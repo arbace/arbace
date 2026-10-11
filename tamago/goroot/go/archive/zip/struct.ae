@@ -1,0 +1,417 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; Package zip provides support for reading and writing ZIP archives.
+;; 
+;; See the [ZIP specification] for details.
+;; 
+;; This package does not support disk spanning.
+;; 
+;; A note about ZIP64:
+;; 
+;; To be backwards compatible the FileHeader has both 32 and 64 bit Size
+;; fields. The 64 bit fields will always contain the correct value and
+;; for normal archives both fields will be the same. For files requiring
+;; the ZIP64 format the 32 bit fields will be 0xffffffff and the 64 bit
+;; fields must be used instead.
+;; 
+;; [ZIP specification]: https://support.pkware.com/pkzip/appnote
+;; */
+(in-ns 'go.archive.zip) (go/file "struct.go" :doc "Package zip provides support for reading and writing ZIP archives.\n\nSee the [ZIP specification] for details.\n\nThis package does not support disk spanning.\n\nA note about ZIP64:\n\nTo be backwards compatible the FileHeader has both 32 and 64 bit Size\nfields. The 64 bit fields will always contain the correct value and\nfor normal archives both fields will be the same. For files requiring\nthe ZIP64 format the 32 bit fields will be 0xffffffff and the 64 bit\nfields must be used instead.\n\n[ZIP specification]: https://support.pkware.com/pkzip/appnote\n" :imports [
+
+
+    ^{:line 25} [fs "io/fs"]
+    ^{:line 26} [path "path"]
+    ^{:line 27} [time "time"]])
+
+
+
+(go/const "Compression methods.\n"
+  ^{:line 32} [^{:tag uint16 :val 0} Store 0] ; no compression
+  ^{:line 33} [^{:tag uint16 :val 8} Deflate 8]) ; DEFLATE compressed
+
+
+(go/const
+  ^{:line 37} [^{:val 67324752} fileHeaderSignature 0x04034b50]
+  ^{:line 38} [^{:val 33639248} directoryHeaderSignature 0x02014b50]
+  ^{:line 39} [^{:val 101010256} directoryEndSignature 0x06054b50]
+  ^{:line 40} [^{:val 117853008} directory64LocSignature 0x07064b50]
+  ^{:line 41} [^{:val 101075792} directory64EndSignature 0x06064b50]
+  ^{:line 42} [^{:val 134695760} dataDescriptorSignature 0x08074b50] ; de-facto standard; required by OS X Finder
+  ^{:line 43} [^{:val 30} fileHeaderLen 30] ; + filename + extra
+  ^{:line 44} [^{:val 46} directoryHeaderLen 46] ; + filename + extra + comment
+  ^{:line 45} [^{:val 22} directoryEndLen 22] ; + comment
+  ^{:line 46} [^{:val 16} dataDescriptorLen 16] ; four uint32: descriptor signature, crc32, compressed size, size
+  ^{:line 47} [^{:val 24} dataDescriptor64Len 24] ; two uint32: signature, crc32 | two uint64: compressed size, size
+  ^{:line 48} [^{:val 20} directory64LocLen 20] ;
+  ^{:line 49} [^{:val 56} directory64EndLen 56] ; + extra
+
+
+  ^{:line 52} [^{:val 0 :doc "Constants for the first byte in CreatorVersion.\n"} creatorFAT 0]
+  ^{:line 53} [^{:val 3} creatorUnix 3]
+  ^{:line 54} [^{:val 11} creatorNTFS 11]
+  ^{:line 55} [^{:val 14} creatorVFAT 14]
+  ^{:line 56} [^{:val 19} creatorMacOSX 19]
+
+
+  ^{:line 59} [^{:val 20 :doc "Version numbers.\n"} zipVersion20 20] ; 2.0
+  ^{:line 60} [^{:val 45} zipVersion45 45] ; 4.5 (reads and writes zip64 archives)
+
+
+  ^{:line 63} [^{:val 65535 :doc "Limits for non zip64 files.\n"} uint16max (- (<< 1 16) 1)]
+  ^{:line 64} [^{:val 4294967295} uint32max (- (<< 1 32) 1)]
+
+
+
+
+
+
+
+
+
+
+  ^{:line 75} [^{:val 1 :doc "Extra header IDs.\n\nIDs 0..31 are reserved for official use by PKWARE.\nIDs above that range are defined by third-party vendors.\nSince ZIP lacked high precision timestamps (nor an official specification\nof the timezone used for the date fields), many competing extra fields\nhave been invented. Pervasive use effectively makes them \"official\".\n\nSee http://mdfs.net/Docs/Comp/Archiving/Zip/ExtraField\n"} zip64ExtraID 0x0001] ; Zip64 extended information
+  ^{:line 76} [^{:val 10} ntfsExtraID 0x000a] ; NTFS
+  ^{:line 77} [^{:val 13} unixExtraID 0x000d] ; UNIX
+  ^{:line 78} [^{:val 21589} extTimeExtraID 0x5455] ; Extended timestamp
+  ^{:line 79} [^{:val 22613} infoZipUnixExtraID 0x5855]) ; Info-ZIP Unix extension
+
+
+
+
+
+
+(go/type FileHeader "FileHeader describes a file within a ZIP file.\nSee the [ZIP specification] for details.\n\n[ZIP specification]: https://support.pkware.com/pkzip/appnote\n" (struct
+
+
+
+
+
+    ^{:line 92 :tag string :doc "Name is the name of the file.\n\nIt must be a relative path, not start with a drive letter (such as \"C:\"),\nand must use forward slashes instead of back slashes. A trailing slash\nindicates that this file is a directory and should have no data.\n"} Name
+
+
+    ^{:line 95 :tag string :doc "Comment is any arbitrary user-defined string shorter than 64KiB.\n"} Comment
+
+
+
+
+
+
+
+
+
+
+    ^{:line 106 :tag bool :doc "NonUTF8 indicates that Name and Comment are not encoded in UTF-8.\n\nBy specification, the only other encoding permitted should be CP-437,\nbut historically many ZIP readers interpret Name and Comment as whatever\nthe system's local character encoding happens to be.\n\nThis flag should only be set if the user intends to encode a non-portable\nZIP file for a specific localized region. Otherwise, the Writer\nautomatically sets the ZIP format's UTF-8 flag for valid UTF-8 strings.\n"} NonUTF8
+
+    ^{:line 108 :tag uint16} CreatorVersion
+    ^{:line 109 :tag uint16} ReaderVersion
+    ^{:line 110 :tag uint16} Flags
+
+
+    ^{:line 113 :tag uint16 :doc "Method is the compression method. If zero, Store is used.\n"} Method
+
+
+
+
+
+
+
+
+
+
+    ^{:line 124 :tag time/Time :doc "Modified is the modified time of the file.\n\nWhen reading, an extended timestamp is preferred over the legacy MS-DOS\ndate field, and the offset between the times is used as the timezone.\nIf only the MS-DOS date is present, the timezone is assumed to be UTC.\n\nWhen writing, an extended timestamp (which is timezone-agnostic) is\nalways emitted. The legacy MS-DOS date field is encoded according to the\nlocation of the Modified time.\n"} Modified
+
+
+
+
+    ^{:line 129 :tag uint16 :doc "ModifiedTime is an MS-DOS-encoded time.\n\nDeprecated: Use Modified instead.\n"} ModifiedTime
+
+
+
+
+    ^{:line 134 :tag uint16 :doc "ModifiedDate is an MS-DOS-encoded date.\n\nDeprecated: Use Modified instead.\n"} ModifiedDate
+
+
+    ^{:line 137 :tag uint32 :doc "CRC32 is the CRC32 checksum of the file content.\n"} CRC32
+
+
+
+
+
+
+    ^{:line 144 :tag uint32 :doc "CompressedSize is the compressed size of the file in bytes.\nIf either the uncompressed or compressed size of the file\ndoes not fit in 32 bits, CompressedSize is set to ^uint32(0).\n\nDeprecated: Use CompressedSize64 instead.\n"} CompressedSize
+
+
+
+
+
+
+    ^{:line 151 :tag uint32 :doc "UncompressedSize is the uncompressed size of the file in bytes.\nIf either the uncompressed or compressed size of the file\ndoes not fit in 32 bits, UncompressedSize is set to ^uint32(0).\n\nDeprecated: Use UncompressedSize64 instead.\n"} UncompressedSize
+
+
+    ^{:line 154 :tag uint64 :doc "CompressedSize64 is the compressed size of the file in bytes.\n"} CompressedSize64
+
+
+    ^{:line 157 :tag uint64 :doc "UncompressedSize64 is the uncompressed size of the file in bytes.\n"} UncompressedSize64
+
+
+
+
+    ^{:line 162 :tag (slice byte) :doc "Extra are the extensible data fields. The writer automatically includes\nthe appropriate Zip64 field if necessary, and [Writer.Close] appends the\nCentral Directory version of the Zip64 field to Extra.\n"} Extra
+
+    ^{:line 164 :tag uint32} ExternalAttrs)) ; Meaning depends on CreatorVersion
+
+
+
+^{:go/end 170} (go/method FileInfo "FileInfo returns an fs.FileInfo for the [FileHeader].\n" ^fs/FileInfo [^{:tag (* FileHeader)} h]
+  (lit headerFileInfo h))
+
+
+
+(go/type headerFileInfo "headerFileInfo implements [fs.FileInfo].\n" (struct
+    ^{:line 174 :tag (* FileHeader)} fh))
+
+
+^{:go/end 177} (go/method Name ^string [^headerFileInfo fi] (path/Base (.-Name (.-fh fi))))
+^{:go/end 183} (go/method Size ^int64 [^headerFileInfo fi]
+  (when (> (.-UncompressedSize64 (.-fh fi)) 0)
+    (return (conv int64 (.-UncompressedSize64 (.-fh fi)))))
+
+  (conv int64 (.-UncompressedSize (.-fh fi))))
+
+^{:go/end 184} (go/method IsDir ^bool [^headerFileInfo fi] (.IsDir (.Mode fi)))
+^{:go/end 190} (go/method ModTime ^time/Time [^headerFileInfo fi]
+  (when (.IsZero (.-Modified (.-fh fi)))
+    (return (.ModTime (.-fh fi))))
+
+  (.UTC (.-Modified (.-fh fi))))
+
+^{:go/end 191} (go/method Mode ^fs/FileMode [^headerFileInfo fi] (.Mode (.-fh fi)))
+^{:go/end 192} (go/method Type ^fs/FileMode [^headerFileInfo fi] (.Type (.Mode (.-fh fi))))
+^{:go/end 193} (go/method Sys ^any [^headerFileInfo fi] (.-fh fi))
+
+^{:go/end 195} (go/method Info [^headerFileInfo fi] :results [fs/FileInfo error] (return fi nil))
+
+^{:go/end 199} (go/method String ^string [^headerFileInfo fi]
+  (fs/FormatFileInfo fi))
+
+
+
+
+
+
+
+
+
+^{:go/end 222} (go/func FileInfoHeader "FileInfoHeader creates a partially-populated [FileHeader] from an\nfs.FileInfo.\nBecause fs.FileInfo's Name method returns only the base name of\nthe file it describes, it may be necessary to modify the Name field\nof the returned header to provide the full path name of the file.\nIf compression is desired, callers should set the FileHeader.Method\nfield; it is unset by default.\n" [^fs/FileInfo fi] :results [(* FileHeader) error]
+  (let [size (.Size fi)
+      ^{:line 210} fh (addr ^{:go/breaks [2 4]} (lit FileHeader
+          :Name (.Name fi)
+          :UncompressedSize64 (conv uint64 size)))]
+
+    (.SetModTime fh (.ModTime fi))
+    (.SetMode fh (.Mode fi))
+    (if (> (.-UncompressedSize64 fh) uint32max)
+      (set! (.-UncompressedSize fh) uint32max)
+
+      (set! (.-UncompressedSize fh) (conv uint32 (.-UncompressedSize64 fh))))
+
+    (return fh nil)))
+
+
+(go/type directoryEnd (struct
+    ^{:line 225 :tag uint32} diskNbr ; unused
+    ^{:line 226 :tag uint32} dirDiskNbr ; unused
+    ^{:line 227 :tag uint64} dirRecordsThisDisk ; unused
+    ^{:line 228 :tag uint64} directoryRecords
+    ^{:line 229 :tag uint64} directorySize
+    ^{:line 230 :tag uint64} directoryOffset ; relative to file
+    ^{:line 231 :tag uint16} commentLen
+    ^{:line 232 :tag string} comment))
+
+
+
+
+^{:go/end 248} (go/func timeZone "timeZone returns a *time.Location based on the provided offset.\nIf the offset is non-sensible, then this uses an offset of zero.\n" ^{:tag (* time/Location)} [^time/Duration offset]
+  (let [
+      ^:const ^{:line 239 :val -43200000000000} minOffset (* -12 time/Hour) ; E.g., Baker island at -12:00
+      ^:const ^:go/grouped ^{:line 240 :val 50400000000000} maxOffset (* (+ 14) time/Hour) ; E.g., Line island at +14:00
+      ^:const ^:go/grouped ^{:line 241 :val 900000000000} offsetAlias (* 15 time/Minute)] ; E.g., Nepal at +5:45
+
+    (set! offset (.Round offset offsetAlias))
+    (when (or (< offset minOffset) (< maxOffset offset))
+      (set! offset 0))
+
+    (time/FixedZone "" (conv int (/ offset time/Second)))))
+
+
+
+
+
+^{:go/end 268} (go/func msDosTimeToTime "msDosTimeToTime converts an MS-DOS date and time into a time.Time.\nThe resolution is 2s.\nSee: https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-dosdatetimetofiletime\n" ^time/Time [^uint16 dosDate ^uint16 dosTime]
+  ^{:go/breaks [7]} (time/Date
+    ;; date bits 0-4: day of month; 5-8: month; 9-15: years since 1980
+    (conv int (+ (>> dosDate 9) 1980))
+    (conv time/Month (bit-and (>> dosDate 5) 0xf))
+    (conv int (bit-and dosDate 0x1f))
+
+    ;; time bits 0-4: second/2; 5-10: minute; 11-15: hour
+    (conv int (>> dosTime 11))
+    (conv int (bit-and (>> dosTime 5) 0x3f))
+    (conv int (* (bit-and dosTime 0x1f) 2))
+    0 ; nanoseconds
+
+    ^{:line 266} time/UTC))
+
+
+
+
+
+
+^{:go/end 277} (go/func timeToMsDosTime "timeToMsDosTime converts a time.Time to an MS-DOS date and time.\nThe resolution is 2s.\nSee: https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-filetimetodosdatetime\n" [^time/Time t] :results [^uint16 fDate ^uint16 fTime]
+  (set! fDate (conv uint16 (+ (.Day t) (<< (conv int (.Month t)) 5) (<< (- (.Year t) 1980) 9))))
+  (set! fTime (conv uint16 (+ (/ (.Second t) 2) (<< (.Minute t) 5) (<< (.Hour t) 11))))
+  (return))
+
+
+
+
+
+
+^{:go/end 285} (go/method ModTime "ModTime returns the modification time in UTC using the legacy\n[ModifiedDate] and [ModifiedTime] fields.\n\nDeprecated: Use [Modified] instead.\n" ^time/Time [^{:tag (* FileHeader)} h]
+  (msDosTimeToTime (.-ModifiedDate h) (.-ModifiedTime h)))
+
+
+
+
+
+
+^{:go/end 295} (go/method SetModTime "SetModTime sets the [Modified], [ModifiedTime], and [ModifiedDate] fields\nto the given time in UTC.\n\nDeprecated: Use [Modified] instead.\n" [^{:tag (* FileHeader)} h ^time/Time t]
+  (set! t (.UTC t)) ; Convert to UTC for compatibility
+  (set! (.-Modified h) t)
+  (set! (values (.-ModifiedDate h) (.-ModifiedTime h)) (timeToMsDosTime t)))
+
+
+(go/const
+
+
+  ^{:line 300} [^{:val 61440 :doc "Unix constants. The specification doesn't mention them,\nbut these seem to be the values agreed on by tools.\n"} s_IFMT 0xf000]
+  ^{:line 301} [^{:val 49152} s_IFSOCK 0xc000]
+  ^{:line 302} [^{:val 40960} s_IFLNK 0xa000]
+  ^{:line 303} [^{:val 32768} s_IFREG 0x8000]
+  ^{:line 304} [^{:val 24576} s_IFBLK 0x6000]
+  ^{:line 305} [^{:val 16384} s_IFDIR 0x4000]
+  ^{:line 306} [^{:val 8192} s_IFCHR 0x2000]
+  ^{:line 307} [^{:val 4096} s_IFIFO 0x1000]
+  ^{:line 308} [^{:val 2048} s_ISUID 0x800]
+  ^{:line 309} [^{:val 1024} s_ISGID 0x400]
+  ^{:line 310} [^{:val 512} s_ISVTX 0x200]
+
+  ^{:line 312} [^{:val 16} msdosDir 0x10]
+  ^{:line 313} [^{:val 1} msdosReadOnly 0x01])
+
+
+
+^{:go/end 328} (go/method Mode "Mode returns the permission and mode bits for the [FileHeader].\n" [^{:tag (* FileHeader)} h] :results [^fs/FileMode mode]
+  (switch (>> (.-CreatorVersion h) 8)
+    (case [creatorUnix creatorMacOSX]
+      (set! mode (unixModeToFileMode (>> (.-ExternalAttrs h) 16))))
+    (case [creatorNTFS creatorVFAT creatorFAT]
+      (set! mode (msdosModeToFileMode (.-ExternalAttrs h)))))
+
+  (when (and (> (len (.-Name h)) 0) (== (aget (.-Name h) (- (len (.-Name h)) 1)) \/))
+    (set! mode bit-or fs/ModeDir))
+
+  ^{:line 327} mode)
+
+
+
+^{:go/end 342} (go/method SetMode "SetMode changes the permission and mode bits for the [FileHeader].\n" [^{:tag (* FileHeader)} h ^fs/FileMode mode]
+  (set! (.-CreatorVersion h) (bit-or (bit-and (.-CreatorVersion h) 0xff) (<< creatorUnix 8)))
+  (set! (.-ExternalAttrs h) (<< (fileModeToUnixMode mode) 16))
+
+  ;; set MSDOS attributes too, as the original zip does.
+  (when (!= (bit-and mode fs/ModeDir) 0)
+    (set! (.-ExternalAttrs h) bit-or msdosDir))
+
+  (when (== (bit-and mode 0200) 0)
+    (set! (.-ExternalAttrs h) bit-or msdosReadOnly)))
+
+
+
+^{:go/end 346} (go/method hasDataDescriptor ^bool [^{:tag (* FileHeader)} h]
+  (!= (bit-and (.-Flags h) 0x8) 0))
+
+
+^{:go/end 358} (go/func msdosModeToFileMode [^uint32 m] :results [^fs/FileMode mode]
+  (if (!= (bit-and m msdosDir) 0)
+    (set! mode (bit-or fs/ModeDir 0777))
+
+    (set! mode 0666))
+
+  (when (!= (bit-and m msdosReadOnly) 0)
+    (set! mode bit-and-not 0222))
+
+  ^{:line 357} mode)
+
+
+^{:go/end 388} (go/func fileModeToUnixMode ^uint32 [^fs/FileMode mode]
+  (let [^uint32 m (zero uint32)]
+    (switch (bit-and mode fs/ModeType)
+      (default
+        (set! m s_IFREG))
+      (case [fs/ModeDir]
+        (set! m s_IFDIR))
+      (case [fs/ModeSymlink]
+        (set! m s_IFLNK))
+      (case [fs/ModeNamedPipe]
+        (set! m s_IFIFO))
+      (case [fs/ModeSocket]
+        (set! m s_IFSOCK))
+      (case [fs/ModeDevice]
+        (set! m s_IFBLK))
+      (case [(bit-or fs/ModeDevice fs/ModeCharDevice)]
+        (set! m s_IFCHR)))
+
+    (when (!= (bit-and mode fs/ModeSetuid) 0)
+      (set! m bit-or s_ISUID))
+
+    (when (!= (bit-and mode fs/ModeSetgid) 0)
+      (set! m bit-or s_ISGID))
+
+    (when (!= (bit-and mode fs/ModeSticky) 0)
+      (set! m bit-or s_ISVTX))
+
+    (bit-or m (conv uint32 (bit-and mode 0777)))))
+
+
+^{:go/end 418} (go/func unixModeToFileMode ^fs/FileMode [^uint32 m]
+  (let [mode (conv fs/FileMode (bit-and m 0777))]
+    (switch (bit-and m s_IFMT)
+      (case [s_IFBLK]
+        (set! mode bit-or fs/ModeDevice))
+      (case [s_IFCHR]
+        (set! mode bit-or (bit-or fs/ModeDevice fs/ModeCharDevice)))
+      (case [s_IFDIR]
+        (set! mode bit-or fs/ModeDir))
+      (case [s_IFIFO]
+        (set! mode bit-or fs/ModeNamedPipe))
+      (case [s_IFLNK]
+        (set! mode bit-or fs/ModeSymlink))
+      (case [s_IFREG])
+      ;; nothing to do
+      (case [s_IFSOCK]
+        (set! mode bit-or fs/ModeSocket)))
+
+    (when (!= (bit-and m s_ISGID) 0)
+      (set! mode bit-or fs/ModeSetgid))
+
+    (when (!= (bit-and m s_ISUID) 0)
+      (set! mode bit-or fs/ModeSetuid))
+
+    (when (!= (bit-and m s_ISVTX) 0)
+      (set! mode bit-or fs/ModeSticky))
+
+    ^{:line 417} mode))

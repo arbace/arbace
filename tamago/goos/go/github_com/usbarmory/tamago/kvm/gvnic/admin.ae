@@ -1,0 +1,122 @@
+;; Google Compute Engine Virtual Ethernet (gVNIC) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.gvnic) (go/file "admin.go" :imports [
+
+
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [bits "math/bits"]
+    ^{:line 15} [time "time"]
+
+    ^{:line 17} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/var ^{:doc "CommandTimeout is the timeout for commands sent to the admin queue.\n"} CommandTimeout (* 1 time/Second))
+
+
+(go/const "Admin queue status codes\n"
+  ^{:line 25} [^{:val 0} COMMAND_UNSET 0x0]
+  ^{:line 26} [^{:val 1} COMMAND_PASSED 0x1]
+  ^{:line 27} [^{:val 4294967280} COMMAND_ERROR_ABORTED 0xfffffff0]
+  ^{:line 28} [^{:val 4294967281} COMMAND_ERROR_ALREADY_EXISTS 0xfffffff1]
+  ^{:line 29} [^{:val 4294967282} COMMAND_ERROR_CANCELLED 0xfffffff2]
+  ^{:line 30} [^{:val 4294967283} COMMAND_ERROR_DATALOSS 0xfffffff3]
+  ^{:line 31} [^{:val 4294967284} COMMAND_ERROR_DEADLINE_EXCEEDED 0xfffffff4]
+  ^{:line 32} [^{:val 4294967285} COMMAND_ERROR_FAILED_PRECONDITION 0xfffffff5]
+  ^{:line 33} [^{:val 4294967286} COMMAND_ERROR_INTERNAL_ERROR 0xfffffff6]
+  ^{:line 34} [^{:val 4294967287} COMMAND_ERROR_INVALID_ARGUMENT 0xfffffff7]
+  ^{:line 35} [^{:val 4294967288} COMMAND_ERROR_NOT_FOUND 0xfffffff8]
+  ^{:line 36} [^{:val 4294967289} COMMAND_ERROR_OUT_OF_RANGE 0xfffffff9]
+  ^{:line 37} [^{:val 4294967290} COMMAND_ERROR_PERMISSION_DENIED 0xfffffffa]
+  ^{:line 38} [^{:val 4294967291} COMMAND_ERROR_UNAUTHENTICATED 0xfffffffb]
+  ^{:line 39} [^{:val 4294967292} COMMAND_ERROR_RESOURCE_EXHAUSTED 0xfffffffc]
+  ^{:line 40} [^{:val 4294967293} COMMAND_ERROR_UNAVAILABLE 0xfffffffd]
+  ^{:line 41} [^{:val 4294967294} COMMAND_ERROR_UNIMPLEMENTED 0xfffffffe]
+  ^{:line 42} [^{:val 4294967295} COMMAND_ERROR_UNKNOWN_ERROR 0xffffffff])
+
+
+(go/const
+  ^{:line 46} [^{:val 4096} pageSize 4096]
+  ^{:line 47} [^{:val 4096} adminQueueSize pageSize]
+  ^{:line 48} [^{:val 8} hdrSize 8])
+
+
+(go/type adminCommandHeader (struct
+    ^{:line 52 :tag uint32} Opcode
+    ^{:line 53 :tag uint32} Status))
+
+
+(go/type adminQueue (struct
+
+    ^{:line 58 :tag uint32 :doc "control registers\n"} Doorbell
+    ^{:line 59 :tag uint32} Counter
+
+
+    ^{:line 62 :tag uint32 :doc "internal counter\n"} cnt
+
+
+    ^{:line 65 :tag uint :doc "DMA buffer\n"} addr
+    ^{:line 66 :tag (slice byte)} buf))
+
+
+^{:go/end 103} (go/method Push [^{:tag (* adminQueue)} aq ^uint32 opcode ^any cmd] :results [^error err]
+  (let [ac (addr ^{:go/breaks [2]} (lit adminCommandHeader
+          :Opcode opcode))
+
+
+      ^{:line 74} low (* (.-cnt aq) descSize)
+      ^{:line 75} high (+ low descSize)]
+
+    (when [(set! (values _ err) (binary/Encode (subslice (.-buf aq) low high) binary/BigEndian ac))] (!= err nil)
+      (return))
+
+
+    (when [(set! (values _ err) (binary/Encode (subslice (.-buf aq) (+ low hdrSize) high) binary/BigEndian cmd))] (!= err nil)
+      (return))
+
+
+    ;; zero out remaining buffer
+    (let [pad (- descSize hdrSize (binary/Size cmd))]
+      (clear (subslice (.-buf aq) (- high (conv uint32 pad)) high))
+
+      ;; bump counter and ring door bell
+      (set! (.-cnt aq) (% (+ (.-cnt aq) 1) (/ adminQueueSize descSize)))
+      (let [cnt (bits/ReverseBytes32 (.-cnt aq))]
+        (reg/Write (.-Doorbell aq) cnt)
+
+        (when (not (reg/WaitFor CommandTimeout (.-Counter aq) 0 0xffffffff cnt))
+          (return (fmt/Errorf "admin queue timeout")))
+
+
+        (when [status (.Uint32 binary/BigEndian (subslice (.-buf aq) (+ low 4) (+ low 8)))] (!= status COMMAND_PASSED)
+          (return (fmt/Errorf "admin command error, opcode:%#x status:%#x" opcode status)))
+
+
+        (return)))))
+
+
+^{:go/end 123} (go/method initAdminQueue [^{:tag (* GVE)} hw] :results [^error err]
+  (set! (.-aq hw) (addr ^{:go/breaks [2 4]} (lit adminQueue
+        :Doorbell (+ (.-registers hw) ADMINQ_DOORBELL)
+        :Counter (+ (.-registers hw) ADMINQ_EVENT_COUNTER))))
+
+
+  (set! (values (.-addr (.-aq hw)) (.-buf (.-aq hw))) (.Reserve (.-Region hw) adminQueueSize pageSize))
+
+  (if (< (.-Revision (.-Device hw)) 1)
+    ;; set admin queue based address to region page frame number
+    (.set hw ADMINQ_PFN (conv uint32 (/ (.-addr (.-aq hw)) pageSize)))
+    (do
+      ;; set admin queue based address and size
+      (.set hw ADMINQ_LENGTH adminQueueSize)
+      (.set hw ADMINQ_BASE_ADDRESS_LOW (conv uint32 (.-addr (.-aq hw))))))
+
+
+  (return))

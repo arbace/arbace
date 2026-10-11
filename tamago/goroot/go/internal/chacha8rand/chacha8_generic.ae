@@ -1,0 +1,234 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; ChaCha8 is ChaCha with 8 rounds.
+;; See https://cr.yp.to/chacha/chacha-20080128.pdf.
+;;
+;; ChaCha8 operates on a 4x4 matrix of uint32 values, initially set to:
+;;
+;;	const1 const2 const3 const4
+;;	seed   seed   seed   seed
+;;	seed   seed   seed   seed
+;;	counter64     0      0
+;;
+;; We use the same constants as ChaCha20 does, a random seed,
+;; and a counter. Running ChaCha8 on this input produces
+;; a 4x4 matrix of pseudo-random values with as much entropy
+;; as the seed.
+;;
+;; Given SIMD registers that can hold N uint32s, it is possible
+;; to run N ChaCha8 block transformations in parallel by filling
+;; the first register with the N copies of const1, the second
+;; with N copies of const2, and so on, and then running the operations.
+;;
+;; Each iteration of ChaCha8Rand operates over 32 bytes of input and
+;; produces 992 bytes of RNG output, plus 32 bytes of input for the next
+;; iteration.
+;;
+;; The 32 bytes of input are used as a ChaCha8 key, with a zero nonce, to
+;; produce 1024 bytes of output (16 blocks, with counters 0 to 15).
+;; First, for each block, the values 0x61707865, 0x3320646e, 0x79622d32,
+;; 0x6b206574 are subtracted from the 32-bit little-endian words at
+;; position 0, 1, 2, and 3 respectively, and an increasing counter
+;; starting at zero is subtracted from each word at position 12. Then,
+;; this stream is permuted such that for each sequence of four blocks,
+;; first we output the first four bytes of each block, then the next four
+;; bytes of each block, and so on. Finally, the last 32 bytes of output
+;; are used as the input of the next iteration, and the remaining 992
+;; bytes are the RNG output.
+;;
+;; See https://c2sp.org/chacha8rand for additional details.
+;;
+;; Normal ChaCha20 implementations for encryption use this same
+;; parallelism but then have to deinterlace the results so that
+;; it appears the blocks were generated separately. For the purposes
+;; of generating random numbers, the interlacing is fine.
+;; We are simply locked in to preserving the 4-way interlacing
+;; in any future optimizations.
+(in-ns 'go.internal.chacha8rand) (go/file "chacha8_generic.go" :doc "ChaCha8 is ChaCha with 8 rounds.\nSee https://cr.yp.to/chacha/chacha-20080128.pdf.\n\nChaCha8 operates on a 4x4 matrix of uint32 values, initially set to:\n\n\tconst1 const2 const3 const4\n\tseed   seed   seed   seed\n\tseed   seed   seed   seed\n\tcounter64     0      0\n\nWe use the same constants as ChaCha20 does, a random seed,\nand a counter. Running ChaCha8 on this input produces\na 4x4 matrix of pseudo-random values with as much entropy\nas the seed.\n\nGiven SIMD registers that can hold N uint32s, it is possible\nto run N ChaCha8 block transformations in parallel by filling\nthe first register with the N copies of const1, the second\nwith N copies of const2, and so on, and then running the operations.\n\nEach iteration of ChaCha8Rand operates over 32 bytes of input and\nproduces 992 bytes of RNG output, plus 32 bytes of input for the next\niteration.\n\nThe 32 bytes of input are used as a ChaCha8 key, with a zero nonce, to\nproduce 1024 bytes of output (16 blocks, with counters 0 to 15).\nFirst, for each block, the values 0x61707865, 0x3320646e, 0x79622d32,\n0x6b206574 are subtracted from the 32-bit little-endian words at\nposition 0, 1, 2, and 3 respectively, and an increasing counter\nstarting at zero is subtracted from each word at position 12. Then,\nthis stream is permuted such that for each sequence of four blocks,\nfirst we output the first four bytes of each block, then the next four\nbytes of each block, and so on. Finally, the last 32 bytes of output\nare used as the input of the next iteration, and the remaining 992\nbytes are the RNG output.\n\nSee https://c2sp.org/chacha8rand for additional details.\n\nNormal ChaCha20 implementations for encryption use this same\nparallelism but then have to deinterlace the results so that\nit appears the blocks were generated separately. For the purposes\nof generating random numbers, the interlacing is fine.\nWe are simply locked in to preserving the 4-way interlacing\nin any future optimizations.\n" :imports [
+
+
+    ^{:line 52} [goarch "internal/goarch"]
+    ^{:line 53} [unsafe "unsafe"]])
+
+
+
+
+
+^{:go/end 137} (go/func setup "setup sets up 4 ChaCha8 blocks in b32 with the counter and seed.\nNote that b32 is [16][4]uint32 not [4][16]uint32: the blocks are interlaced\nthe same way they would be in a 4-way SIMD implementations.\n" [^{:tag (* (array 4 uint64))} seed ^{:tag (* (array 16 (array 4 uint32)))} b32 ^uint32 counter]
+  ;; Convert to uint64 to do half as many stores to memory.
+  (let [b (conv (* (array 16 (array 2 uint64))) (conv unsafe/Pointer b32))]
+
+    ;; Constants; same as in ChaCha20: "expand 32-byte k"
+    (aset (aget b 0) 0 0x6170786561707865)
+    (aset (aget b 0) 1 0x6170786561707865)
+
+    (aset (aget b 1) 0 0x3320646e3320646e)
+    (aset (aget b 1) 1 0x3320646e3320646e)
+
+    (aset (aget b 2) 0 0x79622d3279622d32)
+    (aset (aget b 2) 1 0x79622d3279622d32)
+
+    (aset (aget b 3) 0 0x6b2065746b206574)
+    (aset (aget b 3) 1 0x6b2065746b206574)
+
+    ;; Seed values.
+    (let [^uint64 x64 (zero uint64)
+        ^{:line 78 :tag uint32} x (zero uint32)]
+
+      (set! x (conv uint32 (aget seed 0)))
+      (set! x64 (bit-or (<< (conv uint64 x) 32) (conv uint64 x)))
+      (aset (aget b 4) 0 x64)
+      (aset (aget b 4) 1 x64)
+
+      (set! x (conv uint32 (>> (aget seed 0) 32)))
+      (set! x64 (bit-or (<< (conv uint64 x) 32) (conv uint64 x)))
+      (aset (aget b 5) 0 x64)
+      (aset (aget b 5) 1 x64)
+
+      (set! x (conv uint32 (aget seed 1)))
+      (set! x64 (bit-or (<< (conv uint64 x) 32) (conv uint64 x)))
+      (aset (aget b 6) 0 x64)
+      (aset (aget b 6) 1 x64)
+
+      (set! x (conv uint32 (>> (aget seed 1) 32)))
+      (set! x64 (bit-or (<< (conv uint64 x) 32) (conv uint64 x)))
+      (aset (aget b 7) 0 x64)
+      (aset (aget b 7) 1 x64)
+
+      (set! x (conv uint32 (aget seed 2)))
+      (set! x64 (bit-or (<< (conv uint64 x) 32) (conv uint64 x)))
+      (aset (aget b 8) 0 x64)
+      (aset (aget b 8) 1 x64)
+
+      (set! x (conv uint32 (>> (aget seed 2) 32)))
+      (set! x64 (bit-or (<< (conv uint64 x) 32) (conv uint64 x)))
+      (aset (aget b 9) 0 x64)
+      (aset (aget b 9) 1 x64)
+
+      (set! x (conv uint32 (aget seed 3)))
+      (set! x64 (bit-or (<< (conv uint64 x) 32) (conv uint64 x)))
+      (aset (aget b 10) 0 x64)
+      (aset (aget b 10) 1 x64)
+
+      (set! x (conv uint32 (>> (aget seed 3) 32)))
+      (set! x64 (bit-or (<< (conv uint64 x) 32) (conv uint64 x)))
+      (aset (aget b 11) 0 x64)
+      (aset (aget b 11) 1 x64)
+
+      ;; Counters.
+      (if goarch/BigEndian (do
+          (aset (aget b 12) 0 (bit-or (<< (conv uint64 (+ counter 0)) 32) (conv uint64 (+ counter 1))))
+          (aset (aget b 12) 1 (bit-or (<< (conv uint64 (+ counter 2)) 32) (conv uint64 (+ counter 3)))))
+        (do
+          (aset (aget b 12) 0 (bit-or (conv uint64 (+ counter 0)) (<< (conv uint64 (+ counter 1)) 32)))
+          (aset (aget b 12) 1 (bit-or (conv uint64 (+ counter 2)) (<< (conv uint64 (+ counter 3)) 32)))))
+
+
+      ;; Zeros.
+      (aset (aget b 13) 0 0)
+      (aset (aget b 13) 1 0)
+      (aset (aget b 14) 0 0)
+      (aset (aget b 14) 1 0)
+
+      (aset (aget b 15) 0 0)
+      (aset (aget b 15) 1 0))))
+
+
+^{:go/end 144} (go/func _ []
+  ;; block and block_generic must have same type
+  (let [x block]
+    (set! x block_generic)
+    (set! _ x)))
+
+
+
+
+
+
+^{:go/end 218} (go/func block_generic "block_generic is the non-assembly block implementation,\nfor use on systems without special assembly.\nEven on such systems, it is quite fast: on GOOS=386,\nChaCha8 using this code generates random values faster than PCG-DXSM.\n" [^{:tag (* (array 4 uint64))} seed ^{:tag (* (array 32 uint64))} buf ^uint32 counter]
+  (let [b (conv (* (array 16 (array 4 uint32))) (conv unsafe/Pointer buf))]
+
+    (setup seed b counter)
+
+    (range [i (aget b 0)]
+      ;; Load block i from b[*][i] into local variables.
+      (let [b0 (aget (aget b 0) i)
+          ^{:line 158} b1 (aget (aget b 1) i)
+          ^{:line 159} b2 (aget (aget b 2) i)
+          ^{:line 160} b3 (aget (aget b 3) i)
+          ^{:line 161} b4 (aget (aget b 4) i)
+          ^{:line 162} b5 (aget (aget b 5) i)
+          ^{:line 163} b6 (aget (aget b 6) i)
+          ^{:line 164} b7 (aget (aget b 7) i)
+          ^{:line 165} b8 (aget (aget b 8) i)
+          ^{:line 166} b9 (aget (aget b 9) i)
+          ^{:line 167} b10 (aget (aget b 10) i)
+          ^{:line 168} b11 (aget (aget b 11) i)
+          ^{:line 169} b12 (aget (aget b 12) i)
+          ^{:line 170} b13 (aget (aget b 13) i)
+          ^{:line 171} b14 (aget (aget b 14) i)
+          ^{:line 172} b15 (aget (aget b 15) i)]
+
+        ;; 4 iterations of eight quarter-rounds each is 8 rounds
+        (for [round 0] (< round 4) (inc! round)
+          (set! (values b0 b4 b8 b12) (qr b0 b4 b8 b12))
+          (set! (values b1 b5 b9 b13) (qr b1 b5 b9 b13))
+          (set! (values b2 b6 b10 b14) (qr b2 b6 b10 b14))
+          (set! (values b3 b7 b11 b15) (qr b3 b7 b11 b15))
+
+          (set! (values b0 b5 b10 b15) (qr b0 b5 b10 b15))
+          (set! (values b1 b6 b11 b12) (qr b1 b6 b11 b12))
+          (set! (values b2 b7 b8 b13) (qr b2 b7 b8 b13))
+          (set! (values b3 b4 b9 b14) (qr b3 b4 b9 b14)))
+
+
+        ;; Store block i back into b[*][i].
+        ;; Add b4..b11 back to the original key material,
+        ;; like in ChaCha20, to avoid trivial invertibility.
+        ;; There is no entropy in b0..b3 and b12..b15
+        ;; so we can skip the additions and save some time.
+        (aset (aget b 0) i b0)
+        (aset (aget b 1) i b1)
+        (aset (aget b 2) i b2)
+        (aset (aget b 3) i b3)
+        (set! (aget (aget b 4) i) + b4)
+        (set! (aget (aget b 5) i) + b5)
+        (set! (aget (aget b 6) i) + b6)
+        (set! (aget (aget b 7) i) + b7)
+        (set! (aget (aget b 8) i) + b8)
+        (set! (aget (aget b 9) i) + b9)
+        (set! (aget (aget b 10) i) + b10)
+        (set! (aget (aget b 11) i) + b11)
+        (aset (aget b 12) i b12)
+        (aset (aget b 13) i b13)
+        (aset (aget b 14) i b14)
+        (aset (aget b 15) i b15)))
+
+
+    (when goarch/BigEndian
+      ;; On a big-endian system, reading the uint32 pairs as uint64s
+      ;; will word-swap them compared to little-endian, so we word-swap
+      ;; them here first to make the next swap get the right answer.
+      (range [i x buf]
+        (aset buf i (bit-or (>> x 32) (<< x 32)))))))
+
+
+
+
+
+^{:go/end 235} (go/func qr "qr is the (inlinable) ChaCha8 quarter round.\n" [^uint32 a ^uint32 b ^uint32 c ^uint32 d] :results [^uint32 _a ^uint32 _b ^uint32 _c ^uint32 _d]
+  (set! a + b)
+  (set! d bit-xor a)
+  (set! d (bit-or (<< d 16) (>> d 16)))
+  (set! c + d)
+  (set! b bit-xor c)
+  (set! b (bit-or (<< b 12) (>> b 20)))
+  (set! a + b)
+  (set! d bit-xor a)
+  (set! d (bit-or (<< d 8) (>> d 24)))
+  (set! c + d)
+  (set! b bit-xor c)
+  (set! b (bit-or (<< b 7) (>> b 25)))
+  (return a b c d))

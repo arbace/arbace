@@ -1,0 +1,244 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.net) (go/file "unixsock_posix.go" :build ["//go:build unix || js || wasip1 || windows || tamago"] :imports [
+
+
+    ^{:line 10} [context "context"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [syscall "syscall"]])
+
+
+^{:go/end 50} (go/func unixSocket [^context/Context ctx ^string net ^sockaddr laddr ^sockaddr raddr ^string mode ^{:tag (func [context/Context string string syscall/RawConn] [error])} ctxCtrlFn] :results [(* netFD) error]
+  (let [^int sotype (zero int)]
+    (switch net
+      (case ["unix"]
+        (set! sotype syscall/SOCK_STREAM))
+      (case ["unixgram"]
+        (set! sotype syscall/SOCK_DGRAM))
+      (case ["unixpacket"]
+        (set! sotype syscall/SOCK_SEQPACKET))
+      (default
+        (return nil (conv UnknownNetworkError net))))
+
+
+    (switch mode
+      (case ["dial"]
+        (when (and (!= laddr nil) (.isWildcard laddr))
+          (set! laddr nil))
+
+        (when (and (!= raddr nil) (.isWildcard raddr))
+          (set! raddr nil))
+
+        (when (and (== raddr nil) ^:go/paren (or (!= sotype syscall/SOCK_DGRAM) (== laddr nil)))
+          (return nil errMissingAddress)))
+
+      (case ["listen"])
+      (default
+        (return nil (errors/New (+ "unknown mode: " mode)))))
+
+
+    (let [(values fd err) (socket ctx net syscall/AF_UNIX sotype 0 false laddr raddr ctxCtrlFn)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return fd nil))))
+
+
+^{:go/breaks [[4 56]] :go/end 57} (go/func sockaddrToUnix ^Addr [^syscall/Sockaddr sa]
+  (when [(values s ok) (assert (* syscall/SockaddrUnix) sa)] ok
+    (return (addr (lit UnixAddr :Name (.-Name s) :Net "unix"))))
+
+  nil)
+
+
+^{:go/breaks [[4 63]] :go/end 64} (go/func sockaddrToUnixgram ^Addr [^syscall/Sockaddr sa]
+  (when [(values s ok) (assert (* syscall/SockaddrUnix) sa)] ok
+    (return (addr (lit UnixAddr :Name (.-Name s) :Net "unixgram"))))
+
+  nil)
+
+
+^{:go/breaks [[4 70]] :go/end 71} (go/func sockaddrToUnixpacket ^Addr [^syscall/Sockaddr sa]
+  (when [(values s ok) (assert (* syscall/SockaddrUnix) sa)] ok
+    (return (addr (lit UnixAddr :Name (.-Name s) :Net "unixpacket"))))
+
+  nil)
+
+
+^{:go/end 84} (go/func sotypeToNet ^string [^int sotype]
+  (switch sotype
+    (case [syscall/SOCK_STREAM]
+      (return "unix"))
+    (case [syscall/SOCK_DGRAM]
+      (return "unixgram"))
+    (case [syscall/SOCK_SEQPACKET]
+      (return "unixpacket"))
+    (default
+      (panic "sotypeToNet unknown socket type"))))
+
+
+
+^{:go/end 88} (go/method family ^int [^{:tag (* UnixAddr)} a]
+  ^{:line 87} syscall/AF_UNIX)
+
+
+^{:go/end 95} (go/method sockaddr [^{:tag (* UnixAddr)} a ^int family] :results [syscall/Sockaddr error]
+  (when (== a nil)
+    (return nil nil))
+
+  (return (addr (lit syscall/SockaddrUnix :Name (.-Name a))) nil))
+
+
+^{:go/end 99} (go/method toLocal ^sockaddr [^{:tag (* UnixAddr)} a ^string net]
+  ^{:line 98} a)
+
+
+^{:go/end 111} (go/method readFrom [^{:tag (* UnixConn)} c ^{:tag (slice byte)} b] :results [int (* UnixAddr) error]
+  (let [^{:tag (* UnixAddr)} addr (zero (* UnixAddr))
+      (values n sa err) (.readFrom ^{:go/via [conn]} (.-fd c) b)]
+    (type-switch [sa sa]
+      (case [(* syscall/SockaddrUnix)]
+        (when (!= (.-Name sa) "")
+          (set! addr (addr (lit UnixAddr :Name (.-Name sa) :Net (sotypeToNet (.-sotype ^{:go/via [conn]} (.-fd c)))))))))
+
+
+    (return n addr err)))
+
+
+^{:go/end 127} (go/method readMsg [^{:tag (* UnixConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob] :results [^int n ^int oobn ^int flags ^{:tag (* UnixAddr)} addr ^error err]
+  (let [^syscall/Sockaddr sa (zero syscall/Sockaddr)]
+    (set! (values n oobn flags sa err) (.readMsg ^{:go/via [conn]} (.-fd c) b oob readMsgFlags))
+    (when (and (== readMsgFlags 0) (== err nil) (> oobn 0))
+      (setReadMsgCloseOnExec (subslice oob _ oobn)))
+
+
+    (type-switch [sa sa]
+      (case [(* syscall/SockaddrUnix)]
+        (when (!= (.-Name sa) "")
+          (set! addr (addr (lit UnixAddr :Name (.-Name sa) :Net (sotypeToNet (.-sotype ^{:go/via [conn]} (.-fd c)))))))))
+
+
+    (return)))
+
+
+^{:go/end 141} (go/method writeTo [^{:tag (* UnixConn)} c ^{:tag (slice byte)} b ^{:tag (* UnixAddr)} addr] :results [int error]
+  (when (.-isConnected ^{:go/via [conn]} (.-fd c))
+    (return 0 ErrWriteToConnected))
+
+  (when (== addr nil)
+    (return 0 errMissingAddress))
+
+  (when (!= (.-Net addr) (sotypeToNet (.-sotype ^{:go/via [conn]} (.-fd c))))
+    (return 0 syscall/EAFNOSUPPORT))
+
+  (let [sa (addr (lit syscall/SockaddrUnix :Name (.-Name addr)))]
+    (.writeTo ^{:go/via [conn]} (.-fd c) b sa)))
+
+
+^{:go/end 155} (go/method writeMsg [^{:tag (* UnixConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob ^{:tag (* UnixAddr)} addr] :results [^int n ^int oobn ^error err]
+  (when (and (== (.-sotype ^{:go/via [conn]} (.-fd c)) syscall/SOCK_DGRAM) (.-isConnected ^{:go/via [conn]} (.-fd c)))
+    (return 0 0 ErrWriteToConnected))
+
+  (let [^syscall/Sockaddr sa (zero syscall/Sockaddr)]
+    (when (!= addr nil)
+      (when (!= (.-Net addr) (sotypeToNet (.-sotype ^{:go/via [conn]} (.-fd c))))
+        (return 0 0 syscall/EAFNOSUPPORT))
+
+      (set! sa (addr (lit syscall/SockaddrUnix :Name (.-Name addr)))))
+
+    (.writeMsg ^{:go/via [conn]} (.-fd c) b oob sa)))
+
+
+^{:go/end 169} (go/method dialUnix [^{:tag (* sysDialer)} sd ^context/Context ctx ^{:tag (* UnixAddr)} laddr ^{:tag (* UnixAddr)} raddr] :results [(* UnixConn) error]
+  (let [ctrlCtxFn (.-ControlContext (.-Dialer sd))]
+    (when (and (== ctrlCtxFn nil) (!= (.-Control (.-Dialer sd)) nil))
+      (set! ctrlCtxFn ^{:go/end 162} (fn ^error [^context/Context ctx ^string network ^string address ^syscall/RawConn c]
+          ((.-Control (.-Dialer sd)) network address c))))
+
+
+    (let [(values fd err) (unixSocket ctx (.-network sd) laddr raddr "dial" ctrlCtxFn)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (newUnixConn fd) nil))))
+
+
+^{:go/end 177} (go/method accept [^{:tag (* UnixListener)} ln] :results [(* UnixConn) error]
+  (let [(values fd err) (.accept (.-fd ln))]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (newUnixConn fd) nil)))
+
+
+^{:go/end 197} (go/method close ^error [^{:tag (* UnixListener)} ln]
+  ;; The operating system doesn't clean up
+  ;; the file that announcing created, so
+  ;; we have to clean it up ourselves.
+  ;; There's a race here--we can't know for
+  ;; sure whether someone else has come along
+  ;; and replaced our socket name already--
+  ;; but this sequence (remove then close)
+  ;; is at least compatible with the auto-remove
+  ;; sequence in ListenUnix. It's only non-Go
+  ;; programs that can mess us up.
+  ;; Even if there are racy calls to Close, we want to unlink only for the first one.
+  (.Do (.-unlinkOnce ln) ^{:go/end 195} (fn []
+      (when (and (!= (aget (.-path ln) 0) \@) (.-unlink ln))
+        (syscall/Unlink (.-path ln)))))
+
+
+  (.Close (.-fd ln)))
+
+
+^{:go/end 205} (go/method file [^{:tag (* UnixListener)} ln] :results [(* os/File) error]
+  (let [(values f err) (.dup (.-fd ln))]
+    (when (!= err nil)
+      (return nil err))
+
+    (return f nil)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 217} (go/method SetUnlinkOnClose "SetUnlinkOnClose sets whether the underlying socket file should be removed\nfrom the file system when the listener is closed.\n\nThe default behavior is to unlink the socket file only when package net created it.\nThat is, when the listener and the underlying socket file were created by a call to\nListen or ListenUnix, then by default closing the listener will remove the socket file.\nbut if the listener was created by a call to FileListener to use an already existing\nsocket file, then by default closing the listener will not remove the socket file.\n" [^{:tag (* UnixListener)} l ^bool unlink]
+  (set! (.-unlink l) unlink))
+
+
+^{:go/end 231} (go/method listenUnix [^{:tag (* sysListener)} sl ^context/Context ctx ^{:tag (* UnixAddr)} laddr] :results [(* UnixListener) error]
+  (let [^{:tag (func [^context/Context ctx ^string network ^string address ^syscall/RawConn c] [error])} ctrlCtxFn (zero (func [^context/Context ctx ^string network ^string address ^syscall/RawConn c] [error]))]
+    (when (!= (.-Control (.-ListenConfig sl)) nil)
+      (set! ctrlCtxFn ^{:go/end 224} (fn ^error [^context/Context ctx ^string network ^string address ^syscall/RawConn c]
+          ((.-Control (.-ListenConfig sl)) network address c))))
+
+
+    (let [(values fd err) (unixSocket ctx (.-network sl) laddr nil "listen" ctrlCtxFn)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (addr (lit UnixListener :fd fd :path (.String (.-laddr fd)) :unlink true)) nil))))
+
+
+^{:go/end 245} (go/method listenUnixgram [^{:tag (* sysListener)} sl ^context/Context ctx ^{:tag (* UnixAddr)} laddr] :results [(* UnixConn) error]
+  (let [^{:tag (func [^context/Context ctx ^string network ^string address ^syscall/RawConn c] [error])} ctrlCtxFn (zero (func [^context/Context ctx ^string network ^string address ^syscall/RawConn c] [error]))]
+    (when (!= (.-Control (.-ListenConfig sl)) nil)
+      (set! ctrlCtxFn ^{:go/end 238} (fn ^error [^context/Context ctx ^string network ^string address ^syscall/RawConn c]
+          ((.-Control (.-ListenConfig sl)) network address c))))
+
+
+    (let [(values fd err) (unixSocket ctx (.-network sl) laddr nil "listen" ctrlCtxFn)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (newUnixConn fd) nil))))

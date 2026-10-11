@@ -1,0 +1,87 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.trace) (go/file "batch.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [tracev2 "internal/trace/tracev2"]])
+
+
+
+(go/type timestamp "timestamp is an unprocessed timestamp.\n" uint64)
+
+(go/type batch (struct
+    ^{:line 16 :tag timestamp} time
+    ^{:line 17 :tag uint64} gen
+    ^{:line 18 :tag (slice byte)} data))
+
+
+
+
+^{:go/end 88} (go/func readBatch "readBatch copies b and parses the trace batch header inside.\nReturns the batch, bytes read, and an error.\n" [^{:tag (slice byte)} b] :results [batch uint64 error]
+  (when (== (len b) 0)
+    (return (lit batch) 0 (fmt/Errorf "batch is empty")))
+
+  (let [data (make (slice byte) (len b))]
+    (copy data b)
+
+    ;; Read batch header byte.
+    (when [typ (conv tracev2/EventType (aget b 0))] (== typ tracev2/EvEndOfGeneration)
+      (when (!= (len b) 1)
+        (return (lit batch) 1 (fmt/Errorf "unexpected end of generation in batch of size >1")))
+
+      (return (lit batch :data data) 1 nil))
+
+    (when [typ (conv tracev2/EventType (aget b 0))] (and (!= typ tracev2/EvEventBatch) (!= typ tracev2/EvExperimentalBatch))
+      (return (lit batch) 1 (fmt/Errorf "expected batch event, got event %d" typ)))
+
+    (let [total 1]
+      (set! b (subslice b 1))
+
+      ;; Read the generation
+      (let [(values gen n err) (readUvarint b)]
+        (when (!= err nil)
+          (return (lit batch) (conv uint64 (+ total n)) (fmt/Errorf "error reading batch gen: %w" err)))
+
+        (set! total + n)
+        (set! b (subslice b n))
+
+        ;; Read the M (discard it).
+        (set! (values _ n err) (readUvarint b))
+        (when (!= err nil)
+          (return (lit batch) (conv uint64 (+ total n)) (fmt/Errorf "error reading batch M ID: %w" err)))
+
+        (set! total + n)
+        (set! b (subslice b n))
+
+        ;; Read the timestamp.
+        (let [(values ts ^:assign n ^:assign err) (readUvarint b)]
+          (when (!= err nil)
+            (return (lit batch) (conv uint64 (+ total n)) (fmt/Errorf "error reading batch timestamp: %w" err)))
+
+          (set! total + n)
+          (set! b (subslice b n))
+
+          ;; Read the size of the batch to follow.
+          (let [(values size ^:assign n ^:assign err) (readUvarint b)]
+            (when (!= err nil)
+              (return (lit batch) (conv uint64 (+ total n)) (fmt/Errorf "error reading batch size: %w" err)))
+
+            (when (> size tracev2/MaxBatchSize)
+              (return (lit batch) (conv uint64 (+ total n)) (fmt/Errorf "invalid batch size %d, maximum is %d" size tracev2/MaxBatchSize)))
+
+            (set! total + n)
+            (set! total + (conv int size))
+            (when (!= total (len data))
+              (return (lit batch) (conv uint64 total) (fmt/Errorf "expected complete batch")))
+
+            (set! data (subslice data _ total))
+
+            ;; Return the batch.
+            (return ^{:go/breaks [2 4 6]} (lit batch
+                :gen gen
+                :time (conv timestamp ts)
+                :data data)
+              (conv uint64 total) nil)))))))

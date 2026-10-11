@@ -1,0 +1,180 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; MakeFunc implementation.
+
+(in-ns 'go.reflect) (go/file "makefunc.go" :imports [
+
+
+    ^{:line 10} [abi "internal/abi"]
+    ^{:line 11} [goarch "internal/goarch"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+(go/type makeFuncImpl "makeFuncImpl is the closure value implementing the function\nreturned by MakeFunc.\nThe first three words of this type must be kept in sync with\nmethodValue and runtime.reflectMethodValue.\nAny changes should be reflected in all three.\n" (struct
+    ^{:line 21} makeFuncCtxt
+    ^{:line 22 :tag (* funcType)} ftyp
+    ^{:line 23 :tag (func [(slice Value)] [(slice Value)])} fn))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 73} (go/func MakeFunc "MakeFunc returns a new function of the given [Type]\nthat wraps the function fn. When called, that new function\ndoes the following:\n\n  - converts its arguments to a slice of Values.\n  - runs results := fn(args).\n  - returns the results as a slice of Values, one per formal result.\n\nThe implementation fn can assume that the argument [Value] slice\nhas the number and type of arguments given by typ.\nIf typ describes a variadic function, the final Value is itself\na slice representing the variadic arguments, as in the\nbody of a variadic function. The result Value slice returned by fn\nmust have the number and type of results given by typ.\n\nThe [Value.Call] method allows the caller to invoke a typed function\nin terms of Values; in contrast, MakeFunc allows the caller to implement\na typed function in terms of Values.\n\nThe Examples section of the documentation includes an illustration\nof how to use MakeFunc to build a swap function for different types.\n" ^Value [^Type typ ^{:tag (func [^{:tag (slice Value)} args] [^{:tag (slice Value)} results])} fn]
+  (let [t (.common typ)]
+    (set! typ (toType t)) ; for #80332, ensure t's exported methods are not shadowed
+    (when (!= (.Kind typ) Func)
+      (panic "reflect: call of MakeFunc with non-Func type"))
+
+
+    (let [ftyp (conv (* funcType) (conv unsafe/Pointer t))
+
+        ^{:line 56} code (abi/FuncPCABI0 makeFuncStub)
+
+        ;; makeFuncImpl contains a stack map for use by the runtime
+        (values _ _ abid) (funcLayout ftyp nil)
+
+        ^{:line 61} impl (addr ^{:go/breaks [2 [4 68] 6]} (lit makeFuncImpl
+            :makeFuncCtxt ^{:go/breaks [2 4 6 8]} (lit makeFuncCtxt
+              :fn code
+              :stack (.-stackPtrs abid)
+              :argLen (.-stackCallArgsSize abid)
+              :regPtrs (.-inRegPtrs abid))
+
+            :ftyp ftyp
+            :fn fn))]
+
+
+      (lit Value t (conv unsafe/Pointer impl) (conv flag Func)))))
+
+
+
+
+
+
+
+(go/func ^:extern makeFuncStub "makeFuncStub is an assembly function that is the code half of\nthe function returned from MakeFunc. It expects a *callReflectFunc\nas its context register, and its job is to invoke callReflect(ctxt, frame)\nwhere ctxt is the context register and frame is a pointer to the first\nword in the passed-in argument frame.\n" [])
+
+
+
+
+(go/type methodValue "The first 3 words of this type must be kept in sync with\nmakeFuncImpl and runtime.reflectMethodValue.\nAny changes should be reflected in all three.\n" (struct
+    ^{:line 86} makeFuncCtxt
+    ^{:line 87 :tag int} method
+    ^{:line 88 :tag Value} rcvr))
+
+
+
+
+
+
+
+
+
+^{:go/end 132} (go/func makeMethodValue "makeMethodValue converts v from the rcvr+method index representation\nof a method value to an actual method func value, which is\nbasically the receiver value with a special bit set, into a true\nfunc value - a value holding an actual func. The output is\nsemantically equivalent to the input as far as the user of package\nreflect can tell, but the true func representation can be handled\nby code like Convert and Interface and Assign.\n" ^Value [^string op ^Value v]
+  (when (== (bit-and (.-flag v) flagMethod) 0)
+    (panic "reflect: internal error: invalid use of makeMethodValue"))
+
+
+  ;; Ignoring the flagMethod bit, v describes the receiver, not the method type.
+  (let [fl (bit-and (.-flag v) (bit-or flagRO flagAddr flagIndir))]
+    (set! fl bit-or (conv flag (.Kind (.typ v))))
+    (let [rcvr (lit Value (.typ v) (.-ptr v) fl)
+
+        ;; v.Type returns the actual type of the method value.
+        ^{:line 109} ftyp (conv (* funcType) (conv unsafe/Pointer (assert (* rtype) (.Type v))))
+
+        ^{:line 111} code (methodValueCallCodePtr)
+
+        ;; methodValue contains a stack map for use by the runtime
+        (values _ _ abid) (funcLayout ftyp nil)
+        ^{:line 115} fv (addr ^{:go/breaks [2 [4 122] 6]} (lit methodValue
+            :makeFuncCtxt ^{:go/breaks [2 4 6 8]} (lit makeFuncCtxt
+              :fn code
+              :stack (.-stackPtrs abid)
+              :argLen (.-stackCallArgsSize abid)
+              :regPtrs (.-inRegPtrs abid))
+
+            :method (>> (conv int (.-flag v)) flagMethodShift)
+            :rcvr rcvr))]
+
+
+      ;; Cause panic if method is not appropriate.
+      ;; The panic would still happen during the call if we omit this,
+      ;; but we want Interface() and other operations to fail early.
+      (methodReceiver op (.-rcvr fv) (.-method fv))
+
+      (lit Value ^{:go/via [Type]} (.Common ftyp) (conv unsafe/Pointer fv) (bit-or (bit-and (.-flag v) flagRO) (conv flag Func))))))
+
+
+^{:go/end 136} (go/func methodValueCallCodePtr ^uintptr []
+  (abi/FuncPCABI0 methodValueCall))
+
+
+
+
+
+
+
+(go/func ^:extern methodValueCall "methodValueCall is an assembly function that is the code half of\nthe function returned from makeMethodValue. It expects a *methodValue\nas its context register, and its job is to invoke callMethod(ctxt, frame)\nwhere ctxt is the context register and frame is a pointer to the first\nword in the passed-in argument frame.\n" [])
+
+
+
+(go/type makeFuncCtxt "This structure must be kept in sync with runtime.reflectMethodValue.\nAny changes should be reflected in all both.\n" (struct
+    ^{:line 148 :tag uintptr} fn
+    ^{:line 149 :tag (* bitVector)} stack ; ptrmap for both stack args and results
+    ^{:line 150 :tag uintptr} argLen ; just args
+    ^{:line 151 :tag abi/IntArgRegBitmap} regPtrs))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 183} (go/func ^:go/nosplit moveMakeFuncArgPtrs "moveMakeFuncArgPtrs uses ctxt.regPtrs to copy integer pointer arguments\nin args.Ints to args.Ptrs where the GC can see them.\n\nThis is similar to what reflectcallmove does in the runtime, except\nthat happens on the return path, whereas this happens on the call path.\n\nnosplit because pointers are being held in uintptr slots in args, so\nhaving our stack scanned now could lead to accidentally freeing\nmemory.\n" [^{:tag (* makeFuncCtxt)} ctxt ^{:tag (* abi/RegArgs)} args]
+  (range [i arg (.-Ints args)]
+    ;; Avoid write barriers! Because our write barrier enqueues what
+    ;; was there before, we might enqueue garbage.
+    ;; Also avoid bounds checks, we don't have the stack space for it.
+    ;; (Normally the prove pass removes them, but for -N builds we
+    ;; use too much stack.)
+    ;; ptr := &args.Ptrs[i] (but cast from *unsafe.Pointer to *uintptr)
+    (let [ptr (conv (* uintptr) (add (conv unsafe/Pointer (unsafe/SliceData (subslice (.-Ptrs args)))) (* (conv uintptr i) goarch/PtrSize) "always in [0:IntArgRegs]"))]
+      (if (.Get (.-regPtrs ctxt) i)
+        (set! @ptr arg)
+
+        ;; We *must* zero this space ourselves because it's defined in
+        ;; assembly code and the GC will scan these pointers. Otherwise,
+        ;; there will be garbage here.
+        (set! @ptr 0)))))

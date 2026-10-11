@@ -1,0 +1,343 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Random number generation
+
+(in-ns 'go.runtime) (go/file "rand.go" :imports [
+
+
+    ^{:line 10} [byteorder "internal/byteorder"]
+    ^{:line 11} [chacha8rand "internal/chacha8rand"]
+    ^{:line 12} [goarch "internal/goarch"]
+    ^{:line 13} [bits "math/bits"]
+    ^{:line 14} [unsafe "unsafe"]
+    ^{:line 15} [_ "unsafe"]]) ; for go:linkname
+
+
+
+
+
+(go/var ^{:tag (slice byte) :doc "OS-specific startup can set startupRand if the OS passes\nrandom data to the process at startup time.\nFor example Linux passes 16 bytes in the auxv vector.\n"} startupRand)
+
+
+
+
+
+(go/var ^{:tag (struct ^mutex lock ^{:tag (array 32 byte)} seed ^chacha8rand/State state ^bool init) :doc "globalRand holds the global random state.\nIt is only used at startup and for creating new m's.\nOtherwise the per-m random state should be used\nby calling goodrand.\n"} globalRand)
+
+
+
+
+
+
+(go/var ^bool readRandomFailed)
+
+
+
+^{:go/end 84} (go/func randinit "randinit initializes the global random state.\nIt must be called before any use of grand.\n" []
+  (lock (addr (.-lock globalRand)))
+  (when (.-init globalRand)
+    (fatal "randinit twice"))
+
+
+  (let [seed (addr (.-seed globalRand))]
+    (if (and (>= (len startupRand) 16)
+        ;; Check that at least the first two words of startupRand weren't
+        ;; cleared by any libc initialization.
+        (not (allZero (subslice startupRand _ 8))) (not (allZero (subslice startupRand 8 16))))
+      (range [i c startupRand]
+        (set! (aget seed (% i (len seed))) bit-xor c))
+
+      (do
+        (when (or (!= (readRandom (subslice seed)) (len seed)) (allZero (subslice seed)))
+          ;; readRandom should never fail, but if it does we'd rather
+          ;; not make Go binaries completely unusable, so make up
+          ;; some random data based on the current time.
+          (set! readRandomFailed true)
+          (readTimeRandom (subslice seed)))))
+
+
+    (.Init (.-state globalRand) @seed)
+    (clear (subslice seed))
+
+    (when (!= startupRand nil)
+      ;; Overwrite startupRand instead of clearing it, in case cgo programs
+      ;; access it after we used it.
+      (while (> (len startupRand) 0)
+        (let [buf (make (slice byte) 8)]
+          (while true
+            (when [(values x ok) (.Next (.-state globalRand))] ok
+              (byteorder/BEPutUint64 buf x)
+              (break))
+
+            (.Refill (.-state globalRand)))
+
+          (let [n (copy startupRand buf)]
+            (set! startupRand (subslice startupRand n)))))
+
+      (set! startupRand nil))
+
+
+    (set! (.-init globalRand) true)
+    (unlock (addr (.-lock globalRand)))))
+
+
+
+
+
+
+
+^{:go/end 110} (go/func readTimeRandom "readTimeRandom stretches any entropy in the current time\ninto entropy the length of r and XORs it into r.\nThis is a fallback for when readRandom does not read\nthe full requested amount.\nWhatever entropy r already contained is preserved.\n" [^{:tag (slice byte)} r]
+  ;; Inspired by wyrand.
+  ;; An earlier version of this code used getg().m.procid as well,
+  ;; but note that this is called so early in startup that procid
+  ;; is not initialized yet.
+  (let [v (conv uint64 (nanotime))]
+    (while (> (len r) 0)
+      (set! v bit-xor 0xa0761d6478bd642f)
+      (set! v * 0xe7037ed1a0b428db)
+      (let [size 8]
+        (when (< (len r) 8)
+          (set! size (len r)))
+
+        (for [i 0] (< i size) (inc! i)
+          (set! (aget r i) bit-xor (conv byte (>> v (* 8 i)))))
+
+        (set! r (subslice r size))
+        (set! v (bit-or (>> v 32) (<< v 32)))))))
+
+
+
+^{:go/end 118} (go/func allZero ^bool [^{:tag (slice byte)} b]
+  (let [^byte acc (zero byte)]
+    (range [_ x b]
+      (set! acc bit-or x))
+
+    (== acc 0)))
+
+
+
+
+
+(go/directive "//go:linknamestd bootstrapRand")
+^{:go/end 136} (go/func bootstrapRand "Used in internal/runtime/maps\nbootstrapRand returns a random uint64 from the global random generator.\n" ^uint64 []
+  (lock (addr (.-lock globalRand)))
+  (when (not (.-init globalRand))
+    (fatal "randinit missed"))
+
+  (while true
+    (when [(values x ok) (.Next (.-state globalRand))] ok
+      (unlock (addr (.-lock globalRand)))
+      (return x))
+
+    (.Refill (.-state globalRand))))
+
+
+
+
+
+^{:go/end 147} (go/func bootstrapRandReseed "bootstrapRandReseed reseeds the bootstrap random number generator,\nclearing from memory any trace of previously returned random numbers.\n" []
+  (lock (addr (.-lock globalRand)))
+  (when (not (.-init globalRand))
+    (fatal "randinit missed"))
+
+  (.Reseed (.-state globalRand))
+  (unlock (addr (.-lock globalRand))))
+
+
+
+
+
+^{:go/end 154} (go/func ^:go/nosplit rand32 "rand32 is uint32(rand()), called from compiler-generated code.\n" ^uint32 []
+  (conv uint32 (rand)))
+
+
+
+
+
+
+
+
+
+^{:go/end 183} (go/func ^:go/nosplit ^{:go/linkname "rand"} rand "rand returns a random uint64 from the per-m chacha8 state.\nThis is called from compiler-generated code.\n\nDo not change signature: used via linkname from other packages.\n" ^uint64 []
+  ;; Note: We avoid acquirem here so that in the fast path
+  ;; there is just a getg, an inlined c.Next, and a return.
+  ;; The performance difference on a 16-core AMD is
+  ;; 3.7ns/call this way versus 4.3ns/call with acquirem (+16%).
+  (let [mp (.-m (getg))
+      ^{:line 169} c (addr (.-chacha8 mp))]
+    (while true
+      ;; Note: c.Next is marked nosplit,
+      ;; so we don't need to use mp.locks
+      ;; on the fast path, which is that the
+      ;; first attempt succeeds.
+      (let [(values x ok) (.Next c)]
+        (when ok
+          (return x))
+
+        (inc! (.-locks mp)) ; hold m even though c.Refill may do stack split checks
+        (.Refill c)
+        (dec! (.-locks mp))))))
+
+
+
+
+^{:go/end 188} (go/func ^{:go/linkname "maps_rand internal/runtime/maps.rand"} maps_rand ^uint64 []
+  (rand))
+
+
+
+^{:go/end 200} (go/func mrandinit "mrandinit initializes the random state of an m.\n" [^{:tag (* m)} mp]
+  (let [^{:tag (array 4 uint64)} seed (zero (array 4 uint64))]
+    (range [i seed]
+      (aset seed i (bootstrapRand)))
+
+    (bootstrapRandReseed) ; erase key we just extracted
+    (.Init64 (.-chacha8 mp) seed)
+    (set! (.-cheaprand mp) (conv uint32 (rand)))
+    (set! (.-cheaprand64 mp) (rand))))
+
+
+
+
+
+
+
+^{:go/end 210} (go/func ^:go/nosplit ^{:go/linkname "randn"} randn "randn is like rand() % n but faster.\nDo not change signature: used via linkname from other packages.\n" ^uint32 [^uint32 n]
+  ;; See https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
+  (conv uint32 (>> (* (conv uint64 (conv uint32 (rand))) (conv uint64 n)) 32)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 253} (go/func ^:go/nosplit ^{:go/linkname "cheaprand"} cheaprand "cheaprand is a non-cryptographic-quality 32-bit random generator\nsuitable for calling at very high frequency (such as during scheduling decisions)\nand at sensitive moments in the runtime (such as during stack unwinding).\nit is \"cheap\" in the sense of both expense and quality.\n\ncheaprand must not be exported to other packages:\nthe rule is that other packages using runtime-provided\nrandomness must always use rand.\n\ncheaprand should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bytedance/gopkg\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^uint32 []
+  (let [mp (.-m (getg))]
+    ;; Implement wyrand: https://github.com/wangyi-fudan/wyhash
+    ;; Only the platform that supports 64-bit multiplication
+    ;; natively should be allowed.
+    (when (== bits/UintSize 64)
+      (set! (.-cheaprand mp) + 0x53c5ca59)
+      (let [(values hi lo) (bits/Mul32 (.-cheaprand mp) (bit-xor (.-cheaprand mp) 0x74743c1b))]
+        (return (bit-xor hi lo))))
+
+
+    ;; Implement xorshift64+: 2 32-bit xorshift sequences added together.
+    ;; Shift triplet [17,7,16] was calculated as indicated in Marsaglia's
+    ;; Xorshift paper: https://www.jstatsoft.org/article/view/v008i14/xorshift.pdf
+    ;; This generator passes the SmallCrush suite, part of TestU01 framework:
+    ;; http://simul.iro.umontreal.ca/testu01/tu01.html
+    (let [t (conv (* (array 2 uint32)) (conv unsafe/Pointer (addr (.-cheaprand64 mp))))
+        (values s1 s0) (values (aget t 0) (aget t 1))]
+      (set! s1 bit-xor (<< s1 17))
+      (set! s1 (bit-xor s1 s0 (>> s1 7) (>> s0 16)))
+      (set! (values (aget t 0) (aget t 1)) (values s0 s1))
+      (+ s0 s1))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 275} (go/func ^:go/nosplit ^{:go/linkname "cheaprand64"} cheaprand64 "cheaprand64 is a non-cryptographic-quality 63-bit random generator\nsuitable for calling at very high frequency (such as during sampling decisions).\nit is \"cheap\" in the sense of both expense and quality.\n\ncheaprand64 must not be exported to other packages:\nthe rule is that other packages using runtime-provided\nrandomness must always use rand.\n\ncheaprand64 should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/zhangyunhao116/fastrand\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^int64 []
+  (conv int64 (bit-and (cheaprandu64) (bit-not (<< (conv uint64 1) 63)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 301} (go/func ^:go/nosplit cheaprandu64 "cheaprandu64 is a non-cryptographic-quality 64-bit random generator\nsuitable for calling at very high frequency (such as during sampling decisions).\nit is \"cheap\" in the sense of both expense and quality.\n\ncheaprandu64 must not be exported to other packages:\nthe rule is that other packages using runtime-provided\nrandomness must always use rand.\n" ^uint64 []
+  ;; Implement wyrand: https://github.com/wangyi-fudan/wyhash
+  ;; Only the platform that bits.Mul64 can be lowered
+  ;; by the compiler should be in this list.
+  (when (== (bit-or goarch/IsAmd64 goarch/IsArm64 goarch/IsPpc64
+        ^{:line 291} goarch/IsPpc64le goarch/IsMips64 goarch/IsMips64le
+        ^{:line 292} goarch/IsS390x goarch/IsRiscv64 goarch/IsLoong64) 1)
+    (let [mp (.-m (getg))]
+      ;; Implement wyrand: https://github.com/wangyi-fudan/wyhash
+      (set! (.-cheaprand64 mp) + 0xa0761d6478bd642f)
+      (let [(values hi lo) (bits/Mul64 (.-cheaprand64 mp) (bit-xor (.-cheaprand64 mp) 0xe7037ed1a0b428db))]
+        (return (bit-xor hi lo)))))
+
+
+  (bit-or (<< (conv uint64 (cheaprand)) 32) (conv uint64 (cheaprand))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 322} (go/func ^:go/nosplit ^{:go/linkname "cheaprandn"} cheaprandn "cheaprandn is like cheaprand() % n but faster.\n\ncheaprandn must not be exported to other packages:\nthe rule is that other packages using runtime-provided\nrandomness must always use randn.\n\ncheaprandn should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/phuslu/log\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^uint32 [^uint32 n]
+  ;; See https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
+  (conv uint32 (>> (* (conv uint64 (cheaprand)) (conv uint64 n)) 32)))
+
+
+;; Too much legacy code has go:linkname references
+;; to runtime.fastrand and friends, so keep these around for now.
+;; Code should migrate to math/rand/v2.Uint64,
+;; which is just as fast, but that's only available in Go 1.22+.
+;; It would be reasonable to remove these in Go 1.24.
+;; Do not call these from package runtime.
+
+
+^{:go/end 334} (go/func ^{:go/linkname "legacy_fastrand runtime.fastrand"} legacy_fastrand ^uint32 []
+  (conv uint32 (rand)))
+
+
+
+^{:go/end 339} (go/func ^{:go/linkname "legacy_fastrandn runtime.fastrandn"} legacy_fastrandn ^uint32 [^uint32 n]
+  (randn n))
+
+
+
+^{:go/end 344} (go/func ^{:go/linkname "legacy_fastrand64 runtime.fastrand64"} legacy_fastrand64 ^uint64 []
+  (rand))

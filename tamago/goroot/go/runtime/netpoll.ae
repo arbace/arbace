@@ -1,0 +1,732 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.runtime) (go/file "netpoll.go" :build ["//go:build unix || (js && wasm) || wasip1 || windows || tamago"] :imports [
+
+
+    ^{:line 10} [atomic "internal/runtime/atomic"]
+    ^{:line 11} [sys "internal/runtime/sys"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+;; Integrated network poller (platform-independent part).
+;; A particular implementation (epoll/kqueue/port/AIX/Windows)
+;; must define the following functions:
+;;
+;; func netpollinit()
+;;     Initialize the poller. Only called once.
+;;
+;; func netpollopen(fd uintptr, pd *pollDesc) int32
+;;     Arm edge-triggered notifications for fd. The pd argument is to pass
+;;     back to netpollready when fd is ready. Return an errno value.
+;;
+;; func netpollclose(fd uintptr) int32
+;;     Disable notifications for fd. Return an errno value.
+;;
+;; func netpoll(delta int64) (gList, int32)
+;;     Poll the network. If delta < 0, block indefinitely. If delta == 0,
+;;     poll without blocking. If delta > 0, block for up to delta nanoseconds.
+;;     Return a list of goroutines built by calling netpollready,
+;;     and a delta to add to netpollWaiters when all goroutines are ready.
+;;     This must never return an empty list with a non-zero delta.
+;;
+;; func netpollBreak()
+;;     Wake up the network poller, assumed to be blocked in netpoll.
+;;
+;; func netpollIsPollDescriptor(fd uintptr) bool
+;;     Reports whether fd is a file descriptor used by the poller.
+
+
+
+(go/const "Error codes returned by runtime_pollReset and runtime_pollWait.\nThese must match the values in internal/poll/fd_poll_runtime.go.\n"
+  ^{:line 45} [^{:val 0} pollNoError 0] ; no error
+  ^{:line 46} [^{:val 1} pollErrClosing 1] ; descriptor is closed
+  ^{:line 47} [^{:val 2} pollErrTimeout 2] ; I/O timeout
+  ^{:line 48} [^{:val 3} pollErrNotPollable 3]) ; general error polling descriptor
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const "pollDesc contains 2 binary semaphores, rg and wg, to park reader and writer\ngoroutines respectively. The semaphore can be in the following states:\n\n\tpdReady - io readiness notification is pending;\n\t          a goroutine consumes the notification by changing the state to pdNil.\n\tpdWait - a goroutine prepares to park on the semaphore, but not yet parked;\n\t         the goroutine commits to park by changing the state to G pointer,\n\t         or, alternatively, concurrent io notification changes the state to pdReady,\n\t         or, alternatively, concurrent timeout/close changes the state to pdNil.\n\tG pointer - the goroutine is blocked on the semaphore;\n\t            io notification or timeout/close changes the state to pdReady or pdNil respectively\n\t            and unparks the goroutine.\n\tpdNil - none of the above.\n"
+  ^{:line 65} [^{:tag uintptr :val 0} pdNil 0]
+  ^{:line 66} [^{:tag uintptr :val 1} pdReady 1]
+  ^{:line 67} [^{:tag uintptr :val 2} pdWait 2])
+
+
+(go/const ^{:val 4096} pollBlockSize (* 4 1024))
+
+
+
+
+(go/type pollDesc "Network poller descriptor.\n\nNo heap pointers.\n" (struct
+    ^{:line 76 :tag sys/NotInHeap} _
+    ^{:line 77 :tag (* pollDesc)} link ; in pollcache, protected by pollcache.lock
+    ^{:line 78 :tag uintptr} fd ; constant for pollDesc usage lifetime
+    ^{:line 79 :tag atomic/Uintptr} fdseq ; protects against stale pollDesc
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 96 :tag atomic/Uint32 :doc "atomicInfo holds bits from closing, rd, and wd,\nwhich are only ever written while holding the lock,\nsummarized for use by netpollcheckerr,\nwhich cannot acquire the lock.\nAfter writing these fields under lock in a way that\nmight change the summary, code must call publishInfo\nbefore releasing the lock.\nCode that changes fields and then calls netpollunblock\n(while still holding the lock) must call publishInfo\nbefore calling netpollunblock, because publishInfo is what\nstops netpollblock from blocking anew\n(by changing the result of netpollcheckerr).\natomicInfo also holds the eventErr bit,\nrecording whether a poll event on the fd got an error;\natomicInfo is the only source of truth for that bit.\n"} atomicInfo ; atomic pollInfo
+
+
+
+    ^{:line 100 :tag atomic/Uintptr :doc "rg, wg are accessed atomically and hold g pointers.\n(Using atomic.Uintptr here is similar to using guintptr elsewhere.)\n"} rg ; pdReady, pdWait, G waiting for read or pdNil
+    ^{:line 101 :tag atomic/Uintptr} wg ; pdReady, pdWait, G waiting for write or pdNil
+
+    ^{:line 103 :tag mutex} lock ; protects the following fields
+    ^{:line 104 :tag bool} closing
+    ^{:line 105 :tag bool} rrun ; whether rt is running
+    ^{:line 106 :tag bool} wrun ; whether wt is running
+    ^{:line 107 :tag uint32} user ; user settable cookie
+    ^{:line 108 :tag uintptr} rseq ; protects from stale read timers
+    ^{:line 109 :tag timer} rt ; read deadline timer
+    ^{:line 110 :tag int64} rd ; read deadline (a nanotime in the future, -1 when expired)
+    ^{:line 111 :tag uintptr} wseq ; protects from stale write timers
+    ^{:line 112 :tag timer} wt ; write deadline timer
+    ^{:line 113 :tag int64} wd ; write deadline (a nanotime in the future, -1 when expired)
+    ^{:line 114 :tag (* pollDesc)} self)) ; storage for indirect interface. See (*pollDesc).makeArg.
+
+
+
+
+
+
+(go/type pollInfo "pollInfo is the bits needed by netpollcheckerr, stored atomically,\nmostly duplicating state that is manipulated under lock in pollDesc.\nThe one exception is the pollEventErr bit, which is maintained only\nin the pollInfo.\n" uint32)
+
+(go/const
+  ^{:line 124} [^{:val 1} pollClosing (<< 1 iota)]
+  ^{:line 125} [^{:val 2} pollEventErr]
+  ^{:line 126} [^{:val 4} pollExpiredReadDeadline]
+  ^{:line 127} [^{:val 8} pollExpiredWriteDeadline]
+  ^{:line 128} [^{:val 16} pollFDSeq]) ; 20 bit field, low 20 bits of fdseq field
+
+
+(go/const
+  ^{:line 132} [^{:val 20} pollFDSeqBits 20] ; number of bits in pollFDSeq
+  ^{:line 133} [^{:val 1048575} pollFDSeqMask (- (<< 1 pollFDSeqBits) 1)]) ; mask for pollFDSeq
+
+
+^{:go/end 136} (go/method closing ^bool [^pollInfo i] (!= (bit-and i pollClosing) 0))
+^{:go/end 137} (go/method eventErr ^bool [^pollInfo i] (!= (bit-and i pollEventErr) 0))
+^{:go/end 138} (go/method expiredReadDeadline ^bool [^pollInfo i] (!= (bit-and i pollExpiredReadDeadline) 0))
+^{:go/end 139} (go/method expiredWriteDeadline ^bool [^pollInfo i] (!= (bit-and i pollExpiredWriteDeadline) 0))
+
+
+^{:go/end 144} (go/method info "info returns the pollInfo corresponding to pd.\n" ^pollInfo [^{:tag (* pollDesc)} pd]
+  (conv pollInfo (.Load (.-atomicInfo pd))))
+
+
+
+
+
+
+
+
+
+^{:go/end 171} (go/method publishInfo "publishInfo updates pd.atomicInfo (returned by pd.info)\nusing the other values in pd.\nIt must be called while holding pd.lock,\nand it must be called after changing anything\nthat might affect the info bits.\nIn practice this means after changing closing\nor changing rd or wd from < 0 to >= 0.\n" [^{:tag (* pollDesc)} pd]
+  (let [^uint32 info (zero uint32)]
+    (when (.-closing pd)
+      (set! info bit-or pollClosing))
+
+    (when (< (.-rd pd) 0)
+      (set! info bit-or pollExpiredReadDeadline))
+
+    (when (< (.-wd pd) 0)
+      (set! info bit-or pollExpiredWriteDeadline))
+
+    (set! info bit-or (<< (conv uint32 (bit-and (.Load (.-fdseq pd)) pollFDSeqMask)) pollFDSeq))
+
+    ;; Set all of x except the pollEventErr bit.
+    (let [x (.Load (.-atomicInfo pd))]
+      (while (not (.CompareAndSwap (.-atomicInfo pd) x (bit-or (bit-and x pollEventErr) info)))
+        (set! x (.Load (.-atomicInfo pd)))))))
+
+
+
+
+
+
+^{:go/end 190} (go/method setEventErr "setEventErr sets the result of pd.info().eventErr() to b.\nWe only change the error bit if seq == 0 or if seq matches pollFDSeq\n(issue #59545).\n" [^{:tag (* pollDesc)} pd ^bool b ^uintptr seq]
+  (let [mSeq (conv uint32 (bit-and seq pollFDSeqMask))
+      ^{:line 178} x (.Load (.-atomicInfo pd))
+      ^{:line 179} xSeq (bit-and (>> x pollFDSeq) pollFDSeqMask)]
+    (when (and (!= seq 0) (!= xSeq mSeq))
+      (return))
+
+    (while (and (!= (!= (bit-and x pollEventErr) 0) b) (not (.CompareAndSwap (.-atomicInfo pd) x (bit-xor x pollEventErr))))
+      (set! x (.Load (.-atomicInfo pd)))
+      (let [xSeq (bit-and (>> x pollFDSeq) pollFDSeqMask)]
+        (when (and (!= seq 0) (!= xSeq mSeq))
+          (return))))))
+
+
+
+
+(go/type pollCache (struct
+    ^{:line 193 :tag mutex} lock
+    ^{:line 194 :tag (* pollDesc)} first))
+;; PollDesc objects must be type-stable,
+;; because we can get ready notification from epoll/kqueue
+;; after the descriptor is closed/reused.
+;; Stale notifications are detected using seq variable,
+;; seq is incremented when deadlines are changed or descriptor is reused.
+
+
+(go/var
+  ^{:line 203} [^mutex netpollInitLock]
+  ^{:line 204} [^atomic/Uint32 netpollInited]
+
+  ^{:line 206} [^pollCache pollcache]
+  ^{:line 207} [^atomic/Uint32 netpollWaiters])
+
+
+;; netpollWaiters is accessed in tests
+(go/directive "//go:linkname netpollWaiters")
+
+
+^{:go/end 216} (go/func ^{:go/linkname "poll_runtime_pollServerInit internal/poll.runtime_pollServerInit"} poll_runtime_pollServerInit []
+  (netpollGenericInit))
+
+
+^{:go/end 229} (go/func netpollGenericInit []
+  (when (== (.Load netpollInited) 0)
+    (lockInit (addr netpollInitLock) lockRankNetpollInit)
+    (lockInit (addr (.-lock pollcache)) lockRankPollCache)
+    (lock (addr netpollInitLock))
+    (when (== (.Load netpollInited) 0)
+      (netpollinit)
+      (.Store netpollInited 1))
+
+    (unlock (addr netpollInitLock))))
+
+
+
+^{:go/end 233} (go/func netpollinited ^bool []
+  (!= (.Load netpollInited) 0))
+
+
+
+
+
+
+^{:go/end 241} (go/func ^{:go/linkname "poll_runtime_isPollServerDescriptor internal/poll.runtime_isPollServerDescriptor"} poll_runtime_isPollServerDescriptor "poll_runtime_isPollServerDescriptor reports whether fd is a\ndescriptor being used by netpoll.\n" ^bool [^uintptr fd]
+  (netpollIsPollDescriptor fd))
+
+
+
+^{:go/end 278} (go/func ^{:go/linkname "poll_runtime_pollOpen internal/poll.runtime_pollOpen"} poll_runtime_pollOpen [^uintptr fd] :results [(* pollDesc) int]
+  (let [pd (.alloc pollcache)]
+    (lock (addr (.-lock pd)))
+    (let [wg (.Load (.-wg pd))]
+      (when (and (!= wg pdNil) (!= wg pdReady))
+        (throw "runtime: blocked write on free polldesc"))
+
+      (let [rg (.Load (.-rg pd))]
+        (when (and (!= rg pdNil) (!= rg pdReady))
+          (throw "runtime: blocked read on free polldesc"))
+
+        (set! (.-fd pd) fd)
+        (when (== (.Load (.-fdseq pd)) 0)
+          ;; The value 0 is special in setEventErr, so don't use it.
+          (.Store (.-fdseq pd) 1))
+
+        (set! (.-closing pd) false)
+        (.setEventErr pd false 0)
+        (inc! (.-rseq pd))
+        (.Store (.-rg pd) pdNil)
+        (set! (.-rd pd) 0)
+        (inc! (.-wseq pd))
+        (.Store (.-wg pd) pdNil)
+        (set! (.-wd pd) 0)
+        (set! (.-self pd) pd)
+        (.publishInfo pd)
+        (unlock (addr (.-lock pd)))
+
+        (let [errno (netpollopen fd pd)]
+          (when (!= errno 0)
+            (.free pollcache pd)
+            (return nil (conv int errno)))
+
+          (return pd 0))))))
+
+
+
+^{:go/end 295} (go/func ^{:go/linkname "poll_runtime_pollClose internal/poll.runtime_pollClose"} poll_runtime_pollClose [^{:tag (* pollDesc)} pd]
+  (when (not (.-closing pd))
+    (throw "runtime: close polldesc w/o unblock"))
+
+  (let [wg (.Load (.-wg pd))]
+    (when (and (!= wg pdNil) (!= wg pdReady))
+      (throw "runtime: blocked write on closing polldesc"))
+
+    (let [rg (.Load (.-rg pd))]
+      (when (and (!= rg pdNil) (!= rg pdReady))
+        (throw "runtime: blocked read on closing polldesc"))
+
+      (netpollclose (.-fd pd))
+      (.free pollcache pd))))
+
+
+^{:go/end 316} (go/method free [^{:tag (* pollCache)} c ^{:tag (* pollDesc)} pd]
+  ;; pd can't be shared here, but lock anyhow because
+  ;; that's what publishInfo documents.
+  (lock (addr (.-lock pd)))
+
+  ;; Increment the fdseq field, so that any currently
+  ;; running netpoll calls will not mark pd as ready.
+  (let [fdseq (.Load (.-fdseq pd))]
+    (set! fdseq (bit-and (+ fdseq 1) (- (<< 1 tagBits) 1)))
+    (.Store (.-fdseq pd) fdseq)
+
+    (.publishInfo pd)
+
+    (unlock (addr (.-lock pd)))
+
+    (lock (addr (.-lock c)))
+    (set! (.-link pd) (.-first c))
+    (set! (.-first c) pd)
+    (unlock (addr (.-lock c)))))
+
+
+
+
+
+
+
+^{:go/end 334} (go/func ^{:go/linkname "poll_runtime_pollReset internal/poll.runtime_pollReset"} poll_runtime_pollReset "poll_runtime_pollReset, which is internal/poll.runtime_pollReset,\nprepares a descriptor for polling in mode, which is 'r' or 'w'.\nThis returns an error code; the codes are defined above.\n" ^int [^{:tag (* pollDesc)} pd ^int mode]
+  (let [errcode (netpollcheckerr pd (conv int32 mode))]
+    (when (!= errcode pollNoError)
+      (return errcode))
+
+    (cond (== mode \r)
+      (.Store (.-rg pd) pdNil)
+      (== mode \w)
+      (.Store (.-wg pd) pdNil))
+
+    ^{:line 333} pollNoError))
+
+
+
+
+
+
+
+
+^{:go/end 361} (go/func ^{:go/linkname "poll_runtime_pollWait internal/poll.runtime_pollWait"} poll_runtime_pollWait "poll_runtime_pollWait, which is internal/poll.runtime_pollWait,\nwaits for a descriptor to be ready for reading or writing,\naccording to mode, which is 'r' or 'w'.\nThis returns an error code; the codes are defined above.\n" ^int [^{:tag (* pollDesc)} pd ^int mode]
+  (let [errcode (netpollcheckerr pd (conv int32 mode))]
+    (when (!= errcode pollNoError)
+      (return errcode))
+
+    ;; As for now only Solaris, illumos, AIX and wasip1 use level-triggered IO.
+    (when (or (== GOOS "solaris") (== GOOS "illumos") (== GOOS "aix") (== GOOS "wasip1"))
+      (netpollarm pd mode))
+
+    (while (not (netpollblock pd (conv int32 mode) false))
+      (set! errcode (netpollcheckerr pd (conv int32 mode)))
+      (when (!= errcode pollNoError)
+        (return errcode)))
+
+    ;; Can happen if timeout has fired and unblocked us,
+    ;; but before we had a chance to run, timeout has been reset.
+    ;; Pretend it has not happened and retry.
+
+    ^{:line 360} pollNoError))
+
+
+
+^{:go/end 369} (go/func ^{:go/linkname "poll_runtime_pollWaitCanceled internal/poll.runtime_pollWaitCanceled"} poll_runtime_pollWaitCanceled [^{:tag (* pollDesc)} pd ^int mode]
+  ;; This function is used only on windows after a failed attempt to cancel
+  ;; a pending async IO operation. Wait for ioready, ignore closing or timeouts.
+  (while (not (netpollblock pd (conv int32 mode) true))))
+
+
+
+
+^{:go/end 449} (go/func ^{:go/linkname "poll_runtime_pollSetDeadline internal/poll.runtime_pollSetDeadline"} poll_runtime_pollSetDeadline [^{:tag (* pollDesc)} pd ^int64 d ^int mode]
+  (lock (addr (.-lock pd)))
+  (when (.-closing pd)
+    (unlock (addr (.-lock pd)))
+    (return))
+
+  (let [(values rd0 wd0) (values (.-rd pd) (.-wd pd))
+      ^{:line 379} combo0 (and (> rd0 0) (== rd0 wd0))]
+    (when (> d 0)
+      (set! d + (nanotime))
+      (when (<= d 0)
+        ;; If the user has a deadline in the future, but the delay calculation
+        ;; overflows, then set the deadline to the maximum possible value.
+        (set! d (- (<< 1 63) 1))))
+
+
+    (when (or (== mode \r) (== mode (+ \r \w)))
+      (set! (.-rd pd) d))
+
+    (when (or (== mode \w) (== mode (+ \r \w)))
+      (set! (.-wd pd) d))
+
+    (.publishInfo pd)
+    (let [combo (and (> (.-rd pd) 0) (== (.-rd pd) (.-wd pd)))
+        ^{:line 396} rtf netpollReadDeadline]
+      (when combo
+        (set! rtf netpollDeadline))
+
+      (cond (not (.-rrun pd))
+        (when (> (.-rd pd) 0)
+          ;; Copy current seq into the timer arg.
+          ;; Timer func will check the seq against current descriptor seq,
+          ;; if they differ the descriptor was reused or timers were reset.
+          (.modify (.-rt pd) (.-rd pd) 0 rtf (.makeArg pd) (.-rseq pd))
+          (set! (.-rrun pd) true))
+
+        (or (!= (.-rd pd) rd0) (!= combo combo0)) (do
+          (inc! (.-rseq pd)) ; invalidate current timers
+          (if (> (.-rd pd) 0)
+            (.modify (.-rt pd) (.-rd pd) 0 rtf (.makeArg pd) (.-rseq pd))
+            (do
+              (.stop (.-rt pd))
+              (set! (.-rrun pd) false)))))
+
+
+      (cond (not (.-wrun pd))
+        (when (and (> (.-wd pd) 0) (not combo))
+          (.modify (.-wt pd) (.-wd pd) 0 netpollWriteDeadline (.makeArg pd) (.-wseq pd))
+          (set! (.-wrun pd) true))
+
+        (or (!= (.-wd pd) wd0) (!= combo combo0)) (do
+          (inc! (.-wseq pd)) ; invalidate current timers
+          (if (and (> (.-wd pd) 0) (not combo))
+            (.modify (.-wt pd) (.-wd pd) 0 netpollWriteDeadline (.makeArg pd) (.-wseq pd))
+            (do
+              (.stop (.-wt pd))
+              (set! (.-wrun pd) false)))))
+
+
+      ;; If we set the new deadline in the past, unblock currently pending IO if any.
+      ;; Note that pd.publishInfo has already been called, above, immediately after modifying rd and wd.
+      (let [delta (conv int32 0)
+          (values ^{:tag (* g)} rg ^{:tag (* g)} wg) (zero (* g))]
+        (when (< (.-rd pd) 0)
+          (set! rg (netpollunblock pd \r false (addr delta))))
+
+        (when (< (.-wd pd) 0)
+          (set! wg (netpollunblock pd \w false (addr delta))))
+
+        (unlock (addr (.-lock pd)))
+        (when (!= rg nil)
+          (netpollgoready rg 3))
+
+        (when (!= wg nil)
+          (netpollgoready wg 3))
+
+        (netpollAdjustWaiters delta)))))
+
+
+
+^{:go/end 481} (go/func ^{:go/linkname "poll_runtime_pollUnblock internal/poll.runtime_pollUnblock"} poll_runtime_pollUnblock [^{:tag (* pollDesc)} pd]
+  (lock (addr (.-lock pd)))
+  (when (.-closing pd)
+    (throw "runtime: unblock on closing polldesc"))
+
+  (set! (.-closing pd) true)
+  (inc! (.-rseq pd))
+  (inc! (.-wseq pd))
+  (let [(values ^{:tag (* g)} rg ^{:tag (* g)} wg) (zero (* g))]
+    (.publishInfo pd)
+    (let [delta (conv int32 0)]
+      (set! rg (netpollunblock pd \r false (addr delta)))
+      (set! wg (netpollunblock pd \w false (addr delta)))
+      (when (.-rrun pd)
+        (.stop (.-rt pd))
+        (set! (.-rrun pd) false))
+
+      (when (.-wrun pd)
+        (.stop (.-wt pd))
+        (set! (.-wrun pd) false))
+
+      (unlock (addr (.-lock pd)))
+      (when (!= rg nil)
+        (netpollgoready rg 3))
+
+      (when (!= wg nil)
+        (netpollgoready wg 3))
+
+      (netpollAdjustWaiters delta))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 510} (go/func ^:go/nowritebarrier netpollready "netpollready is called by the platform-specific netpoll function.\nIt declares that the fd associated with pd is ready for I/O.\nThe toRun argument is used to build a list of goroutines to return\nfrom netpoll. The mode argument is 'r', 'w', or 'r'+'w' to indicate\nwhether the fd is ready for reading or writing or both.\n\nThis returns a delta to apply to netpollWaiters.\n\nThis may run while the world is stopped, so write barriers are not allowed.\n" ^int32 [^{:tag (* gList)} toRun ^{:tag (* pollDesc)} pd ^int32 mode]
+  (let [delta (conv int32 0)
+      (values ^{:tag (* g)} rg ^{:tag (* g)} wg) (zero (* g))]
+    (when (or (== mode \r) (== mode (+ \r \w)))
+      (set! rg (netpollunblock pd \r true (addr delta))))
+
+    (when (or (== mode \w) (== mode (+ \r \w)))
+      (set! wg (netpollunblock pd \w true (addr delta))))
+
+    (when (!= rg nil)
+      (.push toRun rg))
+
+    (when (!= wg nil)
+      (.push toRun wg))
+
+    ^{:line 509} delta))
+
+
+^{:go/end 527} (go/func netpollcheckerr ^int [^{:tag (* pollDesc)} pd ^int32 mode]
+  (let [info (.info pd)]
+    (when (.closing info)
+      (return pollErrClosing))
+
+    (when (or ^:go/paren (and (== mode \r) (.expiredReadDeadline info)) ^:go/paren (and (== mode \w) (.expiredWriteDeadline info)))
+      (return pollErrTimeout))
+
+    ;; Report an event scanning error only on a read event.
+    ;; An error on a write event will be captured in a subsequent
+    ;; write call that is able to report a more specific error.
+    (when (and (== mode \r) (.eventErr info))
+      (return pollErrNotPollable))
+
+    ^{:line 526} pollNoError))
+
+
+^{:go/end 538} (go/func netpollblockcommit ^bool [^{:tag (* g)} gp ^unsafe/Pointer gpp]
+  (let [r (atomic/Casuintptr (conv (* uintptr) gpp) pdWait (conv uintptr (conv unsafe/Pointer gp)))]
+    (when r
+      ;; Bump the count of goroutines waiting for the poller.
+      ;; The scheduler uses this to decide whether to block
+      ;; waiting for the poller if there is nothing else to do.
+      (netpollAdjustWaiters 1))
+
+    ^{:line 537} r))
+
+
+^{:go/end 542} (go/func netpollgoready [^{:tag (* g)} gp ^int traceskip]
+  (goready gp (+ traceskip 1)))
+
+
+
+
+
+
+^{:go/end 583} (go/func netpollblock "returns true if IO is ready, or false if timed out or closed\nwaitio - wait only for completed IO, ignore errors\nConcurrent calls to netpollblock in the same mode are forbidden, as pollDesc\ncan hold only a single waiting goroutine for each mode.\n" ^bool [^{:tag (* pollDesc)} pd ^int32 mode ^bool waitio]
+  (let [gpp (addr (.-rg pd))]
+    (when (== mode \w)
+      (set! gpp (addr (.-wg pd))))
+
+
+    ;; set the gpp semaphore to pdWait
+    (while true
+      ;; Consume notification if already ready.
+      (when (.CompareAndSwap gpp pdReady pdNil)
+        (return true))
+
+      (when (.CompareAndSwap gpp pdNil pdWait)
+        (break))
+
+
+      ;; Double check that this isn't corrupt; otherwise we'd loop
+      ;; forever.
+      (when [v (.Load gpp)] (and (!= v pdReady) (!= v pdNil))
+        (throw "runtime: double wait")))
+
+
+
+    ;; need to recheck error states after setting gpp to pdWait
+    ;; this is necessary because runtime_pollUnblock/runtime_pollSetDeadline/deadlineimpl
+    ;; do the opposite: store to closing/rd/wd, publishInfo, load of rg/wg
+    (when (or waitio (== (netpollcheckerr pd mode) pollNoError))
+      (gopark netpollblockcommit (conv unsafe/Pointer gpp) waitReasonIOWait traceBlockNet 5))
+
+    ;; be careful to not lose concurrent pdReady notification
+    (let [old (.Swap gpp pdNil)]
+      (when (> old pdWait)
+        (throw "runtime: corrupted polldesc"))
+
+      (== old pdReady))))
+
+
+
+
+
+
+
+
+^{:go/end 620} (go/func netpollunblock "netpollunblock moves either pd.rg (if mode == 'r') or\npd.wg (if mode == 'w') into the pdReady state.\nThis returns any goroutine blocked on pd.{rg,wg}.\nIt adds any adjustment to netpollWaiters to *delta;\nthis adjustment should be applied after the goroutine has\nbeen marked ready.\n" ^{:tag (* g)} [^{:tag (* pollDesc)} pd ^int32 mode ^bool ioready ^{:tag (* int32)} delta]
+  (let [gpp (addr (.-rg pd))]
+    (when (== mode \w)
+      (set! gpp (addr (.-wg pd))))
+
+
+    (while true
+      (let [old (.Load gpp)]
+        (when (== old pdReady)
+          (return nil))
+
+        (when (and (== old pdNil) (not ioready))
+          ;; Only set pdReady for ioready. runtime_pollWait
+          ;; will check for timeout/cancel before waiting.
+          (return nil))
+
+        (let [new pdNil]
+          (when ioready
+            (set! new pdReady))
+
+          (when (.CompareAndSwap gpp old new)
+            (cond (== old pdWait)
+              (set! old pdNil)
+              (!= old pdNil)
+              (set! @delta - 1))
+
+            (return (conv (* g) (conv unsafe/Pointer old)))))))))
+
+
+
+
+^{:go/end 662} (go/func netpolldeadlineimpl [^{:tag (* pollDesc)} pd ^uintptr seq ^bool read ^bool write]
+  (lock (addr (.-lock pd)))
+  ;; Seq arg is seq when the timer was set.
+  ;; If it's stale, ignore the timer event.
+  (let [currentSeq (.-rseq pd)]
+    (when (not read)
+      (set! currentSeq (.-wseq pd)))
+
+    (when (!= seq currentSeq)
+      ;; The descriptor was reused or timers were reset.
+      (unlock (addr (.-lock pd)))
+      (return))
+
+    (let [delta (conv int32 0)
+        ^{:line 636 :tag (* g)} rg (zero (* g))]
+      (when read
+        (when (or (<= (.-rd pd) 0) (not (.-rrun pd)))
+          (throw "runtime: inconsistent read deadline"))
+
+        (set! (.-rd pd) -1)
+        (.publishInfo pd)
+        (set! rg (netpollunblock pd \r false (addr delta))))
+
+      (let [^{:tag (* g)} wg (zero (* g))]
+        (when write
+          (when (or (<= (.-wd pd) 0) (and (not (.-wrun pd)) (not read)))
+            (throw "runtime: inconsistent write deadline"))
+
+          (set! (.-wd pd) -1)
+          (.publishInfo pd)
+          (set! wg (netpollunblock pd \w false (addr delta))))
+
+        (unlock (addr (.-lock pd)))
+        (when (!= rg nil)
+          (netpollgoready rg 0))
+
+        (when (!= wg nil)
+          (netpollgoready wg 0))
+
+        (netpollAdjustWaiters delta)))))
+
+
+^{:go/end 666} (go/func netpollDeadline [^any arg ^uintptr seq ^int64 delta]
+  (netpolldeadlineimpl (assert (* pollDesc) arg) seq true true))
+
+
+^{:go/end 670} (go/func netpollReadDeadline [^any arg ^uintptr seq ^int64 delta]
+  (netpolldeadlineimpl (assert (* pollDesc) arg) seq true false))
+
+
+^{:go/end 674} (go/func netpollWriteDeadline [^any arg ^uintptr seq ^int64 delta]
+  (netpolldeadlineimpl (assert (* pollDesc) arg) seq false true))
+
+
+
+^{:go/end 679} (go/func netpollAnyWaiters "netpollAnyWaiters reports whether any goroutines are waiting for I/O.\n" ^bool []
+  (> (.Load netpollWaiters) 0))
+
+
+
+^{:go/end 686} (go/func netpollAdjustWaiters "netpollAdjustWaiters adds delta to netpollWaiters.\n" [^int32 delta]
+  (when (!= delta 0)
+    (.Add netpollWaiters delta)))
+
+
+
+^{:go/end 716} (go/method alloc ^{:tag (* pollDesc)} [^{:tag (* pollCache)} c]
+  (lock (addr (.-lock c)))
+  (when (== (.-first c) nil)
+    (let-type [pollDescPadded (struct
+          ^{:line 692} pollDesc
+          ^{:line 693 :tag (array (- tagAlign (unsafe/Sizeof (lit pollDesc))) byte)} pad)]
+
+      (let [^:const ^{:val 512} pdSize (unsafe/Sizeof (lit pollDescPadded))
+          ^{:line 696} n (/ pollBlockSize pdSize)]
+        (when (== n 0)
+          (set! n 1))
+
+        ;; Must be in non-GC memory because can be referenced
+        ;; only from epoll/kqueue internals.
+        (let [mem (persistentalloc (* n pdSize) tagAlign (addr (.-other_sys memstats)))]
+          (for [i (conv uintptr 0)] (< i n) (inc! i)
+            (let [pd (conv (* pollDesc) (add mem (* i pdSize)))]
+              (lockInit (addr (.-lock pd)) lockRankPollDesc)
+              (.init (.-rt pd) nil nil)
+              (.init (.-wt pd) nil nil)
+              (set! (.-link pd) (.-first c))
+              (set! (.-first c) pd)))))))
+
+
+  (let [pd (.-first c)]
+    (set! (.-first c) (.-link pd))
+    (unlock (addr (.-lock c)))
+    ^{:line 715} pd))
+
+
+
+
+
+
+
+^{:go/end 728} (go/method makeArg "makeArg converts pd to an interface{}.\nmakeArg does not do any allocation. Normally, such\na conversion requires an allocation because pointers to\ntypes which embed internal/runtime/sys.NotInHeap (which pollDesc is)\nmust be stored in interfaces indirectly. See issue 42076.\n" [^{:tag (* pollDesc)} pd] :results [^any i]
+  (let [x (conv (* eface) (conv unsafe/Pointer (addr i)))]
+    (set! (.-_type x) pdType)
+    (set! (.-data x) (conv unsafe/Pointer (addr (.-self pd))))
+    (return)))
+
+
+(go/var
+  ^{:line 731} [^any pdEface (conv (* pollDesc) nil)]
+  ^{:line 732} [^{:tag (* _type)} pdType (.-_type (efaceOf (addr pdEface)))])

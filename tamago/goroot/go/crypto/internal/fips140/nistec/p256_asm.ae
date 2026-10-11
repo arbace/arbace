@@ -1,0 +1,757 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file contains the Go wrapper for the constant-time, 64-bit assembly
+;; implementation of P256. The optimizations performed here are described in
+;; detail in:
+;; S.Gueron and V.Krasnov, "Fast prime field elliptic-curve cryptography with
+;;                          256-bit primes"
+;; https://link.springer.com/article/10.1007%2Fs13389-014-0090-x
+;; https://eprint.iacr.org/2013/816.pdf
+
+
+
+(in-ns 'go.crypto.internal.fips140.nistec) (go/file "p256_asm.go" :build ["//go:build (amd64 || arm64 || ppc64le || s390x) && !purego"] :imports [
+
+
+    ^{:line 18} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 19} [errors "errors"]
+    ^{:line 20} [bits "math/bits"]
+    ^{:line 21} [runtime "runtime"]
+    ^{:line 22} [unsafe "unsafe"]])
+
+
+
+
+(go/type p256Element "p256Element is a P-256 base field element in [0, P-1] in the Montgomery\ndomain (with R 2²⁵⁶) as four limbs in little-endian order value.\n" (array 4 uint64))
+
+
+(go/var ^{:doc "p256One is one in the Montgomery domain.\n"} p256One ^{:go/breaks [4]} (lit p256Element 0x0000000000000001 0xffffffff00000000
+    0xffffffffffffffff 0x00000000fffffffe))
+
+(go/var p256Zero (lit p256Element))
+
+
+(go/var ^{:doc "p256P is 2²⁵⁶ - 2²²⁴ + 2¹⁹² + 2⁹⁶ - 1 in the Montgomery domain.\n"} p256P ^{:go/breaks [4]} (lit p256Element 0xffffffffffffffff 0x00000000ffffffff
+    0x0000000000000000 0xffffffff00000001))
+
+
+
+(go/type P256Point "P256Point is a P-256 point. The zero value should not be assumed to be valid\n(although it is in this implementation).\n" (struct
+
+
+    ^{:line 44 :tag p256Element :doc "(X:Y:Z) are Jacobian coordinates where x = X/Z² and y = Y/Z³. The point\nat infinity can be represented by any set of coordinates with Z = 0.\n"} x ^{:tag p256Element :doc "(X:Y:Z) are Jacobian coordinates where x = X/Z² and y = Y/Z³. The point\nat infinity can be represented by any set of coordinates with Z = 0.\n"} y ^{:tag p256Element :doc "(X:Y:Z) are Jacobian coordinates where x = X/Z² and y = Y/Z³. The point\nat infinity can be represented by any set of coordinates with Z = 0.\n"} z))
+
+
+
+^{:go/end 52} (go/func NewP256Point "NewP256Point returns a new P256Point representing the point at infinity.\n" ^{:tag (* P256Point)} []
+  (addr ^{:go/breaks [2]} (lit P256Point
+      :x p256One :y p256One :z p256Zero)))
+
+
+
+
+^{:go/end 62} (go/method SetGenerator "SetGenerator sets p to the canonical generator and returns p.\n" ^{:tag (* P256Point)} [^{:tag (* P256Point)} p]
+  (set! (.-x p) ^{:go/breaks [4]} (lit p256Element 0x79e730d418a9143c 0x75ba95fc5fedb601
+      0x79fb732b77622510 0x18905f76a53755c6))
+  (set! (.-y p) ^{:go/breaks [4]} (lit p256Element 0xddf25357ce95560a 0x8b4ab8e4ba19e45c
+      0xd2e88688dd21f325 0x8571ff1825885d85))
+  (set! (.-z p) p256One)
+  ^{:line 61} p)
+
+
+
+^{:go/end 68} (go/method Set "Set sets p = q and returns p.\n" ^{:tag (* P256Point)} [^{:tag (* P256Point)} p ^{:tag (* P256Point)} q]
+  (set! (values (.-x p) (.-y p) (.-z p)) (values (.-x q) (.-y q) (.-z q)))
+  ^{:line 67} p)
+
+
+(go/const ^{:val 32} p256ElementLength 32)
+(go/const ^{:val 65} p256UncompressedLength (+ 1 (* 2 p256ElementLength)))
+(go/const ^{:val 33} p256CompressedLength (+ 1 p256ElementLength))
+
+
+
+
+
+^{:go/end 135} (go/method SetBytes "SetBytes sets p to the compressed, uncompressed, or infinity value encoded in\nb, as specified in SEC 1, Version 2.0, Section 2.3.4. If the point is not on\nthe curve, it returns nil and an error, and the receiver is unchanged.\nOtherwise, it returns p.\n" [^{:tag (* P256Point)} p ^{:tag (slice byte)} b] :results [(* P256Point) error]
+  ;; This implementation operates in the Montgomery domain with R = 2²⁵⁶ mod
+  ;; p. Elements in the Montgomery domain take the form a×R and p256Mul
+  ;; calculates (a × b × R⁻¹) mod p. rr is R in the domain, or R×R mod p, thus
+  ;; p256Mul(e, RR) gives e×R, i.e. converts e into the Montgomery domain.
+  (let [rr ^{:go/breaks [4]} (lit p256Element 0x0000000000000003 0xfffffffbffffffff
+        0xfffffffffffffffe 0x00000004fffffffd)]
+
+    (switch
+      ;; Point at infinity.
+      (case [(and (== (len b) 1) (== (aget b 0) 0))]
+        (return (.Set p (NewP256Point)) nil))
+
+      ;; Uncompressed form.
+      (case [(and (== (len b) p256UncompressedLength) (== (aget b 0) 4))]
+        (let [^P256Point r (zero P256Point)]
+          (p256BigToLittle (addr (.-x r)) (conv (* (array 32 byte)) (subslice b 1 33)))
+          (p256BigToLittle (addr (.-y r)) (conv (* (array 32 byte)) (subslice b 33 65)))
+          (when (or (== (p256LessThanP (addr (.-x r))) 0) (== (p256LessThanP (addr (.-y r))) 0))
+            (return nil (errors/New "invalid P256 element encoding")))
+
+          (p256Mul (addr (.-x r)) (addr (.-x r)) (addr rr))
+          (p256Mul (addr (.-y r)) (addr (.-y r)) (addr rr))
+          (when [err (p256CheckOnCurve (addr (.-x r)) (addr (.-y r)))] (!= err nil)
+            (return nil err))
+
+          (set! (.-z r) p256One)
+          (return (.Set p (addr r)) nil)))
+
+      ;; Compressed form.
+      (case [(and (== (len b) p256CompressedLength) ^:go/paren (or (== (aget b 0) 2) (== (aget b 0) 3)))]
+        (let [^P256Point r (zero P256Point)]
+          (p256BigToLittle (addr (.-x r)) (conv (* (array 32 byte)) (subslice b 1 33)))
+          (when (== (p256LessThanP (addr (.-x r))) 0)
+            (return nil (errors/New "invalid P256 element encoding")))
+
+          (p256Mul (addr (.-x r)) (addr (.-x r)) (addr rr))
+
+          ;; y² = x³ - 3x + b
+          (p256Polynomial (addr (.-y r)) (addr (.-x r)))
+          (when (not (p256Sqrt (addr (.-y r)) (addr (.-y r))))
+            (return nil (errors/New "invalid P256 compressed point encoding")))
+
+
+          ;; Select the positive or negative root, as indicated by the least
+          ;; significant bit, based on the encoding type byte.
+          (let [yy (new p256Element)]
+            (p256FromMont yy (addr (.-y r)))
+            (let [cond (bit-xor (conv int (bit-and (aget yy 0) 1)) (conv int (bit-and (aget b 0) 1)))]
+              (p256NegCond (addr (.-y r)) cond)
+
+              (set! (.-z r) p256One)
+              (return (.Set p (addr r)) nil)))))
+
+      (default
+        (return nil (errors/New "invalid P256 point encoding"))))))
+
+
+
+
+^{:go/end 156} (go/func p256Polynomial "p256Polynomial sets y2 to x³ - 3x + b, and returns y2.\n" ^{:tag (* p256Element)} [^{:tag (* p256Element)} y2 ^{:tag (* p256Element)} x]
+  (let [x3 (new p256Element)]
+    (p256Sqr x3 x 1)
+    (p256Mul x3 x3 x)
+
+    (let [threeX (new p256Element)]
+      (p256Add threeX x x)
+      (p256Add threeX threeX x)
+      (p256NegCond threeX 1)
+
+      (let [p256B (addr ^{:go/breaks [4]} (lit p256Element 0xd89cdf6229c4bddf 0xacf005cd78843090
+              0xe5a220abf7212ed6 0xdc30061d04874834))]
+
+        (p256Add x3 x3 threeX)
+        (p256Add x3 x3 p256B)
+
+        (set! @y2 @x3)
+        ^{:line 155} y2))))
+
+
+^{:go/end 167} (go/func p256CheckOnCurve ^error [^{:tag (* p256Element)} x ^{:tag (* p256Element)} y]
+  ;; y² = x³ - 3x + b
+  ^{:go/breaks [[4 166]]} (let [rhs (p256Polynomial (new p256Element) x)
+      ^{:line 161} lhs (new p256Element)]
+    (p256Sqr lhs y 1)
+    (when (!= (p256Equal lhs rhs) 1)
+      (return (errors/New "P256 point not on curve")))
+
+    nil))
+
+
+
+
+
+^{:go/end 179} (go/func p256LessThanP "p256LessThanP returns 1 if x < p, and 0 otherwise. Note that a p256Element is\nnot allowed to be equal to or greater than p, so if this function returns 0\nthen x is invalid.\n" ^int [^{:tag (* p256Element)} x]
+  (let [^uint64 b (zero uint64)]
+    (set! (values _ b) (bits/Sub64 (aget x 0) (aget p256P 0) b))
+    (set! (values _ b) (bits/Sub64 (aget x 1) (aget p256P 1) b))
+    (set! (values _ b) (bits/Sub64 (aget x 2) (aget p256P 2) b))
+    (set! (values _ b) (bits/Sub64 (aget x 3) (aget p256P 3) b))
+    (conv int b)))
+
+
+^{:go/end 183} (go/func p256BigToLittle [^{:tag (* p256Element)} l ^{:tag (* (array 32 byte))} b]
+  (bytesToLimbs (conv (* (array 4 uint64)) l) b))
+
+
+^{:go/end 190} (go/func bytesToLimbs [^{:tag (* (array 4 uint64))} l ^{:tag (* (array 32 byte))} b]
+  (aset l 0 (byteorder/BEUint64 (subslice b 24)))
+  (aset l 1 (byteorder/BEUint64 (subslice b 16)))
+  (aset l 2 (byteorder/BEUint64 (subslice b 8)))
+  (aset l 3 (byteorder/BEUint64 (subslice b))))
+
+
+^{:go/end 194} (go/func p256LittleToBig [^{:tag (* (array 32 byte))} b ^{:tag (* p256Element)} l]
+  (limbsToBytes b (conv (* (array 4 uint64)) l)))
+
+
+^{:go/end 201} (go/func limbsToBytes [^{:tag (* (array 32 byte))} b ^{:tag (* (array 4 uint64))} l]
+  (byteorder/BEPutUint64 (subslice b 24) (aget l 0))
+  (byteorder/BEPutUint64 (subslice b 16) (aget l 1))
+  (byteorder/BEPutUint64 (subslice b 8) (aget l 2))
+  (byteorder/BEPutUint64 (subslice b) (aget l 3)))
+
+
+
+^{:go/end 228} (go/func p256Add "p256Add sets res = x + y.\n" [^{:tag (* p256Element)} res ^{:tag (* p256Element)} x ^{:tag (* p256Element)} y]
+  (let [(values ^uint64 c ^uint64 b) (zero uint64)
+      ^{:line 206} t1 (make (slice uint64) 4)]
+    (set! (values (aget t1 0) c) (bits/Add64 (aget x 0) (aget y 0) 0))
+    (set! (values (aget t1 1) c) (bits/Add64 (aget x 1) (aget y 1) c))
+    (set! (values (aget t1 2) c) (bits/Add64 (aget x 2) (aget y 2) c))
+    (set! (values (aget t1 3) c) (bits/Add64 (aget x 3) (aget y 3) c))
+    (let [t2 (make (slice uint64) 4)]
+      (set! (values (aget t2 0) b) (bits/Sub64 (aget t1 0) (aget p256P 0) 0))
+      (set! (values (aget t2 1) b) (bits/Sub64 (aget t1 1) (aget p256P 1) b))
+      (set! (values (aget t2 2) b) (bits/Sub64 (aget t1 2) (aget p256P 2) b))
+      (set! (values (aget t2 3) b) (bits/Sub64 (aget t1 3) (aget p256P 3) b))
+      ;; Three options:
+      ;;   - a+b < p
+      ;;     then c is 0, b is 1, and t1 is correct
+      ;;   - p <= a+b < 2^256
+      ;;     then c is 0, b is 0, and t2 is correct
+      ;;   - 2^256 <= a+b
+      ;;     then c is 1, b is 1, and t2 is correct
+      (let [t2Mask (- (bit-xor c b) 1)]
+        (aset res 0 (bit-or (bit-and (aget t1 0) (bit-not t2Mask)) (bit-and (aget t2 0) t2Mask)))
+        (aset res 1 (bit-or (bit-and (aget t1 1) (bit-not t2Mask)) (bit-and (aget t2 1) t2Mask)))
+        (aset res 2 (bit-or (bit-and (aget t1 2) (bit-not t2Mask)) (bit-and (aget t2 2) t2Mask)))
+        (aset res 3 (bit-or (bit-and (aget t1 3) (bit-not t2Mask)) (bit-and (aget t2 3) t2Mask)))))))
+
+
+
+
+^{:go/end 272} (go/func p256Sqrt "p256Sqrt sets e to a square root of x. If x is not a square, p256Sqrt returns\nfalse and e is unchanged. e and x can overlap.\n" [^{:tag (* p256Element)} e ^{:tag (* p256Element)} x] :results [^bool isSquare]
+  ^{:go/breaks [20]} (let [(values t0 t1) (values (new p256Element) (new p256Element))]
+
+    ;; Since p = 3 mod 4, exponentiation by (p + 1) / 4 yields a square root candidate.
+    ;;
+    ;; The sequence of 7 multiplications and 253 squarings is derived from the
+    ;; following addition chain generated with github.com/mmcloughlin/addchain v0.4.0.
+    ;;
+    ;;	_10       = 2*1
+    ;;	_11       = 1 + _10
+    ;;	_1100     = _11 << 2
+    ;;	_1111     = _11 + _1100
+    ;;	_11110000 = _1111 << 4
+    ;;	_11111111 = _1111 + _11110000
+    ;;	x16       = _11111111 << 8 + _11111111
+    ;;	x32       = x16 << 16 + x16
+    ;;	return      ((x32 << 32 + 1) << 96 + 1) << 94
+    ;;
+    (p256Sqr t0 x 1)
+    (p256Mul t0 x t0)
+    (p256Sqr t1 t0 2)
+    (p256Mul t0 t0 t1)
+    (p256Sqr t1 t0 4)
+    (p256Mul t0 t0 t1)
+    (p256Sqr t1 t0 8)
+    (p256Mul t0 t0 t1)
+    (p256Sqr t1 t0 16)
+    (p256Mul t0 t0 t1)
+    (p256Sqr t0 t0 32)
+    (p256Mul t0 x t0)
+    (p256Sqr t0 t0 96)
+    (p256Mul t0 x t0)
+    (p256Sqr t0 t0 94)
+
+    (p256Sqr t1 t0 1)
+    (when (!= (p256Equal t1 x) 1)
+      (return false))
+
+    (set! @e @t0)
+    true))
+
+
+;; The following assembly functions are implemented in p256_asm_*.s
+
+
+
+
+(go/func ^:extern ^:go/noescape p256Mul "Montgomery multiplication. Sets res = in1 * in2 * R⁻¹ mod p.\n" [^{:tag (* p256Element)} res ^{:tag (* p256Element)} in1 ^{:tag (* p256Element)} in2])
+
+
+
+
+(go/func ^:extern ^:go/noescape p256Sqr "Montgomery square, repeated n times (n >= 1).\n" [^{:tag (* p256Element)} res ^{:tag (* p256Element)} in ^int n])
+
+
+
+
+
+(go/func ^:extern ^:go/noescape p256FromMont "Montgomery multiplication by R⁻¹, or 1 outside the domain, as R⁻¹×R = 1.\nSets res = in * R⁻¹, bringing res out of the Montgomery domain.\n" [^{:tag (* p256Element)} res ^{:tag (* p256Element)} in])
+
+
+
+
+(go/func ^:extern ^:go/noescape p256NegCond "If cond is not 0, sets val = -val mod p.\n" [^{:tag (* p256Element)} val ^int cond])
+
+
+
+
+(go/func ^:extern ^:go/noescape p256MovCond "If cond is 0, sets res = b, otherwise sets res = a.\n" [^{:tag (* P256Point)} res ^{:tag (* P256Point)} a ^{:tag (* P256Point)} b ^int cond])
+
+
+
+
+(go/type p256Table "p256Table is a table of the first 16 multiples of a point. Points are stored\nat an index offset of -1 so [8]P is at index 7, P is at 0, and [16]P is at 15.\n[0]P is the point at infinity and it's not stored.\n" (array 16 P256Point))
+
+
+
+
+
+(go/func ^:extern ^:go/noescape p256Select "p256Select sets res to the point at index idx in the table.\nidx must be in [0, 15]. It executes in constant time.\n" [^{:tag (* P256Point)} res ^{:tag (* p256Table)} table ^int idx])
+
+
+
+(go/type p256AffinePoint "p256AffinePoint is a point in affine coordinates (x, y). x and y are still\nMontgomery domain elements. The point can't be the point at infinity.\n" (struct
+    ^{:line 316 :tag p256Element} x ^p256Element y))
+
+
+
+
+(go/type p256AffineTable "p256AffineTable is a table of the first 32 multiples of a point. Points are\nstored at an index offset of -1 like in p256Table, and [0]P is not stored.\n" (array 32 p256AffinePoint))
+
+
+
+
+
+
+
+
+(go/var ^{:tag (* (array 43 p256AffineTable)) :doc "p256Precomputed is a series of precomputed multiples of G, the canonical\ngenerator. The first p256AffineTable contains multiples of G. The second one\nmultiples of [2⁶]G, the third one of [2¹²]G, and so on, where each successive\ntable is the previous table doubled six times. Six is the width of the\nsliding window used in p256ScalarBaseMult, and having each table already\npre-doubled lets us avoid the doublings between windows entirely. This table\naliases into p256PrecomputedEmbed.\n"} p256Precomputed)
+
+^{:go/end 342} (go/func init []
+  (let [p256PrecomputedPtr (conv unsafe/Pointer (addr p256PrecomputedEmbed))]
+    (when (== runtime/GOARCH "s390x")
+      (let [^{:tag (array (* 43 32 2 4) uint64)} newTable (zero (array (* 43 32 2 4) uint64))]
+        (range [i x (conv (* (array (* 43 32 2 4) (array 8 byte))) p256PrecomputedPtr)]
+          (aset newTable i (byteorder/LEUint64 (subslice x))))
+
+        (set! p256PrecomputedPtr (conv unsafe/Pointer (addr newTable)))))
+
+    (set! p256Precomputed (conv (* (array 43 p256AffineTable)) p256PrecomputedPtr))))
+
+
+
+
+
+
+(go/func ^:extern ^:go/noescape p256SelectAffine "p256SelectAffine sets res to the point at index idx in the table.\nidx must be in [0, 31]. It executes in constant time.\n" [^{:tag (* p256AffinePoint)} res ^{:tag (* p256AffineTable)} table ^int idx])
+
+
+
+
+
+
+(go/func ^:extern ^:go/noescape p256PointAddAffineAsm "Point addition with an affine point and constant time conditions.\nIf zero is 0, sets res = in2. If sel is 0, sets res = in1.\nIf sign is not 0, sets res = in1 + -in2. Otherwise, sets res = in1 + in2\n" [^{:tag (* P256Point)} res ^{:tag (* P256Point)} in1 ^{:tag (* p256AffinePoint)} in2 ^int sign ^int sel ^int zero])
+
+
+
+
+
+
+(go/func ^:extern ^:go/noescape p256PointAddAsm "Point addition. Sets res = in1 + in2. Returns one if the two input points\nwere equal and zero otherwise. If in1 or in2 are the point at infinity, res\nand the return value are undefined.\n" ^int [^{:tag (* P256Point)} res ^{:tag (* P256Point)} in1 ^{:tag (* P256Point)} in2])
+
+
+
+
+(go/func ^:extern ^:go/noescape p256PointDoubleAsm "Point doubling. Sets res = in + in. in can be the point at infinity.\n" [^{:tag (* P256Point)} res ^{:tag (* P256Point)} in])
+
+
+
+(go/type p256OrdElement "p256OrdElement is a P-256 scalar field element in [0, ord(G)-1]\nas four uint64 limbs in little-endian order.\n" (array 4 uint64))
+
+
+^{:go/end 386} (go/func p256OrdReduce "p256OrdReduce ensures s is in the range [0, ord(G)-1].\n" [^{:tag (* p256OrdElement)} s]
+  ;; Since 2 * ord(G) > 2²⁵⁶, we can just conditionally subtract ord(G),
+  ;; keeping the result if it doesn't underflow.
+  (let [(values t0 b) (bits/Sub64 (aget s 0) 0xf3b9cac2fc632551 0)
+      (values t1 ^:assign b) (bits/Sub64 (aget s 1) 0xbce6faada7179e84 b)
+      (values t2 ^:assign b) (bits/Sub64 (aget s 2) 0xffffffffffffffff b)
+      (values t3 ^:assign b) (bits/Sub64 (aget s 3) 0xffffffff00000000 b)
+      ^{:line 381} tMask (- b 1)] ; zero if subtraction underflowed
+    (set! (aget s 0) bit-xor (bit-and (bit-xor t0 (aget s 0)) tMask))
+    (set! (aget s 1) bit-xor (bit-and (bit-xor t1 (aget s 1)) tMask))
+    (set! (aget s 2) bit-xor (bit-and (bit-xor t2 (aget s 2)) tMask))
+    (set! (aget s 3) bit-xor (bit-and (bit-xor t3 (aget s 3)) tMask))))
+
+
+^{:go/end 390} (go/func p256OrdLittleToBig [^{:tag (* (array 32 byte))} b ^{:tag (* p256OrdElement)} l]
+  (limbsToBytes b (conv (* (array 4 uint64)) l)))
+
+
+^{:go/end 394} (go/func p256OrdBigToLittle [^{:tag (* p256OrdElement)} l ^{:tag (* (array 32 byte))} b]
+  (bytesToLimbs (conv (* (array 4 uint64)) l) b))
+
+
+
+^{:go/end 407} (go/method Add "Add sets q = p1 + p2, and returns q. The points may overlap.\n" ^{:tag (* P256Point)} [^{:tag (* P256Point)} q ^{:tag (* P256Point)} r1 ^{:tag (* P256Point)} r2]
+  (let [(values ^P256Point sum ^P256Point double) (zero P256Point)
+      ^{:line 399} r1IsInfinity (.isInfinity r1)
+      ^{:line 400} r2IsInfinity (.isInfinity r2)
+      ^{:line 401} pointsEqual (p256PointAddAsm (addr sum) r1 r2)]
+    (p256PointDoubleAsm (addr double) r1)
+    (p256MovCond (addr sum) (addr double) (addr sum) pointsEqual)
+    (p256MovCond (addr sum) r1 (addr sum) r2IsInfinity)
+    (p256MovCond (addr sum) r2 (addr sum) r1IsInfinity)
+    (.Set q (addr sum))))
+
+
+
+^{:go/end 414} (go/method Double "Double sets q = p + p, and returns q. The points may overlap.\n" ^{:tag (* P256Point)} [^{:tag (* P256Point)} q ^{:tag (* P256Point)} p]
+  (let [^P256Point double (zero P256Point)]
+    (p256PointDoubleAsm (addr double) p)
+    (.Set q (addr double))))
+
+
+
+
+
+^{:go/end 429} (go/method ScalarBaseMult "ScalarBaseMult sets r = scalar * generator, where scalar is a 32-byte big\nendian value, and returns r. If scalar is not 32 bytes long, ScalarBaseMult\nreturns an error and the receiver is unchanged.\n" [^{:tag (* P256Point)} r ^{:tag (slice byte)} scalar] :results [(* P256Point) error]
+  (when (!= (len scalar) 32)
+    (return nil (errors/New "invalid scalar length")))
+
+  (let [scalarReversed (new p256OrdElement)]
+    (p256OrdBigToLittle scalarReversed (conv (* (array 32 byte)) scalar))
+    (p256OrdReduce scalarReversed)
+
+    (.p256BaseMult r scalarReversed)
+    (return r nil)))
+
+
+
+
+
+^{:go/end 444} (go/method ScalarMult "ScalarMult sets r = scalar * q, where scalar is a 32-byte big endian value,\nand returns r. If scalar is not 32 bytes long, ScalarBaseMult returns an\nerror and the receiver is unchanged.\n" [^{:tag (* P256Point)} r ^{:tag (* P256Point)} q ^{:tag (slice byte)} scalar] :results [(* P256Point) error]
+  (when (!= (len scalar) 32)
+    (return nil (errors/New "invalid scalar length")))
+
+  (let [scalarReversed (new p256OrdElement)]
+    (p256OrdBigToLittle scalarReversed (conv (* (array 32 byte)) scalar))
+    (p256OrdReduce scalarReversed)
+
+    (.p256ScalarMult (.Set r q) scalarReversed)
+    (return r nil)))
+
+
+
+^{:go/end 456} (go/func uint64IsZero "uint64IsZero returns 1 if x is zero and zero otherwise.\n" ^int [^uint64 x]
+  (set! x (bit-not x))
+  (set! x bit-and (>> x 32))
+  (set! x bit-and (>> x 16))
+  (set! x bit-and (>> x 8))
+  (set! x bit-and (>> x 4))
+  (set! x bit-and (>> x 2))
+  (set! x bit-and (>> x 1))
+  (conv int (bit-and x 1)))
+
+
+
+^{:go/end 465} (go/func p256Equal "p256Equal returns 1 if a and b are equal and 0 otherwise.\n" ^int [^{:tag (* p256Element)} a ^{:tag (* p256Element)} b]
+  (let [^uint64 acc (zero uint64)]
+    (range [i a]
+      (set! acc bit-or (bit-xor (aget a i) (aget b i))))
+
+    (uint64IsZero acc)))
+
+
+
+^{:go/end 470} (go/method isInfinity "isInfinity returns 1 if p is the point at infinity and 0 otherwise.\n" ^int [^{:tag (* P256Point)} p]
+  (p256Equal (addr (.-z p)) (addr p256Zero)))
+
+
+
+
+
+^{:go/end 480} (go/method Bytes "Bytes returns the uncompressed or infinity encoding of p, as specified in\nSEC 1, Version 2.0, Section 2.3.3. Note that the encoding of the point at\ninfinity is shorter than all other encodings.\n" ^{:tag (slice byte)} [^{:tag (* P256Point)} p]
+  ;; This function is outlined to make the allocations inline in the caller
+  ;; rather than happen on the heap.
+  (let [^{:tag (array p256UncompressedLength byte)} out (zero (array p256UncompressedLength byte))]
+    (.bytes p (addr out))))
+
+
+^{:go/end 496} (go/method bytes ^{:tag (slice byte)} [^{:tag (* P256Point)} p ^{:tag (* (array p256UncompressedLength byte))} out]
+  ;; The proper representation of the point at infinity is a single zero byte.
+  (when (== (.isInfinity p) 1)
+    (return (append (subslice out _ 0) 0)))
+
+
+  (let [(values x y) (values (new p256Element) (new p256Element))]
+    (.affineFromMont p x y)
+
+    (aset out 0 4) ; Uncompressed form.
+    (p256LittleToBig (conv (* (array 32 byte)) (subslice out 1 33)) x)
+    (p256LittleToBig (conv (* (array 32 byte)) (subslice out 33 65)) y)
+
+    (subslice out)))
+
+
+
+
+^{:go/end 510} (go/method affineFromMont "affineFromMont sets (x, y) to the affine coordinates of p, converted out of the\nMontgomery domain.\n" [^{:tag (* P256Point)} p ^{:tag (* p256Element)} x ^{:tag (* p256Element)} y]
+  (p256Inverse y (addr (.-z p)))
+  (p256Sqr x y 1)
+  (p256Mul y y x)
+
+  (p256Mul x (addr (.-x p)) x)
+  (p256Mul y (addr (.-y p)) y)
+
+  (p256FromMont x x)
+  (p256FromMont y y))
+
+
+
+
+^{:go/end 519} (go/method BytesX "BytesX returns the encoding of the x-coordinate of p, as specified in SEC 1,\nVersion 2.0, Section 2.3.5, or an error if p is the point at infinity.\n" [^{:tag (* P256Point)} p] :results [(slice byte) error]
+  ;; This function is outlined to make the allocations inline in the caller
+  ;; rather than happen on the heap.
+  (let [^{:tag (array p256ElementLength byte)} out (zero (array p256ElementLength byte))]
+    (.bytesX p (addr out))))
+
+
+^{:go/end 534} (go/method bytesX [^{:tag (* P256Point)} p ^{:tag (* (array p256ElementLength byte))} out] :results [(slice byte) error]
+  (when (== (.isInfinity p) 1)
+    (return nil (errors/New "P256 point is the point at infinity")))
+
+
+  (let [x (new p256Element)]
+    (p256Inverse x (addr (.-z p)))
+    (p256Sqr x x 1)
+    (p256Mul x (addr (.-x p)) x)
+    (p256FromMont x x)
+    (p256LittleToBig (conv (* (array 32 byte)) (subslice out)) x)
+
+    (return (subslice out) nil)))
+
+
+
+
+
+^{:go/end 544} (go/method BytesCompressed "BytesCompressed returns the compressed or infinity encoding of p, as\nspecified in SEC 1, Version 2.0, Section 2.3.3. Note that the encoding of the\npoint at infinity is shorter than all other encodings.\n" ^{:tag (slice byte)} [^{:tag (* P256Point)} p]
+  ;; This function is outlined to make the allocations inline in the caller
+  ;; rather than happen on the heap.
+  (let [^{:tag (array p256CompressedLength byte)} out (zero (array p256CompressedLength byte))]
+    (.bytesCompressed p (addr out))))
+
+
+^{:go/end 558} (go/method bytesCompressed ^{:tag (slice byte)} [^{:tag (* P256Point)} p ^{:tag (* (array p256CompressedLength byte))} out]
+  (when (== (.isInfinity p) 1)
+    (return (append (subslice out _ 0) 0)))
+
+
+  (let [(values x y) (values (new p256Element) (new p256Element))]
+    (.affineFromMont p x y)
+
+    (aset out 0 (bit-or 2 (conv byte (bit-and (aget y 0) 1))))
+    (p256LittleToBig (conv (* (array 32 byte)) (subslice out 1 33)) x)
+
+    (subslice out)))
+
+
+
+^{:go/end 564} (go/method Select "Select sets q to p1 if cond == 1, and to p2 if cond == 0.\n" ^{:tag (* P256Point)} [^{:tag (* P256Point)} q ^{:tag (* P256Point)} p1 ^{:tag (* P256Point)} p2 ^int cond]
+  (p256MovCond q p1 p2 cond)
+  ^{:line 563} q)
+
+
+
+^{:go/end 618} (go/func p256Inverse "p256Inverse sets out to in⁻¹ mod p. If in is zero, out will be zero.\n" [^{:tag (* p256Element)} out ^{:tag (* p256Element)} in]
+  ;; Inversion is calculated through exponentiation by p - 2, per Fermat's
+  ;; little theorem.
+  ;;
+  ;; The sequence of 12 multiplications and 255 squarings is derived from the
+  ;; following addition chain generated with github.com/mmcloughlin/addchain
+  ;; v0.4.0.
+  ;;
+  ;;  _10     = 2*1
+  ;;  _11     = 1 + _10
+  ;;  _110    = 2*_11
+  ;;  _111    = 1 + _110
+  ;;  _111000 = _111 << 3
+  ;;  _111111 = _111 + _111000
+  ;;  x12     = _111111 << 6 + _111111
+  ;;  x15     = x12 << 3 + _111
+  ;;  x16     = 2*x15 + 1
+  ;;  x32     = x16 << 16 + x16
+  ;;  i53     = x32 << 15
+  ;;  x47     = x15 + i53
+  ;;  i263    = ((i53 << 17 + 1) << 143 + x47) << 47
+  ;;  return    (x47 + i263) << 2 + 1
+  ;;
+  (let [^:var z (new p256Element)
+      ^:var ^{:line 591} t0 (new p256Element)
+      ^:var ^{:line 592} t1 (new p256Element)]
+
+    (p256Sqr z in 1)
+    (p256Mul z in z)
+    (p256Sqr z z 1)
+    (p256Mul z in z)
+    (p256Sqr t0 z 3)
+    (p256Mul t0 z t0)
+    (p256Sqr t1 t0 6)
+    (p256Mul t0 t0 t1)
+    (p256Sqr t0 t0 3)
+    (p256Mul z z t0)
+    (p256Sqr t0 z 1)
+    (p256Mul t0 in t0)
+    (p256Sqr t1 t0 16)
+    (p256Mul t0 t0 t1)
+    (p256Sqr t0 t0 15)
+    (p256Mul z z t0)
+    (p256Sqr t0 t0 17)
+    (p256Mul t0 in t0)
+    (p256Sqr t0 t0 143)
+    (p256Mul t0 z t0)
+    (p256Sqr t0 t0 47)
+    (p256Mul z z t0)
+    (p256Sqr z z 2)
+    (p256Mul out in z)))
+
+
+^{:go/end 626} (go/func boothW5 [^uint in] :results [int int]
+  (let [^uint s (bit-not (- (>> in 5) 1))
+      ^{:line 622 :tag uint} d (- (<< 1 6) in 1)]
+    (set! d (bit-or (bit-and d s) (bit-and in (bit-not s))))
+    (set! d (+ (>> d 1) (bit-and d 1)))
+    (return (conv int d) (conv int (bit-and s 1)))))
+
+
+^{:go/end 634} (go/func boothW6 [^uint in] :results [int int]
+  (let [^uint s (bit-not (- (>> in 6) 1))
+      ^{:line 630 :tag uint} d (- (<< 1 7) in 1)]
+    (set! d (bit-or (bit-and d s) (bit-and in (bit-not s))))
+    (set! d (+ (>> d 1) (bit-and d 1)))
+    (return (conv int d) (conv int (bit-and s 1)))))
+
+
+^{:go/end 663} (go/method p256BaseMult [^{:tag (* P256Point)} p ^{:tag (* p256OrdElement)} scalar]
+  (let [^p256AffinePoint t0 (zero p256AffinePoint)
+
+      ^{:line 639} wvalue (bit-and (<< (aget scalar 0) 1) 0x7f)
+      (values sel sign) (boothW6 (conv uint wvalue))]
+    (p256SelectAffine (addr t0) (addr (aget p256Precomputed 0)) sel)
+    (set! (values (.-x p) (.-y p) (.-z p)) (values (.-x t0) (.-y t0) p256One))
+    (p256NegCond (addr (.-y p)) sign)
+
+    (let [index (conv uint 5)
+        ^{:line 646} zero sel]
+
+      (for [i 1] (< i 43) (inc! i)
+        (if (< index 192)
+          (set! wvalue (bit-and (+ (>> (aget scalar (/ index 64)) (% index 64)) (<< (aget scalar (+ (/ index 64) 1)) (- 64 (% index 64)))) 0x7f))
+
+          (set! wvalue (bit-and (>> (aget scalar (/ index 64)) (% index 64)) 0x7f)))
+
+        (set! index + 6)
+        (set! (values sel sign) (boothW6 (conv uint wvalue)))
+        (p256SelectAffine (addr t0) (addr (aget p256Precomputed i)) sel)
+        (p256PointAddAffineAsm p p (addr t0) sign sel zero)
+        (set! zero bit-or sel))
+
+
+      ;; If the whole scalar was zero, set to the point at infinity.
+      (p256MovCond p p (NewP256Point) zero))))
+
+
+^{:go/end 758} (go/method p256ScalarMult [^{:tag (* P256Point)} p ^{:tag (* p256OrdElement)} scalar]
+  ;; precomp is a table of precomputed points that stores powers of p
+  ;; from p^1 to p^16.
+  (let [^p256Table precomp (zero p256Table)
+      (values ^P256Point t0 ^P256Point t1 ^P256Point t2 ^P256Point t3) (zero P256Point)]
+
+    ;; Prepare the table
+    (aset precomp 0 @p) ; 1
+
+    (p256PointDoubleAsm (addr t0) p)
+    (p256PointDoubleAsm (addr t1) (addr t0))
+    (p256PointDoubleAsm (addr t2) (addr t1))
+    (p256PointDoubleAsm (addr t3) (addr t2))
+    (aset precomp 1 t0) ; 2
+    (aset precomp 3 t1) ; 4
+    (aset precomp 7 t2) ; 8
+    (aset precomp 15 t3) ; 16
+
+    (p256PointAddAsm (addr t0) (addr t0) p)
+    (p256PointAddAsm (addr t1) (addr t1) p)
+    (p256PointAddAsm (addr t2) (addr t2) p)
+    (aset precomp 2 t0) ; 3
+    (aset precomp 4 t1) ; 5
+    (aset precomp 8 t2) ; 9
+
+    (p256PointDoubleAsm (addr t0) (addr t0))
+    (p256PointDoubleAsm (addr t1) (addr t1))
+    (aset precomp 5 t0) ; 6
+    (aset precomp 9 t1) ; 10
+
+    (p256PointAddAsm (addr t2) (addr t0) p)
+    (p256PointAddAsm (addr t1) (addr t1) p)
+    (aset precomp 6 t2) ; 7
+    (aset precomp 10 t1) ; 11
+
+    (p256PointDoubleAsm (addr t0) (addr t0))
+    (p256PointDoubleAsm (addr t2) (addr t2))
+    (aset precomp 11 t0) ; 12
+    (aset precomp 13 t2) ; 14
+
+    (p256PointAddAsm (addr t0) (addr t0) p)
+    (p256PointAddAsm (addr t2) (addr t2) p)
+    (aset precomp 12 t0) ; 13
+    (aset precomp 14 t2) ; 15
+
+    ;; Start scanning the window from top bit
+    (let [index (conv uint 254)
+        (values ^int sel ^int sign) (zero int)
+
+        ^{:line 714} wvalue (bit-and (>> (aget scalar (/ index 64)) (% index 64)) 0x3f)]
+      (set! (values sel _) (boothW5 (conv uint wvalue)))
+
+      (p256Select p (addr precomp) sel)
+      (let [zero sel]
+
+        (while (> index 4)
+          (set! index - 5)
+          (p256PointDoubleAsm p p)
+          (p256PointDoubleAsm p p)
+          (p256PointDoubleAsm p p)
+          (p256PointDoubleAsm p p)
+          (p256PointDoubleAsm p p)
+
+          (if (< index 192)
+            (set! wvalue (bit-and (+ (>> (aget scalar (/ index 64)) (% index 64)) (<< (aget scalar (+ (/ index 64) 1)) (- 64 (% index 64)))) 0x3f))
+
+            (set! wvalue (bit-and (>> (aget scalar (/ index 64)) (% index 64)) 0x3f)))
+
+
+          (set! (values sel sign) (boothW5 (conv uint wvalue)))
+
+          (p256Select (addr t0) (addr precomp) sel)
+          (p256NegCond (addr (.-y t0)) sign)
+          (p256PointAddAsm (addr t1) p (addr t0))
+          (p256MovCond (addr t1) (addr t1) p sel)
+          (p256MovCond p (addr t1) (addr t0) zero)
+          (set! zero bit-or sel))
+
+
+        (p256PointDoubleAsm p p)
+        (p256PointDoubleAsm p p)
+        (p256PointDoubleAsm p p)
+        (p256PointDoubleAsm p p)
+        (p256PointDoubleAsm p p)
+
+        (set! wvalue (bit-and (<< (aget scalar 0) 1) 0x3f))
+        (set! (values sel sign) (boothW5 (conv uint wvalue)))
+
+        (p256Select (addr t0) (addr precomp) sel)
+        (p256NegCond (addr (.-y t0)) sign)
+        (p256PointAddAsm (addr t1) p (addr t0))
+        (p256MovCond (addr t1) (addr t1) p sel)
+        (p256MovCond p (addr t1) (addr t0) zero)))))

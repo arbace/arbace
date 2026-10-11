@@ -1,0 +1,331 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package synctest provides support for testing concurrent code.
+;;
+;; The [Test] function runs a function in an isolated "bubble".
+;; Any goroutines started within the bubble are also part of the bubble.
+;;
+;; Each test should be entirely self-contained:
+;; The following guidelines should apply to most tests:
+;;
+;;   - Avoid interacting with goroutines not started from within the test.
+;;   - Avoid using the network. Use a fake network implementation as needed.
+;;   - Avoid interacting with external processes.
+;;   - Avoid leaking goroutines in background tasks.
+;;
+;; # Time
+;;
+;; Within a bubble, the [time] package uses a fake clock.
+;; Each bubble has its own clock.
+;; The initial time is midnight UTC 2000-01-01.
+;;
+;; Time in a bubble only advances when every goroutine in the
+;; bubble is durably blocked.
+;; See below for the exact definition of "durably blocked".
+;;
+;; For example, this test runs immediately rather than taking
+;; two seconds:
+;;
+;;	func TestTime(t *testing.T) {
+;;		synctest.Test(t, func(t *testing.T) {
+;;			start := time.Now() // always midnight UTC 2000-01-01
+;;			go func() {
+;;				time.Sleep(1 * time.Second)
+;;				t.Log(time.Since(start)) // always logs "1s"
+;;			}()
+;;			time.Sleep(2 * time.Second) // the goroutine above will run before this Sleep returns
+;;			t.Log(time.Since(start))    // always logs "2s"
+;;		})
+;;	}
+;;
+;; Time stops advancing when the root goroutine of the bubble exits.
+;;
+;; # Blocking
+;;
+;; A goroutine in a bubble is "durably blocked" when it is blocked
+;; and can only be unblocked by another goroutine in the same bubble.
+;; A goroutine which can be unblocked by an event from outside its
+;; bubble is not durably blocked.
+;;
+;; The [Wait] function blocks until all other goroutines in the
+;; bubble are durably blocked.
+;;
+;; For example:
+;;
+;;	func TestWait(t *testing.T) {
+;;		synctest.Test(t, func(t *testing.T) {
+;;			done := false
+;;			go func() {
+;;				done = true
+;;			}()
+;;			// Wait will block until the goroutine above has finished.
+;;			synctest.Wait()
+;;			t.Log(done) // always logs "true"
+;;		})
+;;	}
+;;
+;; When every goroutine in a bubble is durably blocked:
+;;
+;;   - [Wait] returns, if it has been called.
+;;   - Otherwise, time advances to the next time that will
+;;     unblock at least one goroutine, if there is such a time
+;;     and the root goroutine of the bubble has not exited.
+;;   - Otherwise, there is a deadlock and [Test] panics.
+;;
+;; The following operations durably block a goroutine:
+;;
+;;   - a blocking send or receive on a channel created within the bubble
+;;   - a blocking select statement where every case is a channel created
+;;     within the bubble
+;;   - [sync.Cond.Wait]
+;;   - [sync.WaitGroup.Wait], when [sync.WaitGroup.Add] was called within the bubble
+;;   - [time.Sleep]
+;;
+;; Operations not in the above list are not durably blocking.
+;; In particular, the following operations may block a goroutine,
+;; but are not durably blocking because the goroutine can be unblocked
+;; by an event occurring outside its bubble:
+;;
+;;   - locking a [sync.Mutex] or [sync.RWMutex]
+;;   - blocking on I/O, such as reading from a network socket
+;;   - system calls
+;;
+;; # Isolation
+;;
+;; A channel, [time.Timer], or [time.Ticker] created within a bubble
+;; is associated with it. Operating on a bubbled channel, timer, or
+;; ticker from outside the bubble panics.
+;;
+;; A [sync.WaitGroup] becomes associated with a bubble on the first
+;; call to Add or Go. Once a WaitGroup is associated with a bubble,
+;; calling Add or Go from outside that bubble is a fatal error.
+;; (As a technical limitation, a WaitGroup defined as a package
+;; variable, such as "var wg sync.WaitGroup", cannot be associated
+;; with a bubble and operations on it may not be durably blocking.
+;; This limitation does not apply to a *WaitGroup stored in a
+;; package variable, such as "var wg = new(sync.WaitGroup)".)
+;;
+;; [sync.Cond.Wait] is durably blocking. Waking a goroutine in a bubble
+;; blocked on Cond.Wait from outside the bubble is a fatal error.
+;;
+;; Cleanup functions and finalizers registered with
+;; [runtime.AddCleanup] and [runtime.SetFinalizer]
+;; run outside of any bubble.
+;;
+;; # Example: Context.AfterFunc
+;;
+;; This example demonstrates testing the [context.AfterFunc] function.
+;;
+;; AfterFunc registers a function to execute in a new goroutine
+;; after a context is canceled.
+;;
+;; The test verifies that the function is not run before the context is canceled,
+;; and is run after the context is canceled.
+;;
+;;	func TestContextAfterFunc(t *testing.T) {
+;;		synctest.Test(t, func(t *testing.T) {
+;;			// Create a context.Context which can be canceled.
+;;			ctx, cancel := context.WithCancel(t.Context())
+;;
+;;			// context.AfterFunc registers a function to be called
+;;			// when a context is canceled.
+;;			afterFuncCalled := false
+;;			context.AfterFunc(ctx, func() {
+;;				afterFuncCalled = true
+;;			})
+;;
+;;			// The context has not been canceled, so the AfterFunc is not called.
+;;			synctest.Wait()
+;;			if afterFuncCalled {
+;;				t.Fatalf("before context is canceled: AfterFunc called")
+;;			}
+;;
+;;			// Cancel the context and wait for the AfterFunc to finish executing.
+;;			// Verify that the AfterFunc ran.
+;;			cancel()
+;;			synctest.Wait()
+;;			if !afterFuncCalled {
+;;				t.Fatalf("after context is canceled: AfterFunc not called")
+;;			}
+;;		})
+;;	}
+;;
+;; # Example: Context.WithTimeout
+;;
+;; This example demonstrates testing the [context.WithTimeout] function.
+;;
+;; WithTimeout creates a context which is canceled after a timeout.
+;;
+;; The test verifies that the context is not canceled before the timeout expires,
+;; and is canceled after the timeout expires.
+;;
+;;	func TestContextWithTimeout(t *testing.T) {
+;;		synctest.Test(t, func(t *testing.T) {
+;;			// Create a context.Context which is canceled after a timeout.
+;;			const timeout = 5 * time.Second
+;;			ctx, cancel := context.WithTimeout(t.Context(), timeout)
+;;			defer cancel()
+;;
+;;			// Wait just less than the timeout.
+;;			time.Sleep(timeout - time.Nanosecond)
+;;			synctest.Wait()
+;;			if err := ctx.Err(); err != nil {
+;;				t.Fatalf("before timeout: ctx.Err() = %v, want nil\n", err)
+;;			}
+;;
+;;			// Wait the rest of the way until the timeout.
+;;			time.Sleep(time.Nanosecond)
+;;			synctest.Wait()
+;;			if err := ctx.Err(); err != context.DeadlineExceeded {
+;;				t.Fatalf("after timeout: ctx.Err() = %v, want DeadlineExceeded\n", err)
+;;			}
+;;		})
+;;	}
+;;
+;; # Example: HTTP 100 Continue
+;;
+;; This example demonstrates testing [http.Transport]'s 100 Continue handling.
+;;
+;; An HTTP client sending a request can include an "Expect: 100-continue" header
+;; to tell the server that the client has additional data to send.
+;; The server may then respond with an 100 Continue information response
+;; to request the data, or some other status to tell the client the data is not needed.
+;; For example, a client uploading a large file might use this feature to confirm
+;; that the server is willing to accept the file before sending it.
+;;
+;; This test confirms that when sending an "Expect: 100-continue" header
+;; the HTTP client does not send a request's content before the server requests it,
+;; and that it does send the content after receiving a 100 Continue response.
+;;
+;;	func TestHTTPTransport100Continue(t *testing.T) {
+;;		synctest.Test(t, func(*testing.T) {
+;;			// Create an in-process fake network connection.
+;;			// We cannot use a loopback network connection for this test,
+;;			// because goroutines blocked on network I/O prevent a synctest
+;;			// bubble from becoming idle.
+;;			srvConn, cliConn := net.Pipe()
+;;			defer cliConn.Close()
+;;			defer srvConn.Close()
+;;
+;;			tr := &http.Transport{
+;;				// Use the fake network connection created above.
+;;				DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+;;					return cliConn, nil
+;;				},
+;;				// Enable "Expect: 100-continue" handling.
+;;				ExpectContinueTimeout: 5 * time.Second,
+;;			}
+;;
+;;			// Send a request with the "Expect: 100-continue" header set.
+;;			// Send it in a new goroutine, since it won't complete until the end of the test.
+;;			body := "request body"
+;;			go func() {
+;;				req, _ := http.NewRequest("PUT", "http://test.tld/", strings.NewReader(body))
+;;				req.Header.Set("Expect", "100-continue")
+;;				resp, err := tr.RoundTrip(req)
+;;				if err != nil {
+;;					t.Errorf("RoundTrip: unexpected error %v\n", err)
+;;				} else {
+;;					resp.Body.Close()
+;;				}
+;;			}()
+;;
+;;			// Read the request headers sent by the client.
+;;			req, err := http.ReadRequest(bufio.NewReader(srvConn))
+;;			if err != nil {
+;;				t.Fatalf("ReadRequest: %v\n", err)
+;;			}
+;;
+;;			// Start a new goroutine copying the body sent by the client into a buffer.
+;;			// Wait for all goroutines in the bubble to block and verify that we haven't
+;;			// read anything from the client yet.
+;;			var gotBody bytes.Buffer
+;;			go io.Copy(&gotBody, req.Body)
+;;			synctest.Wait()
+;;			if got, want := gotBody.String(), ""; got != want {
+;;				t.Fatalf("before sending 100 Continue, read body: %q, want %q\n", got, want)
+;;			}
+;;
+;;			// Write a "100 Continue" response to the client and verify that
+;;			// it sends the request body.
+;;			srvConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
+;;			synctest.Wait()
+;;			if got, want := gotBody.String(), body; got != want {
+;;				t.Fatalf("after sending 100 Continue, read body: %q, want %q\n", got, want)
+;;			}
+;;
+;;			// Finish up by sending the "200 OK" response to conclude the request.
+;;			srvConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+;;
+;;			// We started several goroutines during the test.
+;;			// The synctest.Test call will wait for all of them to exit before returning.
+;;		})
+;;	}
+(in-ns 'go.testing.synctest) (go/file "synctest.go" :doc "Package synctest provides support for testing concurrent code.\n\nThe [Test] function runs a function in an isolated \"bubble\".\nAny goroutines started within the bubble are also part of the bubble.\n\nEach test should be entirely self-contained:\nThe following guidelines should apply to most tests:\n\n  - Avoid interacting with goroutines not started from within the test.\n  - Avoid using the network. Use a fake network implementation as needed.\n  - Avoid interacting with external processes.\n  - Avoid leaking goroutines in background tasks.\n\n# Time\n\nWithin a bubble, the [time] package uses a fake clock.\nEach bubble has its own clock.\nThe initial time is midnight UTC 2000-01-01.\n\nTime in a bubble only advances when every goroutine in the\nbubble is durably blocked.\nSee below for the exact definition of \"durably blocked\".\n\nFor example, this test runs immediately rather than taking\ntwo seconds:\n\n\tfunc TestTime(t *testing.T) {\n\t\tsynctest.Test(t, func(t *testing.T) {\n\t\t\tstart := time.Now() // always midnight UTC 2000-01-01\n\t\t\tgo func() {\n\t\t\t\ttime.Sleep(1 * time.Second)\n\t\t\t\tt.Log(time.Since(start)) // always logs \"1s\"\n\t\t\t}()\n\t\t\ttime.Sleep(2 * time.Second) // the goroutine above will run before this Sleep returns\n\t\t\tt.Log(time.Since(start))    // always logs \"2s\"\n\t\t})\n\t}\n\nTime stops advancing when the root goroutine of the bubble exits.\n\n# Blocking\n\nA goroutine in a bubble is \"durably blocked\" when it is blocked\nand can only be unblocked by another goroutine in the same bubble.\nA goroutine which can be unblocked by an event from outside its\nbubble is not durably blocked.\n\nThe [Wait] function blocks until all other goroutines in the\nbubble are durably blocked.\n\nFor example:\n\n\tfunc TestWait(t *testing.T) {\n\t\tsynctest.Test(t, func(t *testing.T) {\n\t\t\tdone := false\n\t\t\tgo func() {\n\t\t\t\tdone = true\n\t\t\t}()\n\t\t\t// Wait will block until the goroutine above has finished.\n\t\t\tsynctest.Wait()\n\t\t\tt.Log(done) // always logs \"true\"\n\t\t})\n\t}\n\nWhen every goroutine in a bubble is durably blocked:\n\n  - [Wait] returns, if it has been called.\n  - Otherwise, time advances to the next time that will\n    unblock at least one goroutine, if there is such a time\n    and the root goroutine of the bubble has not exited.\n  - Otherwise, there is a deadlock and [Test] panics.\n\nThe following operations durably block a goroutine:\n\n  - a blocking send or receive on a channel created within the bubble\n  - a blocking select statement where every case is a channel created\n    within the bubble\n  - [sync.Cond.Wait]\n  - [sync.WaitGroup.Wait], when [sync.WaitGroup.Add] was called within the bubble\n  - [time.Sleep]\n\nOperations not in the above list are not durably blocking.\nIn particular, the following operations may block a goroutine,\nbut are not durably blocking because the goroutine can be unblocked\nby an event occurring outside its bubble:\n\n  - locking a [sync.Mutex] or [sync.RWMutex]\n  - blocking on I/O, such as reading from a network socket\n  - system calls\n\n# Isolation\n\nA channel, [time.Timer], or [time.Ticker] created within a bubble\nis associated with it. Operating on a bubbled channel, timer, or\nticker from outside the bubble panics.\n\nA [sync.WaitGroup] becomes associated with a bubble on the first\ncall to Add or Go. Once a WaitGroup is associated with a bubble,\ncalling Add or Go from outside that bubble is a fatal error.\n(As a technical limitation, a WaitGroup defined as a package\nvariable, such as \"var wg sync.WaitGroup\", cannot be associated\nwith a bubble and operations on it may not be durably blocking.\nThis limitation does not apply to a *WaitGroup stored in a\npackage variable, such as \"var wg = new(sync.WaitGroup)\".)\n\n[sync.Cond.Wait] is durably blocking. Waking a goroutine in a bubble\nblocked on Cond.Wait from outside the bubble is a fatal error.\n\nCleanup functions and finalizers registered with\n[runtime.AddCleanup] and [runtime.SetFinalizer]\nrun outside of any bubble.\n\n# Example: Context.AfterFunc\n\nThis example demonstrates testing the [context.AfterFunc] function.\n\nAfterFunc registers a function to execute in a new goroutine\nafter a context is canceled.\n\nThe test verifies that the function is not run before the context is canceled,\nand is run after the context is canceled.\n\n\tfunc TestContextAfterFunc(t *testing.T) {\n\t\tsynctest.Test(t, func(t *testing.T) {\n\t\t\t// Create a context.Context which can be canceled.\n\t\t\tctx, cancel := context.WithCancel(t.Context())\n\n\t\t\t// context.AfterFunc registers a function to be called\n\t\t\t// when a context is canceled.\n\t\t\tafterFuncCalled := false\n\t\t\tcontext.AfterFunc(ctx, func() {\n\t\t\t\tafterFuncCalled = true\n\t\t\t})\n\n\t\t\t// The context has not been canceled, so the AfterFunc is not called.\n\t\t\tsynctest.Wait()\n\t\t\tif afterFuncCalled {\n\t\t\t\tt.Fatalf(\"before context is canceled: AfterFunc called\")\n\t\t\t}\n\n\t\t\t// Cancel the context and wait for the AfterFunc to finish executing.\n\t\t\t// Verify that the AfterFunc ran.\n\t\t\tcancel()\n\t\t\tsynctest.Wait()\n\t\t\tif !afterFuncCalled {\n\t\t\t\tt.Fatalf(\"after context is canceled: AfterFunc not called\")\n\t\t\t}\n\t\t})\n\t}\n\n# Example: Context.WithTimeout\n\nThis example demonstrates testing the [context.WithTimeout] function.\n\nWithTimeout creates a context which is canceled after a timeout.\n\nThe test verifies that the context is not canceled before the timeout expires,\nand is canceled after the timeout expires.\n\n\tfunc TestContextWithTimeout(t *testing.T) {\n\t\tsynctest.Test(t, func(t *testing.T) {\n\t\t\t// Create a context.Context which is canceled after a timeout.\n\t\t\tconst timeout = 5 * time.Second\n\t\t\tctx, cancel := context.WithTimeout(t.Context(), timeout)\n\t\t\tdefer cancel()\n\n\t\t\t// Wait just less than the timeout.\n\t\t\ttime.Sleep(timeout - time.Nanosecond)\n\t\t\tsynctest.Wait()\n\t\t\tif err := ctx.Err(); err != nil {\n\t\t\t\tt.Fatalf(\"before timeout: ctx.Err() = %v, want nil\\n\", err)\n\t\t\t}\n\n\t\t\t// Wait the rest of the way until the timeout.\n\t\t\ttime.Sleep(time.Nanosecond)\n\t\t\tsynctest.Wait()\n\t\t\tif err := ctx.Err(); err != context.DeadlineExceeded {\n\t\t\t\tt.Fatalf(\"after timeout: ctx.Err() = %v, want DeadlineExceeded\\n\", err)\n\t\t\t}\n\t\t})\n\t}\n\n# Example: HTTP 100 Continue\n\nThis example demonstrates testing [http.Transport]'s 100 Continue handling.\n\nAn HTTP client sending a request can include an \"Expect: 100-continue\" header\nto tell the server that the client has additional data to send.\nThe server may then respond with an 100 Continue information response\nto request the data, or some other status to tell the client the data is not needed.\nFor example, a client uploading a large file might use this feature to confirm\nthat the server is willing to accept the file before sending it.\n\nThis test confirms that when sending an \"Expect: 100-continue\" header\nthe HTTP client does not send a request's content before the server requests it,\nand that it does send the content after receiving a 100 Continue response.\n\n\tfunc TestHTTPTransport100Continue(t *testing.T) {\n\t\tsynctest.Test(t, func(*testing.T) {\n\t\t\t// Create an in-process fake network connection.\n\t\t\t// We cannot use a loopback network connection for this test,\n\t\t\t// because goroutines blocked on network I/O prevent a synctest\n\t\t\t// bubble from becoming idle.\n\t\t\tsrvConn, cliConn := net.Pipe()\n\t\t\tdefer cliConn.Close()\n\t\t\tdefer srvConn.Close()\n\n\t\t\ttr := &http.Transport{\n\t\t\t\t// Use the fake network connection created above.\n\t\t\t\tDialContext: func(ctx context.Context, network, address string) (net.Conn, error) {\n\t\t\t\t\treturn cliConn, nil\n\t\t\t\t},\n\t\t\t\t// Enable \"Expect: 100-continue\" handling.\n\t\t\t\tExpectContinueTimeout: 5 * time.Second,\n\t\t\t}\n\n\t\t\t// Send a request with the \"Expect: 100-continue\" header set.\n\t\t\t// Send it in a new goroutine, since it won't complete until the end of the test.\n\t\t\tbody := \"request body\"\n\t\t\tgo func() {\n\t\t\t\treq, _ := http.NewRequest(\"PUT\", \"http://test.tld/\", strings.NewReader(body))\n\t\t\t\treq.Header.Set(\"Expect\", \"100-continue\")\n\t\t\t\tresp, err := tr.RoundTrip(req)\n\t\t\t\tif err != nil {\n\t\t\t\t\tt.Errorf(\"RoundTrip: unexpected error %v\\n\", err)\n\t\t\t\t} else {\n\t\t\t\t\tresp.Body.Close()\n\t\t\t\t}\n\t\t\t}()\n\n\t\t\t// Read the request headers sent by the client.\n\t\t\treq, err := http.ReadRequest(bufio.NewReader(srvConn))\n\t\t\tif err != nil {\n\t\t\t\tt.Fatalf(\"ReadRequest: %v\\n\", err)\n\t\t\t}\n\n\t\t\t// Start a new goroutine copying the body sent by the client into a buffer.\n\t\t\t// Wait for all goroutines in the bubble to block and verify that we haven't\n\t\t\t// read anything from the client yet.\n\t\t\tvar gotBody bytes.Buffer\n\t\t\tgo io.Copy(&gotBody, req.Body)\n\t\t\tsynctest.Wait()\n\t\t\tif got, want := gotBody.String(), \"\"; got != want {\n\t\t\t\tt.Fatalf(\"before sending 100 Continue, read body: %q, want %q\\n\", got, want)\n\t\t\t}\n\n\t\t\t// Write a \"100 Continue\" response to the client and verify that\n\t\t\t// it sends the request body.\n\t\t\tsrvConn.Write([]byte(\"HTTP/1.1 100 Continue\\r\\n\\r\\n\"))\n\t\t\tsynctest.Wait()\n\t\t\tif got, want := gotBody.String(), body; got != want {\n\t\t\t\tt.Fatalf(\"after sending 100 Continue, read body: %q, want %q\\n\", got, want)\n\t\t\t}\n\n\t\t\t// Finish up by sending the \"200 OK\" response to conclude the request.\n\t\t\tsrvConn.Write([]byte(\"HTTP/1.1 200 OK\\r\\n\\r\\n\"))\n\n\t\t\t// We started several goroutines during the test.\n\t\t\t// The synctest.Test call will wait for all of them to exit before returning.\n\t\t})\n\t}\n" :imports [
+
+
+    ^{:line 269} [synctest "internal/synctest"]
+    ^{:line 270} [testing "testing"]
+    ^{:line 271} [time "time"]
+    ^{:line 272} [_ "unsafe"]]) ; for linkname
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 299} (go/func Test "Test executes f in a new bubble.\n\nTest waits for all goroutines in the bubble to exit before returning.\nIf the goroutines in the bubble become deadlocked, the test fails.\n\nTest must not be called from within a bubble.\n\nThe [*testing.T] provided to f has the following properties:\n\n  - T.Cleanup functions run inside the bubble,\n    immediately before Test returns.\n  - T.Context returns a [context.Context] with a Done channel\n    associated with the bubble.\n  - T.Run, T.Parallel, and T.Deadline must not be called.\n" [^{:tag (* testing/T)} t ^{:tag (func [(* testing/T)])} f]
+  (let [^bool ok (zero bool)]
+    (synctest/Run ^{:go/end 293} (fn []
+        (set! ok (testingSynctestTest t f))))
+
+    (when (not ok)
+      ;; Fail the test outside the bubble,
+      ;; so test durations get set using real time.
+      ^{:go/via [common]} (.FailNow t))))
+
+
+
+
+(go/func ^:extern ^{:go/linkname "testingSynctestTest testing/synctest.testingSynctestTest"} testingSynctestTest ^bool [^{:tag (* testing/T)} t ^{:tag (func [(* testing/T)])} f])
+
+
+
+
+
+
+
+^{:go/end 312} (go/func Wait "Wait blocks until every goroutine within the current bubble,\nother than the current goroutine, is durably blocked.\n\nWait must not be called from outside a bubble.\nWait must not be called concurrently by multiple goroutines\nin the same bubble.\n" []
+  (synctest/Wait))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 332} (go/func Sleep "Sleep blocks until the current bubble's clock has advanced\nby the duration of d and every goroutine within the current bubble,\nother than the current goroutine, is durably blocked.\n\nThis is exactly equivalent to\n\n\ttime.Sleep(d)\n\tsynctest.Wait()\n\nIn tests, this is often preferable to calling only [time.Sleep].\nIf the test itself and another goroutine running the system under test\nsleeps for the exact same amount of time, it's unpredictable which\nof the two goroutines will run first. The test itself usually wants\nto wait for the system under test to \"settle\" after sleeping.\nThis is what Sleep accomplishes.\n" [^time/Duration d]
+  (time/Sleep d)
+  (Wait))

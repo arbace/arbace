@@ -1,0 +1,247 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.sync) (go/file "rwmutex.go" :imports [
+
+
+    ^{:line 8} [race "internal/race"]
+    ^{:line 9} [atomic "sync/atomic"]
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+;; There is a modified copy of this file in runtime/rwmutex.go.
+;; If you make any changes here, see if you should make them there.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type RWMutex "A RWMutex is a reader/writer mutual exclusion lock.\nThe lock can be held by an arbitrary number of readers or a single writer.\nThe zero value for a RWMutex is an unlocked mutex.\n\nA RWMutex must not be copied after first use.\n\nIf any goroutine calls [RWMutex.Lock] while the lock is already held by\none or more readers, concurrent calls to [RWMutex.RLock] will block until\nthe writer has acquired (and released) the lock, to ensure that\nthe lock eventually becomes available to the writer.\nNote that this prohibits recursive read-locking.\nA [RWMutex.RLock] cannot be upgraded into a [RWMutex.Lock],\nnor can a [RWMutex.Lock] be downgraded into a [RWMutex.RLock].\n\nIn the terminology of [the Go memory model],\nthe n'th call to [RWMutex.Unlock] “synchronizes before” the m'th call to Lock\nfor any n < m, just as for [Mutex].\nFor any call to RLock, there exists an n such that\nthe n'th call to Unlock “synchronizes before” that call to RLock,\nand the corresponding call to [RWMutex.RUnlock] “synchronizes before”\nthe n+1'th call to Lock.\n\n[the Go memory model]: https://go.dev/ref/mem\n" (struct
+    ^{:line 40 :tag Mutex} w ; held if there are pending writers
+    ^{:line 41 :tag uint32} writerSem ; semaphore for writers to wait for completing readers
+    ^{:line 42 :tag uint32} readerSem ; semaphore for readers to wait for completing writers
+    ^{:line 43 :tag atomic/Int32} readerCount ; number of pending readers
+    ^{:line 44 :tag atomic/Int32} readerWait)) ; number of departing readers
+
+
+(go/const ^{:val 1073741824} rwmutexMaxReaders (<< 1 30))
+
+;; Happens-before relationships are indicated to the race detector via:
+;; - Unlock  -> Lock:  readerSem
+;; - Unlock  -> RLock: readerSem
+;; - RUnlock -> Lock:  writerSem
+;;
+;; The methods below temporarily disable handling of race synchronization
+;; events in order to provide the more precise model above to the race
+;; detector.
+;;
+;; For example, atomic.AddInt32 in RLock should not appear to provide
+;; acquire-release semantics, which would incorrectly synchronize racing
+;; readers, thus potentially missing races.
+
+
+
+
+
+
+^{:go/end 80} (go/method RLock "RLock locks rw for reading.\n\nIt should not be used for recursive read locking; a blocked Lock\ncall excludes new readers from acquiring the lock. See the\ndocumentation on the [RWMutex] type.\n" [^{:tag (* RWMutex)} rw]
+  (when race/Enabled
+    (race/Read (conv unsafe/Pointer (addr (.-w rw))))
+    (race/Disable))
+
+  (when (< (.Add (.-readerCount rw) 1) 0)
+    ;; A writer is pending, wait for it.
+    (runtime_SemacquireRWMutexR (addr (.-readerSem rw)) false 0))
+
+  (when race/Enabled
+    (race/Enable)
+    (race/Acquire (conv unsafe/Pointer (addr (.-readerSem rw))))))
+
+
+
+
+
+
+
+
+^{:go/end 108} (go/method TryRLock "TryRLock tries to lock rw for reading and reports whether it succeeded.\n\nNote that while correct uses of TryRLock do exist, they are rare,\nand use of TryRLock is often a sign of a deeper problem\nin a particular use of mutexes.\n" ^bool [^{:tag (* RWMutex)} rw]
+  (when race/Enabled
+    (race/Read (conv unsafe/Pointer (addr (.-w rw))))
+    (race/Disable))
+
+  (while true
+    (let [c (.Load (.-readerCount rw))]
+      (when (< c 0)
+        (when race/Enabled
+          (race/Enable))
+
+        (return false))
+
+      (when (.CompareAndSwap (.-readerCount rw) c (+ c 1))
+        (when race/Enabled
+          (race/Enable)
+          (race/Acquire (conv unsafe/Pointer (addr (.-readerSem rw)))))
+
+        (return true)))))
+
+
+
+
+
+
+
+
+^{:go/end 127} (go/method RUnlock "RUnlock undoes a single [RWMutex.RLock] call;\nit does not affect other simultaneous readers.\nIt is a run-time error if rw is not locked for reading\non entry to RUnlock.\n" [^{:tag (* RWMutex)} rw]
+  (when race/Enabled
+    (race/Read (conv unsafe/Pointer (addr (.-w rw))))
+    (race/ReleaseMerge (conv unsafe/Pointer (addr (.-writerSem rw))))
+    (race/Disable))
+
+  (when [r (.Add (.-readerCount rw) -1)] (< r 0)
+    ;; Outlined slow-path to allow the fast-path to be inlined
+    (.rUnlockSlow rw r))
+
+  (when race/Enabled
+    (race/Enable)))
+
+
+
+^{:go/end 139} (go/method rUnlockSlow [^{:tag (* RWMutex)} rw ^int32 r]
+  (when (or (== (+ r 1) 0) (== (+ r 1) (- rwmutexMaxReaders)))
+    (race/Enable)
+    (fatal "sync: RUnlock of unlocked RWMutex"))
+
+  ;; A writer is pending.
+  (when (== (.Add (.-readerWait rw) -1) 0)
+    ;; The last reader unblocks the writer.
+    (runtime_Semrelease (addr (.-writerSem rw)) false 1)))
+
+
+
+
+
+
+^{:go/end 162} (go/method Lock "Lock locks rw for writing.\nIf the lock is already locked for reading or writing,\nLock blocks until the lock is available.\n" [^{:tag (* RWMutex)} rw]
+  (when race/Enabled
+    (race/Read (conv unsafe/Pointer (addr (.-w rw))))
+    (race/Disable))
+
+  ;; First, resolve competition with other writers.
+  (.Lock (.-w rw))
+  ;; Announce to readers there is a pending writer.
+  (let [r (+ (.Add (.-readerCount rw) (- rwmutexMaxReaders)) rwmutexMaxReaders)]
+    ;; Wait for active readers.
+    (when (and (!= r 0) (!= (.Add (.-readerWait rw) r) 0))
+      (runtime_SemacquireRWMutex (addr (.-writerSem rw)) false 0))
+
+    (when race/Enabled
+      (race/Enable)
+      (race/Acquire (conv unsafe/Pointer (addr (.-readerSem rw))))
+      (race/Acquire (conv unsafe/Pointer (addr (.-writerSem rw)))))))
+
+
+
+
+
+
+
+
+^{:go/breaks [[8 192]] :go/end 193} (go/method TryLock "TryLock tries to lock rw for writing and reports whether it succeeded.\n\nNote that while correct uses of TryLock do exist, they are rare,\nand use of TryLock is often a sign of a deeper problem\nin a particular use of mutexes.\n" ^bool [^{:tag (* RWMutex)} rw]
+  (when race/Enabled
+    (race/Read (conv unsafe/Pointer (addr (.-w rw))))
+    (race/Disable))
+
+  (when (not (.TryLock (.-w rw)))
+    (when race/Enabled
+      (race/Enable))
+
+    (return false))
+
+  (when (not (.CompareAndSwap (.-readerCount rw) 0 (- rwmutexMaxReaders)))
+    (.Unlock (.-w rw))
+    (when race/Enabled
+      (race/Enable))
+
+    (return false))
+
+  (when race/Enabled
+    (race/Enable)
+    (race/Acquire (conv unsafe/Pointer (addr (.-readerSem rw))))
+    (race/Acquire (conv unsafe/Pointer (addr (.-writerSem rw)))))
+
+  true)
+
+
+
+
+
+
+
+
+^{:go/end 223} (go/method Unlock "Unlock unlocks rw for writing. It is a run-time error if rw is\nnot locked for writing on entry to Unlock.\n\nAs with Mutexes, a locked [RWMutex] is not associated with a particular\ngoroutine. One goroutine may [RWMutex.RLock] ([RWMutex.Lock]) a RWMutex and then\narrange for another goroutine to [RWMutex.RUnlock] ([RWMutex.Unlock]) it.\n" [^{:tag (* RWMutex)} rw]
+  (when race/Enabled
+    (race/Read (conv unsafe/Pointer (addr (.-w rw))))
+    (race/Release (conv unsafe/Pointer (addr (.-readerSem rw))))
+    (race/Disable))
+
+
+  ;; Announce to readers there is no active writer.
+  (let [r (.Add (.-readerCount rw) rwmutexMaxReaders)]
+    (when (>= r rwmutexMaxReaders)
+      (race/Enable)
+      (fatal "sync: Unlock of unlocked RWMutex"))
+
+    ;; Unblock blocked readers, if any.
+    (for [i 0] (< i (conv int r)) (inc! i)
+      (runtime_Semrelease (addr (.-readerSem rw)) false 0))
+
+    ;; Allow other writers to proceed.
+    (.Unlock (.-w rw))
+    (when race/Enabled
+      (race/Enable))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 236} (go/func ^{:go/linkname "syscall_hasWaitingReaders syscall.hasWaitingReaders"} syscall_hasWaitingReaders "syscall_hasWaitingReaders reports whether any goroutine is waiting\nto acquire a read lock on rw. This exists because syscall.ForkLock\nis an RWMutex, and we can't change that without breaking compatibility.\nWe don't need or want RWMutex semantics for ForkLock, and we use\nthis private API to avoid having to change the type of ForkLock.\nFor more details see the syscall package.\n" ^bool [^{:tag (* RWMutex)} rw]
+  (let [r (.Load (.-readerCount rw))]
+    (and (< r 0) (> (+ r rwmutexMaxReaders) 0))))
+
+
+
+
+^{:go/end 242} (go/method RLocker "RLocker returns a [Locker] interface that implements\nthe [Locker.Lock] and [Locker.Unlock] methods by calling rw.RLock and rw.RUnlock.\n" ^Locker [^{:tag (* RWMutex)} rw]
+  (conv (* rlocker) rw))
+
+
+(go/type rlocker RWMutex)
+
+^{:go/end 246} (go/method Lock [^{:tag (* rlocker)} r] (.RLock (conv (* RWMutex) r)))
+^{:go/end 247} (go/method Unlock [^{:tag (* rlocker)} r] (.RUnlock (conv (* RWMutex) r)))

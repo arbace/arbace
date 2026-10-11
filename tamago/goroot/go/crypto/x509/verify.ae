@@ -1,0 +1,1406 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "verify.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [crypto "crypto"]
+    ^{:line 10} [pkix "crypto/x509/pkix"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [iter "iter"]
+    ^{:line 14} [maps "maps"]
+    ^{:line 15} [net "net"]
+    ^{:line 16} [netip "net/netip"]
+    ^{:line 17} [runtime "runtime"]
+    ^{:line 18} [slices "slices"]
+    ^{:line 19} [strings "strings"]
+    ^{:line 20} [time "time"]
+    ^{:line 21} [utf8 "unicode/utf8"]])
+
+
+(go/type InvalidReason int)
+
+(go/const
+
+
+  ^{:line 29} [^{:tag InvalidReason :val 0 :doc "NotAuthorizedToSign results when a certificate is signed by another\nwhich isn't marked as a CA certificate.\n"} NotAuthorizedToSign iota]
+
+
+  ^{:line 32} [^{:val 1 :doc "Expired results when a certificate has expired, based on the time\ngiven in the VerifyOptions.\n"} Expired]
+
+
+
+  ^{:line 36} [^{:val 2 :doc "CANotAuthorizedForThisName results when an intermediate or root\ncertificate has a name constraint which doesn't permit a DNS or\nother name (including IP address) in the leaf certificate.\n"} CANotAuthorizedForThisName]
+
+
+  ^{:line 39} [^{:val 3 :doc "TooManyIntermediates results when a path length constraint is\nviolated.\n"} TooManyIntermediates]
+
+
+  ^{:line 42} [^{:val 4 :doc "IncompatibleUsage results when the certificate's key usage indicates\nthat it may only be used for a different purpose.\n"} IncompatibleUsage]
+
+
+  ^{:line 45} [^{:val 5 :doc "NameMismatch results when the subject name of a parent certificate\ndoes not match the issuer name in the child.\n"} NameMismatch]
+
+  ^{:line 47} [^{:val 6 :doc "NameConstraintsWithoutSANs is a legacy error and is no longer returned.\n"} NameConstraintsWithoutSANs]
+
+
+
+  ^{:line 51} [^{:val 7 :doc "UnconstrainedName results when a CA certificate contains permitted\nname constraints, but leaf certificate contains a name of an\nunsupported or unconstrained type.\n"} UnconstrainedName]
+
+
+
+
+
+  ^{:line 57} [^{:val 8 :doc "TooManyConstraints results when the number of comparison operations\nneeded to check a certificate exceeds the limit set by\nVerifyOptions.MaxConstraintComparisions. This limit exists to\nprevent pathological certificates can consuming excessive amounts of\nCPU time to verify.\n"} TooManyConstraints]
+
+
+  ^{:line 60} [^{:val 9 :doc "CANotAuthorizedForExtKeyUsage results when an intermediate or root\ncertificate does not permit a requested extended key usage.\n"} CANotAuthorizedForExtKeyUsage]
+
+  ^{:line 62} [^{:val 10 :doc "NoValidChains results when there are no valid chains to return.\n"} NoValidChains])
+
+
+
+
+(go/type CertificateInvalidError "CertificateInvalidError results when an odd error occurs. Users of this\nlibrary probably want to handle all these errors uniformly.\n" (struct
+    ^{:line 68 :tag (* Certificate)} Cert
+    ^{:line 69 :tag InvalidReason} Reason
+    ^{:line 70 :tag string} Detail))
+
+
+^{:go/breaks [[4 100]] :go/end 101} (go/method Error ^string [^CertificateInvalidError e]
+  (switch (.-Reason e)
+    (case [NotAuthorizedToSign]
+      (return "x509: certificate is not authorized to sign other certificates"))
+    (case [Expired]
+      (return (+ "x509: certificate has expired or is not yet valid: " (.-Detail e))))
+    (case [CANotAuthorizedForThisName]
+      (return (+ "x509: a root or intermediate certificate is not authorized to sign for this name: " (.-Detail e))))
+    (case [CANotAuthorizedForExtKeyUsage]
+      (return (+ "x509: a root or intermediate certificate is not authorized for an extended key usage: " (.-Detail e))))
+    (case [TooManyIntermediates]
+      (return "x509: too many intermediates for path length constraint"))
+    (case [IncompatibleUsage]
+      (return "x509: certificate specifies an incompatible key usage"))
+    (case [NameMismatch]
+      (return "x509: issuer name does not match subject from issuing certificate"))
+    (case [NameConstraintsWithoutSANs]
+      (return "x509: issuer has name constraints but leaf doesn't have a SAN extension"))
+    (case [UnconstrainedName]
+      (return (+ "x509: issuer has name constraints but leaf contains unknown or unconstrained name: " (.-Detail e))))
+    (case [NoValidChains]
+      (let [s "x509: no valid chains built"]
+        (when (!= (.-Detail e) "")
+          (set! s (fmt/Sprintf "%s: %s" s (.-Detail e))))
+
+        (return s))))
+
+  "x509: unknown error")
+
+
+
+
+(go/type HostnameError "HostnameError results when the set of authorized names doesn't match the\nrequested name.\n" (struct
+    ^{:line 106 :tag (* Certificate)} Certificate
+    ^{:line 107 :tag string} Host))
+
+
+^{:go/end 144} (go/method Error ^string [^HostnameError h]
+  (let [c (.-Certificate h)
+      ^{:line 112} maxNamesIncluded 100]
+
+    (when (and (not (.hasSANExtension c)) (matchHostnames (.-CommonName (.-Subject c)) (splitHostname (.-Host h))))
+      (return "x509: certificate relies on legacy Common Name field, use SANs instead"))
+
+
+    (let [^strings/Builder valid (zero strings/Builder)]
+      (if [ip (net/ParseIP (.-Host h))] (!= ip nil) (do
+          ;; Trying to validate an IP
+          (when (== (len (.-IPAddresses c)) 0)
+            (return (+ "x509: cannot validate certificate for " (.-Host h) " because it doesn't contain any IP SANs")))
+
+          (when (>= (len (.-IPAddresses c)) maxNamesIncluded)
+            (return (fmt/Sprintf "x509: certificate is valid for %d IP SANs, but none matched %s" (len (.-IPAddresses c)) (.-Host h))))
+
+          (range [_ san (.-IPAddresses c)]
+            (when (> (.Len valid) 0)
+              (.WriteString valid ", "))
+
+            (.WriteString valid (.String san))))
+
+        (do
+          (when (>= (len (.-DNSNames c)) maxNamesIncluded)
+            (return (fmt/Sprintf "x509: certificate is valid for %d names, but none matched %s" (len (.-DNSNames c)) (.-Host h))))
+
+          (.WriteString valid (strings/Join (.-DNSNames c) ", "))))
+
+
+      (when (== (.Len valid) 0)
+        (return (+ "x509: certificate is not valid for any names, but wanted to match " (.-Host h))))
+
+      (+ "x509: certificate is valid for " (.String valid) ", not " (.-Host h)))))
+
+
+
+(go/type UnknownAuthorityError "UnknownAuthorityError results when the certificate issuer is unknown\n" (struct
+    ^{:line 148 :tag (* Certificate)} Cert
+
+
+    ^{:line 151 :tag error :doc "hintErr contains an error that may be helpful in determining why an\nauthority wasn't found.\n"} hintErr
+
+
+    ^{:line 154 :tag (* Certificate) :doc "hintCert contains a possible authority certificate that was rejected\nbecause of the error in hintErr.\n"} hintCert))
+
+
+^{:go/end 171} (go/method Error ^string [^UnknownAuthorityError e]
+  (let [s "x509: certificate signed by unknown authority"]
+    (when (!= (.-hintErr e) nil)
+      (let [certName (.-CommonName (.-Subject (.-hintCert e)))]
+        (when (== (len certName) 0)
+          (if (> (len (.-Organization (.-Subject (.-hintCert e)))) 0)
+            (set! certName (aget (.-Organization (.-Subject (.-hintCert e))) 0))
+
+            (set! certName (+ "serial:" (.String (.-SerialNumber (.-hintCert e)))))))
+
+
+        (set! s + (fmt/Sprintf " (possibly because of %q while trying to verify candidate authority certificate %q)" (.-hintErr e) certName))))
+
+    ^{:line 170} s))
+
+
+
+(go/type SystemRootsError "SystemRootsError results when we fail to load the system root certificates.\n" (struct
+    ^{:line 175 :tag error} Err))
+
+
+^{:go/end 184} (go/method Error ^string [^SystemRootsError se]
+  (let [msg "x509: failed to load system roots and no roots provided"]
+    (when (!= (.-Err se) nil)
+      (return (+ msg "; " (.Error (.-Err se)))))
+
+    ^{:line 183} msg))
+
+
+^{:go/end 186} (go/method Unwrap ^error [^SystemRootsError se] (.-Err se))
+
+
+
+(go/var ^{:doc "errNotParsed is returned when a certificate without ASN.1 contents is\nverified. Platform-specific verification needs the ASN.1 contents.\n"} errNotParsed (errors/New "x509: missing ASN.1 contents; use ParseCertificate"))
+
+
+(go/type VerifyOptions "VerifyOptions contains parameters for Certificate.Verify.\n" (struct
+
+
+    ^{:line 196 :tag string :doc "DNSName, if set, is checked against the leaf certificate with\nCertificate.VerifyHostname or the platform verifier.\n"} DNSName
+
+
+
+
+    ^{:line 201 :tag (* CertPool) :doc "Intermediates is an optional pool of certificates that are not trust\nanchors, but can be used to form a chain from the leaf certificate to a\nroot certificate.\n"} Intermediates
+
+
+    ^{:line 204 :tag (* CertPool) :doc "Roots is the set of trusted root certificates the leaf certificate needs\nto chain up to. If nil, the system roots or the platform verifier are used.\n"} Roots
+
+
+
+    ^{:line 208 :tag time/Time :doc "CurrentTime is used to check the validity of all certificates in the\nchain. If zero, the current time is used.\n"} CurrentTime
+
+
+
+
+    ^{:line 213 :tag (slice ExtKeyUsage) :doc "KeyUsages specifies which Extended Key Usage values are acceptable. A\nchain is accepted if it allows any of the listed values. An empty list\nmeans ExtKeyUsageServerAuth. To accept any key usage, include ExtKeyUsageAny.\n"} KeyUsages
+
+
+
+
+
+
+    ^{:line 220 :tag int :doc "MaxConstraintComparisions is the maximum number of comparisons to\nperform when checking a given certificate's name constraints. If\nzero, a sensible default is used. This limit prevents pathological\ncertificates from consuming excessive amounts of CPU time when\nvalidating. It does not apply to the platform verifier.\n"} MaxConstraintComparisions
+
+
+
+
+    ^{:line 225 :tag (slice OID) :doc "CertificatePolicies specifies which certificate policy OIDs are\nacceptable during policy validation. An empty CertificatePolices\nfield implies any valid policy is acceptable.\n"} CertificatePolicies
+
+    ;; The following policy fields are unexported, because we do not expect
+    ;; users to actually need to use them, but are useful for testing the
+    ;; policy validation code.
+
+
+
+    ^{:line 233 :tag bool :doc "inhibitPolicyMapping indicates if policy mapping should be allowed\nduring path validation.\n"} inhibitPolicyMapping
+
+
+
+    ^{:line 237 :tag bool :doc "requireExplicitPolicy indidicates if explicit policies must be present\nfor each certificate being validated.\n"} requireExplicitPolicy
+
+
+
+    ^{:line 241 :tag bool :doc "inhibitAnyPolicy indicates if the anyPolicy policy should be\nprocessed if present in a certificate being validated.\n"} inhibitAnyPolicy))
+
+
+(go/const
+  ^{:line 245} [^{:val 0} leafCertificate iota]
+  ^{:line 246} [^{:val 1} intermediateCertificate]
+  ^{:line 247} [^{:val 2} rootCertificate])
+
+
+
+
+
+(go/type rfc2821Mailbox "rfc2821Mailbox represents a “mailbox” (which is an email address to most\npeople) by breaking it into the “local” (i.e. before the '@') and “domain”\nparts.\n" (struct
+    ^{:line 254 :tag string} local ^string domain))
+
+
+^{:go/end 259} (go/method String ^string [^rfc2821Mailbox s]
+  (fmt/Sprintf "%s@%s" (.-local s) (.-domain s)))
+
+
+
+
+
+
+^{:go/end 404} (go/func parseRFC2821Mailbox "parseRFC2821Mailbox parses an email address into local and domain parts,\nbased on the ABNF for a “Mailbox” from RFC 2821. According to RFC 5280,\nSection 4.2.1.6 that's correct for an rfc822Name from a certificate: “The\nformat of an rfc822Name is a \"Mailbox\" as defined in RFC 2821, Section 4.1.2”.\n" [^string in] :results [^rfc2821Mailbox mailbox ^bool ok]
+  (when (== (len in) 0)
+    (return mailbox false))
+
+
+  (let [localPartBytes (make (slice byte) 0 (/ (len in) 2))]
+
+    (if (== (aget in 0) \") (do
+        ;; Quoted-string = DQUOTE *qcontent DQUOTE
+        ;; non-whitespace-control = %d1-8 / %d11 / %d12 / %d14-31 / %d127
+        ;; qcontent = qtext / quoted-pair
+        ;; qtext = non-whitespace-control /
+        ;;         %d33 / %d35-91 / %d93-126
+        ;; quoted-pair = ("\" text) / obs-qp
+        ;; text = %d1-9 / %d11 / %d12 / %d14-127 / obs-text
+        ;;
+        ;; (Names beginning with “obs-” are the obsolete syntax from RFC 2822,
+        ;; Section 4. Since it has been 16 years, we no longer accept that.)
+        (set! in (subslice in 1))
+        (label :QuotedString
+          (while true
+            (when (== (len in) 0)
+              (return mailbox false))
+
+            (let [c (aget in 0)]
+              (set! in (subslice in 1))
+
+              (switch
+                (case [(== c \")]
+                  (break :QuotedString))
+
+                (case [(== c \\)]
+                  ;; quoted-pair
+                  (when (== (len in) 0)
+                    (return mailbox false))
+
+                  (if (or (== (aget in 0) 11)
+                      (== (aget in 0) 12)
+                      ^:go/paren (and (<= 1 (aget in 0)) (<= (aget in 0) 9))
+                      ^:go/paren (and (<= 14 (aget in 0)) (<= (aget in 0) 127))) (do
+                      (set! localPartBytes (append localPartBytes (aget in 0)))
+                      (set! in (subslice in 1)))
+
+                    (return mailbox false)))
+
+
+                (case [(or (== c 11)
+                      (== c 12)
+                      ;; Space (char 32) is not allowed based on the
+                      ;; BNF, but RFC 3696 gives an example that
+                      ;; assumes that it is. Several “verified”
+                      ;; errata continue to argue about this point.
+                      ;; We choose to accept it.
+                      (== c 32)
+                      (== c 33)
+                      (== c 127)
+                      ^:go/paren (and (<= 1 c) (<= c 8))
+                      ^:go/paren (and (<= 14 c) (<= c 31))
+                      ^:go/paren (and (<= 35 c) (<= c 91))
+                      ^:go/paren (and (<= 93 c) (<= c 126)))]
+                  ;; qtext
+                  (set! localPartBytes (append localPartBytes c)))
+
+                (default
+                  (return mailbox false)))))))
+
+
+      (do
+        ;; Atom ("." Atom)*
+        (label :NextChar
+          (while (> (len in) 0)
+            ;; atext from RFC 2822, Section 3.2.4
+            (let [c (aget in 0)]
+
+              (switch
+                (case [(== c \\)]
+                  ;; Examples given in RFC 3696 suggest that
+                  ;; escaped characters can appear outside of a
+                  ;; quoted string. Several “verified” errata
+                  ;; continue to argue the point. We choose to
+                  ;; accept it.
+                  (set! in (subslice in 1))
+                  (when (== (len in) 0)
+                    (return mailbox false))
+
+                  (fallthrough))
+
+                (case [(or ^:go/paren (and (<= \0 c) (<= c \9))
+                      ^:go/paren (and (<= \a c) (<= c \z))
+                      ^:go/paren (and (<= \A c) (<= c \Z))
+                      (== c \!) (== c \#) (== c \$) (== c \%)
+                      (== c \&) (== c \') (== c \*) (== c \+)
+                      (== c \-) (== c \/) (== c \=) (== c \?)
+                      (== c \^) (== c \_) (== c \`) (== c \{)
+                      (== c \|) (== c \}) (== c \~) (== c \.))]
+                  (set! localPartBytes (append localPartBytes (aget in 0)))
+                  (set! in (subslice in 1)))
+
+                (default
+                  (break :NextChar))))))
+
+
+
+        (when (== (len localPartBytes) 0)
+          (return mailbox false))
+
+
+        ;; From RFC 3696, Section 3:
+        ;; “period (".") may also appear, but may not be used to start
+        ;; or end the local part, nor may two or more consecutive
+        ;; periods appear.”
+        (let [twoDots (lit (slice byte) \. \.)]
+          (when (or (== (aget localPartBytes 0) \.)
+              (== (aget localPartBytes (- (len localPartBytes) 1)) \.)
+              (bytes/Contains localPartBytes twoDots))
+            (return mailbox false)))))
+
+
+
+    (when (or (== (len in) 0) (!= (aget in 0) \@))
+      (return mailbox false))
+
+    (set! in (subslice in 1))
+
+    ;; The RFC species a format for domains, but that's known to be
+    ;; violated in practice so we accept that anything after an '@' is the
+    ;; domain part.
+    (when (not (domainNameValid in false))
+      (return mailbox false))
+
+
+    ;; Reject domain names containing @.
+    (when (strings/ContainsRune in \@)
+      (return mailbox false))
+
+
+    (set! (.-local mailbox) (conv string localPartBytes))
+    (set! (.-domain mailbox) in)
+    (return mailbox true)))
+
+
+
+
+^{:go/end 445} (go/func domainToReverseLabels "domainToReverseLabels converts a textual domain name like foo.example.com to\nthe list of labels in reverse order, e.g. [\"com\", \"example\", \"foo\"].\n" [^string domain] :results [^{:tag (slice string)} reverseLabels ^bool ok]
+  (set! reverseLabels (make (slice string) 0 (+ (strings/Count domain ".") 1)))
+  (while (> (len domain) 0)
+    (if [i (strings/LastIndexByte domain \.)] (== i -1) (do
+        (set! reverseLabels (append reverseLabels domain))
+        (set! domain ""))
+      (do
+        (set! reverseLabels (append reverseLabels (subslice domain (+ i 1))))
+        (set! domain (subslice domain _ i))
+        (when (== i 0) ; domain == ""
+          ;; domain is prefixed with an empty label, append an empty
+          ;; string to reverseLabels to indicate this.
+          (set! reverseLabels (append reverseLabels ""))))))
+
+
+
+
+  (when (and (> (len reverseLabels) 0) (== (len (aget reverseLabels 0)) 0))
+    ;; An empty label at the end indicates an absolute value.
+    (return nil false))
+
+
+  (range [_ label reverseLabels]
+    (when (== (len label) 0)
+      ;; Empty labels are otherwise invalid.
+      (return nil false))
+
+
+    (range [_ c label]
+      (when (or (< c 33) (> c 126))
+        ;; Invalid character.
+        (return nil false))))
+
+
+
+
+  (return reverseLabels true))
+
+
+
+
+^{:go/end 514} (go/method isValid "isValid performs validity checks on c given that it is a candidate to append\nto the chain in currentChain.\n" ^error [^{:tag (* Certificate)} c ^int certType ^{:tag (slice (* Certificate))} currentChain ^{:tag (* VerifyOptions)} opts]
+  (when (> (len (.-UnhandledCriticalExtensions c)) 0)
+    (return (lit UnhandledCriticalExtension)))
+
+
+  (when (> (len currentChain) 0)
+    (let [child (aget currentChain (- (len currentChain) 1))]
+      (when (not (bytes/Equal (.-RawIssuer child) (.-RawSubject c)))
+        (return (lit CertificateInvalidError c NameMismatch "")))))
+
+
+
+  ^{:go/breaks [[7 513]]} (let [now (.-CurrentTime opts)]
+    (when (.IsZero now)
+      (set! now (time/Now)))
+
+    (cond (.Before now (.-NotBefore c))
+      (return ^{:go/breaks [2 4 6]} (lit CertificateInvalidError
+          :Cert c
+          :Reason Expired
+          :Detail (fmt/Sprintf "current time %s is before %s" (.Format now time/RFC3339) (.Format (.-NotBefore c) time/RFC3339))))
+
+      (.After now (.-NotAfter c))
+      (return ^{:go/breaks [2 4 6]} (lit CertificateInvalidError
+          :Cert c
+          :Reason Expired
+          :Detail (fmt/Sprintf "current time %s is after %s" (.Format now time/RFC3339) (.Format (.-NotAfter c) time/RFC3339)))))
+
+
+
+    (when (or (== certType intermediateCertificate) (== certType rootCertificate))
+      (when (== (len currentChain) 0)
+        (return (errors/New "x509: internal error: empty chain when appending CA cert"))))
+
+
+
+    ;; KeyUsage status flags are ignored. From Engineering Security, Peter
+    ;; Gutmann: A European government CA marked its signing certificates as
+    ;; being valid for encryption only, but no-one noticed. Another
+    ;; European CA marked its signature keys as not being valid for
+    ;; signatures. A different CA marked its own trusted root certificate
+    ;; as being invalid for certificate signing. Another national CA
+    ;; distributed a certificate to be used to encrypt data for the
+    ;; country’s tax authority that was marked as only being usable for
+    ;; digital signatures but not for encryption. Yet another CA reversed
+    ;; the order of the bit flags in the keyUsage due to confusion over
+    ;; encoding endianness, essentially setting a random keyUsage in
+    ;; certificates that it issued. Another CA created a self-invalidating
+    ;; certificate by adding a certificate policy statement stipulating
+    ;; that the certificate had to be used strictly as specified in the
+    ;; keyUsage, and a keyUsage containing a flag indicating that the RSA
+    ;; encryption key could only be used for Diffie-Hellman key agreement.
+
+    (when (and (== certType intermediateCertificate) ^:go/paren (or (not (.-BasicConstraintsValid c)) (not (.-IsCA c))))
+      (return (lit CertificateInvalidError c NotAuthorizedToSign "")))
+
+
+    (when (and (.-BasicConstraintsValid c) (>= (.-MaxPathLen c) 0))
+      (let [numIntermediates (- (len currentChain) 1)]
+        (when (> numIntermediates (.-MaxPathLen c))
+          (return (lit CertificateInvalidError c TooManyIntermediates "")))))
+
+
+
+    nil))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 667} (go/method Verify "Verify attempts to verify c by building one or more chains from c to a\ncertificate in opts.Roots, using certificates in opts.Intermediates if\nneeded. If successful, it returns one or more chains where the first\nelement of the chain is c and the last element is from opts.Roots.\n\nIf opts.Roots is nil, the platform verifier might be used, and\nverification details might differ from what is described below. If system\nroots are unavailable the returned error will be of type SystemRootsError.\n\nName constraints in the intermediates will be applied to all names claimed\nin the chain, not just opts.DNSName. Thus it is invalid for a leaf to claim\nexample.com if an intermediate doesn't permit it, even if example.com is not\nthe name being validated. Note that DirectoryName constraints are not\nsupported.\n\nName constraint validation follows the rules from RFC 5280, with the\naddition that DNS name constraints may use the leading period format\ndefined for emails and URIs. When a constraint has a leading period\nit indicates that at least one additional label must be prepended to\nthe constrained name to be considered valid.\n\nExtended Key Usage values are enforced nested down a chain, so an intermediate\nor root that enumerates EKUs prevents a leaf from asserting an EKU not in that\nlist. (While this is not specified, it is common practice in order to limit\nthe types of certificates a CA can issue.)\n\nCertificates that use SHA1WithRSA and ECDSAWithSHA1 signatures are not supported,\nand will not be used to build chains.\n\nCertificates other than c in the returned chains should not be modified.\n\nWARNING: this function doesn't do any revocation checking.\n" [^{:tag (* Certificate)} c ^VerifyOptions opts] :results [(slice (slice (* Certificate))) error]
+  ;; Platform-specific verification needs the ASN.1 contents so
+  ;; this makes the behavior consistent across platforms.
+  (when (== (len (.-Raw c)) 0)
+    (return nil errNotParsed))
+
+  (for [i 0] (< i (.len (.-Intermediates opts))) (inc! i)
+    (let [(values c _ err) (.cert (.-Intermediates opts) i)]
+      (when (!= err nil)
+        (return nil (fmt/Errorf "crypto/x509: error fetching intermediate: %w" err)))
+
+      (when (== (len (.-Raw c)) 0)
+        (return nil errNotParsed))))
+
+
+
+  ;; Use platform verifiers, where available, if Roots is from SystemCertPool.
+  (when (or (== runtime/GOOS "windows") (== runtime/GOOS "darwin") (== runtime/GOOS "ios"))
+    ;; Don't use the system verifier if the system pool was replaced with a non-system pool,
+    ;; i.e. if SetFallbackRoots was called with x509usefallbackroots=1.
+    (let [systemPool (systemRootsPool)]
+      (when (and (== (.-Roots opts) nil) ^:go/paren (or (== systemPool nil) (.-systemPool systemPool)))
+        (return (.systemVerify c (addr opts))))
+
+      (when (and (!= (.-Roots opts) nil) (.-systemPool (.-Roots opts)))
+        (let [(values platformChains err) (.systemVerify c (addr opts))]
+          ;; If the platform verifier succeeded, or there are no additional
+          ;; roots, return the platform verifier result. Otherwise, continue
+          ;; with the Go verifier.
+          (when (or (== err nil) (== (.len (.-Roots opts)) 0))
+            (return platformChains err))))))
+
+
+
+
+  (when (== (.-Roots opts) nil)
+    (set! (.-Roots opts) (systemRootsPool))
+    (when (== (.-Roots opts) nil)
+      (return nil (lit SystemRootsError systemRootsErr))))
+
+
+
+  (let [err (.isValid c leafCertificate nil (addr opts))]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (when (> (len (.-DNSName opts)) 0)
+      (set! err (.VerifyHostname c (.-DNSName opts)))
+      (when (!= err nil)
+        (return nil err)))
+
+
+
+    (let [^{:tag (slice (slice (* Certificate)))} candidateChains (zero (slice (slice (* Certificate))))]
+      (if (.contains (.-Roots opts) c)
+        (set! candidateChains (lit (slice (slice (* Certificate))) (lit _ c)))
+        (do
+          (set! (values candidateChains err) (.buildChains c (lit (slice (* Certificate)) c) nil (addr opts)))
+          (when (!= err nil)
+            (return nil err))))
+
+
+
+      (let [anyKeyUsage false]
+        (range [_ eku (.-KeyUsages opts)]
+          (when (== eku ExtKeyUsageAny)
+            ;; The presence of anyExtendedKeyUsage overrides any other key usage.
+            (set! anyKeyUsage true)
+            (break)))
+
+
+
+        (when (== (len (.-KeyUsages opts)) 0)
+          (set! (.-KeyUsages opts) (lit (slice ExtKeyUsage) ExtKeyUsageServerAuth)))
+
+
+        (let [^int invalidPoliciesChains (zero int)
+            ^{:line 626 :tag int} incompatibleKeyUsageChains (zero int)
+            ^{:line 627 :tag error} constraintsHintErr (zero error)]
+          (set! candidateChains (^{:inst [(slice (slice (* Certificate))) (slice (* Certificate))]} slices/DeleteFunc candidateChains ^{:go/breaks [[5 645]] :go/end 646} (fn ^bool [^{:tag (slice (* Certificate))} chain]
+                (when (not (policiesValid chain opts))
+                  (inc! invalidPoliciesChains)
+                  (return true))
+
+                ;; If any key usage is acceptable, no need to check the chain for
+                ;; key usages.
+                (when (and (not anyKeyUsage) (not (checkChainForKeyUsage chain (.-KeyUsages opts))))
+                  (inc! incompatibleKeyUsageChains)
+                  (return true))
+
+                (when [err (checkChainConstraints chain)] (!= err nil)
+                  (when (== constraintsHintErr nil)
+                    (set! constraintsHintErr (lit CertificateInvalidError c CANotAuthorizedForThisName (.Error err))))
+
+                  (return true))
+
+                false)))
+
+
+          (when (== (len candidateChains) 0)
+            (when (!= constraintsHintErr nil)
+              (return nil constraintsHintErr)) ; Preserve previous constraint behavior
+
+            (let [^{:tag (slice string)} details (zero (slice string))]
+              (when (> incompatibleKeyUsageChains 0)
+                (when (== invalidPoliciesChains 0)
+                  (return nil (lit CertificateInvalidError c IncompatibleUsage "")))
+
+                (set! details (append details (fmt/Sprintf "%d candidate chains with incompatible key usage" incompatibleKeyUsageChains))))
+
+              (when (> invalidPoliciesChains 0)
+                (set! details (append details (fmt/Sprintf "%d candidate chains with invalid policies" invalidPoliciesChains))))
+
+              (set! err (lit CertificateInvalidError c NoValidChains (strings/Join details ", ")))
+              (return nil err)))
+
+
+          (return candidateChains nil))))))
+
+
+^{:go/end 674} (go/func appendToFreshChain ^{:tag (slice (* Certificate))} [^{:tag (slice (* Certificate))} chain ^{:tag (* Certificate)} cert]
+  (let [n (make (slice (* Certificate)) (+ (len chain) 1))]
+    (copy n chain)
+    (aset n (len chain) cert)
+    ^{:line 673} n))
+
+
+
+
+
+
+
+^{:go/end 721} (go/func alreadyInChain "alreadyInChain checks whether a candidate certificate is present in a chain.\nRather than doing a direct byte for byte equivalency check, we check if the\nsubject, public key, and SAN, if present, are equal. This prevents loops that\nare created by mutual cross-signatures, or other cross-signature bridge\noddities.\n" ^bool [^{:tag (* Certificate)} candidate ^{:tag (slice (* Certificate))} chain]
+  (let-type [pubKeyEqual (interface
+        (Equal ^bool [crypto/PublicKey]))]
+
+
+    ^{:go/breaks [[4 720]]} (let [^{:tag (* pkix/Extension)} candidateSAN (zero (* pkix/Extension))]
+      (range [_ ext (.-Extensions candidate)]
+        (when (.Equal (.-Id ext) oidExtensionSubjectAltName)
+          (set! candidateSAN (addr ext))
+          (break)))
+
+
+
+      (range [_ cert chain]
+        (when (not (bytes/Equal (.-RawSubject candidate) (.-RawSubject cert)))
+          (continue))
+
+        ;; We enforce the canonical encoding of SPKI (by only allowing the
+        ;; correct AI parameter encodings in parseCertificate), so it's safe to
+        ;; directly compare the raw bytes.
+        (when (not (bytes/Equal (.-RawSubjectPublicKeyInfo candidate) (.-RawSubjectPublicKeyInfo cert)))
+          (continue))
+
+        (let [^{:tag (* pkix/Extension)} certSAN (zero (* pkix/Extension))]
+          (range [_ ext (.-Extensions cert)]
+            (when (.Equal (.-Id ext) oidExtensionSubjectAltName)
+              (set! certSAN (addr ext))
+              (break)))
+
+
+          (cond (and (== candidateSAN nil) (== certSAN nil))
+            (return true)
+            (or (== candidateSAN nil) (== certSAN nil))
+            (return false))
+
+          (when (bytes/Equal (.-Value candidateSAN) (.-Value certSAN))
+            (return true))))
+
+
+      false)))
+
+
+
+
+
+
+(go/const ^{:val 100 :doc "maxChainSignatureChecks is the maximum number of CheckSignatureFrom calls\nthat an invocation of buildChains will (transitively) make. Most chains are\nless than 15 certificates long, so this leaves space for multiple chains and\nfor failed checks due to different intermediates having the same Subject.\n"} maxChainSignatureChecks 100)
+
+(go/var errSignatureLimit (errors/New "x509: signature check attempts limit reached while verifying certificate chain"))
+
+^{:go/end 812} (go/method buildChains [^{:tag (* Certificate)} c ^{:tag (slice (* Certificate))} currentChain ^{:tag (* int)} sigChecks ^{:tag (* VerifyOptions)} opts] :results [^{:tag (slice (slice (* Certificate)))} chains ^error err]
+  (let [
+      ^{:line 733 :tag error} hintErr (zero error)
+      ^{:line 734 :tag (* Certificate)} hintCert (zero (* Certificate))
+
+
+      ^{:line 737} considerCandidate ^{:go/end 786} (fn [^int certType ^potentialParent candidate]
+        (when (== sigChecks nil)
+          (set! sigChecks (new int)))
+
+        (inc! @sigChecks)
+        (when (> @sigChecks maxChainSignatureChecks)
+          (set! err errSignatureLimit)
+          (return))
+
+
+        (when (or (== (.-PublicKey (.-cert candidate)) nil) (alreadyInChain (.-cert candidate) currentChain))
+          (return))
+
+
+        (when [err (.CheckSignatureFrom c (.-cert candidate))] (!= err nil)
+          (when (== hintErr nil)
+            (set! hintErr err)
+            (set! hintCert (.-cert candidate)))
+
+          (return))
+
+
+        (set! err (.isValid (.-cert candidate) certType currentChain opts))
+        (when (!= err nil)
+          (when (== hintErr nil)
+            (set! hintErr err)
+            (set! hintCert (.-cert candidate)))
+
+          (return))
+
+
+        (when (!= (.-constraint candidate) nil)
+          (when [err ((.-constraint candidate) currentChain)] (!= err nil)
+            (when (== hintErr nil)
+              (set! hintErr err)
+              (set! hintCert (.-cert candidate)))
+
+            (return)))
+
+
+
+        (switch certType
+          (case [rootCertificate]
+            (set! chains (append chains (appendToFreshChain currentChain (.-cert candidate)))))
+          (case [intermediateCertificate]
+            (let [^{:tag (slice (slice (* Certificate)))} childChains (zero (slice (slice (* Certificate))))]
+              (set! (values childChains err) (.buildChains (.-cert candidate) (appendToFreshChain currentChain (.-cert candidate)) sigChecks opts))
+              (set! chains (append chains (spread childChains)))))))]
+
+
+
+    (label :candidateLoop
+      (range [_ parents (lit (slice (struct
+                ^{:line 790 :tag int} certType
+                ^{:line 791 :tag (slice potentialParent)} potentials))
+
+            (lit _ rootCertificate (.findPotentialParents (.-Roots opts) c))
+            (lit _ intermediateCertificate (.findPotentialParents (.-Intermediates opts) c)))]
+
+        (range [_ parent (.-potentials parents)]
+          (considerCandidate (.-certType parents) parent)
+          (when (== err errSignatureLimit)
+            (break :candidateLoop)))))
+
+
+
+
+    (when (> (len chains) 0)
+      (set! err nil))
+
+    (when (and (== (len chains) 0) (== err nil))
+      (set! err (lit UnknownAuthorityError c hintErr hintCert)))
+
+
+    (return)))
+
+
+^{:go/end 814} (go/func validHostnamePattern ^bool [^string host] (validHostname host true))
+^{:go/end 815} (go/func validHostnameInput ^bool [^string host] (validHostname host false))
+
+
+
+
+^{:go/breaks [[8 866]] :go/end 867} (go/func validHostname "validHostname reports whether host is a valid hostname that can be matched or\nmatched against according to RFC 6125 2.2, with some leniency to accommodate\nlegacy values.\n" ^bool [^string host ^bool isPattern]
+  (when (not isPattern)
+    (set! host (strings/TrimSuffix host ".")))
+
+  (when (== (len host) 0)
+    (return false))
+
+  (when (== host "*")
+    ;; Bare wildcards are not allowed, they are not valid DNS names,
+    ;; nor are they allowed per RFC 6125.
+    (return false))
+
+
+  (range [i part (strings/Split host ".")]
+    (when (== part "")
+      ;; Empty label.
+      (return false))
+
+    (when (and isPattern (== i 0) (== part "*"))
+      ;; Only allow full left-most wildcards, as those are the only ones
+      ;; we match, and matching literal '*' characters is probably never
+      ;; the expected behavior.
+      (continue))
+
+    (range [j c part]
+      (when (and (<= \a c) (<= c \z))
+        (continue))
+
+      (when (and (<= \0 c) (<= c \9))
+        (continue))
+
+      (when (and (<= \A c) (<= c \Z))
+        (continue))
+
+      (when (and (== c \-) (!= j 0))
+        (continue))
+
+      (when (== c \_)
+        ;; Not a valid character in hostnames, but commonly
+        ;; found in deployments outside the WebPKI.
+        (continue))
+
+      (return false)))
+
+
+
+  true)
+
+
+^{:go/end 874} (go/func matchExactly ^bool [^string hostA ^string hostB]
+  (when (or (== hostA "") (== hostA ".") (== hostB "") (== hostB "."))
+    (return false))
+
+  (== (toLowerCaseASCII hostA) (toLowerCaseASCII hostB)))
+
+
+^{:go/end 899} (go/func matchHostnames ^bool [^string pattern ^{:tag (slice string)} hostParts]
+  (set! pattern (toLowerCaseASCII pattern))
+
+  (when (or (== (len pattern) 0) (== (len hostParts) 0))
+    (return false))
+
+
+  ^{:go/breaks [[4 898]]} (let [patternParts (strings/Split pattern ".")]
+
+    (when (!= (len patternParts) (len hostParts))
+      (return false))
+
+
+    (range [i patternPart patternParts]
+      (when (and (== i 0) (== patternPart "*"))
+        (continue))
+
+      (when (!= patternPart (aget hostParts i))
+        (return false)))
+
+
+
+    true))
+
+
+
+
+
+^{:go/end 931} (go/func toLowerCaseASCII "toLowerCaseASCII returns a lower-case version of in. See RFC 6125 6.4.1. We use\nan explicitly ASCII function to avoid any sharp corners resulting from\nperforming Unicode operations on DNS labels.\n" ^string [^string in]
+  ;; If the string is already lower-case then there's nothing to do.
+  (let [isAlreadyLowerCase true]
+    (range [_ c in]
+      (when (== c utf8/RuneError)
+        ;; If we get a UTF-8 error then there might be
+        ;; upper-case ASCII bytes in the invalid sequence.
+        (set! isAlreadyLowerCase false)
+        (break))
+
+      (when (and (<= \A c) (<= c \Z))
+        (set! isAlreadyLowerCase false)
+        (break)))
+
+
+
+    (when isAlreadyLowerCase
+      (return in))
+
+
+    (let [out (conv (slice byte) in)]
+      (range [i c out]
+        (when (and (<= \A c) (<= c \Z))
+          (set! (aget out i) + (- \a \A))))
+
+
+      (conv string out))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 983} (go/method VerifyHostname "VerifyHostname returns nil if c is a valid certificate for the named host.\nOtherwise it returns an error describing the mismatch.\n\nIP addresses can be optionally enclosed in square brackets and are checked\nagainst the IPAddresses field. Other names are checked case insensitively\nagainst the DNSNames field. If the names are valid hostnames, the certificate\nfields can have a wildcard as the complete left-most label (e.g. *.example.com).\n\nNote that the legacy Common Name field is ignored.\n" ^error [^{:tag (* Certificate)} c ^string h]
+  ;; IP addresses may be written in [ ].
+  (let [candidateIP h]
+    (when (and (>= (len h) 3) (== (aget h 0) \[) (== (aget h (- (len h) 1)) \]))
+      (set! candidateIP (subslice h 1 (- (len h) 1))))
+
+    ;; We use netip.ParseAddr() to allow IPv6 scoped addresses.
+    (when [(values addr err) (netip/ParseAddr candidateIP)] (== err nil)
+      ;; We only match IP addresses against IP SANs.
+      ;; See RFC 6125, Appendix B.2.
+      (let [ip (conv net/IP (.AsSlice addr))]
+        (range [_ candidate (.-IPAddresses c)]
+          (when (.Equal ip candidate)
+            (return nil)))
+
+
+        (return (lit HostnameError c (.String ip)))))
+
+
+    (let [candidateName (toLowerCaseASCII h) ; Save allocations inside the loop.
+        ^{:line 962} validCandidateName (validHostnameInput candidateName)
+        ^{:line 963} hostParts (splitHostname candidateName)]
+
+      (range [_ match (.-DNSNames c)]
+        ;; Ideally, we'd only match valid hostnames according to RFC 6125 like
+        ;; browsers (more or less) do, but in practice Go is used in a wider
+        ;; array of contexts and can't even assume DNS resolution. Instead,
+        ;; always allow perfect matches, and only apply wildcard and trailing
+        ;; dot processing to valid hostnames.
+        (if (and validCandidateName (validHostnamePattern match))
+          (when (matchHostnames match hostParts)
+            (return nil))
+
+          (do
+            (when (matchExactly match candidateName)
+              (return nil)))))
+
+
+
+
+      (lit HostnameError c h))))
+
+
+^{:go/end 987} (go/func splitHostname ^{:tag (slice string)} [^string host]
+  (strings/Split (toLowerCaseASCII (strings/TrimSuffix host ".")) "."))
+
+
+^{:go/end 1041} (go/func checkChainForKeyUsage ^bool [^{:tag (slice (* Certificate))} chain ^{:tag (slice ExtKeyUsage)} keyUsages]
+  (let [usages (make (slice ExtKeyUsage) (len keyUsages))]
+    (copy usages keyUsages)
+
+    (when (== (len chain) 0)
+      (return false))
+
+
+    ^{:go/breaks [[3 1040]]} (let [usagesRemaining (len usages)]
+
+      ;; We walk down the list and cross out any usages that aren't supported
+      ;; by each certificate. If we cross out all the usages, then the chain
+      ;; is unacceptable.
+
+      (label :NextCert
+        (for [i (- (len chain) 1)] (>= i 0) (dec! i)
+          (let [cert (aget chain i)]
+            (when (and (== (len (.-ExtKeyUsage cert)) 0) (== (len (.-UnknownExtKeyUsage cert)) 0))
+              ;; The certificate doesn't have any extended key usage specified.
+              (continue))
+
+
+            (range [_ usage (.-ExtKeyUsage cert)]
+              (when (== usage ExtKeyUsageAny)
+                ;; The certificate is explicitly good for any usage.
+                (continue :NextCert)))
+
+
+
+            (let [^:const ^{:val -1} invalidUsage -1]
+
+              (label :NextRequestedUsage
+                (range [i requestedUsage usages]
+                  (when (== requestedUsage invalidUsage)
+                    (continue))
+
+
+                  (range [_ usage (.-ExtKeyUsage cert)]
+                    (when (== requestedUsage usage)
+                      (continue :NextRequestedUsage)))
+
+
+
+                  (aset usages i invalidUsage)
+                  (dec! usagesRemaining)
+                  (when (== usagesRemaining 0)
+                    (return false))))))))
+
+
+
+
+      true)))
+
+
+^{:go/end 1049} (go/func mustNewOIDFromInts ^OID [^{:tag (slice uint64)} ints]
+  (let [(values oid err) (OIDFromInts ints)]
+    (when (!= err nil)
+      (panic (fmt/Sprintf "OIDFromInts(%v) unexpected error: %v" ints err)))
+
+    ^{:line 1048} oid))
+
+
+(go/type policyGraphNode (struct
+    ^{:line 1052 :tag OID} validPolicy
+    ^{:line 1053 :tag (slice OID)} expectedPolicySet
+    ;; we do not implement qualifiers, so we don't track qualifier_set
+
+    ^{:line 1056 :tag (map (* policyGraphNode) bool)} parents
+    ^{:line 1057 :tag (map (* policyGraphNode) bool)} children))
+
+
+^{:go/end 1072} (go/func newPolicyGraphNode ^{:tag (* policyGraphNode)} [^OID valid ^{:tag (slice (* policyGraphNode))} parents]
+  (let [n (addr ^{:go/breaks [2 4 6 8]} (lit policyGraphNode
+          :validPolicy valid
+          :expectedPolicySet (lit (slice OID) valid)
+          :children (lit (map (* policyGraphNode) bool))
+          :parents (lit (map (* policyGraphNode) bool))))]
+
+    (range [_ p parents]
+      (aset (.-children p) n true)
+      (aset (.-parents n) p true))
+
+    ^{:line 1071} n))
+
+
+(go/type policyGraph (struct
+    ^{:line 1075 :tag (slice (map string (* policyGraphNode)))} strata
+
+    ^{:line 1077 :tag (map string (slice (* policyGraphNode))) :doc "map of OID -> nodes at strata[depth-1] with OID in their expectedPolicySet\n"} parentIndex
+    ^{:line 1078 :tag int} depth))
+
+
+(go/var anyPolicyOID (mustNewOIDFromInts (lit (slice uint64) 2 5 29 32 0)))
+
+^{:go/end 1094} (go/func newPolicyGraph ^{:tag (* policyGraph)} []
+  (let [root ^{:go/breaks [2 4 6 8]} (lit policyGraphNode
+        :validPolicy anyPolicyOID
+        :expectedPolicySet (lit (slice OID) anyPolicyOID)
+        :children (lit (map (* policyGraphNode) bool))
+        :parents (lit (map (* policyGraphNode) bool)))]
+
+    (addr ^{:go/breaks [2 4]} (lit policyGraph
+        :depth 0
+        :strata (lit (slice (map string (* policyGraphNode))) (lit _ [(conv string (.-der anyPolicyOID)) (addr root)]))))))
+
+
+
+^{:go/end 1098} (go/method insert [^{:tag (* policyGraph)} pg ^{:tag (* policyGraphNode)} n]
+  (aset (aget (.-strata pg) (.-depth pg)) (conv string (.-der (.-validPolicy n))) n))
+
+
+^{:go/end 1105} (go/method parentsWithExpected ^{:tag (slice (* policyGraphNode))} [^{:tag (* policyGraph)} pg ^OID expected]
+  (when (== (.-depth pg) 0)
+    (return nil))
+
+  (aget (.-parentIndex pg) (conv string (.-der expected))))
+
+
+^{:go/end 1112} (go/method parentWithAnyPolicy ^{:tag (* policyGraphNode)} [^{:tag (* policyGraph)} pg]
+  (when (== (.-depth pg) 0)
+    (return nil))
+
+  (aget (aget (.-strata pg) (- (.-depth pg) 1)) (conv string (.-der anyPolicyOID))))
+
+
+^{:go/end 1119} (go/method parents ^{:tag (iter/Seq (* policyGraphNode))} [^{:tag (* policyGraph)} pg]
+  (when (== (.-depth pg) 0)
+    (return nil))
+
+  (^{:inst [(map string (* policyGraphNode)) string (* policyGraphNode)]} maps/Values (aget (.-strata pg) (- (.-depth pg) 1))))
+
+
+^{:go/end 1123} (go/method leaves ^{:tag (map string (* policyGraphNode))} [^{:tag (* policyGraph)} pg]
+  (aget (.-strata pg) (.-depth pg)))
+
+
+^{:go/end 1127} (go/method leafWithPolicy ^{:tag (* policyGraphNode)} [^{:tag (* policyGraph)} pg ^OID policy]
+  (aget (aget (.-strata pg) (.-depth pg)) (conv string (.-der policy))))
+
+
+^{:go/end 1141} (go/method deleteLeaf [^{:tag (* policyGraph)} pg ^OID policy]
+  (let [n (aget (aget (.-strata pg) (.-depth pg)) (conv string (.-der policy)))]
+    (when (== n nil)
+      (return))
+
+    (range [p (.-parents n)]
+      (delete (.-children p) n))
+
+    (range [c (.-children n)]
+      (delete (.-parents c) n))
+
+    (delete (aget (.-strata pg) (.-depth pg)) (conv string (.-der policy)))))
+
+
+^{:go/end 1161} (go/method validPolicyNodes ^{:tag (slice (* policyGraphNode))} [^{:tag (* policyGraph)} pg]
+  (let [^{:tag (slice (* policyGraphNode))} validNodes (zero (slice (* policyGraphNode)))]
+    (for [i (.-depth pg)] (>= i 0) (dec! i)
+      (range [_ n (aget (.-strata pg) i)]
+        (when (.Equal (.-validPolicy n) anyPolicyOID)
+          (continue))
+
+
+        (when (== (len (.-parents n)) 1)
+          (range [p (.-parents n)]
+            (when (.Equal (.-validPolicy p) anyPolicyOID)
+              (set! validNodes (append validNodes n)))))))
+
+
+
+
+
+    ^{:line 1160} validNodes))
+
+
+^{:go/end 1174} (go/method prune [^{:tag (* policyGraph)} pg]
+  (for [i (- (.-depth pg) 1)] (> i 0) (dec! i)
+    (range [_ n (aget (.-strata pg) i)]
+      (when (== (len (.-children n)) 0)
+        (range [p (.-parents n)]
+          (delete (.-children p) n))
+
+        (delete (aget (.-strata pg) i) (conv string (.-der (.-validPolicy n))))))))
+
+
+
+
+
+^{:go/end 1186} (go/method incrDepth [^{:tag (* policyGraph)} pg]
+  (set! (.-parentIndex pg) (lit (map string (slice (* policyGraphNode)))))
+  (range [_ n (aget (.-strata pg) (.-depth pg))]
+    (range [_ e (.-expectedPolicySet n)]
+      (aset (.-parentIndex pg) (conv string (.-der e)) (append (aget (.-parentIndex pg) (conv string (.-der e))) n))))
+
+
+
+  (inc! (.-depth pg))
+  (set! (.-strata pg) (append (.-strata pg) (lit (map string (* policyGraphNode))))))
+
+
+^{:go/end 1407} (go/func policiesValid ^bool [^{:tag (slice (* Certificate))} chain ^VerifyOptions opts]
+  ;; The following code implements the policy verification algorithm as
+  ;; specified in RFC 5280 and updated by RFC 9618. In particular the
+  ;; following sections are replaced by RFC 9618:
+  ;;	* 6.1.2 (a)
+  ;;	* 6.1.3 (d)
+  ;;	* 6.1.3 (e)
+  ;;	* 6.1.3 (f)
+  ;;	* 6.1.4 (b)
+  ;;	* 6.1.5 (g)
+
+  (when (== (len chain) 1)
+    (return true))
+
+
+  ;; n is the length of the chain minus the trust anchor
+  (let [n (- (len chain) 1)
+
+      ^{:line 1206} pg (newPolicyGraph)
+      (values ^int inhibitAnyPolicy ^int explicitPolicy ^int policyMapping) (zero int)]
+    (when (not (.-inhibitAnyPolicy opts))
+      (set! inhibitAnyPolicy (+ n 1)))
+
+    (when (not (.-requireExplicitPolicy opts))
+      (set! explicitPolicy (+ n 1)))
+
+    (when (not (.-inhibitPolicyMapping opts))
+      (set! policyMapping (+ n 1)))
+
+
+    (let [initialUserPolicySet (lit (map string bool))]
+      (range [_ p (.-CertificatePolicies opts)]
+        (aset initialUserPolicySet (conv string (.-der p)) true))
+
+      ;; If the user does not pass any policies, we consider
+      ;; that equivalent to passing anyPolicyOID.
+      (when (== (len initialUserPolicySet) 0)
+        (aset initialUserPolicySet (conv string (.-der anyPolicyOID)) true))
+
+
+      (for [i (- n 1)] (>= i 0) (dec! i)
+        (let [cert (aget chain i)
+
+            ^{:line 1231} isSelfSigned (bytes/Equal (.-RawIssuer cert) (.-RawSubject cert))]
+
+          ;; 6.1.3 (e) -- as updated by RFC 9618
+          (when (== (len (.-Policies cert)) 0)
+            (set! pg nil))
+
+
+          ;; 6.1.3 (f) -- as updated by RFC 9618
+          (when (and (== explicitPolicy 0) (== pg nil))
+            (return false))
+
+
+          (when (!= pg nil)
+            (.incrDepth pg)
+
+            (let [policies (lit (map string bool))]
+
+              ;; 6.1.3 (d) (1) -- as updated by RFC 9618
+              (range [_ policy (.-Policies cert)]
+                (aset policies (conv string (.-der policy)) true)
+
+                (when (.Equal policy anyPolicyOID)
+                  (continue))
+
+
+                ;; 6.1.3 (d) (1) (i) -- as updated by RFC 9618
+                (let [parents (.parentsWithExpected pg policy)]
+                  (when (== (len parents) 0)
+                    ;; 6.1.3 (d) (1) (ii) -- as updated by RFC 9618
+                    (when [anyParent (.parentWithAnyPolicy pg)] (!= anyParent nil)
+                      (set! parents (lit (slice (* policyGraphNode)) anyParent))))
+
+
+                  (when (> (len parents) 0)
+                    (.insert pg (newPolicyGraphNode policy parents)))))
+
+
+
+              ;; 6.1.3 (d) (2) -- as updated by RFC 9618
+              ;; NOTE: in the check "n-i < n" our i is different from the i in the specification.
+              ;; In the specification chains go from the trust anchor to the leaf, whereas our
+              ;; chains go from the leaf to the trust anchor, so our i's our inverted. Our
+              ;; check here matches the check "i < n" in the specification.
+              (when (and (aget policies (conv string (.-der anyPolicyOID))) ^:go/paren (or (> inhibitAnyPolicy 0) ^:go/paren (and (< (- n i) n) isSelfSigned)))
+                (let [missing (lit (map string (slice (* policyGraphNode))))
+                    ^{:line 1276} leaves (.leaves pg)]
+                  (range [p (.parents pg)]
+                    (range [_ expected (.-expectedPolicySet p)]
+                      (when (== (aget leaves (conv string (.-der expected))) nil)
+                        (aset missing (conv string (.-der expected)) (append (aget missing (conv string (.-der expected))) p)))))
+
+
+
+
+                  (range [oidStr parents missing]
+                    (.insert pg (newPolicyGraphNode (lit OID :der (conv (slice byte) oidStr)) parents)))))
+
+
+
+              ;; 6.1.3 (d) (3) -- as updated by RFC 9618
+              (.prune pg)
+
+              (when (!= i 0)
+                ;; 6.1.4 (b) -- as updated by RFC 9618
+                (when (> (len (.-PolicyMappings cert)) 0)
+                  ;; collect map of issuer -> []subject
+                  (let [mappings (lit (map string (slice OID)))]
+
+                    (range [_ mapping (.-PolicyMappings cert)]
+                      (if (> policyMapping 0) (do
+                          (when (or (.Equal (.-IssuerDomainPolicy mapping) anyPolicyOID) (.Equal (.-SubjectDomainPolicy mapping) anyPolicyOID))
+                            ;; Invalid mapping
+                            (return false))
+
+                          (aset mappings (conv string (.-der (.-IssuerDomainPolicy mapping))) (append (aget mappings (conv string (.-der (.-IssuerDomainPolicy mapping)))) (.-SubjectDomainPolicy mapping))))
+
+                        ;; 6.1.4 (b) (3) (i) -- as updated by RFC 9618
+                        (.deleteLeaf pg (.-IssuerDomainPolicy mapping))))
+
+
+
+                    ;; 6.1.4 (b) (3) (ii) -- as updated by RFC 9618
+                    (.prune pg)
+
+                    (range [issuerStr subjectPolicies mappings]
+                      ;; 6.1.4 (b) (1) -- as updated by RFC 9618
+                      (if [matching (.leafWithPolicy pg (lit OID :der (conv (slice byte) issuerStr)))] (!= matching nil)
+                        (set! (.-expectedPolicySet matching) subjectPolicies)
+                        (when [matching (.leafWithPolicy pg anyPolicyOID)] (!= matching nil)
+                          ;; 6.1.4 (b) (2) -- as updated by RFC 9618
+                          (let [n (newPolicyGraphNode (lit OID :der (conv (slice byte) issuerStr)) (lit (slice (* policyGraphNode)) matching))]
+                            (set! (.-expectedPolicySet n) subjectPolicies)
+                            (.insert pg n))))))))))
+
+
+
+
+
+
+          (when (!= i 0)
+            ;; 6.1.4 (h)
+            (when (not isSelfSigned)
+              (when (> explicitPolicy 0)
+                (dec! explicitPolicy))
+
+              (when (> policyMapping 0)
+                (dec! policyMapping))
+
+              (when (> inhibitAnyPolicy 0)
+                (dec! inhibitAnyPolicy)))
+
+
+
+            ;; 6.1.4 (i)
+            (when (and ^:go/paren (or (> (.-RequireExplicitPolicy cert) 0) (.-RequireExplicitPolicyZero cert)) (< (.-RequireExplicitPolicy cert) explicitPolicy))
+              (set! explicitPolicy (.-RequireExplicitPolicy cert)))
+
+            (when (and ^:go/paren (or (> (.-InhibitPolicyMapping cert) 0) (.-InhibitPolicyMappingZero cert)) (< (.-InhibitPolicyMapping cert) policyMapping))
+              (set! policyMapping (.-InhibitPolicyMapping cert)))
+
+            ;; 6.1.4 (j)
+            (when (and ^:go/paren (or (> (.-InhibitAnyPolicy cert) 0) (.-InhibitAnyPolicyZero cert)) (< (.-InhibitAnyPolicy cert) inhibitAnyPolicy))
+              (set! inhibitAnyPolicy (.-InhibitAnyPolicy cert))))))
+
+
+
+
+      ;; 6.1.5 (a)
+      (when (> explicitPolicy 0)
+        (dec! explicitPolicy))
+
+
+      ;; 6.1.5 (b)
+      (when (.-RequireExplicitPolicyZero (aget chain 0))
+        (set! explicitPolicy 0))
+
+
+      ;; 6.1.5 (g) (1) -- as updated by RFC 9618
+      (let [^{:tag (slice (* policyGraphNode))} validPolicyNodeSet (zero (slice (* policyGraphNode)))]
+        ;; 6.1.5 (g) (2) -- as updated by RFC 9618
+        (when (!= pg nil)
+          (set! validPolicyNodeSet (.validPolicyNodes pg))
+          ;; 6.1.5 (g) (3) -- as updated by RFC 9618
+          (when [currentAny (.leafWithPolicy pg anyPolicyOID)] (!= currentAny nil)
+            (set! validPolicyNodeSet (append validPolicyNodeSet currentAny))))
+
+
+
+        ;; 6.1.5 (g) (4) -- as updated by RFC 9618
+        (let [authorityConstrainedPolicySet (lit (map string bool))]
+          (range [_ n validPolicyNodeSet]
+            (aset authorityConstrainedPolicySet (conv string (.-der (.-validPolicy n))) true))
+
+          ;; 6.1.5 (g) (5) -- as updated by RFC 9618
+          ^{:go/breaks [[4 1406]]} (let [userConstrainedPolicySet (^{:inst [(map string bool) string bool]} maps/Clone authorityConstrainedPolicySet)]
+            ;; 6.1.5 (g) (6) -- as updated by RFC 9618
+            (when (or (!= (len initialUserPolicySet) 1) (not (aget initialUserPolicySet (conv string (.-der anyPolicyOID)))))
+              ;; 6.1.5 (g) (6) (i) -- as updated by RFC 9618
+              (range [p userConstrainedPolicySet]
+                (when (not (aget initialUserPolicySet p))
+                  (delete userConstrainedPolicySet p)))
+
+
+              ;; 6.1.5 (g) (6) (ii) -- as updated by RFC 9618
+              (when (aget authorityConstrainedPolicySet (conv string (.-der anyPolicyOID)))
+                (range [policy initialUserPolicySet]
+                  (aset userConstrainedPolicySet policy true))))
+
+
+
+
+            (when (and (== explicitPolicy 0) (== (len userConstrainedPolicySet) 0))
+              (return false))
+
+
+            true))))))

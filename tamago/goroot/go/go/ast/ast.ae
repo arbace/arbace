@@ -1,0 +1,1153 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package ast declares the types used to represent syntax trees for Go
+;; packages.
+;;
+;; Syntax trees may be constructed directly, but they are typically
+;; produced from Go source code by the parser; see the
+;; [go/parser.ParseFile] function.
+(in-ns 'go.go.ast) (go/file "ast.go" :doc "Package ast declares the types used to represent syntax trees for Go\npackages.\n\nSyntax trees may be constructed directly, but they are typically\nproduced from Go source code by the parser; see the\n[go/parser.ParseFile] function.\n" :imports [
+
+
+    ^{:line 14} [token "go/token"]
+    ^{:line 15} [strings "strings"]])
+
+
+;; ----------------------------------------------------------------------------
+;; Interfaces
+;;
+;; There are 3 main classes of nodes: Expressions and type nodes,
+;; statement nodes, and declaration nodes. The node names usually
+;; match the corresponding Go spec production names to which they
+;; correspond. The node fields correspond to the individual parts
+;; of the respective productions.
+;;
+;; All nodes contain position information marking the beginning of
+;; the corresponding source text segment; it is accessible via the
+;; Pos accessor method. Nodes may contain additional position info
+;; for language constructs where comments may be found between parts
+;; of the construct (typically any larger, parenthesized subpart).
+;; That position information is needed to properly position comments
+;; when printing the construct.
+
+
+(go/type Node "All node types implement the Node interface.\n" (interface
+    (Pos ^token/Pos []) ; position of first character belonging to the node
+    (End ^token/Pos []))) ; position of first character immediately after the node
+
+
+
+(go/type Expr "All expression nodes implement the Expr interface.\n" (interface
+    ^{:line 43} Node
+    (exprNode [])))
+
+
+
+(go/type Stmt "All statement nodes implement the Stmt interface.\n" (interface
+    ^{:line 49} Node
+    (stmtNode [])))
+
+
+
+(go/type Decl "All declaration nodes implement the Decl interface.\n" (interface
+    ^{:line 55} Node
+    (declNode [])))
+
+
+;; ----------------------------------------------------------------------------
+;; Comments
+
+
+
+
+
+
+
+(go/type Comment "A Comment node represents a single //-style or /*-style comment.\n\nThe Text field contains the comment text without carriage returns (\\r) that\nmay have been present in the source. Because a comment's end position is\ncomputed using len(Text), the position reported by [Comment.End] does not match the\ntrue source end position for comments containing carriage returns.\n" (struct
+    ^{:line 69 :tag token/Pos} Slash ; position of "/" starting the comment
+    ^{:line 70 :tag string} Text)) ; comment text (excluding '\n' for //-style comments)
+
+
+^{:go/end 73} (go/method Pos ^token/Pos [^{:tag (* Comment)} c] (.-Slash c))
+^{:go/end 74} (go/method End ^token/Pos [^{:tag (* Comment)} c] (conv token/Pos (+ (conv int (.-Slash c)) (len (.-Text c)))))
+
+
+
+(go/type CommentGroup "A CommentGroup represents a sequence of comments\nwith no other tokens and no empty lines between.\n" (struct
+    ^{:line 79 :tag (slice (* Comment))} List)) ; len(List) > 0
+
+
+^{:go/end 82} (go/method Pos ^token/Pos [^{:tag (* CommentGroup)} g] (.Pos (aget (.-List g) 0)))
+^{:go/end 83} (go/method End ^token/Pos [^{:tag (* CommentGroup)} g] (.End (aget (.-List g) (- (len (.-List g)) 1))))
+
+^{:go/end 85} (go/func isWhitespace ^bool [^byte ch] (or (== ch \space) (== ch \tab) (== ch \newline) (== ch \return)))
+
+^{:go/end 93} (go/func stripTrailingWhitespace ^string [^string s]
+  (let [i (len s)]
+    (while (and (> i 0) (isWhitespace (aget s (- i 1))))
+      (dec! i))
+
+    (subslice s 0 i)))
+
+
+
+
+
+
+
+
+^{:go/end 162} (go/method Text "Text returns the text of the comment.\nComment markers (//, /*, and */), the first space of a line comment, and\nleading and trailing empty lines are removed.\nComment directives like \"//line\" and \"//go:noinline\" are also removed.\nMultiple empty lines are reduced to one, and trailing space on lines is trimmed.\nUnless the result is empty, it is newline-terminated.\n" ^string [^{:tag (* CommentGroup)} g]
+  (when (== g nil)
+    (return ""))
+
+  (let [comments (make (slice string) (len (.-List g)))]
+    (range [i c (.-List g)]
+      (aset comments i (.-Text c)))
+
+
+    (let [lines (make (slice string) 0 10)] ; most comments are less than 10 lines
+      (range [_ c comments]
+        ;; Remove comment markers.
+        ;; The parser has given us exactly the comment text.
+        (switch (aget c 1)
+          (case [\/]
+            ;;-style comment (no newline at the end)
+            (set! c (subslice c 2))
+            (when (== (len c) 0)
+              ;; empty line
+              (break))
+
+            (when (== (aget c 0) \space)
+              ;; strip first space - required for Example tests
+              (set! c (subslice c 1))
+              (break))
+
+            (when (isDirective c)
+              ;; Ignore //go:noinline, //line, and so on.
+              (continue)))
+
+          (case [\*]
+            ;; /*-style comment */
+            (set! c (subslice c 2 (- (len c) 2)))))
+
+
+        ;; Split on newlines.
+        (let [cl (strings/SplitSeq c "\n")]
+
+          ;; Walk lines, stripping trailing white space and adding to list.
+          (range [l cl]
+            (set! lines (append lines (stripTrailingWhitespace l))))))
+
+
+
+      ;; Remove leading blank lines; convert runs of
+      ;; interior blank lines to a single blank line.
+      (let [n 0]
+        (range [_ line lines]
+          (when (or (!= line "") (and (> n 0) (!= (aget lines (- n 1)) "")))
+            (aset lines n line)
+            (inc! n)))
+
+
+        (set! lines (subslice lines 0 n))
+
+        ;; Add final "" entry to get trailing newline from Join.
+        (when (and (> n 0) (!= (aget lines (- n 1)) ""))
+          (set! lines (append lines "")))
+
+
+        (strings/Join lines "\n")))))
+
+
+
+
+^{:go/end 191} (go/func isDirective "isDirective reports whether c is a comment directive.\nThis code is also in go/printer.\n" ^bool [^string c]
+  ;; "//line " is a line directive.
+  ;; "//extern " is for gccgo.
+  ;; "//export " is for cgo.
+  ;; (The // has been removed.)
+  (when (or (strings/HasPrefix c "line ") (strings/HasPrefix c "extern ") (strings/HasPrefix c "export "))
+    (return true))
+
+
+  ;; "//[a-z0-9]+:[a-z0-9]"
+  ;; (The // has been removed.)
+  ^{:go/breaks [[4 190]]} (let [colon (strings/Index c ":")]
+    (when (or (<= colon 0) (>= (+ colon 1) (len c)))
+      (return false))
+
+    (for [i 0] (<= i (+ colon 1)) (inc! i)
+      (when (== i colon)
+        (continue))
+
+      (let [b (aget c i)]
+        (when (not (or (and (<= \a b) (<= b \z)) (and (<= \0 b) (<= b \9))))
+          (return false))))
+
+
+    true))
+
+
+;; ----------------------------------------------------------------------------
+;; Expressions and types
+
+
+
+
+
+
+(go/type Field "A Field represents a Field declaration list in a struct type,\na method list in an interface type, or a parameter/result declaration\nin a signature.\n[Field.Names] is nil for unnamed parameters (parameter lists which only contain types)\nand embedded struct fields. In the latter case, the field name is the type name.\n" (struct
+    ^{:line 202 :tag (* CommentGroup)} Doc ; associated documentation; or nil
+    ^{:line 203 :tag (slice (* Ident))} Names ; field/method/(type) parameter names; or nil
+    ^{:line 204 :tag Expr} Type ; field/method/parameter type; or nil
+    ^{:line 205 :tag (* BasicLit)} Tag ; field tag; or nil
+    ^{:line 206 :tag (* CommentGroup)} Comment)) ; line comments; or nil
+
+
+^{:go/end 217} (go/method Pos ^token/Pos [^{:tag (* Field)} f]
+  (when (> (len (.-Names f)) 0)
+    (return (.Pos (aget (.-Names f) 0))))
+
+  (when (!= (.-Type f) nil)
+    (return (.Pos (.-Type f))))
+
+  ^{:line 216} token/NoPos)
+
+
+^{:go/end 230} (go/method End ^token/Pos [^{:tag (* Field)} f]
+  (when (!= (.-Tag f) nil)
+    (return (.End (.-Tag f))))
+
+  (when (!= (.-Type f) nil)
+    (return (.End (.-Type f))))
+
+  (when (> (len (.-Names f)) 0)
+    (return (.End (aget (.-Names f) (- (len (.-Names f)) 1)))))
+
+  ^{:line 229} token/NoPos)
+
+
+
+
+(go/type FieldList "A FieldList represents a list of Fields, enclosed by parentheses,\ncurly braces, or square brackets.\n" (struct
+    ^{:line 235 :tag token/Pos} Opening ; position of opening parenthesis/brace/bracket, if any
+    ^{:line 236 :tag (slice (* Field))} List ; field list; or nil
+    ^{:line 237 :tag token/Pos} Closing)) ; position of closing parenthesis/brace/bracket, if any
+
+
+^{:go/end 250} (go/method Pos ^token/Pos [^{:tag (* FieldList)} f]
+  (when (.IsValid (.-Opening f))
+    (return (.-Opening f)))
+
+  ;; the list should not be empty in this case;
+  ;; be conservative and guard against bad ASTs
+  (when (> (len (.-List f)) 0)
+    (return (.Pos (aget (.-List f) 0))))
+
+  ^{:line 249} token/NoPos)
+
+
+^{:go/end 262} (go/method End ^token/Pos [^{:tag (* FieldList)} f]
+  (when (.IsValid (.-Closing f))
+    (return (+ (.-Closing f) 1)))
+
+  ;; the list should not be empty in this case;
+  ;; be conservative and guard against bad ASTs
+  (when [n (len (.-List f))] (> n 0)
+    (return (.End (aget (.-List f) (- n 1)))))
+
+  ^{:line 261} token/NoPos)
+
+
+
+^{:go/end 277} (go/method NumFields "NumFields returns the number of parameters or struct fields represented by a [FieldList].\n" ^int [^{:tag (* FieldList)} f]
+  (let [n 0]
+    (when (!= f nil)
+      (range [_ g (.-List f)]
+        (let [m (len (.-Names g))]
+          (when (== m 0)
+            (set! m 1))
+
+          (set! n + m))))
+
+
+    ^{:line 276} n))
+
+
+
+
+(go/type "An expression is represented by a tree consisting of one\nor more of the following concrete expression nodes.\n"
+
+
+
+
+  ^{:line 286} [^{:doc "A BadExpr node is a placeholder for an expression containing\nsyntax errors for which a correct expression node cannot be\ncreated.\n"} BadExpr (struct
+      ^{:line 287 :tag token/Pos} From ^token/Pos To)] ; position range of bad expression
+
+
+
+  ^{:line 291} [^{:doc "An Ident node represents an identifier.\n"} Ident (struct
+      ^{:line 292 :tag token/Pos} NamePos ; identifier position
+      ^{:line 293 :tag string} Name ; identifier name
+      ^{:line 294 :tag (* Object)} Obj)] ; denoted object, or nil. Deprecated: see Object.
+
+
+
+
+
+  ^{:line 300} [^{:doc "An Ellipsis node stands for the \"...\" type in a\nparameter list or the \"...\" length in an array type.\n"} Ellipsis (struct
+      ^{:line 301 :tag token/Pos} Ellipsis ; position of "..."
+      ^{:line 302 :tag Expr} Elt)] ; ellipsis element type (parameter lists only); or nil
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 316} [^{:doc "A BasicLit node represents a literal of basic type.\n\nNote that for the CHAR and STRING kinds, the literal is stored\nwith its quotes. For example, for a double-quoted STRING, the\nfirst and the last rune in the Value field will be \". The\n[strconv.Unquote] and [strconv.UnquoteChar] functions can be\nused to unquote STRING and CHAR values, respectively.\n\nFor raw string literals (Kind == token.STRING && Value[0] == '`'),\nthe Value field contains the string text without carriage returns (\\r) that\nmay have been present in the source.\n"} BasicLit (struct
+      ^{:line 317 :tag token/Pos} ValuePos ; literal position
+      ^{:line 318 :tag token/Pos} ValueEnd ; position immediately after the literal
+      ^{:line 319 :tag token/Token} Kind ; token.INT, token.FLOAT, token.IMAG, token.CHAR, or token.STRING
+      ^{:line 320 :tag string} Value)] ; literal string; e.g. 42, 0x7f, 3.14, 1e-9, 2.4i, 'a', '\x7f', "foo" or `\m\n\o`
+
+
+
+  ^{:line 324} [^{:doc "A FuncLit node represents a function literal.\n"} FuncLit (struct
+      ^{:line 325 :tag (* FuncType)} Type ; function type
+      ^{:line 326 :tag (* BlockStmt)} Body)] ; function body
+
+
+
+  ^{:line 330} [^{:doc "A CompositeLit node represents a composite literal.\n"} CompositeLit (struct
+      ^{:line 331 :tag Expr} Type ; literal type; or nil
+      ^{:line 332 :tag token/Pos} Lbrace ; position of "{"
+      ^{:line 333 :tag (slice Expr)} Elts ; list of composite elements; or nil
+      ^{:line 334 :tag token/Pos} Rbrace ; position of "}"
+      ^{:line 335 :tag bool} Incomplete)] ; true if (source) expressions are missing in the Elts list
+
+
+
+  ^{:line 339} [^{:doc "A ParenExpr node represents a parenthesized expression.\n"} ParenExpr (struct
+      ^{:line 340 :tag token/Pos} Lparen ; position of "("
+      ^{:line 341 :tag Expr} X ; parenthesized expression
+      ^{:line 342 :tag token/Pos} Rparen)] ; position of ")"
+
+
+
+  ^{:line 346} [^{:doc "A SelectorExpr node represents an expression followed by a selector.\n"} SelectorExpr (struct
+      ^{:line 347 :tag Expr} X ; expression
+      ^{:line 348 :tag (* Ident)} Sel)] ; field selector
+
+
+
+  ^{:line 352} [^{:doc "An IndexExpr node represents an expression followed by an index.\n"} IndexExpr (struct
+      ^{:line 353 :tag Expr} X ; expression
+      ^{:line 354 :tag token/Pos} Lbrack ; position of "["
+      ^{:line 355 :tag Expr} Index ; index expression
+      ^{:line 356 :tag token/Pos} Rbrack)] ; position of "]"
+
+
+
+
+  ^{:line 361} [^{:doc "An IndexListExpr node represents an expression followed by multiple\nindices.\n"} IndexListExpr (struct
+      ^{:line 362 :tag Expr} X ; expression
+      ^{:line 363 :tag token/Pos} Lbrack ; position of "["
+      ^{:line 364 :tag (slice Expr)} Indices ; index expressions
+      ^{:line 365 :tag token/Pos} Rbrack)] ; position of "]"
+
+
+
+  ^{:line 369} [^{:doc "A SliceExpr node represents an expression followed by slice indices.\n"} SliceExpr (struct
+      ^{:line 370 :tag Expr} X ; expression
+      ^{:line 371 :tag token/Pos} Lbrack ; position of "["
+      ^{:line 372 :tag Expr} Low ; begin of slice range; or nil
+      ^{:line 373 :tag Expr} High ; end of slice range; or nil
+      ^{:line 374 :tag Expr} Max ; maximum capacity of slice; or nil
+      ^{:line 375 :tag bool} Slice3 ; true if 3-index slice (2 colons present)
+      ^{:line 376 :tag token/Pos} Rbrack)] ; position of "]"
+
+
+
+
+
+  ^{:line 382} [^{:doc "A TypeAssertExpr node represents an expression followed by a\ntype assertion.\n"} TypeAssertExpr (struct
+      ^{:line 383 :tag Expr} X ; expression
+      ^{:line 384 :tag token/Pos} Lparen ; position of "("
+      ^{:line 385 :tag Expr} Type ; asserted type; nil means type switch X.(type)
+      ^{:line 386 :tag token/Pos} Rparen)] ; position of ")"
+
+
+
+  ^{:line 390} [^{:doc "A CallExpr node represents an expression followed by an argument list.\n"} CallExpr (struct
+      ^{:line 391 :tag Expr} Fun ; function expression
+      ^{:line 392 :tag token/Pos} Lparen ; position of "("
+      ^{:line 393 :tag (slice Expr)} Args ; function arguments; or nil
+      ^{:line 394 :tag token/Pos} Ellipsis ; position of "..." (token.NoPos if there is no "...")
+      ^{:line 395 :tag token/Pos} Rparen)] ; position of ")"
+
+
+
+
+
+  ^{:line 401} [^{:doc "A StarExpr node represents an expression of the form \"*\" Expression.\nSemantically it could be a unary \"*\" expression, or a pointer type.\n"} StarExpr (struct
+      ^{:line 402 :tag token/Pos} Star ; position of "*"
+      ^{:line 403 :tag Expr} X)] ; operand
+
+
+
+
+
+  ^{:line 409} [^{:doc "A UnaryExpr node represents a unary expression.\nUnary \"*\" expressions are represented via StarExpr nodes.\n"} UnaryExpr (struct
+      ^{:line 410 :tag token/Pos} OpPos ; position of Op
+      ^{:line 411 :tag token/Token} Op ; operator
+      ^{:line 412 :tag Expr} X)] ; operand
+
+
+
+  ^{:line 416} [^{:doc "A BinaryExpr node represents a binary expression.\n"} BinaryExpr (struct
+      ^{:line 417 :tag Expr} X ; left operand
+      ^{:line 418 :tag token/Pos} OpPos ; position of Op
+      ^{:line 419 :tag token/Token} Op ; operator
+      ^{:line 420 :tag Expr} Y)] ; right operand
+
+
+
+
+
+  ^{:line 426} [^{:doc "A KeyValueExpr node represents (key : value) pairs\nin composite literals.\n"} KeyValueExpr (struct
+      ^{:line 427 :tag Expr} Key
+      ^{:line 428 :tag token/Pos} Colon ; position of ":"
+      ^{:line 429 :tag Expr} Value)])
+
+
+
+
+
+(go/type ChanDir "The direction of a channel type is indicated by a bit\nmask including one or both of the following constants.\n" int)
+
+(go/const
+  ^{:line 438} [^{:tag ChanDir :val 1} SEND (<< 1 iota)]
+  ^{:line 439} [^{:val 2} RECV])
+
+
+
+
+
+(go/type "A type is represented by a tree consisting of one\nor more of the following type-specific expression\nnodes.\n"
+
+  ^{:line 447} [^{:doc "An ArrayType node represents an array or slice type.\n"} ArrayType (struct
+      ^{:line 448 :tag token/Pos} Lbrack ; position of "["
+      ^{:line 449 :tag Expr} Len ; Ellipsis node for [...]T array types, nil for slice types
+      ^{:line 450 :tag Expr} Elt)] ; element type
+
+
+
+  ^{:line 454} [^{:doc "A StructType node represents a struct type.\n"} StructType (struct
+      ^{:line 455 :tag token/Pos} Struct ; position of "struct" keyword
+      ^{:line 456 :tag (* FieldList)} Fields ; list of field declarations
+      ^{:line 457 :tag bool} Incomplete)] ; true if (source) fields are missing in the Fields list
+
+
+  ;; Pointer types are represented via StarExpr nodes.
+
+
+  ^{:line 463} [^{:doc "A FuncType node represents a function type.\n"} FuncType (struct
+      ^{:line 464 :tag token/Pos} Func ; position of "func" keyword (token.NoPos if there is no "func")
+      ^{:line 465 :tag (* FieldList)} TypeParams ; type parameters; or nil
+      ^{:line 466 :tag (* FieldList)} Params ; (incoming) parameters; non-nil
+      ^{:line 467 :tag (* FieldList)} Results)] ; (outgoing) results; or nil
+
+
+
+  ^{:line 471} [^{:doc "An InterfaceType node represents an interface type.\n"} InterfaceType (struct
+      ^{:line 472 :tag token/Pos} Interface ; position of "interface" keyword
+      ^{:line 473 :tag (* FieldList)} Methods ; list of embedded interfaces, methods, or types
+      ^{:line 474 :tag bool} Incomplete)] ; true if (source) methods or types are missing in the Methods list
+
+
+
+  ^{:line 478} [^{:doc "A MapType node represents a map type.\n"} MapType (struct
+      ^{:line 479 :tag token/Pos} Map ; position of "map" keyword
+      ^{:line 480 :tag Expr} Key
+      ^{:line 481 :tag Expr} Value)]
+
+
+
+  ^{:line 485} [^{:doc "A ChanType node represents a channel type.\n"} ChanType (struct
+      ^{:line 486 :tag token/Pos} Begin ; position of "chan" keyword or "<-" (whichever comes first)
+      ^{:line 487 :tag token/Pos} Arrow ; position of "<-" (token.NoPos if there is no "<-")
+      ^{:line 488 :tag ChanDir} Dir ; channel direction
+      ^{:line 489 :tag Expr} Value)]) ; value type
+
+
+
+;; Pos and End implementations for expression/type nodes.
+
+^{:go/end 495} (go/method Pos ^token/Pos [^{:tag (* BadExpr)} x] (.-From x))
+^{:go/end 496} (go/method Pos ^token/Pos [^{:tag (* Ident)} x] (.-NamePos x))
+^{:go/end 497} (go/method Pos ^token/Pos [^{:tag (* Ellipsis)} x] (.-Ellipsis x))
+^{:go/end 498} (go/method Pos ^token/Pos [^{:tag (* BasicLit)} x] (.-ValuePos x))
+^{:go/end 499} (go/method Pos ^token/Pos [^{:tag (* FuncLit)} x] (.Pos (.-Type x)))
+^{:go/end 505} (go/method Pos ^token/Pos [^{:tag (* CompositeLit)} x]
+  (when (!= (.-Type x) nil)
+    (return (.Pos (.-Type x))))
+
+  (.-Lbrace x))
+
+^{:go/end 506} (go/method Pos ^token/Pos [^{:tag (* ParenExpr)} x] (.-Lparen x))
+^{:go/end 507} (go/method Pos ^token/Pos [^{:tag (* SelectorExpr)} x] (.Pos (.-X x)))
+^{:go/end 508} (go/method Pos ^token/Pos [^{:tag (* IndexExpr)} x] (.Pos (.-X x)))
+^{:go/end 509} (go/method Pos ^token/Pos [^{:tag (* IndexListExpr)} x] (.Pos (.-X x)))
+^{:go/end 510} (go/method Pos ^token/Pos [^{:tag (* SliceExpr)} x] (.Pos (.-X x)))
+^{:go/end 511} (go/method Pos ^token/Pos [^{:tag (* TypeAssertExpr)} x] (.Pos (.-X x)))
+^{:go/end 512} (go/method Pos ^token/Pos [^{:tag (* CallExpr)} x] (.Pos (.-Fun x)))
+^{:go/end 513} (go/method Pos ^token/Pos [^{:tag (* StarExpr)} x] (.-Star x))
+^{:go/end 514} (go/method Pos ^token/Pos [^{:tag (* UnaryExpr)} x] (.-OpPos x))
+^{:go/end 515} (go/method Pos ^token/Pos [^{:tag (* BinaryExpr)} x] (.Pos (.-X x)))
+^{:go/end 516} (go/method Pos ^token/Pos [^{:tag (* KeyValueExpr)} x] (.Pos (.-Key x)))
+^{:go/end 517} (go/method Pos ^token/Pos [^{:tag (* ArrayType)} x] (.-Lbrack x))
+^{:go/end 518} (go/method Pos ^token/Pos [^{:tag (* StructType)} x] (.-Struct x))
+^{:go/end 524} (go/method Pos ^token/Pos [^{:tag (* FuncType)} x]
+  (when (or (.IsValid (.-Func x)) (== (.-Params x) nil)) ; see issue 3870
+    (return (.-Func x)))
+
+  (.Pos (.-Params x))) ; interface method declarations have no "func" keyword
+
+^{:go/end 525} (go/method Pos ^token/Pos [^{:tag (* InterfaceType)} x] (.-Interface x))
+^{:go/end 526} (go/method Pos ^token/Pos [^{:tag (* MapType)} x] (.-Map x))
+^{:go/end 527} (go/method Pos ^token/Pos [^{:tag (* ChanType)} x] (.-Begin x))
+
+^{:go/end 529} (go/method End ^token/Pos [^{:tag (* BadExpr)} x] (.-To x))
+^{:go/end 530} (go/method End ^token/Pos [^{:tag (* Ident)} x] (conv token/Pos (+ (conv int (.-NamePos x)) (len (.-Name x)))))
+^{:go/end 536} (go/method End ^token/Pos [^{:tag (* Ellipsis)} x]
+  (when (!= (.-Elt x) nil)
+    (return (.End (.-Elt x))))
+
+  (+ (.-Ellipsis x) 3)) ; len("...")
+
+^{:go/end 545} (go/method End ^token/Pos [^{:tag (* BasicLit)} x]
+  (when (not (.IsValid (.-ValueEnd x)))
+    ;; Not from parser; use a heuristic.
+    ;; (Incorrect for `...` containing \r\n;
+    ;; see https://go.dev/issue/76031.)
+    (return (conv token/Pos (+ (conv int (.-ValuePos x)) (len (.-Value x))))))
+
+  (.-ValueEnd x))
+
+^{:go/end 546} (go/method End ^token/Pos [^{:tag (* FuncLit)} x] (.End (.-Body x)))
+^{:go/end 547} (go/method End ^token/Pos [^{:tag (* CompositeLit)} x] (+ (.-Rbrace x) 1))
+^{:go/end 548} (go/method End ^token/Pos [^{:tag (* ParenExpr)} x] (+ (.-Rparen x) 1))
+^{:go/end 549} (go/method End ^token/Pos [^{:tag (* SelectorExpr)} x] (.End (.-Sel x)))
+^{:go/end 550} (go/method End ^token/Pos [^{:tag (* IndexExpr)} x] (+ (.-Rbrack x) 1))
+^{:go/end 551} (go/method End ^token/Pos [^{:tag (* IndexListExpr)} x] (+ (.-Rbrack x) 1))
+^{:go/end 552} (go/method End ^token/Pos [^{:tag (* SliceExpr)} x] (+ (.-Rbrack x) 1))
+^{:go/end 553} (go/method End ^token/Pos [^{:tag (* TypeAssertExpr)} x] (+ (.-Rparen x) 1))
+^{:go/end 554} (go/method End ^token/Pos [^{:tag (* CallExpr)} x] (+ (.-Rparen x) 1))
+^{:go/end 555} (go/method End ^token/Pos [^{:tag (* StarExpr)} x] (.End (.-X x)))
+^{:go/end 556} (go/method End ^token/Pos [^{:tag (* UnaryExpr)} x] (.End (.-X x)))
+^{:go/end 557} (go/method End ^token/Pos [^{:tag (* BinaryExpr)} x] (.End (.-Y x)))
+^{:go/end 558} (go/method End ^token/Pos [^{:tag (* KeyValueExpr)} x] (.End (.-Value x)))
+^{:go/end 559} (go/method End ^token/Pos [^{:tag (* ArrayType)} x] (.End (.-Elt x)))
+^{:go/end 560} (go/method End ^token/Pos [^{:tag (* StructType)} x] (.End (.-Fields x)))
+^{:go/end 566} (go/method End ^token/Pos [^{:tag (* FuncType)} x]
+  (when (!= (.-Results x) nil)
+    (return (.End (.-Results x))))
+
+  (.End (.-Params x)))
+
+^{:go/end 567} (go/method End ^token/Pos [^{:tag (* InterfaceType)} x] (.End (.-Methods x)))
+^{:go/end 568} (go/method End ^token/Pos [^{:tag (* MapType)} x] (.End (.-Value x)))
+^{:go/end 569} (go/method End ^token/Pos [^{:tag (* ChanType)} x] (.End (.-Value x)))
+
+
+
+^{:go/end 573} (go/method exprNode "exprNode() ensures that only expression/type nodes can be\nassigned to an Expr.\n" [(* BadExpr)])
+^{:go/end 574} (go/method exprNode [(* Ident)])
+^{:go/end 575} (go/method exprNode [(* Ellipsis)])
+^{:go/end 576} (go/method exprNode [(* BasicLit)])
+^{:go/end 577} (go/method exprNode [(* FuncLit)])
+^{:go/end 578} (go/method exprNode [(* CompositeLit)])
+^{:go/end 579} (go/method exprNode [(* ParenExpr)])
+^{:go/end 580} (go/method exprNode [(* SelectorExpr)])
+^{:go/end 581} (go/method exprNode [(* IndexExpr)])
+^{:go/end 582} (go/method exprNode [(* IndexListExpr)])
+^{:go/end 583} (go/method exprNode [(* SliceExpr)])
+^{:go/end 584} (go/method exprNode [(* TypeAssertExpr)])
+^{:go/end 585} (go/method exprNode [(* CallExpr)])
+^{:go/end 586} (go/method exprNode [(* StarExpr)])
+^{:go/end 587} (go/method exprNode [(* UnaryExpr)])
+^{:go/end 588} (go/method exprNode [(* BinaryExpr)])
+^{:go/end 589} (go/method exprNode [(* KeyValueExpr)])
+
+^{:go/end 591} (go/method exprNode [(* ArrayType)])
+^{:go/end 592} (go/method exprNode [(* StructType)])
+^{:go/end 593} (go/method exprNode [(* FuncType)])
+^{:go/end 594} (go/method exprNode [(* InterfaceType)])
+^{:go/end 595} (go/method exprNode [(* MapType)])
+^{:go/end 596} (go/method exprNode [(* ChanType)])
+
+;; ----------------------------------------------------------------------------
+;; Convenience functions for Idents
+
+
+
+^{:go/end 603} (go/func NewIdent "NewIdent creates a new [Ident] without position.\nUseful for ASTs generated by code other than the Go parser.\n" ^{:tag (* Ident)} [^string name] (addr (lit Ident token/NoPos name nil)))
+
+
+^{:go/end 606} (go/func IsExported "IsExported reports whether name starts with an upper-case letter.\n" ^bool [^string name] (token/IsExported name))
+
+
+^{:go/end 609} (go/method IsExported "IsExported reports whether id starts with an upper-case letter.\n" ^bool [^{:tag (* Ident)} id] (token/IsExported (.-Name id)))
+
+^{:go/breaks [[4 615]] :go/end 616} (go/method String ^string [^{:tag (* Ident)} id]
+  (when (!= id nil)
+    (return (.-Name id)))
+
+  "<nil>")
+
+
+;; ----------------------------------------------------------------------------
+;; Statements
+
+
+
+(go/type "A statement is represented by a tree consisting of one\nor more of the following concrete statement nodes.\n"
+
+
+
+
+  ^{:line 628} [^{:doc "A BadStmt node is a placeholder for statements containing\nsyntax errors for which no correct statement nodes can be\ncreated.\n"} BadStmt (struct
+      ^{:line 629 :tag token/Pos} From ^token/Pos To)] ; position range of bad statement
+
+
+
+  ^{:line 633} [^{:doc "A DeclStmt node represents a declaration in a statement list.\n"} DeclStmt (struct
+      ^{:line 634 :tag Decl} Decl)] ; *GenDecl with CONST, TYPE, or VAR token
+
+
+
+
+
+
+  ^{:line 641} [^{:doc "An EmptyStmt node represents an empty statement.\nThe \"position\" of the empty statement is the position\nof the immediately following (explicit or implicit) semicolon.\n"} EmptyStmt (struct
+      ^{:line 642 :tag token/Pos} Semicolon ; position of following ";"
+      ^{:line 643 :tag bool} Implicit)] ; if set, ";" was omitted in the source
+
+
+
+  ^{:line 647} [^{:doc "A LabeledStmt node represents a labeled statement.\n"} LabeledStmt (struct
+      ^{:line 648 :tag (* Ident)} Label
+      ^{:line 649 :tag token/Pos} Colon ; position of ":"
+      ^{:line 650 :tag Stmt} Stmt)]
+
+
+
+
+
+  ^{:line 656} [^{:doc "An ExprStmt node represents a (stand-alone) expression\nin a statement list.\n"} ExprStmt (struct
+      ^{:line 657 :tag Expr} X)] ; expression
+
+
+
+  ^{:line 661} [^{:doc "A SendStmt node represents a send statement.\n"} SendStmt (struct
+      ^{:line 662 :tag Expr} Chan
+      ^{:line 663 :tag token/Pos} Arrow ; position of "<-"
+      ^{:line 664 :tag Expr} Value)]
+
+
+
+  ^{:line 668} [^{:doc "An IncDecStmt node represents an increment or decrement statement.\n"} IncDecStmt (struct
+      ^{:line 669 :tag Expr} X
+      ^{:line 670 :tag token/Pos} TokPos ; position of Tok
+      ^{:line 671 :tag token/Token} Tok)] ; INC or DEC
+
+
+
+
+
+  ^{:line 677} [^{:doc "An AssignStmt node represents an assignment or\na short variable declaration.\n"} AssignStmt (struct
+      ^{:line 678 :tag (slice Expr)} Lhs
+      ^{:line 679 :tag token/Pos} TokPos ; position of Tok
+      ^{:line 680 :tag token/Token} Tok ; assignment token, DEFINE
+      ^{:line 681 :tag (slice Expr)} Rhs)]
+
+
+
+  ^{:line 685} [^{:doc "A GoStmt node represents a go statement.\n"} GoStmt (struct
+      ^{:line 686 :tag token/Pos} Go ; position of "go" keyword
+      ^{:line 687 :tag (* CallExpr)} Call)]
+
+
+
+  ^{:line 691} [^{:doc "A DeferStmt node represents a defer statement.\n"} DeferStmt (struct
+      ^{:line 692 :tag token/Pos} Defer ; position of "defer" keyword
+      ^{:line 693 :tag (* CallExpr)} Call)]
+
+
+
+  ^{:line 697} [^{:doc "A ReturnStmt node represents a return statement.\n"} ReturnStmt (struct
+      ^{:line 698 :tag token/Pos} Return ; position of "return" keyword
+      ^{:line 699 :tag (slice Expr)} Results)] ; result expressions; or nil
+
+
+
+
+
+  ^{:line 705} [^{:doc "A BranchStmt node represents a break, continue, goto,\nor fallthrough statement.\n"} BranchStmt (struct
+      ^{:line 706 :tag token/Pos} TokPos ; position of Tok
+      ^{:line 707 :tag token/Token} Tok ; keyword token (BREAK, CONTINUE, GOTO, FALLTHROUGH)
+      ^{:line 708 :tag (* Ident)} Label)] ; label name; or nil
+
+
+
+  ^{:line 712} [^{:doc "A BlockStmt node represents a braced statement list.\n"} BlockStmt (struct
+      ^{:line 713 :tag token/Pos} Lbrace ; position of "{"
+      ^{:line 714 :tag (slice Stmt)} List
+      ^{:line 715 :tag token/Pos} Rbrace)] ; position of "}", if any (may be absent due to syntax error)
+
+
+
+  ^{:line 719} [^{:doc "An IfStmt node represents an if statement.\n"} IfStmt (struct
+      ^{:line 720 :tag token/Pos} If ; position of "if" keyword
+      ^{:line 721 :tag Stmt} Init ; initialization statement; or nil
+      ^{:line 722 :tag Expr} Cond ; condition
+      ^{:line 723 :tag (* BlockStmt)} Body
+      ^{:line 724 :tag Stmt} Else)] ; else branch; or nil
+
+
+
+  ^{:line 728} [^{:doc "A CaseClause represents a case of an expression or type switch statement.\n"} CaseClause (struct
+      ^{:line 729 :tag token/Pos} Case ; position of "case" or "default" keyword
+      ^{:line 730 :tag (slice Expr)} List ; list of expressions or types; nil means default case
+      ^{:line 731 :tag token/Pos} Colon ; position of ":"
+      ^{:line 732 :tag (slice Stmt)} Body)] ; statement list; or nil
+
+
+
+  ^{:line 736} [^{:doc "A SwitchStmt node represents an expression switch statement.\n"} SwitchStmt (struct
+      ^{:line 737 :tag token/Pos} Switch ; position of "switch" keyword
+      ^{:line 738 :tag Stmt} Init ; initialization statement; or nil
+      ^{:line 739 :tag Expr} Tag ; tag expression; or nil
+      ^{:line 740 :tag (* BlockStmt)} Body)] ; CaseClauses only
+
+
+
+  ^{:line 744} [^{:doc "A TypeSwitchStmt node represents a type switch statement.\n"} TypeSwitchStmt (struct
+      ^{:line 745 :tag token/Pos} Switch ; position of "switch" keyword
+      ^{:line 746 :tag Stmt} Init ; initialization statement; or nil
+      ^{:line 747 :tag Stmt} Assign ; x := y.(type) or y.(type)
+      ^{:line 748 :tag (* BlockStmt)} Body)] ; CaseClauses only
+
+
+
+  ^{:line 752} [^{:doc "A CommClause node represents a case of a select statement.\n"} CommClause (struct
+      ^{:line 753 :tag token/Pos} Case ; position of "case" or "default" keyword
+      ^{:line 754 :tag Stmt} Comm ; send or receive statement; nil means default case
+      ^{:line 755 :tag token/Pos} Colon ; position of ":"
+      ^{:line 756 :tag (slice Stmt)} Body)] ; statement list; or nil
+
+
+
+  ^{:line 760} [^{:doc "A SelectStmt node represents a select statement.\n"} SelectStmt (struct
+      ^{:line 761 :tag token/Pos} Select ; position of "select" keyword
+      ^{:line 762 :tag (* BlockStmt)} Body)] ; CommClauses only
+
+
+
+  ^{:line 766} [^{:doc "A ForStmt represents a for statement.\n"} ForStmt (struct
+      ^{:line 767 :tag token/Pos} For ; position of "for" keyword
+      ^{:line 768 :tag Stmt} Init ; initialization statement; or nil
+      ^{:line 769 :tag Expr} Cond ; condition; or nil
+      ^{:line 770 :tag Stmt} Post ; post iteration statement; or nil
+      ^{:line 771 :tag (* BlockStmt)} Body)]
+
+
+
+  ^{:line 775} [^{:doc "A RangeStmt represents a for statement with a range clause.\n"} RangeStmt (struct
+      ^{:line 776 :tag token/Pos} For ; position of "for" keyword
+      ^{:line 777 :tag Expr} Key ^Expr Value ; Key, Value may be nil
+      ^{:line 778 :tag token/Pos} TokPos ; position of Tok; invalid if Key == nil
+      ^{:line 779 :tag token/Token} Tok ; ILLEGAL if Key == nil, ASSIGN, DEFINE
+      ^{:line 780 :tag token/Pos} Range ; position of "range" keyword
+      ^{:line 781 :tag Expr} X ; value to range over
+      ^{:line 782 :tag (* BlockStmt)} Body)])
+
+
+
+;; Pos and End implementations for statement nodes.
+
+^{:go/end 788} (go/method Pos ^token/Pos [^{:tag (* BadStmt)} s] (.-From s))
+^{:go/end 789} (go/method Pos ^token/Pos [^{:tag (* DeclStmt)} s] (.Pos (.-Decl s)))
+^{:go/end 790} (go/method Pos ^token/Pos [^{:tag (* EmptyStmt)} s] (.-Semicolon s))
+^{:go/end 791} (go/method Pos ^token/Pos [^{:tag (* LabeledStmt)} s] (.Pos (.-Label s)))
+^{:go/end 792} (go/method Pos ^token/Pos [^{:tag (* ExprStmt)} s] (.Pos (.-X s)))
+^{:go/end 793} (go/method Pos ^token/Pos [^{:tag (* SendStmt)} s] (.Pos (.-Chan s)))
+^{:go/end 794} (go/method Pos ^token/Pos [^{:tag (* IncDecStmt)} s] (.Pos (.-X s)))
+^{:go/end 795} (go/method Pos ^token/Pos [^{:tag (* AssignStmt)} s] (.Pos (aget (.-Lhs s) 0)))
+^{:go/end 796} (go/method Pos ^token/Pos [^{:tag (* GoStmt)} s] (.-Go s))
+^{:go/end 797} (go/method Pos ^token/Pos [^{:tag (* DeferStmt)} s] (.-Defer s))
+^{:go/end 798} (go/method Pos ^token/Pos [^{:tag (* ReturnStmt)} s] (.-Return s))
+^{:go/end 799} (go/method Pos ^token/Pos [^{:tag (* BranchStmt)} s] (.-TokPos s))
+^{:go/end 800} (go/method Pos ^token/Pos [^{:tag (* BlockStmt)} s] (.-Lbrace s))
+^{:go/end 801} (go/method Pos ^token/Pos [^{:tag (* IfStmt)} s] (.-If s))
+^{:go/end 802} (go/method Pos ^token/Pos [^{:tag (* CaseClause)} s] (.-Case s))
+^{:go/end 803} (go/method Pos ^token/Pos [^{:tag (* SwitchStmt)} s] (.-Switch s))
+^{:go/end 804} (go/method Pos ^token/Pos [^{:tag (* TypeSwitchStmt)} s] (.-Switch s))
+^{:go/end 805} (go/method Pos ^token/Pos [^{:tag (* CommClause)} s] (.-Case s))
+^{:go/end 806} (go/method Pos ^token/Pos [^{:tag (* SelectStmt)} s] (.-Select s))
+^{:go/end 807} (go/method Pos ^token/Pos [^{:tag (* ForStmt)} s] (.-For s))
+^{:go/end 808} (go/method Pos ^token/Pos [^{:tag (* RangeStmt)} s] (.-For s))
+
+^{:go/end 810} (go/method End ^token/Pos [^{:tag (* BadStmt)} s] (.-To s))
+^{:go/end 811} (go/method End ^token/Pos [^{:tag (* DeclStmt)} s] (.End (.-Decl s)))
+^{:go/end 817} (go/method End ^token/Pos [^{:tag (* EmptyStmt)} s]
+  (when (.-Implicit s)
+    (return (.-Semicolon s)))
+
+  (+ (.-Semicolon s) 1)) ; /* len(";") */
+
+^{:go/end 818} (go/method End ^token/Pos [^{:tag (* LabeledStmt)} s] (.End (.-Stmt s)))
+^{:go/end 819} (go/method End ^token/Pos [^{:tag (* ExprStmt)} s] (.End (.-X s)))
+^{:go/end 820} (go/method End ^token/Pos [^{:tag (* SendStmt)} s] (.End (.-Value s)))
+^{:go/end 823} (go/method End ^token/Pos [^{:tag (* IncDecStmt)} s]
+  (+ (.-TokPos s) 2)) ; /* len("++") */
+
+^{:go/end 824} (go/method End ^token/Pos [^{:tag (* AssignStmt)} s] (.End (aget (.-Rhs s) (- (len (.-Rhs s)) 1))))
+^{:go/end 825} (go/method End ^token/Pos [^{:tag (* GoStmt)} s] (.End (.-Call s)))
+^{:go/end 826} (go/method End ^token/Pos [^{:tag (* DeferStmt)} s] (.End (.-Call s)))
+^{:go/end 832} (go/method End ^token/Pos [^{:tag (* ReturnStmt)} s]
+  (when [n (len (.-Results s))] (> n 0)
+    (return (.End (aget (.-Results s) (- n 1)))))
+
+  (+ (.-Return s) 6)) ; len("return")
+
+^{:go/end 838} (go/method End ^token/Pos [^{:tag (* BranchStmt)} s]
+  (when (!= (.-Label s) nil)
+    (return (.End (.-Label s))))
+
+  (conv token/Pos (+ (conv int (.-TokPos s)) (len (.String (.-Tok s))))))
+
+^{:go/end 847} (go/method End ^token/Pos [^{:tag (* BlockStmt)} s]
+  (when (.IsValid (.-Rbrace s))
+    (return (+ (.-Rbrace s) 1)))
+
+  (when [n (len (.-List s))] (> n 0)
+    (return (.End (aget (.-List s) (- n 1)))))
+
+  (+ (.-Lbrace s) 1))
+
+^{:go/end 853} (go/method End ^token/Pos [^{:tag (* IfStmt)} s]
+  (when (!= (.-Else s) nil)
+    (return (.End (.-Else s))))
+
+  (.End (.-Body s)))
+
+^{:go/end 859} (go/method End ^token/Pos [^{:tag (* CaseClause)} s]
+  (when [n (len (.-Body s))] (> n 0)
+    (return (.End (aget (.-Body s) (- n 1)))))
+
+  (+ (.-Colon s) 1))
+
+^{:go/end 860} (go/method End ^token/Pos [^{:tag (* SwitchStmt)} s] (.End (.-Body s)))
+^{:go/end 861} (go/method End ^token/Pos [^{:tag (* TypeSwitchStmt)} s] (.End (.-Body s)))
+^{:go/end 867} (go/method End ^token/Pos [^{:tag (* CommClause)} s]
+  (when [n (len (.-Body s))] (> n 0)
+    (return (.End (aget (.-Body s) (- n 1)))))
+
+  (+ (.-Colon s) 1))
+
+^{:go/end 868} (go/method End ^token/Pos [^{:tag (* SelectStmt)} s] (.End (.-Body s)))
+^{:go/end 869} (go/method End ^token/Pos [^{:tag (* ForStmt)} s] (.End (.-Body s)))
+^{:go/end 870} (go/method End ^token/Pos [^{:tag (* RangeStmt)} s] (.End (.-Body s)))
+
+
+
+^{:go/end 874} (go/method stmtNode "stmtNode() ensures that only statement nodes can be\nassigned to a Stmt.\n" [(* BadStmt)])
+^{:go/end 875} (go/method stmtNode [(* DeclStmt)])
+^{:go/end 876} (go/method stmtNode [(* EmptyStmt)])
+^{:go/end 877} (go/method stmtNode [(* LabeledStmt)])
+^{:go/end 878} (go/method stmtNode [(* ExprStmt)])
+^{:go/end 879} (go/method stmtNode [(* SendStmt)])
+^{:go/end 880} (go/method stmtNode [(* IncDecStmt)])
+^{:go/end 881} (go/method stmtNode [(* AssignStmt)])
+^{:go/end 882} (go/method stmtNode [(* GoStmt)])
+^{:go/end 883} (go/method stmtNode [(* DeferStmt)])
+^{:go/end 884} (go/method stmtNode [(* ReturnStmt)])
+^{:go/end 885} (go/method stmtNode [(* BranchStmt)])
+^{:go/end 886} (go/method stmtNode [(* BlockStmt)])
+^{:go/end 887} (go/method stmtNode [(* IfStmt)])
+^{:go/end 888} (go/method stmtNode [(* CaseClause)])
+^{:go/end 889} (go/method stmtNode [(* SwitchStmt)])
+^{:go/end 890} (go/method stmtNode [(* TypeSwitchStmt)])
+^{:go/end 891} (go/method stmtNode [(* CommClause)])
+^{:go/end 892} (go/method stmtNode [(* SelectStmt)])
+^{:go/end 893} (go/method stmtNode [(* ForStmt)])
+^{:go/end 894} (go/method stmtNode [(* RangeStmt)])
+
+;; ----------------------------------------------------------------------------
+;; Declarations
+
+
+
+(go/type "A Spec node represents a single (non-parenthesized) import,\nconstant, type, or variable declaration.\n"
+
+  ^{:line 903} [^{:doc "The Spec type stands for any of *ImportSpec, *ValueSpec, and *TypeSpec.\n"} Spec (interface
+      ^{:line 904} Node
+      (specNode []))]
+
+
+
+  ^{:line 909} [^{:doc "An ImportSpec node represents a single package import.\n"} ImportSpec (struct
+      ^{:line 910 :tag (* CommentGroup)} Doc ; associated documentation; or nil
+      ^{:line 911 :tag (* Ident)} Name ; local package name (including "."); or nil
+      ^{:line 912 :tag (* BasicLit)} Path ; import path
+      ^{:line 913 :tag (* CommentGroup)} Comment ; line comments; or nil
+      ^{:line 914 :tag token/Pos} EndPos)] ; end of spec (overrides Path.Pos if nonzero)
+
+
+
+
+
+  ^{:line 920} [^{:doc "A ValueSpec node represents a constant or variable declaration\n(ConstSpec or VarSpec production).\n"} ValueSpec (struct
+      ^{:line 921 :tag (* CommentGroup)} Doc ; associated documentation; or nil
+      ^{:line 922 :tag (slice (* Ident))} Names ; value names (len(Names) > 0)
+      ^{:line 923 :tag Expr} Type ; value type; or nil
+      ^{:line 924 :tag (slice Expr)} Values ; initial values; or nil
+      ^{:line 925 :tag (* CommentGroup)} Comment)] ; line comments; or nil
+
+
+
+  ^{:line 929} [^{:doc "A TypeSpec node represents a type declaration (TypeSpec production).\n"} TypeSpec (struct
+      ^{:line 930 :tag (* CommentGroup)} Doc ; associated documentation; or nil
+      ^{:line 931 :tag (* Ident)} Name ; type name
+      ^{:line 932 :tag (* FieldList)} TypeParams ; type parameters; or nil
+      ^{:line 933 :tag token/Pos} Assign ; position of '=', if any
+      ^{:line 934 :tag Expr} Type ; *Ident, *ParenExpr, *SelectorExpr, *StarExpr, or any of the *XxxTypes
+      ^{:line 935 :tag (* CommentGroup)} Comment)]) ; line comments; or nil
+
+
+
+;; Pos and End implementations for spec nodes.
+
+^{:go/end 946} (go/method Pos ^token/Pos [^{:tag (* ImportSpec)} s]
+  (when (!= (.-Name s) nil)
+    (return (.Pos (.-Name s))))
+
+  (.Pos (.-Path s)))
+
+^{:go/end 947} (go/method Pos ^token/Pos [^{:tag (* ValueSpec)} s] (.Pos (aget (.-Names s) 0)))
+^{:go/end 948} (go/method Pos ^token/Pos [^{:tag (* TypeSpec)} s] (.Pos (.-Name s)))
+
+^{:go/end 955} (go/method End ^token/Pos [^{:tag (* ImportSpec)} s]
+  (when (!= (.-EndPos s) 0)
+    (return (.-EndPos s)))
+
+  (.End (.-Path s)))
+
+
+^{:go/end 965} (go/method End ^token/Pos [^{:tag (* ValueSpec)} s]
+  (when [n (len (.-Values s))] (> n 0)
+    (return (.End (aget (.-Values s) (- n 1)))))
+
+  (when (!= (.-Type s) nil)
+    (return (.End (.-Type s))))
+
+  (.End (aget (.-Names s) (- (len (.-Names s)) 1))))
+
+^{:go/end 966} (go/method End ^token/Pos [^{:tag (* TypeSpec)} s] (.End (.-Type s)))
+
+
+
+^{:go/end 970} (go/method specNode "specNode() ensures that only spec nodes can be\nassigned to a Spec.\n" [(* ImportSpec)])
+^{:go/end 971} (go/method specNode [(* ValueSpec)])
+^{:go/end 972} (go/method specNode [(* TypeSpec)])
+
+
+(go/type "A declaration is represented by one of the following declaration nodes.\n"
+
+
+
+
+  ^{:line 980} [^{:doc "A BadDecl node is a placeholder for a declaration containing\nsyntax errors for which a correct declaration node cannot be\ncreated.\n"} BadDecl (struct
+      ^{:line 981 :tag token/Pos} From ^token/Pos To)] ; position range of bad declaration
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 995} [^{:doc "A GenDecl node (generic declaration node) represents an import,\nconstant, type or variable declaration. A valid Lparen position\n(Lparen.IsValid()) indicates a parenthesized declaration.\n\nRelationship between Tok value and Specs element type:\n\n\ttoken.IMPORT  *ImportSpec\n\ttoken.CONST   *ValueSpec\n\ttoken.TYPE    *TypeSpec\n\ttoken.VAR     *ValueSpec\n"} GenDecl (struct
+      ^{:line 996 :tag (* CommentGroup)} Doc ; associated documentation; or nil
+      ^{:line 997 :tag token/Pos} TokPos ; position of Tok
+      ^{:line 998 :tag token/Token} Tok ; IMPORT, CONST, TYPE, or VAR
+      ^{:line 999 :tag token/Pos} Lparen ; position of '(', if any
+      ^{:line 1000 :tag (slice Spec)} Specs
+      ^{:line 1001 :tag token/Pos} Rparen)] ; position of ')', if any
+
+
+
+  ^{:line 1005} [^{:doc "A FuncDecl node represents a function declaration.\n"} FuncDecl (struct
+      ^{:line 1006 :tag (* CommentGroup)} Doc ; associated documentation; or nil
+      ^{:line 1007 :tag (* FieldList)} Recv ; receiver (methods); or nil (functions)
+      ^{:line 1008 :tag (* Ident)} Name ; function/method name
+      ^{:line 1009 :tag (* FuncType)} Type ; function signature: type and value parameters, results, and position of "func" keyword
+      ^{:line 1010 :tag (* BlockStmt)} Body)]) ; function body; or nil for external (non-Go) function
+
+
+
+;; Pos and End implementations for declaration nodes.
+
+^{:go/end 1016} (go/method Pos ^token/Pos [^{:tag (* BadDecl)} d] (.-From d))
+^{:go/end 1017} (go/method Pos ^token/Pos [^{:tag (* GenDecl)} d] (.-TokPos d))
+^{:go/end 1018} (go/method Pos ^token/Pos [^{:tag (* FuncDecl)} d] (.Pos (.-Type d)))
+
+^{:go/end 1020} (go/method End ^token/Pos [^{:tag (* BadDecl)} d] (.-To d))
+^{:go/end 1026} (go/method End ^token/Pos [^{:tag (* GenDecl)} d]
+  (when (.IsValid (.-Rparen d))
+    (return (+ (.-Rparen d) 1)))
+
+  (.End (aget (.-Specs d) 0)))
+
+^{:go/end 1032} (go/method End ^token/Pos [^{:tag (* FuncDecl)} d]
+  (when (!= (.-Body d) nil)
+    (return (.End (.-Body d))))
+
+  (.End (.-Type d)))
+
+
+
+
+^{:go/end 1036} (go/method declNode "declNode() ensures that only declaration nodes can be\nassigned to a Decl.\n" [(* BadDecl)])
+^{:go/end 1037} (go/method declNode [(* GenDecl)])
+^{:go/end 1038} (go/method declNode [(* FuncDecl)])
+
+;; ----------------------------------------------------------------------------
+;; Files and packages
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type File "A File node represents a Go source file.\n\nThe Comments list contains all comments in the source file in order of\nappearance, including the comments that are pointed to from other nodes\nvia Doc and Comment fields.\n\nFor correct printing of source code containing comments (using packages\ngo/format and go/printer), special care must be taken to update comments\nwhen a File's syntax tree is modified: For printing, comments are interspersed\nbetween tokens based on their position. If syntax tree nodes are\nremoved or moved, relevant comments in their vicinity must also be removed\n(from the [File.Comments] list) or moved accordingly (by updating their\npositions). A [CommentMap] may be used to facilitate some of these operations.\n\nWhether and how a comment is associated with a node depends on the\ninterpretation of the syntax tree by the manipulating program: except for Doc\nand [Comment] comments directly associated with nodes, the remaining comments\nare \"free-floating\" (see also issues [#18593], [#20744]).\n\n[#18593]: https://go.dev/issue/18593\n[#20744]: https://go.dev/issue/20744\n" (struct
+    ^{:line 1065 :tag (* CommentGroup)} Doc ; associated documentation; or nil
+    ^{:line 1066 :tag token/Pos} Package ; position of "package" keyword
+    ^{:line 1067 :tag (* Ident)} Name ; package name
+    ^{:line 1068 :tag (slice Decl)} Decls ; top-level declarations; or nil
+
+    ^{:line 1070 :tag token/Pos} FileStart ^token/Pos FileEnd ; start and end of entire file
+    ^{:line 1071 :tag (* Scope)} Scope ; package scope (this file only). Deprecated: see Object
+    ^{:line 1072 :tag (slice (* ImportSpec))} Imports ; imports in this file
+    ^{:line 1073 :tag (slice (* Ident))} Unresolved ; unresolved identifiers in this file. Deprecated: see Object
+    ^{:line 1074 :tag (slice (* CommentGroup))} Comments ; comments in the file, in lexical order
+    ^{:line 1075 :tag string} GoVersion)) ; minimum Go version required by //go:build or // +build directives
+
+
+
+
+
+
+^{:go/end 1082} (go/method Pos "Pos returns the position of the package declaration.\nIt may be invalid, for example in an empty file.\n\n(Use FileStart for the start of the entire file. It is always valid.)\n" ^token/Pos [^{:tag (* File)} f] (.-Package f))
+
+
+
+
+
+^{:go/end 1093} (go/method End "End returns the end of the last declaration in the file.\nIt may be invalid, for example in an empty file.\n\n(Use FileEnd for the end of the entire file. It is always valid.)\n" ^token/Pos [^{:tag (* File)} f]
+  (when [n (len (.-Decls f))] (> n 0)
+    (return (.End (aget (.-Decls f) (- n 1)))))
+
+  (.End (.-Name f)))
+
+
+
+
+
+
+(go/type Package "A Package node represents a set of source files\ncollectively building a Go package.\n\nDeprecated: use the type checker [go/types] instead; see [Object].\n" (struct
+    ^{:line 1100 :tag string} Name ; package name
+    ^{:line 1101 :tag (* Scope)} Scope ; package scope across all files
+    ^{:line 1102 :tag (map string (* Object))} Imports ; map of package id -> package object
+    ^{:line 1103 :tag (map string (* File))} Files)) ; Go source files by filename
+
+
+^{:go/end 1106} (go/method Pos ^token/Pos [^{:tag (* Package)} p] token/NoPos)
+^{:go/end 1107} (go/method End ^token/Pos [^{:tag (* Package)} p] token/NoPos)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1122} (go/func IsGenerated "IsGenerated reports whether the file was generated by a program,\nnot handwritten, by detecting the special comment described\nat https://go.dev/s/generatedcode.\n\nThe syntax tree must have been parsed with the [go/parser.ParseComments] flag.\nExample:\n\n\tf, err := parser.ParseFile(fset, filename, src, parser.ParseComments|parser.PackageClauseOnly|parser.SkipObjectResolution)\n\tif err != nil { ... }\n\tgen := ast.IsGenerated(f)\n" ^bool [^{:tag (* File)} file]
+  (let [(values _ ok) (generator file)]
+    ^{:line 1121} ok))
+
+
+^{:go/end 1144} (go/func generator [^{:tag (* File)} file] :results [string bool]
+  (range [_ group (.-Comments file)]
+    (range [_ comment (.-List group)]
+      (when (> (.Pos comment) (.-Package file))
+        (break)) ; after package declaration
+
+      ;; opt: check Contains first to avoid unnecessary array allocation in Split.
+      (let [^:const ^{:val "// Code generated "} prefix "// Code generated "]
+        (when (strings/Contains (.-Text comment) prefix)
+          (range [line (strings/SplitSeq (.-Text comment) "\n")]
+            (when [(values rest ok) (strings/CutPrefix line prefix)] ok
+              (when [(values gen ok) (strings/CutSuffix rest " DO NOT EDIT.")] ok
+                (return gen true))))))))
+
+
+
+
+
+
+  (return "" false))
+
+
+
+^{:go/end 1155} (go/func Unparen "Unparen returns the expression with any enclosing parentheses removed.\n" ^Expr [^Expr e]
+  (while true
+    (let [(values paren ok) (assert (* ParenExpr) e)]
+      (when (not ok)
+        (return e))
+
+      (set! e (.-X paren)))))

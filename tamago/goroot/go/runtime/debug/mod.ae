@@ -1,0 +1,296 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.debug) (go/file "mod.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [runtime "runtime"]
+    ^{:line 10} [strconv "strconv"]
+    ^{:line 11} [strings "strings"]])
+
+
+
+(go/func ^:extern modinfo "exported from runtime.\n" ^string [])
+
+
+
+
+^{:go/end 38} (go/func ReadBuildInfo "ReadBuildInfo returns the build information embedded\nin the running binary. The information is available only\nin binaries built with module support.\n" [] :results [^{:tag (* BuildInfo)} info ^bool ok]
+  (let [data (modinfo)]
+    (when (< (len data) 32)
+      (return nil false))
+
+    (set! data (subslice data 16 (- (len data) 16)))
+    (let [(values bi err) (ParseBuildInfo data)]
+      (when (!= err nil)
+        (return nil false))
+
+
+      ;; The go version is stored separately from other build info, mostly for
+      ;; historical reasons. It is not part of the modinfo() string, and
+      ;; ParseBuildInfo does not recognize it. We inject it here to hide this
+      ;; awkwardness from the user.
+      (set! (.-GoVersion bi) (runtime/Version))
+
+      (return bi true))))
+
+
+
+(go/type BuildInfo "BuildInfo represents the build information read from a Go binary.\n" (struct
+
+
+    ^{:line 44 :tag string :go/tag "json:\",omitempty\"" :doc "GoVersion is the version of the Go toolchain that built the binary\n(for example, \"go1.19.2\").\n"} GoVersion
+
+
+
+    ^{:line 48 :tag string :go/tag "json:\",omitempty\"" :doc "Path is the package path of the main package for the binary\n(for example, \"golang.org/x/tools/cmd/stringer\").\n"} Path
+
+
+    ^{:line 51 :tag Module :go/tag "json:\"\"" :doc "Main describes the module that contains the main package for the binary.\n"} Main
+
+
+
+    ^{:line 55 :tag (slice (* Module)) :go/tag "json:\",omitempty\"" :doc "Deps describes all the dependency modules, both direct and indirect,\nthat contributed packages to the build of this binary.\n"} Deps
+
+
+    ^{:line 58 :tag (slice BuildSetting) :go/tag "json:\",omitempty\"" :doc "Settings describes the build settings used to build the binary.\n"} Settings))
+
+
+
+(go/type Module "A Module describes a single module included in a build.\n" (struct
+    ^{:line 63 :tag string :go/tag "json:\",omitempty\""} Path ; module path
+    ^{:line 64 :tag string :go/tag "json:\",omitempty\""} Version ; module version
+    ^{:line 65 :tag string :go/tag "json:\",omitempty\""} Sum ; checksum
+    ^{:line 66 :tag (* Module) :go/tag "json:\",omitempty\""} Replace)) ; replaced by this module
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type BuildSetting "A BuildSetting is a key-value pair describing one setting that influenced a build.\n\nDefined keys include:\n\n  - -buildmode: the buildmode flag used (typically \"exe\")\n  - -compiler: the compiler toolchain flag used (typically \"gc\")\n  - CGO_ENABLED: the effective CGO_ENABLED environment variable\n  - CGO_CFLAGS: the effective CGO_CFLAGS environment variable\n  - CGO_CPPFLAGS: the effective CGO_CPPFLAGS environment variable\n  - CGO_CXXFLAGS:  the effective CGO_CXXFLAGS environment variable\n  - CGO_LDFLAGS: the effective CGO_LDFLAGS environment variable\n  - DefaultGODEBUG: the effective GODEBUG settings\n  - GOARCH: the architecture target\n  - GOAMD64/GOARM/GO386/etc: the architecture feature level for GOARCH\n  - GOOS: the operating system target\n  - GOFIPS140: the frozen FIPS 140-3 module version, if any\n  - vcs: the version control system for the source tree where the build ran\n  - vcs.revision: the revision identifier for the current commit or checkout\n  - vcs.time: the modification time associated with vcs.revision, in RFC3339 format\n  - vcs.modified: true or false indicating whether the source tree had local modifications\n" (struct
+
+
+    ^{:line 92 :tag string :go/tag "json:\",omitempty\"" :doc "Key and Value describe the build setting.\nKey must not contain an equals sign, space, tab, or newline.\n"} Key
+
+    ^{:line 94 :tag string :go/tag "json:\",omitempty\"" :doc "Value must not contain newlines ('\\n').\n"} Value))
+
+
+
+^{:go/end 100} (go/func quoteKey "quoteKey reports whether key is required to be quoted.\n" ^bool [^string key]
+  (or (== (len key) 0) (strings/ContainsAny key "= \t\r\n\"`")))
+
+
+
+^{:go/end 105} (go/func quoteValue "quoteValue reports whether value is required to be quoted.\n" ^bool [^string value]
+  (strings/ContainsAny value " \t\r\n\"`"))
+
+
+
+^{:go/end 151} (go/method String "String returns a string representation of a [BuildInfo].\n" ^string [^{:tag (* BuildInfo)} bi]
+  (let [buf (new strings/Builder)]
+    (when (!= (.-GoVersion bi) "")
+      (fmt/Fprintf buf "go\t%s\n" (.-GoVersion bi)))
+
+    (when (!= (.-Path bi) "")
+      (fmt/Fprintf buf "path\t%s\n" (.-Path bi)))
+
+    (let [^{:tag (func [string Module])} formatMod (zero (func [string Module]))]
+      (set! formatMod ^{:go/end 131} (fn [^string word ^Module m]
+          (.WriteString buf word)
+          (.WriteByte buf \tab)
+          (.WriteString buf (.-Path m))
+          (.WriteByte buf \tab)
+          (.WriteString buf (.-Version m))
+          (if (== (.-Replace m) nil) (do
+              (.WriteByte buf \tab)
+              (.WriteString buf (.-Sum m)))
+            (do
+              (.WriteByte buf \newline)
+              (formatMod "=>" @(.-Replace m))))
+
+          (.WriteByte buf \newline)))
+
+      (when (!= (.-Main bi) (lit Module))
+        (formatMod "mod" (.-Main bi)))
+
+      (range [_ dep (.-Deps bi)]
+        (formatMod "dep" @dep))
+
+      (range [_ s (.-Settings bi)]
+        (let [key (.-Key s)]
+          (when (quoteKey key)
+            (set! key (strconv/Quote key)))
+
+          (let [value (.-Value s)]
+            (when (quoteValue value)
+              (set! value (strconv/Quote value)))
+
+            (fmt/Fprintf buf "build\t%s=%s\n" key value))))
+
+
+      (.String buf))))
+
+
+
+
+
+
+
+
+^{:go/end 297} (go/func ParseBuildInfo "ParseBuildInfo parses the string returned by [*BuildInfo.String],\nrestoring the original [BuildInfo],\nexcept that the GoVersion field is not set.\nPrograms should normally not call this function,\nbut instead call [ReadBuildInfo], [debug/buildinfo.ReadFile],\nor [debug/buildinfo.Read].\n" [^string data] :results [^{:tag (* BuildInfo)} bi ^error err]
+  (let [lineNum 1]
+    (defer (^{:go/end 165} (fn []
+          (when (!= err nil)
+            (set! err (fmt/Errorf "could not parse Go build info: line %d: %w" lineNum err))))))
+
+
+
+    (let [
+        ^:const ^{:line 168 :val "path\t"} pathLine "path\t"
+        ^:const ^:go/grouped ^{:line 169 :val "mod\t"} modLine "mod\t"
+        ^:const ^:go/grouped ^{:line 170 :val "dep\t"} depLine "dep\t"
+        ^:const ^:go/grouped ^{:line 171 :val "=>\t"} repLine "=>\t"
+        ^:const ^:go/grouped ^{:line 172 :val "build\t"} buildLine "build\t"
+        ^:const ^:go/grouped ^{:line 173 :val "\n"} newline "\n"
+        ^:const ^:go/grouped ^{:line 174 :val "\t"} tab "\t"
+
+
+        ^{:line 177} readModuleLine ^{:go/end 191} (fn [^{:tag (slice string)} elem] :results [Module error]
+          (when (and (!= (len elem) 2) (!= (len elem) 3))
+            (return (lit Module) (fmt/Errorf "expected 2 or 3 columns; got %d" (len elem))))
+
+          (let [version (aget elem 1)
+              ^{:line 182} sum ""]
+            (when (== (len elem) 3)
+              (set! sum (aget elem 2)))
+
+            ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6]} (lit Module
+                :Path (aget elem 0)
+                :Version version
+                :Sum sum)
+              nil)))]
+
+
+      (set! bi (new BuildInfo))
+      (let [
+          ^{:line 195 :tag (* Module)} last (zero (* Module))
+          ^{:line 196 :tag string} line (zero string)
+          ^{:line 197 :tag bool} ok (zero bool)]
+
+        ;; Reverse of BuildInfo.String(), except for go version.
+        (while (> (len data) 0)
+          (set! (values line data ok) (strings/Cut data newline))
+          (when (not ok)
+            (break))
+
+          (switch
+            (case [(strings/HasPrefix line pathLine)]
+              (let [elem (subslice line (len pathLine))]
+                (set! (.-Path bi) elem)))
+            (case [(strings/HasPrefix line modLine)]
+              (let [elem (strings/Split (subslice line (len modLine)) tab)]
+                (set! last (addr (.-Main bi)))
+                (set! (values @last err) (readModuleLine elem))
+                (when (!= err nil)
+                  (return nil err))))
+
+            (case [(strings/HasPrefix line depLine)]
+              (let [elem (strings/Split (subslice line (len depLine)) tab)]
+                (set! last (new Module))
+                (set! (.-Deps bi) (append (.-Deps bi) last))
+                (set! (values @last err) (readModuleLine elem))
+                (when (!= err nil)
+                  (return nil err))))
+
+            (case [(strings/HasPrefix line repLine)]
+              (let [elem (strings/Split (subslice line (len repLine)) tab)]
+                (when (!= (len elem) 3)
+                  (return nil (fmt/Errorf "expected 3 columns for replacement; got %d" (len elem))))
+
+                (when (== last nil)
+                  (return nil (fmt/Errorf "replacement with no module on previous line")))
+
+                (set! (.-Replace last) (addr ^{:go/breaks [2 4 6]} (lit Module
+                      :Path (aget elem 0)
+                      :Version (aget elem 1)
+                      :Sum (aget elem 2))))
+
+                (set! last nil)))
+            (case [(strings/HasPrefix line buildLine)]
+              (let [kv (subslice line (len buildLine))]
+                (when (< (len kv) 1)
+                  (return nil (fmt/Errorf "build line missing '='")))
+
+
+                (let [(values ^string key ^string rawValue) (zero string)]
+                  (switch (aget kv 0)
+                    (case [\=]
+                      (return nil (fmt/Errorf "build line with missing key")))
+
+                    (case [\` \"]
+                      (let [(values rawKey err) (strconv/QuotedPrefix kv)]
+                        (when (!= err nil)
+                          (return nil (fmt/Errorf "invalid quoted key in build line")))
+
+                        (when (== (len kv) (len rawKey))
+                          (return nil (fmt/Errorf "build line missing '=' after quoted key")))
+
+                        (when [c (aget kv (len rawKey))] (!= c \=)
+                          (return nil (fmt/Errorf "unexpected character after quoted key: %q" c)))
+
+                        (set! (values key _) (strconv/Unquote rawKey))
+                        (set! rawValue (subslice kv (+ (len rawKey) 1)))))
+
+                    (default
+                      (let [^bool ok (zero bool)]
+                        (set! (values key rawValue ok) (strings/Cut kv "="))
+                        (when (not ok)
+                          (return nil (fmt/Errorf "build line missing '=' after key")))
+
+                        (when (quoteKey key)
+                          (return nil (fmt/Errorf "unquoted key %q must be quoted" key))))))
+
+
+
+                  (let [^string value (zero string)]
+                    (when (> (len rawValue) 0)
+                      (switch (aget rawValue 0)
+                        (case [\` \"]
+                          (let [^error err (zero error)]
+                            (set! (values value err) (strconv/Unquote rawValue))
+                            (when (!= err nil)
+                              (return nil (fmt/Errorf "invalid quoted value in build line")))))
+
+
+                        (default
+                          (set! value rawValue)
+                          (when (quoteValue value)
+                            (return nil (fmt/Errorf "unquoted value %q must be quoted" value))))))
+
+
+
+
+                    (set! (.-Settings bi) (append (.-Settings bi) (lit BuildSetting :Key key :Value value))))))))
+
+          (inc! lineNum))
+
+        (return bi nil)))))

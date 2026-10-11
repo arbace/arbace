@@ -1,0 +1,377 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.internal.http2) (go/file "write.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [log "log"]
+    ^{:line 11} [httpcommon "net/http/internal/httpcommon"]
+    ^{:line 12} [url "net/url"]
+
+    ^{:line 14} [httpguts "golang.org/x/net/http/httpguts"]
+    ^{:line 15} [hpack "golang.org/x/net/http2/hpack"]])
+
+
+
+(go/type writeFramer "writeFramer is implemented by any type that is used to write frames.\n" (interface
+    (writeFrame ^error [writeContext])
+
+
+
+
+    (^{:doc "staysWithinBuffer reports whether this writer promises that\nit will only write less than or equal to size bytes, and it\nwon't Flush the write context.\n"} staysWithinBuffer ^bool [^int size])))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type writeContext "writeContext is the interface needed by the various frame writer\ntypes below. All the writeFrame methods below are scheduled via the\nframe writing scheduler (see writeScheduler in writesched.go).\n\nThis interface is implemented by *serverConn.\n\nTODO: decide whether to a) use this in the client code (which didn't\nend up using this yet, because it has a simpler design, not\ncurrently implementing priorities), or b) delete this and\nmake the server code a bit more concrete.\n" (interface
+    (Framer ^{:tag (* Framer)} [])
+    (Flush ^error [])
+    (CloseConn ^error [])
+
+
+    (^{:doc "HeaderEncoder returns an HPACK encoder that writes to the\nreturned buffer.\n"} HeaderEncoder [] :results [(* hpack/Encoder) (* bytes/Buffer)])))
+
+
+
+
+
+^{:go/breaks [[5 62]] :go/end 63} (go/func writeEndsStream "writeEndsStream reports whether w writes a frame that will transition\nthe stream to a half-closed local state. This returns false for RST_STREAM,\nwhich closes the entire stream (not just the local half).\n" ^bool [^writeFramer w]
+  (type-switch [v w]
+    (case [(* writeData)]
+      (return (.-endStream v)))
+    (case [(* writeResHeaders)]
+      (return (.-endStream v)))
+    (case [nil]
+      ;; This can only happen if the caller reuses w after it's
+      ;; been intentionally nil'ed out to prevent use. Keep this
+      ;; here to catch future refactoring breaking it.
+      (panic "writeEndsStream called on nil writeFramer")))
+
+  false)
+
+
+(go/type flushFrameWriter (struct))
+
+^{:go/end 69} (go/method writeFrame ^error [flushFrameWriter ^writeContext ctx]
+  (.Flush ctx))
+
+
+^{:go/end 71} (go/method staysWithinBuffer ^bool [flushFrameWriter ^int max] false)
+
+(go/type writeSettings (slice Setting))
+
+^{:go/end 79} (go/method staysWithinBuffer ^bool [^writeSettings s ^int max]
+  (let [^:const ^{:val 6} settingSize 6] ; uint16 + uint32
+    (<= (+ frameHeaderLen (* settingSize (len s))) max)))
+
+
+
+^{:go/end 83} (go/method writeFrame ^error [^writeSettings s ^writeContext ctx]
+  (.WriteSettings (.Framer ctx) (spread (conv (slice Setting) s))))
+
+
+(go/type writeGoAway (struct
+    ^{:line 86 :tag uint32} maxStreamID
+    ^{:line 87 :tag ErrCode} code))
+
+
+^{:go/end 94} (go/method writeFrame ^error [^{:tag (* writeGoAway)} p ^writeContext ctx]
+  (let [err (.WriteGoAway (.Framer ctx) (.-maxStreamID p) (.-code p) nil)]
+    (.Flush ctx) ; ignore error: we're hanging up on them anyway
+    ^{:line 93} err))
+
+
+^{:go/end 96} (go/method staysWithinBuffer ^bool [(* writeGoAway) ^int max] false) ; flushes
+
+(go/type writeData (struct
+    ^{:line 99 :tag uint32} streamID
+    ^{:line 100 :tag (slice byte)} p
+    ^{:line 101 :tag bool} endStream))
+
+
+^{:go/end 106} (go/method String ^string [^{:tag (* writeData)} w]
+  (fmt/Sprintf "writeData(stream=%d, p=%d, endStream=%v)" (.-streamID w) (len (.-p w)) (.-endStream w)))
+
+
+^{:go/end 110} (go/method writeFrame ^error [^{:tag (* writeData)} w ^writeContext ctx]
+  (.WriteData (.Framer ctx) (.-streamID w) (.-endStream w) (.-p w)))
+
+
+^{:go/end 114} (go/method staysWithinBuffer ^bool [^{:tag (* writeData)} w ^int max]
+  (<= (+ frameHeaderLen (len (.-p w))) max))
+
+
+
+
+(go/type handlerPanicRST "handlerPanicRST is the message sent from handler goroutines when\nthe handler panics.\n" (struct
+    ^{:line 119 :tag uint32} StreamID))
+
+
+^{:go/end 124} (go/method writeFrame ^error [^handlerPanicRST hp ^writeContext ctx]
+  (.WriteRSTStream (.Framer ctx) (.-StreamID hp) ErrCodeInternal))
+
+
+^{:go/end 126} (go/method staysWithinBuffer ^bool [^handlerPanicRST hp ^int max] (<= (+ frameHeaderLen 4) max))
+
+^{:go/end 130} (go/method writeFrame ^error [^StreamError se ^writeContext ctx]
+  (.WriteRSTStream (.Framer ctx) (.-StreamID se) (.-Code se)))
+
+
+^{:go/end 132} (go/method staysWithinBuffer ^bool [^StreamError se ^int max] (<= (+ frameHeaderLen 4) max))
+
+(go/type writePing (struct
+    ^{:line 135 :tag (array 8 byte)} data))
+
+
+^{:go/end 140} (go/method writeFrame ^error [^writePing w ^writeContext ctx]
+  (.WritePing (.Framer ctx) false (.-data w)))
+
+
+^{:go/end 142} (go/method staysWithinBuffer ^bool [^writePing w ^int max] (<= (+ frameHeaderLen (len (.-data w))) max))
+
+(go/type writePingAck (struct ^{:tag (* PingFrame)} pf))
+
+^{:go/end 148} (go/method writeFrame ^error [^writePingAck w ^writeContext ctx]
+  (.WritePing (.Framer ctx) true (.-Data (.-pf w))))
+
+
+^{:go/end 150} (go/method staysWithinBuffer ^bool [^writePingAck w ^int max] (<= (+ frameHeaderLen (len (.-Data (.-pf w)))) max))
+
+(go/type writeSettingsAck (struct))
+
+^{:go/end 156} (go/method writeFrame ^error [writeSettingsAck ^writeContext ctx]
+  (.WriteSettingsAck (.Framer ctx)))
+
+
+^{:go/end 158} (go/method staysWithinBuffer ^bool [writeSettingsAck ^int max] (<= frameHeaderLen max))
+
+
+
+
+^{:go/end 185} (go/func splitHeaderBlock "splitHeaderBlock splits headerBlock into fragments so that each fragment fits\nin a single frame, then calls fn for each fragment. firstFrag/lastFrag are true\nfor the first/last fragment, respectively.\n" ^error [^writeContext ctx ^{:tag (slice byte)} headerBlock ^{:tag (func [^writeContext ctx ^{:tag (slice byte)} frag ^bool firstFrag ^bool lastFrag] [error])} fn]
+  ;; For now we're lazy and just pick the minimum MAX_FRAME_SIZE
+  ;; that all peers must support (16KB). Later we could care
+  ;; more and send larger frames if the peer advertised it, but
+  ;; there's little point. Most headers are small anyway (so we
+  ;; generally won't have CONTINUATION frames), and extra frames
+  ;; only waste 9 bytes anyway.
+  ^{:go/breaks [[3 184]]} (let [^:const ^{:val 16384} maxFrameSize 16384
+
+      ^{:line 172} first true]
+    (while (> (len headerBlock) 0)
+      (let [frag headerBlock]
+        (when (> (len frag) maxFrameSize)
+          (set! frag (subslice frag _ maxFrameSize)))
+
+        (set! headerBlock (subslice headerBlock (len frag)))
+        (when [err (go/call fn ctx frag first (== (len headerBlock) 0))] (!= err nil)
+          (return err))
+
+        (set! first false)))
+
+    nil))
+
+
+
+
+(go/type writeResHeaders "writeResHeaders is a request to write a HEADERS and 0+ CONTINUATION frames\nfor HTTP response headers or trailers from a server handler.\n" (struct
+    ^{:line 190 :tag uint32} streamID
+    ^{:line 191 :tag int} httpResCode ; 0 means no ":status" line
+    ^{:line 192 :tag Header} h ; may be nil
+    ^{:line 193 :tag (slice string)} trailers ; if non-nil, which keys of h to write. nil means all.
+    ^{:line 194 :tag bool} endStream
+
+    ^{:line 196 :tag string} date
+    ^{:line 197 :tag string} contentType
+    ^{:line 198 :tag string} contentLength))
+
+
+^{:go/end 206} (go/func encKV [^{:tag (* hpack/Encoder)} enc ^string k ^string v]
+  (when VerboseLogs
+    (log/Printf "http2: server encoding header %q = %q" k v))
+
+  (.WriteField enc (lit hpack/HeaderField :Name k :Value v)))
+
+
+^{:go/breaks [[3 216]] :go/end 217} (go/method staysWithinBuffer ^bool [^{:tag (* writeResHeaders)} w ^int max]
+  ;; TODO: this is a common one. It'd be nice to return true
+  ;; here and get into the fast path if we could be clever and
+  ;; calculate the size fast enough, or at least a conservative
+  ;; upper bound that usually fires. (Maybe if w.h and
+  ;; w.trailers are nil, so we don't need to enumerate it.)
+  ;; Otherwise I'm afraid that just calculating the length to
+  ;; answer this question would be slower than the ~2µs benefit.
+  false)
+
+
+^{:go/end 245} (go/method writeFrame ^error [^{:tag (* writeResHeaders)} w ^writeContext ctx]
+  (let [(values enc buf) (.HeaderEncoder ctx)]
+    (.Reset buf)
+
+    (when (!= (.-httpResCode w) 0)
+      (encKV enc ":status" (httpCodeString (.-httpResCode w))))
+
+
+    (encodeHeaders enc (.-h w) (.-trailers w))
+
+    (when (!= (.-contentType w) "")
+      (encKV enc "content-type" (.-contentType w)))
+
+    (when (!= (.-contentLength w) "")
+      (encKV enc "content-length" (.-contentLength w)))
+
+    (when (!= (.-date w) "")
+      (encKV enc "date" (.-date w)))
+
+
+    (let [headerBlock (.Bytes buf)]
+      (when (and (== (len headerBlock) 0) (== (.-trailers w) nil))
+        (panic "unexpected empty hpack"))
+
+
+      (splitHeaderBlock ctx headerBlock (.-writeHeaderBlock w)))))
+
+
+^{:go/end 258} (go/method writeHeaderBlock ^error [^{:tag (* writeResHeaders)} w ^writeContext ctx ^{:tag (slice byte)} frag ^bool firstFrag ^bool lastFrag]
+  (if firstFrag
+    (return (.WriteHeaders (.Framer ctx) ^{:go/breaks [2 4 6 8]} (lit HeadersFrameParam
+          :StreamID (.-streamID w)
+          :BlockFragment frag
+          :EndStream (.-endStream w)
+          :EndHeaders lastFrag)))
+
+
+    (return (.WriteContinuation (.Framer ctx) (.-streamID w) lastFrag frag))))
+
+
+
+
+(go/type writePushPromise "writePushPromise is a request to write a PUSH_PROMISE and 0+ CONTINUATION frames.\n" (struct
+    ^{:line 262 :tag uint32} streamID ; pusher stream
+    ^{:line 263 :tag string} method ; for :method
+    ^{:line 264 :tag (* url/URL)} url ; for :scheme, :authority, :path
+    ^{:line 265 :tag Header} h
+
+
+
+    ^{:line 269 :tag (func [] [uint32 error]) :doc "Creates an ID for a pushed stream. This runs on serveG just before\nthe frame is written. The returned ID is copied to promisedID.\n"} allocatePromisedID
+    ^{:line 270 :tag uint32} promisedID))
+
+
+^{:go/breaks [[3 275]] :go/end 276} (go/method staysWithinBuffer ^bool [^{:tag (* writePushPromise)} w ^int max]
+  ;; TODO: see writeResHeaders.staysWithinBuffer
+  false)
+
+
+^{:go/end 294} (go/method writeFrame ^error [^{:tag (* writePushPromise)} w ^writeContext ctx]
+  (let [(values enc buf) (.HeaderEncoder ctx)]
+    (.Reset buf)
+
+    (encKV enc ":method" (.-method w))
+    (encKV enc ":scheme" (.-Scheme (.-url w)))
+    (encKV enc ":authority" (.-Host (.-url w)))
+    (encKV enc ":path" (.RequestURI (.-url w)))
+    (encodeHeaders enc (.-h w) nil)
+
+    (let [headerBlock (.Bytes buf)]
+      (when (== (len headerBlock) 0)
+        (panic "unexpected empty hpack"))
+
+
+      (splitHeaderBlock ctx headerBlock (.-writeHeaderBlock w)))))
+
+
+^{:go/end 307} (go/method writeHeaderBlock ^error [^{:tag (* writePushPromise)} w ^writeContext ctx ^{:tag (slice byte)} frag ^bool firstFrag ^bool lastFrag]
+  (if firstFrag
+    (return (.WritePushPromise (.Framer ctx) ^{:go/breaks [2 4 6 8]} (lit PushPromiseParam
+          :StreamID (.-streamID w)
+          :PromiseID (.-promisedID w)
+          :BlockFragment frag
+          :EndHeaders lastFrag)))
+
+
+    (return (.WriteContinuation (.Framer ctx) (.-streamID w) lastFrag frag))))
+
+
+
+(go/type write100ContinueHeadersFrame (struct
+    ^{:line 310 :tag uint32} streamID))
+
+
+^{:go/end 323} (go/method writeFrame ^error [^write100ContinueHeadersFrame w ^writeContext ctx]
+  (let [(values enc buf) (.HeaderEncoder ctx)]
+    (.Reset buf)
+    (encKV enc ":status" "100")
+    (.WriteHeaders (.Framer ctx) ^{:go/breaks [2 4 6 8]} (lit HeadersFrameParam
+        :StreamID (.-streamID w)
+        :BlockFragment (.Bytes buf)
+        :EndStream false
+        :EndHeaders true))))
+
+
+
+^{:go/end 328} (go/method staysWithinBuffer ^bool [^write100ContinueHeadersFrame w ^int max]
+  ;; Sloppy but conservative:
+  (<= (+ 9 (* 2 (+ (len ":status") (len "100")))) max))
+
+
+(go/type writeWindowUpdate (struct
+    ^{:line 331 :tag uint32} streamID ; or 0 for conn-level
+    ^{:line 332 :tag uint32} n))
+
+
+^{:go/end 335} (go/method staysWithinBuffer ^bool [^writeWindowUpdate wu ^int max] (<= (+ frameHeaderLen 4) max))
+
+^{:go/end 339} (go/method writeFrame ^error [^writeWindowUpdate wu ^writeContext ctx]
+  (.WriteWindowUpdate (.Framer ctx) (.-streamID wu) (.-n wu)))
+
+
+
+
+^{:go/end 380} (go/func encodeHeaders "encodeHeaders encodes an http.Header. If keys is not nil, then (k, h[k])\nis encoded only if k is in keys.\n" [^{:tag (* hpack/Encoder)} enc ^Header h ^{:tag (slice string)} keys]
+  (when (== keys nil)
+    (let [sorter (assert (* sorter) (.Get sorterPool))]
+      ;; Using defer here, since the returned keys from the
+      ;; sorter.Keys method is only valid until the sorter
+      ;; is returned:
+      (defer (.Put sorterPool sorter))
+      (set! keys (.Keys sorter h))))
+
+  (range [_ k keys]
+    (let [vv (aget h k)
+        (values k ascii) (httpcommon/LowerHeader k)]
+      (when (not ascii)
+        ;; Skip writing invalid headers. Per RFC 7540, Section 8.1.2, header
+        ;; field names have to be ASCII characters (just as in HTTP/1.x).
+        (continue))
+
+      (when (not (validWireHeaderFieldName k))
+        ;; Skip it as backup paranoia. Per
+        ;; golang.org/issue/14048, these should
+        ;; already be rejected at a higher level.
+        (continue))
+
+      (let [isTE (== k "transfer-encoding")]
+        (range [_ v vv]
+          (when (not (httpguts/ValidHeaderFieldValue v))
+            ;; TODO: return an error? golang.org/issue/14048
+            ;; For now just omit it.
+            (continue))
+
+          ;; TODO: more of "8.1.2.2 Connection-Specific Header Fields"
+          (when (and isTE (!= v "trailers"))
+            (continue))
+
+          (encKV enc k v))))))

@@ -1,0 +1,133 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.rpc.jsonrpc) (go/file "server.go" :imports [
+
+
+    ^{:line 8} [json "encoding/json"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [rpc "net/rpc"]
+    ^{:line 12} [sync "sync"]])
+
+
+(go/var errMissingParams (errors/New "jsonrpc: request body missing params"))
+
+(go/type serverCodec (struct
+    ^{:line 18 :tag (* json/Decoder)} dec ; for reading JSON values
+    ^{:line 19 :tag (* json/Encoder)} enc ; for writing JSON values
+    ^{:line 20 :tag io/Closer} c
+
+
+    ^{:line 23 :tag serverRequest :doc "temporary work space\n"} req
+
+
+
+
+
+
+
+    ^{:line 31 :tag sync/Mutex :doc "JSON-RPC clients can use arbitrary json values as request IDs.\nPackage rpc expects uint64 request IDs.\nWe assign uint64 sequence numbers to incoming requests\nbut save the original request ID in the pending map.\nWhen rpc responds, we use the sequence number in\nthe response to find the original request ID.\n"} mutex ; protects seq, pending
+    ^{:line 32 :tag uint64} seq
+    ^{:line 33 :tag (map uint64 (* json/RawMessage))} pending))
+
+
+
+^{:go/end 44} (go/func NewServerCodec "NewServerCodec returns a new [rpc.ServerCodec] using JSON-RPC on conn.\n" ^rpc/ServerCodec [^io/ReadWriteCloser conn]
+  (addr ^{:go/breaks [2 4 6 8]} (lit serverCodec
+      :dec (json/NewDecoder conn)
+      :enc (json/NewEncoder conn)
+      :c conn
+      :pending (make (map uint64 (* json/RawMessage))))))
+
+
+
+(go/type serverRequest (struct
+    ^{:line 47 :tag string :go/tag "json:\"method\""} Method
+    ^{:line 48 :tag (* json/RawMessage) :go/tag "json:\"params\""} Params
+    ^{:line 49 :tag (* json/RawMessage) :go/tag "json:\"id\""} Id))
+
+
+^{:go/end 56} (go/method reset [^{:tag (* serverRequest)} r]
+  (set! (.-Method r) "")
+  (set! (.-Params r) nil)
+  (set! (.-Id r) nil))
+
+
+(go/type serverResponse (struct
+    ^{:line 59 :tag (* json/RawMessage) :go/tag "json:\"id\""} Id
+    ^{:line 60 :tag any :go/tag "json:\"result\""} Result
+    ^{:line 61 :tag any :go/tag "json:\"error\""} Error))
+
+
+^{:go/breaks [[12 81]] :go/end 82} (go/method ReadRequestHeader ^error [^{:tag (* serverCodec)} c ^{:tag (* rpc/Request)} r]
+  (.reset (.-req c))
+  (when [err (.Decode (.-dec c) (addr (.-req c)))] (!= err nil)
+    (return err))
+
+  (set! (.-ServiceMethod r) (.-Method (.-req c)))
+
+  ;; JSON request id can be any JSON value;
+  ;; RPC package expects uint64.  Translate to
+  ;; internal uint64 and save JSON on the side.
+  (.Lock (.-mutex c))
+  (inc! (.-seq c))
+  (aset (.-pending c) (.-seq c) (.-Id (.-req c)))
+  (set! (.-Id (.-req c)) nil)
+  (set! (.-Seq r) (.-seq c))
+  (.Unlock (.-mutex c))
+
+  nil)
+
+
+^{:go/end 98} (go/method ReadRequestBody ^error [^{:tag (* serverCodec)} c ^any x]
+  (when (== x nil)
+    (return nil))
+
+  (when (== (.-Params (.-req c)) nil)
+    (return errMissingParams))
+
+  ;; JSON params is array value.
+  ;; RPC params is struct.
+  ;; Unmarshal into array containing struct for now.
+  ;; Should think about making RPC more general.
+  (let [^{:tag (array 1 any)} params (zero (array 1 any))]
+    (aset params 0 x)
+    (json/Unmarshal @(.-Params (.-req c)) (addr params))))
+
+
+(go/var null (conv json/RawMessage (conv (slice byte) "null")))
+
+^{:go/end 123} (go/method WriteResponse ^error [^{:tag (* serverCodec)} c ^{:tag (* rpc/Response)} r ^any x]
+  (.Lock (.-mutex c))
+  (let [(values b ok) (aget (.-pending c) (.-Seq r))]
+    (when (not ok)
+      (.Unlock (.-mutex c))
+      (return (errors/New "invalid sequence number in response")))
+
+    (delete (.-pending c) (.-Seq r))
+    (.Unlock (.-mutex c))
+
+    (when (== b nil)
+      ;; Invalid request so no id. Use JSON null.
+      (set! b (addr null)))
+
+    (let [resp (lit serverResponse :Id b)]
+      (if (== (.-Error r) "")
+        (set! (.-Result resp) x)
+
+        (set! (.-Error resp) (.-Error r)))
+
+      (.Encode (.-enc c) resp))))
+
+
+^{:go/end 127} (go/method Close ^error [^{:tag (* serverCodec)} c]
+  (.Close (.-c c)))
+
+
+
+
+
+^{:go/end 134} (go/func ServeConn "ServeConn runs the JSON-RPC server on a single connection.\nServeConn blocks, serving the connection until the client hangs up.\nThe caller typically invokes ServeConn in a go statement.\n" [^io/ReadWriteCloser conn]
+  (rpc/ServeCodec (NewServerCodec conn)))

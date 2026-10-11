@@ -1,0 +1,658 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package gif implements a GIF image decoder and encoder.
+;;
+;; The GIF specification is at https://www.w3.org/Graphics/GIF/spec-gif89a.txt.
+;;
+;; When decoding untrusted input, read dimensions with [DecodeConfig] before
+;; calling [Decode] or [DecodeAll]; see those functions and the "Security
+;; Considerations" section in the [image] package documentation.
+(in-ns 'go.image.gif) (go/file "reader.go" :doc "Package gif implements a GIF image decoder and encoder.\n\nThe GIF specification is at https://www.w3.org/Graphics/GIF/spec-gif89a.txt.\n\nWhen decoding untrusted input, read dimensions with [DecodeConfig] before\ncalling [Decode] or [DecodeAll]; see those functions and the \"Security\nConsiderations\" section in the [image] package documentation.\n" :imports [
+
+
+    ^{:line 15} [bufio "bufio"]
+    ^{:line 16} [lzw "compress/lzw"]
+    ^{:line 17} [errors "errors"]
+    ^{:line 18} [fmt "fmt"]
+    ^{:line 19} [image "image"]
+    ^{:line 20} [color "image/color"]
+    ^{:line 21} [io "io"]])
+
+
+(go/var
+  ^{:line 25} [errNotEnough (errors/New "gif: not enough image data")]
+  ^{:line 26} [errTooMuch (errors/New "gif: too much image data")]
+  ^{:line 27} [errBadPixel (errors/New "gif: invalid pixel value")])
+
+
+
+(go/type reader "If the io.Reader does not also have ReadByte, then decode will introduce its own buffering.\n" (interface
+    ^{:line 32} io/Reader
+    ^{:line 33} io/ByteReader))
+
+
+
+(go/const "Masks etc.\n"
+
+  ^{:line 39} [^{:val 128 :doc "Fields.\n"} fColorTable (<< 1 7)]
+  ^{:line 40} [^{:val 64} fInterlace (<< 1 6)]
+  ^{:line 41} [^{:val 7} fColorTableBitsMask 7]
+
+
+  ^{:line 44} [^{:val 1 :doc "Graphic control flags.\n"} gcTransparentColorSet (<< 1 0)]
+  ^{:line 45} [^{:val 28} gcDisposalMethodMask (<< 7 2)])
+
+
+
+(go/const "Disposal Methods.\n"
+  ^{:line 50} [^{:val 1} DisposalNone 0x01]
+  ^{:line 51} [^{:val 2} DisposalBackground 0x02]
+  ^{:line 52} [^{:val 3} DisposalPrevious 0x03])
+
+
+
+(go/const "Section indicators.\n"
+  ^{:line 57} [^{:val 33} sExtension 0x21]
+  ^{:line 58} [^{:val 44} sImageDescriptor 0x2C]
+  ^{:line 59} [^{:val 59} sTrailer 0x3B])
+
+
+
+(go/const "Extensions.\n"
+  ^{:line 64} [^{:val 1} eText 0x01] ; Plain Text
+  ^{:line 65} [^{:val 249} eGraphicControl 0xF9] ; Graphic Control
+  ^{:line 66} [^{:val 254} eComment 0xFE] ; Comment
+  ^{:line 67} [^{:val 255} eApplication 0xFF]) ; Application
+
+
+^{:go/end 76} (go/func readFull ^error [^io/Reader r ^{:tag (slice byte)} b]
+  (let [(values _ err) (io/ReadFull r b)]
+    (when (== err io/EOF)
+      (set! err io/ErrUnexpectedEOF))
+
+    ^{:line 75} err))
+
+
+^{:go/end 84} (go/func readByte [^io/ByteReader r] :results [byte error]
+  (let [(values b err) (.ReadByte r)]
+    (when (== err io/EOF)
+      (set! err io/ErrUnexpectedEOF))
+
+    (return b err)))
+
+
+
+(go/type decoder "decoder is the type used to decode a GIF file.\n" (struct
+    ^{:line 88 :tag reader} r
+
+
+    ^{:line 91 :tag string :doc "From header.\n"} vers
+    ^{:line 92 :tag int} width
+    ^{:line 93 :tag int} height
+    ^{:line 94 :tag int} loopCount
+    ^{:line 95 :tag int} delayTime
+    ^{:line 96 :tag byte} backgroundIndex
+    ^{:line 97 :tag byte} disposalMethod
+
+
+    ^{:line 100 :tag byte :doc "From image descriptor.\n"} imageFields
+
+
+    ^{:line 103 :tag byte :doc "From graphics control.\n"} transparentIndex
+    ^{:line 104 :tag bool} hasTransparentIndex
+
+
+    ^{:line 107 :tag color/Palette :doc "Computed.\n"} globalColorTable
+
+
+    ^{:line 110 :tag (slice int) :doc "Used when decoding.\n"} delay
+    ^{:line 111 :tag (slice byte)} disposal
+    ^{:line 112 :tag (slice (* image/Paletted))} image
+    ^{:line 113 :tag (array 1024 byte)} tmp)) ; must be at least 768 so we can read color table
+
+
+
+
+
+
+
+
+
+
+(go/type blockReader "blockReader parses the block structure of GIF image data, which comprises\n(n, (n bytes)) blocks, with 1 <= n <= 255. It is the reader given to the\nLZW decoder, which is thus immune to the blocking. After the LZW decoder\ncompletes, there will be a 0-byte block remaining (0, ()), which is\nconsumed when checking that the blockReader is exhausted.\n\nTo avoid the allocation of a bufio.Reader for the lzw Reader, blockReader\nimplements io.ByteReader and buffers blocks into the decoder's \"tmp\" buffer.\n" (struct
+    ^{:line 125 :tag (* decoder)} d
+    ^{:line 126 :tag uint8} i ^uint8 j ; d.tmp[i:j] contains the buffered bytes
+    ^{:line 127 :tag error} err))
+
+
+^{:go/end 147} (go/method fill [^{:tag (* blockReader)} b]
+  (when (!= (.-err b) nil)
+    (return))
+
+  (set! (values (.-j b) (.-err b)) (readByte (.-r (.-d b))))
+  (when (and (== (.-j b) 0) (== (.-err b) nil))
+    (set! (.-err b) io/EOF))
+
+  (when (!= (.-err b) nil)
+    (return))
+
+
+  (set! (.-i b) 0)
+  (set! (.-err b) (readFull (.-r (.-d b)) (subslice (.-tmp (.-d b)) _ (.-j b))))
+  (when (!= (.-err b) nil)
+    (set! (.-j b) 0)))
+
+
+
+^{:go/end 160} (go/method ReadByte [^{:tag (* blockReader)} b] :results [byte error]
+  (when (== (.-i b) (.-j b))
+    (.fill b)
+    (when (!= (.-err b) nil)
+      (return 0 (.-err b))))
+
+
+
+  (let [c (aget (.-tmp (.-d b)) (.-i b))]
+    (inc! (.-i b))
+    (return c nil)))
+
+
+
+
+^{:go/end 178} (go/method Read "blockReader must implement io.Reader, but its Read shouldn't ever actually\nbe called in practice. The compress/lzw package will only call [blockReader.ReadByte].\n" [^{:tag (* blockReader)} b ^{:tag (slice byte)} p] :results [int error]
+  (when (or (== (len p) 0) (!= (.-err b) nil))
+    (return 0 (.-err b)))
+
+  (when (== (.-i b) (.-j b))
+    (.fill b)
+    (when (!= (.-err b) nil)
+      (return 0 (.-err b))))
+
+
+
+  (let [n (copy p (subslice (.-tmp (.-d b)) (.-i b) (.-j b)))]
+    (set! (.-i b) + (conv uint8 n))
+    (return n nil)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 220} (go/method close "close primarily detects whether or not a block terminator was encountered\nafter reading a sequence of data sub-blocks. It allows at most one trailing\nsub-block worth of data. I.e., if some number of bytes exist in one sub-block\nfollowing the end of LZW data, the very next sub-block must be the block\nterminator. If the very end of LZW data happened to fill one sub-block, at\nmost one more sub-block of length 1 may exist before the block-terminator.\nThese accommodations allow us to support GIFs created by less strict encoders.\nSee https://golang.org/issue/16146.\n" ^error [^{:tag (* blockReader)} b]
+  (cond (== (.-err b) io/EOF)
+    ;; A clean block-sequence terminator was encountered while reading.
+    (return nil)
+    (!= (.-err b) nil)
+    ;; Some other error was encountered while reading.
+    (return (.-err b)))
+
+
+  (when (== (.-i b) (.-j b))
+    ;; We reached the end of a sub block reading LZW data. We'll allow at
+    ;; most one more sub block of data with a length of 1 byte.
+    (.fill b)
+    (cond (== (.-err b) io/EOF)
+      (return nil)
+      (!= (.-err b) nil)
+      (return (.-err b))
+      (> (.-j b) 1)
+      (return errTooMuch)))
+
+
+
+  ;; Part of a sub-block remains buffered. We expect that the next attempt to
+  ;; buffer a sub-block will reach the block terminator.
+  (.fill b)
+  (cond (== (.-err b) io/EOF)
+    (return nil)
+    (!= (.-err b) nil)
+    (return (.-err b)))
+
+
+  ^{:line 219} errTooMuch)
+
+
+
+^{:go/end 271} (go/method decode "decode reads a GIF image from r and stores the result in d.\n" ^error [^{:tag (* decoder)} d ^io/Reader r ^bool configOnly ^bool keepAllFrames]
+  ;; Add buffering if r does not provide ReadByte.
+  (if [(values rr ok) (assert reader r)] ok
+    (set! (.-r d) rr)
+
+    (set! (.-r d) (bufio/NewReader r)))
+
+
+  (set! (.-loopCount d) -1)
+
+  (let [err (.readHeaderAndScreenDescriptor d)]
+    (when (!= err nil)
+      (return err))
+
+    (when configOnly
+      (return nil))
+
+
+    (while true
+      (let [(values c err) (readByte (.-r d))]
+        (when (!= err nil)
+          (return (fmt/Errorf "gif: reading frames: %v" err)))
+
+        (switch c
+          (case [sExtension]
+            (when [(set! err (.readExtension d))] (!= err nil)
+              (return err)))
+
+
+          (case [sImageDescriptor]
+            (when [(set! err (.readImageDescriptor d keepAllFrames))] (!= err nil)
+              (return err))
+
+
+            (when (and (not keepAllFrames) (== (len (.-image d)) 1))
+              (return nil)))
+
+
+          (case [sTrailer]
+            (when (== (len (.-image d)) 0)
+              (return (fmt/Errorf "gif: missing image data")))
+
+            (return nil))
+
+          (default
+            (return (fmt/Errorf "gif: unknown block type: 0x%.2x" c))))))))
+
+
+
+
+^{:go/end 293} (go/method readHeaderAndScreenDescriptor ^error [^{:tag (* decoder)} d]
+  ^{:go/breaks [[8 292]]} (let [err (readFull (.-r d) (subslice (.-tmp d) _ 13))]
+    (when (!= err nil)
+      (return (fmt/Errorf "gif: reading header: %v" err)))
+
+    (set! (.-vers d) (conv string (subslice (.-tmp d) _ 6)))
+    (when (and (!= (.-vers d) "GIF87a") (!= (.-vers d) "GIF89a"))
+      (return (fmt/Errorf "gif: can't recognize format %q" (.-vers d))))
+
+    (set! (.-width d) (+ (conv int (aget (.-tmp d) 6)) (<< (conv int (aget (.-tmp d) 7)) 8)))
+    (set! (.-height d) (+ (conv int (aget (.-tmp d) 8)) (<< (conv int (aget (.-tmp d) 9)) 8)))
+    (when [fields (aget (.-tmp d) 10)] (!= (bit-and fields fColorTable) 0)
+      (set! (.-backgroundIndex d) (aget (.-tmp d) 11))
+      ;; readColorTable overwrites the contents of d.tmp, but that's OK.
+      (when [(set! (values (.-globalColorTable d) err) (.readColorTable d fields))] (!= err nil)
+        (return err)))
+
+
+    ;; d.tmp[12] is the Pixel Aspect Ratio, which is ignored.
+    nil))
+
+
+^{:go/end 307} (go/method readColorTable [^{:tag (* decoder)} d ^byte fields] :results [color/Palette error]
+  (let [n ^int (<< 1 (+ 1 (conv uint (bit-and fields fColorTableBitsMask))))
+      ^{:line 297} err (readFull (.-r d) (subslice (.-tmp d) _ (* 3 n)))]
+    (when (!= err nil)
+      (return nil (fmt/Errorf "gif: reading color table: %s" err)))
+
+    (let [(values j p) (values 0 (make color/Palette n))]
+      (range [i p]
+        (aset p i (lit color/RGBA (aget (.-tmp d) (+ j 0)) (aget (.-tmp d) (+ j 1)) (aget (.-tmp d) (+ j 2)) 0xFF))
+        (set! j + 3))
+
+      (return p nil))))
+
+
+^{:go/end 361} (go/method readExtension ^error [^{:tag (* decoder)} d]
+  (let [(values extension err) (readByte (.-r d))]
+    (when (!= err nil)
+      (return (fmt/Errorf "gif: reading extension: %v" err)))
+
+    (let [size 0]
+      (switch extension
+        (case [eText]
+          (set! size 13))
+        (case [eGraphicControl]
+          (return (.readGraphicControl d)))
+        (case [eComment])
+        ;; nothing to do but read the data.
+        (case [eApplication]
+          (let [(values b err) (readByte (.-r d))]
+            (when (!= err nil)
+              (return (fmt/Errorf "gif: reading extension: %v" err)))
+
+            ;; The spec requires size be 11, but Adobe sometimes uses 10.
+            (set! size (conv int b))))
+        (default
+          (return (fmt/Errorf "gif: unknown extension 0x%.2x" extension))))
+
+      (when (> size 0)
+        (when [err (readFull (.-r d) (subslice (.-tmp d) _ size))] (!= err nil)
+          (return (fmt/Errorf "gif: reading extension: %v" err))))
+
+
+
+      ;; Application Extension with "NETSCAPE2.0" as string and 1 in data means
+      ;; this extension defines a loop count.
+      (when (and (== extension eApplication) (== (conv string (subslice (.-tmp d) _ size)) "NETSCAPE2.0"))
+        (let [(values n err) (.readBlock d)]
+          (when (!= err nil)
+            (return (fmt/Errorf "gif: reading extension: %v" err)))
+
+          (when (== n 0)
+            (return nil))
+
+          (when (and (== n 3) (== (aget (.-tmp d) 0) 1))
+            (set! (.-loopCount d) (bit-or (conv int (aget (.-tmp d) 1)) (<< (conv int (aget (.-tmp d) 2)) 8))))))
+
+
+      (while true
+        (let [(values n err) (.readBlock d)]
+          (when (!= err nil)
+            (return (fmt/Errorf "gif: reading extension: %v" err)))
+
+          (when (== n 0)
+            (return nil)))))))
+
+
+
+
+^{:go/end 381} (go/method readGraphicControl ^error [^{:tag (* decoder)} d]
+  (when [err (readFull (.-r d) (subslice (.-tmp d) _ 6))] (!= err nil)
+    (return (fmt/Errorf "gif: can't read graphic control: %s" err)))
+
+  (when (!= (aget (.-tmp d) 0) 4)
+    (return (fmt/Errorf "gif: invalid graphic control extension block size: %d" (aget (.-tmp d) 0))))
+
+  ^{:go/breaks [[6 380]]} (let [flags (aget (.-tmp d) 1)]
+    (set! (.-disposalMethod d) (>> (bit-and flags gcDisposalMethodMask) 2))
+    (set! (.-delayTime d) (bit-or (conv int (aget (.-tmp d) 2)) (<< (conv int (aget (.-tmp d) 3)) 8)))
+    (when (!= (bit-and flags gcTransparentColorSet) 0)
+      (set! (.-transparentIndex d) (aget (.-tmp d) 4))
+      (set! (.-hasTransparentIndex d) true))
+
+    (when (!= (aget (.-tmp d) 5) 0)
+      (return (fmt/Errorf "gif: invalid graphic control extension block terminator: %d" (aget (.-tmp d) 5))))
+
+    nil))
+
+
+^{:go/end 488} (go/method readImageDescriptor ^error [^{:tag (* decoder)} d ^bool keepAllFrames]
+  (let [(values m err) (.newImageFromDescriptor d)]
+    (when (!= err nil)
+      (return err))
+
+    (let [useLocalColorTable (!= (bit-and (.-imageFields d) fColorTable) 0)]
+      (if useLocalColorTable (do
+          (set! (values (.-Palette m) err) (.readColorTable d (.-imageFields d)))
+          (when (!= err nil)
+            (return err)))
+
+        (do
+          (when (== (.-globalColorTable d) nil)
+            (return (errors/New "gif: no color table")))
+
+          (set! (.-Palette m) (.-globalColorTable d))))
+
+      (when (.-hasTransparentIndex d)
+        (when (not useLocalColorTable)
+          ;; Clone the global color table.
+          (set! (.-Palette m) (append (conv color/Palette nil) (spread (.-globalColorTable d)))))
+
+        (if [ti (conv int (.-transparentIndex d))] (< ti (len (.-Palette m)))
+          (aset (.-Palette m) ti (lit color/RGBA))
+
+          ;; The transparentIndex is out of range, which is an error
+          ;; according to the spec, but Firefox and Google Chrome
+          ;; seem OK with this, so we enlarge the palette with
+          ;; transparent colors. See golang.org/issue/15059.
+          (let [p (make color/Palette (+ ti 1))]
+            (copy p (.-Palette m))
+            (for [i (len (.-Palette m))] (< i (len p)) (inc! i)
+              (aset p i (lit color/RGBA)))
+
+            (set! (.-Palette m) p))))
+
+
+      (let [(values litWidth ^:assign err) (readByte (.-r d))]
+        (when (!= err nil)
+          (return (fmt/Errorf "gif: reading image data: %v" err)))
+
+        (when (or (< litWidth 2) (> litWidth 8))
+          (return (fmt/Errorf "gif: pixel size in decode out of range: %d" litWidth)))
+
+        ;; A wonderfully Go-like piece of magic.
+        ^{:go/breaks [11]} (let [br (addr (lit blockReader :d d))
+            ^{:line 429} lzwr (lzw/NewReader br lzw/LSB (conv int litWidth))]
+          (defer (.Close lzwr))
+          (when [(set! err (readFull lzwr (.-Pix m)))] (!= err nil)
+            (when (!= err io/ErrUnexpectedEOF)
+              (return (fmt/Errorf "gif: reading image data: %v" err)))
+
+            (return errNotEnough))
+
+          ;; In theory, both lzwr and br should be exhausted. Reading from them
+          ;; should yield (0, io.EOF).
+          ;;
+          ;; The spec (Appendix F - Compression), says that "An End of
+          ;; Information code... must be the last code output by the encoder
+          ;; for an image". In practice, though, giflib (a widely used C
+          ;; library) does not enforce this, so we also accept lzwr returning
+          ;; io.ErrUnexpectedEOF (meaning that the encoded stream hit io.EOF
+          ;; before the LZW decoder saw an explicit end code), provided that
+          ;; the io.ReadFull call above successfully read len(m.Pix) bytes.
+          ;; See https://golang.org/issue/9856 for an example GIF.
+          (when [(values n err) (.Read lzwr (subslice (.-tmp d) 256 257))] (or (!= n 0) ^:go/paren (and (!= err io/EOF) (!= err io/ErrUnexpectedEOF)))
+            (when (!= err nil)
+              (return (fmt/Errorf "gif: reading image data: %v" err)))
+
+            (return errTooMuch))
+
+
+          ;; In practice, some GIFs have an extra byte in the data sub-block
+          ;; stream, which we ignore. See https://golang.org/issue/16146.
+          (if [err (.close br)] (== err errTooMuch)
+            (return errTooMuch)
+            (when (!= err nil)
+              (return (fmt/Errorf "gif: reading image data: %v" err))))
+
+
+          ;; Check that the color indexes are inside the palette.
+          (when (< (len (.-Palette m)) 256)
+            (range [_ pixel (.-Pix m)]
+              (when (>= (conv int pixel) (len (.-Palette m)))
+                (return errBadPixel))))
+
+
+
+
+          ;; Undo the interlacing if necessary.
+          (when (!= (bit-and (.-imageFields d) fInterlace) 0)
+            (uninterlace m))
+
+
+          (when (or keepAllFrames (== (len (.-image d)) 0))
+            (set! (.-image d) (append (.-image d) m))
+            (set! (.-delay d) (append (.-delay d) (.-delayTime d)))
+            (set! (.-disposal d) (append (.-disposal d) (.-disposalMethod d))))
+
+          ;; The GIF89a spec, Section 23 (Graphic Control Extension) says:
+          ;; "The scope of this extension is the first graphic rendering block
+          ;; to follow." We therefore reset the GCE fields to zero.
+          (set! (.-delayTime d) 0)
+          (set! (.-hasTransparentIndex d) false)
+          nil)))))
+
+
+^{:go/end 523} (go/method newImageFromDescriptor [^{:tag (* decoder)} d] :results [(* image/Paletted) error]
+  (when [err (readFull (.-r d) (subslice (.-tmp d) _ 9))] (!= err nil)
+    (return nil (fmt/Errorf "gif: can't read image descriptor: %s" err)))
+
+  (let [left (+ (conv int (aget (.-tmp d) 0)) (<< (conv int (aget (.-tmp d) 1)) 8))
+      ^{:line 495} top (+ (conv int (aget (.-tmp d) 2)) (<< (conv int (aget (.-tmp d) 3)) 8))
+      ^{:line 496} width (+ (conv int (aget (.-tmp d) 4)) (<< (conv int (aget (.-tmp d) 5)) 8))
+      ^{:line 497} height (+ (conv int (aget (.-tmp d) 6)) (<< (conv int (aget (.-tmp d) 7)) 8))]
+    (set! (.-imageFields d) (aget (.-tmp d) 8))
+
+    ;; The GIF89a spec, Section 20 (Image Descriptor) says: "Each image must
+    ;; fit within the boundaries of the Logical Screen, as defined in the
+    ;; Logical Screen Descriptor."
+    ;;
+    ;; This is conceptually similar to testing
+    ;;	frameBounds := image.Rect(left, top, left+width, top+height)
+    ;;	imageBounds := image.Rect(0, 0, d.width, d.height)
+    ;;	if !frameBounds.In(imageBounds) { etc }
+    ;; but the semantics of the Go image.Rectangle type is that r.In(s) is true
+    ;; whenever r is an empty rectangle, even if r.Min.X > s.Max.X. Here, we
+    ;; want something stricter.
+    ;;
+    ;; Note that, by construction, left >= 0 && top >= 0, so we only have to
+    ;; explicitly compare frameBounds.Max (left+width, top+height) against
+    ;; imageBounds.Max (d.width, d.height) and not frameBounds.Min (left, top)
+    ;; against imageBounds.Min (0, 0).
+    (when (or (> (+ left width) (.-width d)) (> (+ top height) (.-height d)))
+      (return nil (errors/New "gif: frame bounds larger than image bounds")))
+
+    (return ^{:go/breaks [2]} (image/NewPaletted ^{:go/breaks [2 4]} (lit image/Rectangle
+          :Min (lit image/Point left top)
+          :Max (lit image/Point (+ left width) (+ top height)))
+        nil) nil)))
+
+
+^{:go/end 534} (go/method readBlock [^{:tag (* decoder)} d] :results [int error]
+  (let [(values n err) (readByte (.-r d))]
+    (when (or (== n 0) (!= err nil))
+      (return 0 err))
+
+    (when [err (readFull (.-r d) (subslice (.-tmp d) _ n))] (!= err nil)
+      (return 0 err))
+
+    (return (conv int n) nil)))
+
+
+
+(go/type interlaceScan "interlaceScan defines the ordering for a pass of the interlace algorithm.\n" (struct
+    ^{:line 538 :tag int} skip ^int start))
+
+
+
+(go/var ^{:doc "interlacing represents the set of scans in an interlaced GIF image.\n"} interlacing (lit (slice interlaceScan)
+    (lit _ 8 0) ; Group 1 : Every 8th. row, starting with row 0.
+    (lit _ 8 4) ; Group 2 : Every 8th. row, starting with row 4.
+    (lit _ 4 2) ; Group 3 : Every 4th. row, starting with row 2.
+    (lit _ 2 1))) ; Group 4 : Every 2nd. row, starting with row 1.
+
+
+
+^{:go/end 565} (go/func uninterlace "uninterlace rearranges the pixels in m to account for interlaced input.\n" [^{:tag (* image/Paletted)} m]
+  (let [^{:tag (slice uint8)} nPix (zero (slice uint8))
+      ^{:line 552} dx (.Dx (.Bounds m))
+      ^{:line 553} dy (.Dy (.Bounds m))]
+    (set! nPix (make (slice uint8) (* dx dy)))
+    (let [offset 0] ; steps through the input by sequential scan lines.
+      (range [_ pass interlacing]
+        (let [nOffset (* (.-start pass) dx)] ; steps through the output as defined by pass.
+          (for [y (.-start pass)] (< y dy) (set! y + (.-skip pass))
+            (copy (subslice nPix nOffset (+ nOffset dx)) (subslice (.-Pix m) offset (+ offset dx)))
+            (set! offset + dx)
+            (set! nOffset + (* dx (.-skip pass))))))
+
+
+      (set! (.-Pix m) nPix))))
+
+
+
+
+
+
+
+
+
+^{:go/end 580} (go/func Decode "Decode reads a GIF image from r and returns the first embedded\nimage as an [image.Image].\n\nWhen decoding images from untrusted sources, it is safest to\nfirst call DecodeConfig and check the image size so\nthat unexpectedly large memory allocations may be safely\navoided.\n" [^io/Reader r] :results [image/Image error]
+  (let [^decoder d (zero decoder)]
+    (when [err (.decode d r false false)] (!= err nil)
+      (return nil err))
+
+    (return (aget (.-image d) 0) nil)))
+
+
+
+(go/type GIF "GIF represents the possibly multiple images stored in a GIF file.\n" (struct
+    ^{:line 584 :tag (slice (* image/Paletted))} Image ; The successive images.
+    ^{:line 585 :tag (slice int)} Delay ; The successive delay times, one per frame, in 100ths of a second.
+
+
+
+
+
+    ^{:line 591 :tag int :doc "LoopCount controls the number of times an animation will be\nrestarted during display.\nA LoopCount of 0 means to loop forever.\nA LoopCount of -1 means to show each frame only once.\nOtherwise, the animation is looped LoopCount+1 times.\n"} LoopCount
+
+
+
+
+    ^{:line 596 :tag (slice byte) :doc "Disposal is the successive disposal methods, one per frame. For\nbackwards compatibility, a nil Disposal is valid to pass to EncodeAll,\nand implies that each frame's disposal method is 0 (no disposal\nspecified).\n"} Disposal
+
+
+
+
+
+
+
+
+
+    ^{:line 606 :tag image/Config :doc "Config is the global color table (palette), width and height. A nil or\nempty-color.Palette Config.ColorModel means that each frame has its own\ncolor table and there is no global color table. Each frame's bounds must\nbe within the rectangle defined by the two points (0, 0) and\n(Config.Width, Config.Height).\n\nFor backwards compatibility, a zero-valued Config is valid to pass to\nEncodeAll, and implies that the overall GIF's width and height equals\nthe first frame's bounds' Rectangle.Max point.\n"} Config
+
+
+    ^{:line 609 :tag byte :doc "BackgroundIndex is the background index in the global color table, for\nuse with the DisposalBackground disposal method.\n"} BackgroundIndex))
+
+
+
+
+
+
+
+
+
+^{:go/end 637} (go/func DecodeAll "DecodeAll reads a GIF image from r and returns the sequential frames\nand timing information.\n\nLike [Decode], this allocates a paletted buffer per frame from width and\nheight in the image descriptors. [DecodeAll] retains every decoded frame in\nmemory. For untrusted input, call [DecodeConfig] first to verify the\nlogical screen size and reject inputs that would require excessive memory.\n" [^io/Reader r] :results [(* GIF) error]
+  (let [^decoder d (zero decoder)]
+    (when [err (.decode d r false true)] (!= err nil)
+      (return nil err))
+
+    (let [gif (addr ^{:go/breaks [2 4 6 8 10 [12 634]]} (lit GIF
+            :Image (.-image d)
+            :LoopCount (.-loopCount d)
+            :Delay (.-delay d)
+            :Disposal (.-disposal d)
+            :Config ^{:go/breaks [2 4 6]} (lit image/Config
+              :ColorModel (.-globalColorTable d)
+              :Width (.-width d)
+              :Height (.-height d))
+
+            :BackgroundIndex (.-backgroundIndex d)))]
+
+      (return gif nil))))
+
+
+
+
+
+
+
+
+^{:go/end 655} (go/func DecodeConfig "DecodeConfig returns the global color model and dimensions of a GIF image\nwithout decoding the entire image.\n\nIt reads the logical screen descriptor and global color table only; it does\nnot allocate pixel buffers for frames. Use it to check width and height\nbefore calling [Decode] or [DecodeAll].\n" [^io/Reader r] :results [image/Config error]
+  (let [^decoder d (zero decoder)]
+    (when [err (.decode d r true false)] (!= err nil)
+      (return (lit image/Config) err))
+
+    ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6]} (lit image/Config
+        :ColorModel (.-globalColorTable d)
+        :Width (.-width d)
+        :Height (.-height d))
+      nil)))
+
+
+^{:go/end 659} (go/func init []
+  (image/RegisterFormat "gif" "GIF8?a" Decode DecodeConfig))

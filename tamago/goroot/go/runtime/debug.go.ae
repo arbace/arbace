@@ -1,0 +1,260 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "debug.go" :imports [
+
+
+    ^{:line 8} [atomic "internal/runtime/atomic"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 110} (go/func GOMAXPROCS "GOMAXPROCS sets the maximum number of CPUs that can be executing\nsimultaneously and returns the previous setting. If n < 1, it does not change\nthe current setting.\n\n# Default\n\nIf the GOMAXPROCS environment variable is set to a positive whole number,\nGOMAXPROCS defaults to that value.\n\nOtherwise, the Go runtime selects an appropriate default value from a combination of\n  - the number of logical CPUs on the machine,\n  - the process’s CPU affinity mask,\n  - and, on Linux, the process’s average CPU throughput limit based on cgroup CPU\n    quota, if any.\n\nIf GODEBUG=containermaxprocs=0 is set and GOMAXPROCS is not set by the\nenvironment variable, then GOMAXPROCS instead defaults to the value of\n[runtime.NumCPU]. Note that GODEBUG=containermaxprocs=0 is [default] for\nlanguage version 1.24 and below.\n\n# Updates\n\nThe Go runtime periodically updates the default value based on changes to\nthe total logical CPU count, the CPU affinity mask, or cgroup quota. Setting\na custom value with the GOMAXPROCS environment variable or by calling\nGOMAXPROCS disables automatic updates. The default value and automatic\nupdates can be restored by calling [SetDefaultGOMAXPROCS].\n\nIf GODEBUG=updatemaxprocs=0 is set, the Go runtime does not perform\nautomatic GOMAXPROCS updating. Note that GODEBUG=updatemaxprocs=0 is\n[default] for language version 1.24 and below.\n\n# Compatibility\n\nNote that the default GOMAXPROCS behavior may change as the scheduler\nimproves, especially the implementation detail below.\n\n# Implementation details\n\nWhen computing default GOMAXPROCS via cgroups, the Go runtime computes the\n\"average CPU throughput limit\" as the cgroup CPU quota / period. In cgroup\nv2, these values come from the cpu.max file. In cgroup v1, they come from\ncpu.cfs_quota_us and cpu.cfs_period_us, respectively. In container runtimes\nthat allow configuring CPU limits, this value usually corresponds to the\n\"CPU limit\" option, not \"CPU request\".\n\nThe Go runtime typically selects the default GOMAXPROCS as the minimum of\nthe logical CPU count, the CPU affinity mask count, or the cgroup CPU\nthroughput limit. However, it will never set GOMAXPROCS less than 2 unless\nthe logical CPU count or CPU affinity mask count are below 2.\n\nIf the cgroup CPU throughput limit is not a whole number, the Go runtime\nrounds up to the next whole number.\n\nGOMAXPROCS updates are performed up to once per second, or less if the\napplication is idle.\n\n[default]: https://go.dev/doc/godebug#default\n" ^int [^int n]
+  (when (and (== GOARCH "wasm") (> n 1))
+    (set! n 1)) ; WebAssembly has no threads yet, so only one CPU is possible.
+
+
+  (when (and (== GOARCH "tamago") (> n 1))
+    (set! numCPUStartup (conv int32 n))) ; One P per CPU, Ms are never dropped.
+
+
+  (lock (addr (.-lock sched)))
+  (let [ret (conv int gomaxprocs)]
+    (when (<= n 0)
+      (unlock (addr (.-lock sched)))
+      (return ret))
+
+    ;; Set early so we can wait for sysmon befor STW. See comment on
+    ;; computeMaxProcsLock.
+    (set! (.-customGOMAXPROCS sched) true)
+    (unlock (addr (.-lock sched)))
+
+    ;; Wait for sysmon to complete running defaultGOMAXPROCS.
+    (lock (addr computeMaxProcsLock))
+    (unlock (addr computeMaxProcsLock))
+
+    (when (== n ret)
+      ;; sched.customGOMAXPROCS set, but no need to actually STW
+      ;; since the gomaxprocs itself isn't changing.
+      (return ret))
+
+
+    (let [stw (stopTheWorldGC stwGOMAXPROCS)]
+
+      ;; newprocs will be processed by startTheWorld
+      ;;
+      ;; TODO(prattmic): this could use a nicer API. Perhaps add it to the
+      ;; stw parameter?
+      (set! newprocs (conv int32 n))
+
+      (startTheWorldGC stw)
+      ^{:line 109} ret)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 151} (go/func SetDefaultGOMAXPROCS "SetDefaultGOMAXPROCS updates the GOMAXPROCS setting to the runtime\ndefault, as described by [GOMAXPROCS], ignoring the GOMAXPROCS\nenvironment variable.\n\nSetDefaultGOMAXPROCS can be used to enable the default automatic updating\nGOMAXPROCS behavior if it has been disabled by the GOMAXPROCS\nenvironment variable or a prior call to [GOMAXPROCS], or to force an immediate\nupdate if the caller is aware of a change to the total logical CPU count, CPU\naffinity mask or cgroup quota.\n" []
+  ;; SetDefaultGOMAXPROCS conceptually means "[re]do what the runtime
+  ;; would do at startup if the GOMAXPROCS environment variable were
+  ;; unset." It still respects GODEBUG.
+
+  (let [procs (defaultGOMAXPROCS 0)]
+
+    (lock (addr (.-lock sched)))
+    (let [curr gomaxprocs
+        ^{:line 130} custom (.-customGOMAXPROCS sched)]
+      (unlock (addr (.-lock sched)))
+
+      (when (and (not custom) (== procs curr))
+        ;; Nothing to do if we're already using automatic GOMAXPROCS
+        ;; and the limit is unchanged.
+        (return))
+
+
+      (let [stw (stopTheWorldGC stwGOMAXPROCS)]
+
+        ;; newprocs will be processed by startTheWorld
+        ;;
+        ;; TODO(prattmic): this could use a nicer API. Perhaps add it to the
+        ;; stw parameter?
+        (set! newprocs procs)
+        (lock (addr (.-lock sched)))
+        (set! (.-customGOMAXPROCS sched) false)
+        (unlock (addr (.-lock sched)))
+
+        (startTheWorldGC stw)))))
+
+
+
+
+
+
+
+^{:go/end 160} (go/func NumCPU "NumCPU returns the number of logical CPUs usable by the current process.\n\nThe set of available CPUs is checked by querying the operating system\nat process startup. Changes to operating system CPU allocation after\nprocess startup are not reflected.\n" ^int []
+  (conv int numCPUStartup))
+
+
+
+^{:go/end 169} (go/func NumCgoCall "NumCgoCall returns the number of cgo calls made by the current process.\n" ^int64 []
+  (let [^:var n (conv int64 (atomic/Load64 (addr ncgocall)))]
+    (for [mp (conv (* m) (atomic/Loadp (conv unsafe/Pointer (addr allm))))] (!= mp nil) (set! mp (.-alllink mp))
+      (set! n + (conv int64 (.-ncgocall mp))))
+
+    ^{:line 168} n))
+
+
+^{:go/end 180} (go/func totalMutexWaitTimeNanos ^int64 []
+  (let [total (.Load (.-totalMutexWaitTime sched))]
+
+    (set! total + (.Load (.-totalRuntimeLockWaitTime sched)))
+    (for [mp (conv (* m) (atomic/Loadp (conv unsafe/Pointer (addr allm))))] (!= mp nil) (set! mp (.-alllink mp))
+      (set! total + (.Load (.-waitTime (.-mLockProfile mp)))))
+
+
+    ^{:line 179} total))
+
+
+
+^{:go/end 185} (go/func NumGoroutine "NumGoroutine returns the number of goroutines that currently exist.\n" ^int []
+  (conv int (gcount false)))
+
+
+
+^{:go/end 190} (go/func ^{:go/linkname "debug_modinfo runtime/debug.modinfo"} debug_modinfo ^string []
+  ^{:line 189} modinfo)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 223} (go/func ^:go/nosplit ^{:go/linkname "mayMoreStackPreempt"} mayMoreStackPreempt "mayMoreStackPreempt is a maymorestack hook that forces a preemption\nat every possible cooperative preemption point.\n\nThis is valuable to apply to the runtime, which can be sensitive to\npreemption points. To apply this to all preemption points in the\nruntime and runtime-like code, use the following in bash or zsh:\n\n\tX=(-{gc,asm}flags={runtime/...,reflect,sync}=-d=maymorestack=runtime.mayMoreStackPreempt) GOFLAGS=${X[@]}\n\nThis must be deeply nosplit because it is called from a function\nprologue before the stack is set up and because the compiler will\ncall it from any splittable prologue (leading to infinite\nrecursion).\n\nIdeally it should also use very little stack because the linker\ndoesn't currently account for this in nosplit stack depth checking.\n\nEnsure mayMoreStackPreempt can be called for all ABIs.\n" []
+  ;; Don't do anything on the g0 or gsignal stack.
+  (let [gp (getg)]
+    (when (or (== gp (.-g0 (.-m gp))) (== gp (.-gsignal (.-m gp))))
+      (return))
+
+    ;; Force a preemption, unless the stack is already poisoned.
+    (when (< (.-stackguard0 gp) stackPoisonMin)
+      (set! (.-stackguard0 gp) stackPreempt))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 242} (go/func ^:go/nosplit ^{:go/linkname "mayMoreStackMove"} mayMoreStackMove "mayMoreStackMove is a maymorestack hook that forces stack movement\nat every possible point.\n\nSee mayMoreStackPreempt.\n" []
+  ;; Don't do anything on the g0 or gsignal stack.
+  (let [gp (getg)]
+    (when (or (== gp (.-g0 (.-m gp))) (== gp (.-gsignal (.-m gp))))
+      (return))
+
+    ;; Force stack movement, unless the stack is already poisoned.
+    (when (< (.-stackguard0 gp) stackPoisonMin)
+      (set! (.-stackguard0 gp) stackForceMove))))
+
+
+
+
+(go/var ^{:tag bool :doc "debugPinnerKeepUnpin is used to make runtime.(*Pinner).Unpin reachable.\n"} debugPinnerKeepUnpin false)
+
+
+
+
+
+
+
+^{:go/end 261} (go/func debugPinnerV1 "debugPinnerV1 returns a new Pinner that pins itself. This function can be\nused by debuggers to easily obtain a Pinner that will not be garbage\ncollected (or moved in memory) even if no references to it exist in the\ntarget program. This pinner in turn can be used to extend this property\nto other objects, which debuggers can use to simplify the evaluation of\nexpressions involving multiple call injections.\n" ^{:tag (* Pinner)} []
+  (let [p (new Pinner)]
+    (.Pin p (conv unsafe/Pointer p))
+    (when debugPinnerKeepUnpin
+      ;; Make Unpin reachable.
+      (.Unpin p))
+
+    ^{:line 260} p))

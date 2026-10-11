@@ -1,0 +1,203 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package entropy implements a CPU jitter-based SP 800-90B entropy source.
+(in-ns 'go.crypto.internal.entropy.v1_0_0) (go/file "entropy.go" :doc "Package entropy implements a CPU jitter-based SP 800-90B entropy source.\n" :imports [
+
+
+    ^{:line 9} [time "crypto/internal/fips140deps/time"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [atomic "sync/atomic"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+
+
+
+
+^{:go/breaks [4] :go/end 21} (go/func Version "Version returns the version of the entropy source.\n\nThis is independent of the FIPS 140-3 module version, in order to reuse the\nESV certificate across module versions.\n" ^string []
+  "v1.0.0")
+
+
+
+
+(go/type ScratchBuffer "ScratchBuffer is a large buffer that will be written to using atomics, to\ngenerate noise from memory access timings. Its contents do not matter.\n" (array (<< 1 25) byte))
+
+
+
+
+
+
+
+
+^{:go/end 69} (go/func Seed "Seed returns a 384-bit seed with full entropy.\n\nmemory is passed in to allow changing the allocation strategy without\nmodifying the frozen and certified entropy source in this package.\n\nSeed returns an error if the entropy source startup health tests fail, which\nhas a non-negligible chance of happening.\n" [^{:tag (* ScratchBuffer)} memory] :results [(array 48 byte) error]
+  ;; Collect w = 1024 samples, each certified to provide no less than h = 0.5
+  ;; bits of entropy, for a total of hᵢₙ = w × h = 512 bits of entropy, over
+  ;; nᵢₙ = w × n = 8192 bits of input data.
+  (let [^{:tag (array 1024 byte)} samples (zero (array 1024 byte))]
+    (when [err (Samples (subslice samples) memory)] (!= err nil)
+      (return (lit (array 48 byte)) err))
+
+
+    ;; Use a vetted unkeyed conditioning component, SHA-384, with nw = 384 and
+    ;; nₒᵤₜ = 384. Per the formula in SP 800-90B Section 3.1.5.1.2, the output
+    ;; entropy hₒᵤₜ is:
+    ;;
+    ;;     sage: n_in = 8192
+    ;;     sage: n_out = 384
+    ;;     sage: nw = 384
+    ;;     sage: h_in = 512
+    ;;     sage: P_high = 2^(-h_in)
+    ;;     sage: P_low = (1 - P_high) / (2^n_in - 1)
+    ;;     sage: n = min(n_out, nw)
+    ;;     sage: ψ = 2^(n_in - n) * P_low + P_high
+    ;;     sage: U = 2^(n_in - n) + sqrt(2 * n * 2^(n_in - n) * ln(2))
+    ;;     sage: ω = U * P_low
+    ;;     sage: h_out = -log(max(ψ, ω), 2)
+    ;;     sage: h_out.n()
+    ;;     384.000000000000
+    ;;
+    ;; According to Implementation Guidance D.K, Resolution 19, since
+    ;;
+    ;;   - the conditioning component is vetted,
+    ;;   - hᵢₙ = 512 ≥ nₒᵤₜ + 64 = 448, and
+    ;;   - nₒᵤₜ ≤ security strength of SHA-384 = 384 (per SP 800-107 Rev. 1, Table 1),
+    ;;
+    ;; we can claim the output has full entropy.
+    (return (SHA384 (addr samples)) nil)))
+
+
+
+
+
+
+
+^{:go/end 95} (go/func Samples "Samples starts a new entropy source, collects the requested number of\nsamples, conducts startup health tests, and returns the samples or an error\nif the health tests fail.\n\nThe health tests have a non-negligible chance of failing.\n" ^error [^{:tag (slice uint8)} samples ^{:tag (* ScratchBuffer)} memory]
+  (when (< (len samples) 1024)
+    (return (errors/New "entropy: at least 1024 samples are required for startup health tests")))
+
+  ^{:go/breaks [[6 94]]} (let [s (newSource memory)]
+    (range [4]
+      ;; Warm up the source to avoid any initial bias.
+      (set! _ (.Sample s)))
+
+    (range [i samples]
+      (aset samples i (.Sample s)))
+
+    (when [err (RepetitionCountTest samples)] (!= err nil)
+      (return err))
+
+    (when [err (AdaptiveProportionTest samples)] (!= err nil)
+      (return err))
+
+    nil))
+
+
+(go/type source (struct
+    ^{:line 98 :tag (* ScratchBuffer)} memory
+    ^{:line 99 :tag uint32} lcgState
+    ^{:line 100 :tag int64} previous))
+
+
+^{:go/end 109} (go/func newSource ^{:tag (* source)} [^{:tag (* ScratchBuffer)} memory]
+  (addr ^{:go/breaks [2 4 6]} (lit source
+      :memory memory
+      :lcgState (conv uint32 (time/HighPrecisionNow))
+      :previous (time/HighPrecisionNow))))
+
+
+
+
+
+
+
+^{:go/end 120} (go/func touchMemory "touchMemory performs a write to memory at the given index.\n\nThe memory slice is passed in and may be shared across sources e.g. to avoid\nthe significant (~500µs) cost of zeroing a new allocation on every [Seed] call.\n" [^{:tag (* ScratchBuffer)} memory ^uint32 idx]
+  (set! idx (* (/ idx 4) 4)) ; align to 32 bits
+  (let [u32 (conv (* uint32) (conv unsafe/Pointer (addr (aget memory idx))))
+      ^{:line 118} last (atomic/LoadUint32 u32)]
+    (atomic/SwapUint32 u32 (+ last 13))))
+
+
+^{:go/end 145} (go/method Sample ^uint8 [^{:tag (* source)} s]
+  ;; Perform a few memory accesses in an unpredictable pattern to expose the
+  ;; next measurement to as much system noise as possible.
+  (let [(values memory lcgState) (values (.-memory s) (.-lcgState s))]
+    (when (== memory nil) ; remove the nil check from the inlined touchMemory calls
+      (panic "entropy: nil memory buffer"))
+
+    (range [64]
+      (set! lcgState (+ (* 1664525 lcgState) 1013904223))
+      ;; Discard the lower bits, which tend to fall into short cycles.
+      (let [idx (bit-and (>> lcgState 6) (- (<< 1 25) 1))]
+        (touchMemory memory idx)))
+
+    (set! (.-lcgState s) lcgState)
+
+    (let [t (time/HighPrecisionNow)
+        ^{:line 138} sample (- t (.-previous s))]
+      (set! (.-previous s) t)
+
+      ;; Reduce the symbol space to 256 values, assuming most of the entropy is in
+      ;; the least-significant bits, which represent the highest-resolution timing
+      ;; differences.
+      (conv uint8 sample))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 174} (go/func RepetitionCountTest "RepetitionCountTest implements the repetition count test from SP 800-90B\nSection 4.4.1. It returns an error if any symbol is repeated C = 41 or more\ntimes in a row.\n\nThis C value is calculated from a target failure probability α = 2⁻²⁰ and a\nclaimed min-entropy per symbol h = 0.5 bits, using the formula in SP 800-90B\nSection 4.4.1.\n\n\tsage: α = 2^-20\n\tsage: H = 0.5\n\tsage: 1 + ceil(-log(α, 2) / H)\n\t41\n" ^error [^{:tag (slice uint8)} samples]
+  ^{:go/breaks [[3 173]]} (let [x (aget samples 0)
+      ^{:line 161} count 1]
+    (range [_ y (subslice samples 1)]
+      (if (== y x) (do
+          (inc! count)
+          (when (>= count 41)
+            (return (errors/New "entropy: repetition count health test failed"))))
+
+        (do
+          (set! x y)
+          (set! count 1))))
+
+
+    nil))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 204} (go/func AdaptiveProportionTest "AdaptiveProportionTest implements the adaptive proportion test from SP 800-90B\nSection 4.4.2. It returns an error if any symbol appears C = 410 or more\ntimes in the last W = 512 samples.\n\nThis C value is calculated from a target failure probability α = 2⁻²⁰, a\nwindow size W = 512, and a claimed min-entropy per symbol h = 0.5 bits, using\nthe formula in SP 800-90B Section 4.4.2, equivalent to the Microsoft Excel\nformula 1+CRITBINOM(W, power(2,(−H)),1−α).\n\n\tsage: from scipy.stats import binom\n\tsage: α = 2^-20\n\tsage: H = 0.5\n\tsage: W = 512\n\tsage: C = 1 + binom.ppf(1 - α, W, 2**(-H))\n\tsage: ceil(C)\n\t410\n" ^error [^{:tag (slice uint8)} samples]
+  ^{:go/breaks [[3 203]]} (let [^{:tag (array 256 int)} counts (zero (array 256 int))]
+    (range [i x samples]
+      (inc! (aget counts x))
+      (when (>= i 512)
+        (dec! (aget counts (aget samples (- i 512)))))
+
+      (when (>= (aget counts x) 410)
+        (return (errors/New "entropy: adaptive proportion health test failed"))))
+
+
+    nil))

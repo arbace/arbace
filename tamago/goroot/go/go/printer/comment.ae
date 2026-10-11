@@ -1,0 +1,154 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.printer) (go/file "comment.go" :imports [
+
+
+    ^{:line 8} [ast "go/ast"]
+    ^{:line 9} [comment "go/doc/comment"]
+    ^{:line 10} [strings "strings"]])
+
+
+
+
+^{:go/end 108} (go/func formatDocComment "formatDocComment reformats the doc comment list,\nreturning the canonical formatting.\n" ^{:tag (slice (* ast/Comment))} [^{:tag (slice (* ast/Comment))} list]
+  ;; Extract comment text (removing comment markers).
+  (let [(values ^string kind ^string text) (zero string)
+      ^{:line 18 :tag (slice (* ast/Comment))} directives (zero (slice (* ast/Comment)))]
+    (cond (and (== (len list) 1) (strings/HasPrefix (.-Text (aget list 0)) "/*")) (do
+        (set! kind "/*")
+        (set! text (.-Text (aget list 0)))
+        (when (or (not (strings/Contains text "\n")) (allStars text))
+          ;; Single-line /* .. */ comment in doc comment position,
+          ;; or multiline old-style comment like
+          ;;	/*
+          ;;	 * Comment
+          ;;	 * text here.
+          ;;	 */
+          ;; Should not happen, since it will not work well as a
+          ;; doc comment, but if it does, just ignore:
+          ;; reformatting it will only make the situation worse.
+          (return list))
+
+        (set! text (subslice text 2 (- (len text) 2)))) ; cut /* and */
+      (strings/HasPrefix (.-Text (aget list 0)) "//") (do
+        (set! kind "//")
+        (let [^strings/Builder b (zero strings/Builder)]
+          (range [_ c list]
+            (let [(values after found) (strings/CutPrefix (.-Text c) "//")]
+              (when (not found)
+                (return list))
+
+              ;; Accumulate //go:build etc lines separately.
+              (when (isDirective after)
+                (set! directives (append directives c))
+                (continue))
+
+              (.WriteString b (strings/TrimPrefix after " "))
+              (.WriteString b "\n")))
+
+          (set! text (.String b)))) :else
+
+      ;; Not sure what this is, so leave alone.
+      (return list))
+
+
+    (when (== text "")
+      (return list))
+
+
+    ;; Parse comment and reformat as text.
+    (let [^comment/Parser p (zero comment/Parser)
+        ^{:line 63} d (.Parse p text)
+
+        ^{:line 65 :tag comment/Printer} pr (zero comment/Printer)]
+      (set! text (conv string (.Comment pr d)))
+
+      ;; For /* */ comment, return one big comment with text inside.
+      (let [slash (.-Slash (aget list 0))]
+        (when (== kind "/*")
+          (let [c (addr ^{:go/breaks [2 4]} (lit ast/Comment
+                  :Slash slash
+                  :Text (+ "/*\n" text "*/")))]
+
+            (return (lit (slice (* ast/Comment)) c))))
+
+
+        ;; For // comment, return sequence of // lines.
+        (let [^{:tag (slice (* ast/Comment))} out (zero (slice (* ast/Comment)))]
+          (while (!= text "")
+            (let [^string line (zero string)]
+              (set! (values line text _) (strings/Cut text "\n"))
+              (cond (== line "")
+                (set! line "//")
+                (strings/HasPrefix line "\t")
+                (set! line (+ "//" line)) :else
+
+                (set! line (+ "// " line)))
+
+              (set! out (append out (addr ^{:go/breaks [2 4]} (lit ast/Comment
+                      :Slash slash
+                      :Text line))))))
+
+
+          (when (> (len directives) 0)
+            (set! out (append out (addr ^{:go/breaks [2 4]} (lit ast/Comment
+                    :Slash slash
+                    :Text "//"))))
+
+            (range [_ c directives]
+              (set! out (append out (addr ^{:go/breaks [2 4]} (lit ast/Comment
+                      :Slash slash
+                      :Text (.-Text c)))))))
+
+
+
+          ^{:line 107} out)))))
+
+
+
+
+
+^{:go/end 138} (go/func isDirective "isDirective reports whether c is a comment directive.\nSee go.dev/issue/37974.\nThis code is also in go/ast.\n" ^bool [^string c]
+  ;; "//line " is a line directive.
+  ;; "//extern " is for gccgo.
+  ;; "//export " is for cgo.
+  ;; (The // has been removed.)
+  (when (or (strings/HasPrefix c "line ") (strings/HasPrefix c "extern ") (strings/HasPrefix c "export "))
+    (return true))
+
+
+  ;; "//[a-z0-9]+:[a-z0-9]"
+  ;; (The // has been removed.)
+  ^{:go/breaks [[4 137]]} (let [colon (strings/Index c ":")]
+    (when (or (<= colon 0) (>= (+ colon 1) (len c)))
+      (return false))
+
+    (for [i 0] (<= i (+ colon 1)) (inc! i)
+      (when (== i colon)
+        (continue))
+
+      (let [b (aget c i)]
+        (when (not (or (and (<= \a b) (<= b \z)) (and (<= \0 b) (<= b \9))))
+          (return false))))
+
+
+    true))
+
+
+
+
+^{:go/breaks [[5 154]] :go/end 155} (go/func allStars "allStars reports whether text is the interior of an\nold-style /* */ comment with a star at the start of each line.\n" ^bool [^string text]
+  (for [i 0] (< i (len text)) (inc! i)
+    (when (== (aget text i) \newline)
+      (let [j (+ i 1)]
+        (while (and (< j (len text)) ^:go/paren (or (== (aget text j) \space) (== (aget text j) \tab)))
+          (inc! j))
+
+        (when (and (< j (len text)) (!= (aget text j) \*))
+          (return false)))))
+
+
+
+  true)

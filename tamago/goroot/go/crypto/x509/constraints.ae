@@ -1,0 +1,628 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "constraints.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [net "net"]
+    ^{:line 11} [netip "net/netip"]
+    ^{:line 12} [url "net/url"]
+    ^{:line 13} [slices "slices"]
+    ^{:line 14} [strings "strings"]])
+
+
+;; This file contains the data structures and functions necessary for
+;; efficiently checking X.509 name constraints. The method for constraint
+;; checking implemented in this file is based on a technique originally
+;; described by davidben@google.com.
+;;
+;; The basic concept is based on the fact that constraints describe possibly
+;; overlapping subtrees that we need to match against. If sorted in lexicographic
+;; order, and then pruned, removing any subtrees that overlap with preceding
+;; subtrees, a simple binary search can be used to find the nearest matching
+;; prefix. This reduces the complexity of name constraint checking from
+;; quadratic to log linear complexity.
+;;
+;; A close reading of RFC 5280 may suggest that constraints could also be
+;; implemented as a trie (or radix tree), which would present the possibility of
+;; doing construction and matching in linear time, but the memory cost of
+;; implementing them is actually quite high, and in the worst case (where each
+;; node has a high number of children) can be abused to require a program to use
+;; significant amounts of memory. The log linear approach taken here is
+;; extremely cheap in terms of memory because we directly alias the already
+;; parsed constraints, thus avoiding the need to do significant additional
+;; allocations.
+;;
+;; The basic data structure is nameConstraintsSet, which implements the sorting,
+;; pruning, and querying of the prefix sets.
+;;
+;; In order to check IP, DNS, URI, and email constraints, we need to use two
+;; different techniques, one for IP addresses, which is quite simple, and one
+;; for DNS names, which additionally compose the portions of URIs and emails we
+;; care about (technically we also need some special logic for email addresses
+;; as well for when constraints comprise of full email addresses) which is
+;; slightly more complex.
+;;
+;; IP addresses use two nameConstraintsSets, one for IPv4 addresses and one for
+;; IPv6 addresses, with no additional logic.
+;;
+;; DNS names require some extra logic in order to handle the distinctions
+;; between permitted and excluded subtrees, as well as for wildcards, and the
+;; semantics of leading period constraints (i.e. '.example.com'). This logic is
+;; implemented in the dnsConstraints type.
+;;
+;; Email addresses also require some additional logic, which does not make use
+;; of nameConstraintsSet, to handle constraints which define full email
+;; addresses (i.e. 'test@example.com'). For bare domain constraints, we use the
+;; dnsConstraints type described above, querying the domain portion of the email
+;; address. For full email addresses, we also hold a map of email addresses with
+;; the domain portion of the email lowercased, since it is case insensitive. When
+;; looking up an email address in the constraint set, we first check the full
+;; email address map, and if we don't find anything, we check the domain portion
+;; of the email address against the dnsConstraints.
+
+(go/type nameConstraintsSet :type-params [^{:tag (| (* net/IPNet) string)} T ^{:tag (| net/IP string)} V] (struct
+    ^{:line 68 :tag (slice T)} set))
+
+
+
+
+
+^{:go/end 92} (go/method sortAndPrune "sortAndPrune sorts the constraints using the provided comparison function, and then\nprunes any constraints that are subsets of preceding constraints using the\nprovided subset function.\n" [^{:tag (* (nameConstraintsSet T V))} nc ^{:tag (func [T T] [int])} cmp ^{:tag (func [T T] [bool])} subset]
+  (when (< (len (.-set nc)) 2)
+    (return))
+
+
+  (^{:inst [(slice T) T]} slices/SortFunc (.-set nc) cmp)
+
+  (when (< (len (.-set nc)) 2)
+    (return))
+
+  (let [writeIndex 1]
+    (for [readIndex 1] (< readIndex (len (.-set nc))) (inc! readIndex)
+      (when (not (subset (aget (.-set nc) (- writeIndex 1)) (aget (.-set nc) readIndex)))
+        (aset (.-set nc) writeIndex (aget (.-set nc) readIndex))
+        (inc! writeIndex)))
+
+
+    (set! (.-set nc) (subslice (.-set nc) _ writeIndex))))
+
+
+
+
+
+
+
+^{:go/end 124} (go/method search "search does a binary search over the constraints set for the provided value\ns, using the provided comparison function cmp to find the lower bound, and\nthe match function to determine if the found constraint is a prefix of s. If\na matching constraint is found, it is returned along with true. If no\nmatching constraint is found, the zero value of T and false are returned.\n" [^{:tag (* (nameConstraintsSet T V))} nc ^V s ^{:tag (func [T V] [int])} cmp ^{:tag (func [T V] [bool])} match] :results [^T lowerBound ^bool exactMatch]
+  (when (== (len (.-set nc)) 0)
+    (return lowerBound false))
+
+  ;; Look for the lower bound of s in the set.
+  (let [(values i found) (^{:inst [(slice T) T V]} slices/BinarySearchFunc (.-set nc) s cmp)]
+    ;; If we found an exact match, return it
+    (when found
+      (return (aget (.-set nc) i) true))
+
+
+    (when (< i 0)
+      (return lowerBound false))
+
+
+    (let [^T constraint (zero T)]
+      (if (== i 0)
+        (set! constraint (aget (.-set nc) 0))
+
+        (set! constraint (aget (.-set nc) (- i 1))))
+
+      (when (match constraint s)
+        (return constraint true))
+
+      (return lowerBound false))))
+
+
+^{:go/end 135} (go/func ipNetworkSubset ^bool [^{:tag (* net/IPNet)} a ^{:tag (* net/IPNet)} b]
+  (when (not (.Contains a (.-IP b)))
+    (return false))
+
+  (let [broadcast (make net/IP (len (.-IP b)))]
+    (range [i (.-IP b)]
+      (aset broadcast i (bit-or (aget (.-IP b) i) (bit-not (aget (.-Mask b) i)))))
+
+    (.Contains a broadcast)))
+
+
+^{:go/end 143} (go/func ipNetworkCompare ^int [^{:tag (* net/IPNet)} a ^{:tag (* net/IPNet)} b]
+  (let [i (bytes/Compare (.-IP a) (.-IP b))]
+    (when (!= i 0)
+      (return i))
+
+    (bytes/Compare (.-Mask a) (.-Mask b))))
+
+
+^{:go/end 147} (go/func ipBinarySearch ^int [^{:tag (* net/IPNet)} constraint ^net/IP target]
+  (bytes/Compare (.-IP constraint) target))
+
+
+^{:go/end 151} (go/func ipMatch ^bool [^{:tag (* net/IPNet)} constraint ^net/IP target]
+  (.Contains constraint target))
+
+
+(go/type ipConstraints (struct
+    ;; NOTE: we could store IP network prefixes as a pre-processed byte slice
+    ;; (i.e. by masking the IP) and doing the byte prefix checking using faster
+    ;; techniques, but this would require allocating new byte slices, which is
+    ;; likely significantly more expensive than just operating on the
+    ;; pre-allocated *net.IPNet and net.IP objects directly.
+
+    ^{:line 160 :tag (* (nameConstraintsSet (* net/IPNet) net/IP))} ipv4
+    ^{:line 161 :tag (* (nameConstraintsSet (* net/IPNet) net/IP))} ipv6))
+
+
+^{:go/end 197} (go/func newIPNetConstraints ^{:tag (interface (query [net/IP] :results [(* net/IPNet) bool]))} [^{:tag (slice (* net/IPNet))} l]
+
+
+  (when (== (len l) 0)
+    (return nil))
+
+  (let [(values ^{:tag (slice (* net/IPNet))} ipv4 ^{:tag (slice (* net/IPNet))} ipv6) (zero (slice (* net/IPNet)))]
+    (range [_ n l]
+      ;; Subtrees may carry non-zero host bits. Sort and search need the masked
+      ;; network address, so use a copy and leave the parsed constraint as encoded.
+      (when [masked (.Mask (.-IP n) (.-Mask n))] (and (!= masked nil) (not (.Equal masked (.-IP n))))
+        (set! n (addr (lit net/IPNet :IP masked :Mask (.-Mask n)))))
+
+      (if (== (len (.-IP n)) net/IPv4len)
+        (set! ipv4 (append ipv4 n))
+
+        (set! ipv6 (append ipv6 n))))
+
+
+    (let [(values ^{:tag (* (nameConstraintsSet (* net/IPNet) net/IP))} v4c ^{:tag (* (nameConstraintsSet (* net/IPNet) net/IP))} v6c) (zero (* (nameConstraintsSet (* net/IPNet) net/IP)))]
+      (when (> (len ipv4) 0)
+        (set! v4c (addr ^{:go/breaks [2]} (lit (nameConstraintsSet (* net/IPNet) net/IP)
+              :set ipv4)))
+
+        (.sortAndPrune v4c ipNetworkCompare ipNetworkSubset))
+
+      (when (> (len ipv6) 0)
+        (set! v6c (addr ^{:go/breaks [2]} (lit (nameConstraintsSet (* net/IPNet) net/IP)
+              :set ipv6)))
+
+        (.sortAndPrune v6c ipNetworkCompare ipNetworkSubset))
+
+      (addr (lit ipConstraints :ipv4 v4c :ipv6 v6c)))))
+
+
+^{:go/end 210} (go/method query [^{:tag (* ipConstraints)} ipc ^net/IP ip] :results [(* net/IPNet) bool]
+  (let [^{:tag (* (nameConstraintsSet (* net/IPNet) net/IP))} c (zero (* (nameConstraintsSet (* net/IPNet) net/IP)))]
+    (if (== (len ip) net/IPv4len)
+      (set! c (.-ipv4 ipc))
+
+      (set! c (.-ipv6 ipc)))
+
+    (when (== c nil)
+      (return nil false))
+
+    (.search c ip ipBinarySearch ipMatch)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 250} (go/func dnsHasSuffix "dnsHasSuffix case-insensitively checks if DNS name b is a label suffix of DNS\nname a, meaning that example.com is not considered a suffix of\ntestexample.com, but is a suffix of test.example.com.\n\ndnsHasSuffix supports the URI \"leading period\" constraint semantics, which\nwhile not explicitly defined for dNSNames in RFC 5280, are widely supported\n(see errata 5997). In particular, a constraint of \".example.com\" is\nconsidered to only match subdomains of example.com, but not example.com\nitself.\n\na and b must both be non-empty strings representing (mostly) valid DNS names.\n" ^bool [^string a ^string b]
+  (let [lenA (len a)
+      ^{:line 225} lenB (len b)]
+    (when (> lenA lenB)
+      (return false))
+
+    ^{:go/breaks [[4 249]]} (let [i (- lenA 1)
+        ^{:line 230} offset (- lenA lenB)]
+      (for [] (>= i 0) (dec! i)
+        (let [(values ar br) (values (aget a i) (aget b (- i offset)))]
+          (when (== ar br)
+            (continue))
+
+          (when (< br ar)
+            (set! (values ar br) (values br ar)))
+
+          (when (and (<= \A ar) (<= ar \Z) (== br (- (+ ar \a) \A)))
+            (continue))
+
+          (return false)))
+
+
+      (when (and (!= (aget a 0) \.) (> lenB lenA) (!= (aget b (- lenB lenA 1)) \.))
+        (return false))
+
+
+      true)))
+
+
+
+
+(go/var ^{:tag (array 256 byte) :doc "dnsCompareTable contains the ASCII alphabet mapped from a characters index in\nthe table to its lowercased form.\n"} dnsCompareTable)
+
+^{:go/end 280} (go/func init []
+  ;; NOTE: we don't actually need the
+  ;; full alphabet, but calculating offsets would be more expensive than just
+  ;; having redundant characters.
+  (for [i 0] (< i 256) (inc! i)
+    (let [c (conv byte i)]
+      (when (and (<= \A c) (<= c \Z))
+        ;; Lowercase uppercase characters A-Z.
+        (set! c + (- \a \A)))
+
+      (aset dnsCompareTable i c)))
+
+  ;; Set the period character to 0 so that we get the right sorting behavior.
+  ;;
+  ;; In particular, we need the period character to sort before the only
+  ;; other valid DNS name character which isn't a-z or 0-9, the hyphen,
+  ;; otherwise a name with a dash would be incorrectly sorted into the middle
+  ;; of another tree.
+  ;;
+  ;; For example, imagine a certificate with the constraints "a.com", "a.a.com", and
+  ;; "a-a.com". These would sort as "a.com", "a-a.com", "a.a.com", which would break
+  ;; the pruning step since we wouldn't see that "a.a.com" is a subset of "a.com".
+  ;; Sorting the period before the hyphen ensures that "a.a.com" sorts before "a-a.com".
+  (aset dnsCompareTable \. 0))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 316} (go/func dnsCompare "dnsCompare is a case-insensitive reversed implementation of strings.Compare\nthat operates from the end to the start of the strings. This is more\nefficient that allocating reversed version of a and b and using\nstrings.Compare directly (even though it is highly optimized).\n\nNOTE: this function treats the period character ('.') as sorting above every\nother character, which is necessary for us to properly sort names into their\ncorrect order. This is further discussed in the init function above.\n" ^int [^string a ^string b]
+  (let [idxA (- (len a) 1)
+      ^{:line 292} idxB (- (len b) 1)]
+
+    (while (and (>= idxA 0) (>= idxB 0))
+      (let [byteA (aget dnsCompareTable (aget a idxA))
+          ^{:line 296} byteB (aget dnsCompareTable (aget b idxB))]
+        (when (== byteA byteB)
+          (dec! idxA)
+          (dec! idxB)
+          (continue))
+
+        (let [ret 1]
+          (when (< byteA byteB)
+            (set! ret -1))
+
+          (return ret))))
+
+
+    (let [ret 0]
+      (cond (< idxA idxB)
+        (set! ret -1)
+        (< idxB idxA)
+        (set! ret 1))
+
+      ^{:line 315} ret)))
+
+
+(go/type dnsConstraints (struct
+
+
+    ^{:line 321 :tag bool :doc "all lets us short circuit the query logic if we see a zero length\nconstraint which permits or excludes everything.\n"} all
+
+
+
+    ^{:line 325 :tag bool :doc "permitted indicates if these constraints are for permitted or excluded\nnames.\n"} permitted
+
+    ^{:line 327 :tag (* (nameConstraintsSet string string))} constraints
+
+
+
+
+
+    ^{:line 333 :tag (map string string) :doc "parentConstraints contains a subset of constraints which are used for\nwildcard SAN queries, which are constructed by removing the first label\nfrom the constraints in constraints. parentConstraints is only populated\nif permitted is false.\n"} parentConstraints))
+
+
+^{:go/end 372} (go/func newDNSConstraints ^{:tag (interface (query [string] :results [string bool]))} [^{:tag (slice string)} l ^bool permitted]
+  (when (== (len l) 0)
+    (return nil))
+
+  (range [_ n l]
+    (when (== (len n) 0)
+      (return (addr (lit dnsConstraints :all true)))))
+
+
+  (let [constraints (^{:inst [(slice string) string]} slices/Clone l)
+
+      ^{:line 347} nc (addr ^{:go/breaks [2 [4 351]]} (lit dnsConstraints
+          :constraints (addr ^{:go/breaks [2]} (lit (nameConstraintsSet string string)
+              :set constraints))
+
+          :permitted permitted))]
+
+
+    (.sortAndPrune (.-constraints nc) dnsCompare dnsHasSuffix)
+
+    (when (not permitted)
+      (let [parentConstraints (lit (map string string))]
+        (range [_ name (.-set (.-constraints nc))]
+          (set! name (strings/ToLower name))
+          (let [trimmedName (trimFirstLabel name)]
+            (when (== trimmedName "")
+              (continue))
+
+            (aset parentConstraints trimmedName name)))
+
+        (when (> (len parentConstraints) 0)
+          (set! (.-parentConstraints nc) parentConstraints))))
+
+
+
+    ^{:line 371} nc))
+
+
+^{:go/end 392} (go/method query [^{:tag (* dnsConstraints)} dnc ^string s] :results [string bool]
+  (when (.-all dnc)
+    (return "" true))
+
+
+  (let [(values constraint match) (.search (.-constraints dnc) s dnsCompare dnsHasSuffix)]
+    (when match
+      (return constraint true))
+
+
+    (when (and (not (.-permitted dnc)) (> (len s) 0) (== (aget s 0) \*))
+      (set! s (strings/ToLower s))
+      (let [trimmed (trimFirstLabel s)]
+        (when [(values constraint found) (aget (.-parentConstraints dnc) trimmed)] found
+          (return constraint true))))
+
+
+    (return "" false)))
+
+
+(go/type emailConstraints (struct
+    ^{:line 395 :tag (interface (query [string] :results [string bool]))} dnsConstraints
+
+
+
+
+
+
+
+    ^{:line 403 :tag (map rfc2821Mailbox (struct)) :doc "fullEmails is map of rfc2821Mailboxs that are fully specified in the\nconstraints, which we need to check for separately since they don't\nfollow the same matching rules as the domain-based constraints. The\ndomain portion of the rfc2821Mailbox has been lowercased, since the\ndomain portion is case insensitive. When checking the map for an email,\nthe domain portion of the query should also be lowercased.\n"} fullEmails))
+
+
+^{:go/end 437} (go/func newEmailConstraints ^{:tag (interface (query [rfc2821Mailbox] :results [string bool]))} [^{:tag (slice string)} l ^bool permitted]
+
+
+  (when (== (len l) 0)
+    (return nil))
+
+  (let [exactMap (lit (map rfc2821Mailbox (struct)))
+      ^{:line 413 :tag (slice string)} domains (zero (slice string))]
+    (range [_ c l]
+      (when (not (strings/ContainsRune c \@))
+        (set! domains (append domains c))
+        (continue))
+
+      (let [(values parsed ok) (parseRFC2821Mailbox c)]
+        (when (not ok)
+          ;; We've already parsed these addresses in parseCertificate, and
+          ;; treat failures as a hard failure for parsing. The only way we can
+          ;; get a parse failure here is if the caller has mutated the
+          ;; certificate since parsing.
+          (continue))
+
+        (set! (.-domain parsed) (strings/ToLower (.-domain parsed)))
+        (aset exactMap parsed (lit (struct)))))
+
+    (let [ec (addr ^{:go/breaks [2]} (lit emailConstraints
+            :fullEmails exactMap))]
+
+      (when (> (len domains) 0)
+        (set! (.-dnsConstraints ec) (newDNSConstraints domains permitted)))
+
+      ^{:line 436} ec)))
+
+
+^{:go/end 450} (go/method query [^{:tag (* emailConstraints)} ec ^rfc2821Mailbox s] :results [string bool]
+  (when (> (len (.-fullEmails ec)) 0)
+    (when [(values _ ok) (aget (.-fullEmails ec) s)] ok
+      (return (fmt/Sprintf "%s@%s" (.-local s) (.-domain s)) true)))
+
+
+  (when (== (.-dnsConstraints ec) nil)
+    (return "" false))
+
+  (let [(values constraint found) (.query (.-dnsConstraints ec) (.-domain s))]
+    (return constraint found)))
+
+
+(go/type constraints :type-params [T ^{:go/grouped false} V] (struct
+    ^{:line 453 :tag string} constraintType
+    ^{:line 454 :tag (interface (query [V] :results [T bool]))} permitted
+    ^{:line 455 :go/grouped false :tag (interface (query [V] :results [T bool]))} excluded))
+
+
+^{:go/breaks [[7 469]] :go/end 470} (go/func checkConstraints :type-params [^{:tag (| string (* net/IPNet))} T V ^{:tag (| string net/IP parsedURI rfc2821Mailbox)} P] ^error [^{:tag (constraints T V)} c ^V s ^P p]
+  (when (!= (.-permitted c) nil)
+    (when [(values _ found) (.query (.-permitted c) s)] (not found)
+      (return (fmt/Errorf "%s %q is not permitted by any constraint" (.-constraintType c) p))))
+
+
+  (when (!= (.-excluded c) nil)
+    (when [(values constraint found) (.query (.-excluded c) s)] found
+      (return (fmt/Errorf "%s %q is excluded by constraint %q" (.-constraintType c) p constraint))))
+
+
+  nil)
+
+
+(go/type chainConstraints (struct
+    ^{:line 473 :tag (constraints (* net/IPNet) net/IP)} ip
+    ^{:line 474 :tag (constraints string string)} dns
+    ^{:line 475 :tag (constraints string string)} uri
+    ^{:line 476 :tag (constraints string rfc2821Mailbox)} email
+
+    ^{:line 478 :tag int} index
+    ^{:line 479 :tag (* chainConstraints)} next))
+
+
+^{:go/breaks [[7 512]] :go/end 513} (go/method check ^error [^{:tag (* chainConstraints)} cc ^{:tag (slice string)} dns ^{:tag (slice parsedURI)} uris ^{:tag (slice rfc2821Mailbox)} emails ^{:tag (slice net/IP)} ips]
+  (range [_ ip ips]
+    (when [err (^{:inst [(* net/IPNet) net/IP net/IP]} checkConstraints (.-ip cc) ip ip)] (!= err nil)
+      (return err)))
+
+
+  (range [_ d dns]
+    (when (not (domainNameValid d false))
+      (return (fmt/Errorf "x509: cannot parse dnsName %q" d)))
+
+    (when [err (^{:inst [string string string]} checkConstraints (.-dns cc) d d)] (!= err nil)
+      (return err)))
+
+
+  (range [_ u uris]
+    (when (not (domainNameValid (.-domain u) false))
+      (return (fmt/Errorf "x509: internal error: URI SAN %q failed to parse" u)))
+
+    (when [err (^{:inst [string string parsedURI]} checkConstraints (.-uri cc) (.-domain u) u)] (!= err nil)
+      (return err)))
+
+
+  (range [_ e emails]
+    (when (not (domainNameValid (.-domain e) false))
+      (return (fmt/Errorf "x509: cannot parse rfc822Name %q" e)))
+
+    (when [err (^{:inst [string rfc2821Mailbox rfc2821Mailbox]} checkConstraints (.-email cc) e e)] (!= err nil)
+      (return err)))
+
+
+  nil)
+
+
+^{:go/end 571} (go/func checkChainConstraints ^error [^{:tag (slice (* Certificate))} chain]
+  ^{:go/breaks [[5 570]]} (let [^{:tag (* chainConstraints)} currentConstraints (zero (* chainConstraints))
+      ^{:line 517 :tag (* chainConstraints)} last (zero (* chainConstraints))]
+    (range [i c chain]
+      (when (not (.hasNameConstraints c))
+        (continue))
+
+      (let [cc (addr ^{:go/breaks [2 4 6 8 10]} (lit chainConstraints
+              :ip (lit (constraints (* net/IPNet) net/IP) "IP address" (newIPNetConstraints (.-PermittedIPRanges c)) (newIPNetConstraints (.-ExcludedIPRanges c)))
+              :dns (lit (constraints string string) "DNS name" (newDNSConstraints (.-PermittedDNSDomains c) true) (newDNSConstraints (.-ExcludedDNSDomains c) false))
+              :uri (lit (constraints string string) "URI" (newDNSConstraints (.-PermittedURIDomains c) true) (newDNSConstraints (.-ExcludedURIDomains c) false))
+              :email (lit (constraints string rfc2821Mailbox) "email address" (newEmailConstraints (.-PermittedEmailAddresses c) true) (newEmailConstraints (.-ExcludedEmailAddresses c) false))
+              :index i))]
+
+        (cond (== currentConstraints nil) (do
+            (set! currentConstraints cc)
+            (set! last cc))
+          (!= last nil) (do
+            (set! (.-next last) cc)
+            (set! last cc)))))
+
+
+    (when (== currentConstraints nil)
+      (return nil))
+
+
+    (range [i c chain]
+      (when (not (.hasSANExtension c))
+        (continue))
+
+      (when (>= i (.-index currentConstraints))
+        (while (<= (.-index currentConstraints) i)
+          (when (== (.-next currentConstraints) nil)
+            (return nil))
+
+          (set! currentConstraints (.-next currentConstraints))))
+
+
+
+      (let [(values uris err) (parseURIs (.-URIs c))]
+        (when (!= err nil)
+          (return err))
+
+        (let [(values emails ^:assign err) (parseMailboxes (.-EmailAddresses c))]
+          (when (!= err nil)
+            (return err))
+
+
+          (for [n currentConstraints] (!= n nil) (set! n (.-next n))
+            (when [err (.check n (.-DNSNames c) uris emails (.-IPAddresses c))] (!= err nil)
+              (return err))))))
+
+
+
+
+    nil))
+
+
+(go/type parsedURI (struct
+    ^{:line 574 :tag (* url/URL)} uri
+    ^{:line 575 :tag string} domain))
+
+
+^{:go/end 580} (go/method String ^string [^parsedURI u]
+  (.String (.-uri u)))
+
+
+^{:go/end 607} (go/func parseURIs [^{:tag (slice (* url/URL))} uris] :results [(slice parsedURI) error]
+  (let [parsed (make (slice parsedURI) 0 (len uris))]
+    (range [_ uri uris]
+      (let [host (strings/ToLower (.-Host uri))]
+        (when (== (len host) 0)
+          (return nil (fmt/Errorf "URI with empty host (%q) cannot be matched against constraints" (.String uri))))
+
+        (when (and (strings/Contains host ":") (not (strings/HasSuffix host "]")))
+          (let [^error err (zero error)]
+            (set! (values host _ err) (net/SplitHostPort (.-Host uri)))
+            (when (!= err nil)
+              (return nil (fmt/Errorf "cannot parse URI host %q: %v" (.-Host uri) err)))))
+
+
+
+        ;; netip.ParseAddr will reject the URI IPv6 literal form "[...]", so we
+        ;; check if _either_ the string parses as an IP, or if it is enclosed in
+        ;; square brackets.
+        (when [(values _ err) (netip/ParseAddr host)] (or (== err nil) ^:go/paren (and (strings/HasPrefix host "[") (strings/HasSuffix host "]")))
+          (return nil (fmt/Errorf "URI with IP (%q) cannot be matched against constraints" (.String uri))))
+
+
+        (set! parsed (append parsed (lit parsedURI uri host)))))
+
+    (return parsed nil)))
+
+
+^{:go/end 620} (go/func parseMailboxes [^{:tag (slice string)} emails] :results [(slice rfc2821Mailbox) error]
+  (let [parsed (make (slice rfc2821Mailbox) 0 (len emails))]
+    (range [_ email emails]
+      (let [(values mailbox ok) (parseRFC2821Mailbox email)]
+        (when (not ok)
+          (return nil (fmt/Errorf "cannot parse rfc822Name %q" email)))
+
+        (set! (.-domain mailbox) (strings/ToLower (.-domain mailbox)))
+        (set! parsed (append parsed mailbox))))
+
+    (return parsed nil)))
+
+
+^{:go/end 629} (go/func trimFirstLabel ^string [^string dnsName]
+  (let [firstDotInd (strings/IndexByte dnsName \.)]
+    (when (< firstDotInd 0)
+      ;; Constraint is a single label, we cannot trim it.
+      (return ""))
+
+    (subslice dnsName firstDotInd)))

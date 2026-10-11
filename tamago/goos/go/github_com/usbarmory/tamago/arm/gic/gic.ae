@@ -1,0 +1,206 @@
+;; ARM Generic Interrupt Controller (GICv2) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; IP: ARM Generic Interrupt Controller version 2.0
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package gic implements a driver for the ARM Generic Interrupt Controller
+;; (GICv2).
+;;
+;; The driver is based on the following reference specifications:
+;;   - ARM IHI 0048B.b - ARM Generic Interrupt Controller - Architecture version 2.0
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=arm` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.arm.gic) (go/file "gic.go" :doc "Package gic implements a driver for the ARM Generic Interrupt Controller\n(GICv2).\n\nThe driver is based on the following reference specifications:\n  - ARM IHI 0048B.b - ARM Generic Interrupt Controller - Architecture version 2.0\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=arm` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 23} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "GICv2 registers\n"
+
+
+  ^{:line 30} [^{:val 4096 :doc "GIC offsets in Cortex-A7\n(p178, Table 8-1, Cortex-A7 MPCore Technical Reference Manual).\n"} GICD_OFF 0x1000]
+  ^{:line 31} [^{:val 8192} GICC_OFF 0x2000]
+
+
+
+  ^{:line 35} [^{:val 0 :doc "Distributor register map\n(p75, Table 4-1, ARM Generic Interrupt Controller Architecture Specification).\n"} GICD_CTLR 0x000]
+  ^{:line 36} [^{:val 1} CTLR_ENABLEGRP1 1]
+  ^{:line 37} [^{:val 0} CTLR_ENABLEGRP0 0]
+
+  ^{:line 39} [^{:val 4} GICD_TYPER 0x004]
+  ^{:line 40} [^{:val 0} TYPER_ITLINES 0]
+
+  ^{:line 42} [^{:val 128} GICD_IGROUPR 0x080]
+  ^{:line 43} [^{:val 256} GICD_ISENABLER 0x100]
+  ^{:line 44} [^{:val 384} GICD_ICENABLER 0x180]
+  ^{:line 45} [^{:val 640} GICD_ICPENDR 0x280]
+
+
+
+  ^{:line 49} [^{:val 0 :doc "CPU interface register map\n(p76, Table 4-2, ARM Generic Interrupt Controller Architecture Specification).\n"} GICC_CTLR 0x0000]
+  ^{:line 50} [^{:val 3} CTLR_FIQEN 3]
+
+  ^{:line 52} [^{:val 4} GICC_PMR 0x0004]
+  ^{:line 53} [^{:val 0} PMR_PRIORITY 0]
+
+  ^{:line 55} [^{:val 12} GICC_IAR 0x000c]
+  ^{:line 56} [^{:val 0} IAR_ID 0]
+
+  ^{:line 58} [^{:val 16} GICC_EOIR 0x0010]
+  ^{:line 59} [^{:val 0} EOIR_ID 0]
+
+  ^{:line 61} [^{:val 32} GICC_AIAR 0x0020]
+  ^{:line 62} [^{:val 0} AIAR_ID 0]
+
+  ^{:line 64} [^{:val 36} GICC_AEOIR 0x0024]
+  ^{:line 65} [^{:val 0} AEOIR_ID 0])
+
+
+
+(go/type GIC "GIC represents a Generic Interrupt Controller (GICv2) instance.\n" (struct
+
+    ^{:line 71 :tag uint32 :doc "Base register\n"} Base
+
+
+    ^{:line 74 :tag uint32 :doc "control registers\n"} gicd
+    ^{:line 75 :tag uint32} gicc))
+
+
+
+^{:go/end 118} (go/method Init "InitGIC initializes an ARM Generic Interrupt Controller (GICv2) instance.\n" [^{:tag (* GIC)} hw]
+  (when (== (.-Base hw) 0)
+    (panic "invalid GIC instance"))
+
+
+  (set! (.-gicd hw) (+ (.-Base hw) GICD_OFF))
+  (set! (.-gicc hw) (+ (.-Base hw) GICC_OFF))
+
+  ;; Get the maximum number of external interrupt lines
+  (let [itLinesNum (reg/GetN (+ (.-gicd hw) GICD_TYPER) TYPER_ITLINES 0x1f)]
+
+    ;; Add a line for the 32 internal interrupts
+    (set! itLinesNum + 1)
+
+    (for [n (conv uint32 0)] (< n itLinesNum) (inc! n)
+      ;; Disable interrupts
+      (let [addr (+ (.-gicd hw) GICD_ICENABLER (* 4 n))]
+        (reg/Write addr 0xffffffff)
+
+        ;; Clear pending interrupts
+        (set! addr (+ (.-gicd hw) GICD_ICPENDR (* 4 n)))
+        (reg/Write addr 0xffffffff)
+
+        ;; Group 0 (Secure)
+        (set! addr (+ (.-gicd hw) GICD_IGROUPR (* 4 n)))
+        (reg/Write addr 0x00000000)))
+
+
+    ;; Set priority mask to allow Non-Secure world to use the lower half
+    ;; of the priority range.
+    (reg/Write (+ (.-gicc hw) GICC_PMR) 0x80)
+
+    (reg/Clear (+ (.-gicc hw) GICC_CTLR) CTLR_FIQEN)
+
+    (reg/Set (+ (.-gicc hw) GICC_CTLR) CTLR_ENABLEGRP1)
+    (reg/Set (+ (.-gicc hw) GICC_CTLR) CTLR_ENABLEGRP0)
+
+    (reg/Set (+ (.-gicd hw) GICD_CTLR) CTLR_ENABLEGRP1)
+    (reg/Set (+ (.-gicd hw) GICD_CTLR) CTLR_ENABLEGRP0)))
+
+
+
+
+^{:go/end 124} (go/method FIQEn "FIQEn controls whether Group 0 (Secure) interrupts should be signalled as\nIRQ or FIQ requests.\n" [^{:tag (* GIC)} hw ^bool fiq]
+  (reg/SetTo (+ (.-gicc hw) GICC_CTLR) CTLR_FIQEN fiq))
+
+
+^{:go/end 141} (go/method irq [^{:tag (* GIC)} hw ^int m ^bool enable]
+  (let [addr (.-gicd hw)
+
+      ^{:line 129} n (conv uint32 (/ m 32))
+      ^{:line 130} i (% m 32)]
+
+    (if enable
+      (set! addr + GICD_ISENABLER)
+
+      (set! addr + GICD_ICENABLER))
+
+
+    ;; ISENABLER and ICENABLER are write-1-to-act, a read-modify-write would
+    ;; act on every other set bit as well.
+    (reg/Write (+ addr (* 4 n)) ^uint32 (<< 1 i))))
+
+
+
+
+^{:go/end 147} (go/method EnableInterrupt "EnableInterrupt enables forwarding of the corresponding interrupt to the CPU\nand configures its group status (Secure: Group 0, Non-Secure: Group 1).\n" [^{:tag (* GIC)} hw ^int id]
+  (.irq hw id true))
+
+
+
+
+^{:go/end 153} (go/method DisableInterrupt "DisableInterrupt disables forwarding of the corresponding interrupt to the\nCPU.\n" [^{:tag (* GIC)} hw ^int id]
+  (.irq hw id false))
+
+
+
+^{:go/end 164} (go/method GetInterrupt "GetInterrupt obtains and acknowledges a signaled interrupt.\n" [^{:tag (* GIC)} hw] :results [^int id]
+  (let [m (reg/GetN (+ (.-gicc hw) GICC_IAR) IAR_ID 0x3ff)]
+
+    (when (< m 1020)
+      (reg/Write (+ (.-gicc hw) GICC_EOIR) (<< (bit-and m 0x3ff) EOIR_ID)))
+
+
+    (conv int m)))
+
+
+
+
+^{:go/end 176} (go/method GetNonSecureInterrupt "GetInterrupt obtains and acknowledges a signaled Non-Secure interrupt from\nSecure access.\n" [^{:tag (* GIC)} hw] :results [^int id]
+  (let [m (reg/GetN (+ (.-gicc hw) GICC_AIAR) AIAR_ID 0x3ff)]
+
+    (when (< m 1020)
+      (reg/Write (+ (.-gicc hw) GICC_AEOIR) (<< (bit-and m 0x3ff) AEOIR_ID)))
+
+
+    (conv int m)))
+
+
+
+
+^{:go/end 185} (go/method SetInterruptGroup "SetInterruptGroup assigns the corresponding interrupt to either Group 0\n(Secure, false) or 1 (Non-Secure, true).\n" [^{:tag (* GIC)} hw ^int id ^bool status]
+  (let [n (conv uint32 (/ id 32))
+      ^{:line 182} i (% id 32)]
+
+    (reg/SetTo (+ (.-gicd hw) GICD_IGROUPR (* 4 n)) i status)))
+
+
+
+
+^{:go/end 208} (go/method SetInterruptsGroup "SetInterruptsGroup assigns all interrupts to either Group 0 (Secure, false)\nor 1 (Non-Secure, true).\n" [^{:tag (* GIC)} hw ^bool status]
+  ;; Group 0 (Secure)
+  (let [mask (conv uint32 0x00000000)
+
+      ;; Get the maximum number of external interrupt lines
+      ^{:line 194} itLinesNum (reg/GetN (+ (.-gicd hw) GICD_TYPER) TYPER_ITLINES 0x1f)]
+
+    ;; Add a line for the 32 internal interrupts
+    (set! itLinesNum + 1)
+
+    (when status
+      ;; Group 1 (Non-Secure)
+      (set! mask 0xffffffff))
+
+
+    (for [n (conv uint32 0)] (< n itLinesNum) (inc! n)
+      (let [addr (+ (.-gicd hw) GICD_IGROUPR (* 4 n))]
+        (reg/Write addr mask)))))

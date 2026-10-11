@@ -1,0 +1,169 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.printer) (go/file "gobuild.go" :imports [
+
+
+    ^{:line 8} [constraint "go/build/constraint"]
+    ^{:line 9} [slices "slices"]
+    ^{:line 10} [tabwriter "text/tabwriter"]])
+
+
+^{:go/end 131} (go/method fixGoBuildLines [^{:tag (* printer)} p]
+  (when (== (+ (len (.-goBuild p)) (len (.-plusBuild p))) 0)
+    (return))
+
+
+  ;; Find latest possible placement of //go:build and // +build comments.
+  ;; That's just after the last blank line before we find a non-comment.
+  ;; (We'll add another blank line after our comment block.)
+  ;; When we start dropping // +build comments, we can skip over /* */ comments too.
+  ;; Note that we are processing tabwriter input, so every comment
+  ;; begins and ends with a tabwriter.Escape byte.
+  ;; And some newlines have turned into \f bytes.
+  (let [insert 0]
+    (for [pos 0] _ _
+      ;; Skip leading space at beginning of line.
+      (let [blank true]
+        (while (and (< pos (len (.-output p))) ^:go/paren (or (== (aget (.-output p) pos) \space) (== (aget (.-output p) pos) \tab)))
+          (inc! pos))
+
+        ;; Skip over // comment if any.
+        (when (and (< (+ pos 3) (len (.-output p))) (== (aget (.-output p) pos) tabwriter/Escape) (== (aget (.-output p) (+ pos 1)) \/) (== (aget (.-output p) (+ pos 2)) \/))
+          (set! blank false)
+          (while (and (< pos (len (.-output p))) (not (isNL (aget (.-output p) pos))))
+            (inc! pos)))
+
+
+        ;; Skip over \n at end of line.
+        (when (or (>= pos (len (.-output p))) (not (isNL (aget (.-output p) pos))))
+          (break))
+
+        (inc! pos)
+
+        (when blank
+          (set! insert pos))))
+
+
+
+    ;; If there is a //go:build comment before the place we identified,
+    ;; use that point instead. (Earlier in the file is always fine.)
+    (cond (and (> (len (.-goBuild p)) 0) (< (aget (.-goBuild p) 0) insert))
+      (set! insert (aget (.-goBuild p) 0))
+      (and (> (len (.-plusBuild p)) 0) (< (aget (.-plusBuild p) 0) insert))
+      (set! insert (aget (.-plusBuild p) 0)))
+
+
+    (let [^constraint/Expr x (zero constraint/Expr)]
+      (switch (len (.-goBuild p))
+        (case [0]
+          ;; Synthesize //go:build expression from // +build lines.
+          (range [_ pos (.-plusBuild p)]
+            (let [(values y err) (constraint/Parse (.commentTextAt p pos))]
+              (when (!= err nil)
+                (set! x nil)
+                (break))
+
+              (if (== x nil)
+                (set! x y)
+
+                (set! x (addr (lit constraint/AndExpr :X x :Y y)))))))
+
+
+        (case [1]
+          ;; Parse //go:build expression.
+          (set! (values x _) (constraint/Parse (.commentTextAt p (aget (.-goBuild p) 0))))))
+
+
+      (let [^{:tag (slice byte)} block (zero (slice byte))]
+        (if (== x nil) (do
+            ;; Don't have a valid //go:build expression to treat as truth.
+            ;; Bring all the lines together but leave them alone.
+            ;; Note that these are already tabwriter-escaped.
+            (range [_ pos (.-goBuild p)]
+              (set! block (append block (spread (.lineAt p pos)))))
+
+            (range [_ pos (.-plusBuild p)]
+              (set! block (append block (spread (.lineAt p pos))))))
+
+          (do
+            (set! block (append block tabwriter/Escape))
+            (set! block (append block (spread "//go:build ")))
+            (set! block (append block (spread (.String x))))
+            (set! block (append block tabwriter/Escape \newline))
+            (when (> (len (.-plusBuild p)) 0)
+              (let [(values lines err) (constraint/PlusBuildLines x)]
+                (when (!= err nil)
+                  (set! lines (lit (slice string) (+ "// +build error: " (.Error err)))))
+
+                (range [_ line lines]
+                  (set! block (append block tabwriter/Escape))
+                  (set! block (append block (spread line)))
+                  (set! block (append block tabwriter/Escape \newline)))))))
+
+
+
+        (set! block (append block \newline))
+
+        ;; Build sorted list of lines to delete from remainder of output.
+        (let [toDelete (append (.-goBuild p) (spread (.-plusBuild p)))]
+          (^{:inst [(slice int) int]} slices/Sort toDelete)
+
+          ;; Collect output after insertion point, with lines deleted, into after.
+          (let [^{:tag (slice byte)} after (zero (slice byte))
+              ^{:line 115} start insert]
+            (range [_ end toDelete]
+              (when (< end start)
+                (continue))
+
+              (set! after (appendLines after (subslice (.-output p) start end)))
+              (set! start (+ end (len (.lineAt p end)))))
+
+            (set! after (appendLines after (subslice (.-output p) start)))
+            (when [n (len after)] (and (>= n 2) (isNL (aget after (- n 1))) (isNL (aget after (- n 2))))
+              (set! after (subslice after _ (- n 1))))
+
+
+            (set! (.-output p) (subslice (.-output p) _ insert))
+            (set! (.-output p) (append (.-output p) (spread block)))
+            (set! (.-output p) (append (.-output p) (spread after)))))))))
+
+
+
+
+
+
+
+^{:go/end 144} (go/func appendLines "appendLines is like append(x, y...)\nbut it avoids creating doubled blank lines,\nwhich would not be gofmt-standard output.\nIt assumes that only whole blocks of lines are being appended,\nnot line fragments.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} x ^{:tag (slice byte)} y]
+  (when (and (> (len y) 0) (isNL (aget y 0)) ; y starts in blank line
+      ^:go/paren (or (== (len x) 0) (and (>= (len x) 2) (isNL (aget x (- (len x) 1))) (isNL (aget x (- (len x) 2)))))) ; x is empty or ends in blank line
+    (set! y (subslice y 1))) ; delete y's leading blank line
+
+  (append x (spread y)))
+
+
+^{:go/end 155} (go/method lineAt ^{:tag (slice byte)} [^{:tag (* printer)} p ^int start]
+  (let [pos start]
+    (while (and (< pos (len (.-output p))) (not (isNL (aget (.-output p) pos))))
+      (inc! pos))
+
+    (when (< pos (len (.-output p)))
+      (inc! pos))
+
+    (subslice (.-output p) start pos)))
+
+
+^{:go/end 166} (go/method commentTextAt ^string [^{:tag (* printer)} p ^int start]
+  (when (and (< start (len (.-output p))) (== (aget (.-output p) start) tabwriter/Escape))
+    (inc! start))
+
+  (let [pos start]
+    (while (and (< pos (len (.-output p))) (!= (aget (.-output p) pos) tabwriter/Escape) (not (isNL (aget (.-output p) pos))))
+      (inc! pos))
+
+    (conv string (subslice (.-output p) start pos))))
+
+
+^{:go/end 170} (go/func isNL ^bool [^byte b]
+  (or (== b \newline) (== b \formfeed)))

@@ -1,0 +1,177 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package tls13 implements the TLS 1.3 Key Schedule as specified in RFC 8446,
+;; Section 7.1 and allowed by FIPS 140-3 IG 2.4.B Resolution 7.
+(in-ns 'go.crypto.internal.fips140.tls13) (go/file "tls13.go" :doc "Package tls13 implements the TLS 1.3 Key Schedule as specified in RFC 8446,\nSection 7.1 and allowed by FIPS 140-3 IG 2.4.B Resolution 7.\n" :imports [
+
+
+    ^{:line 10} [hkdf "crypto/internal/fips140/hkdf"]
+    ^{:line 11} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 12} [hash "hash"]])
+
+
+;; We don't set the service indicator in this package but we delegate that to
+;; the underlying functions because the TLS 1.3 KDF does not have a standard of
+;; its own.
+
+
+^{:go/end 40} (go/func ExpandLabel "ExpandLabel implements HKDF-Expand-Label from RFC 8446, Section 7.1.\n" :type-params [^hash/Hash H] ^{:tag (slice byte)} [^{:tag (func [] [H])} hash ^{:tag (slice byte)} secret ^string label ^{:tag (slice byte)} context ^int length]
+  (when (or (> (+ (len "tls13 ") (len label)) 255) (> (len context) 255))
+    ;; It should be impossible for this to panic: labels are fixed strings,
+    ;; and context is either a fixed-length computed hash, or parsed from a
+    ;; field which has the same length limitation.
+    ;;
+    ;; Another reasonable approach might be to return a randomized slice if
+    ;; we encounter an error, which would break the connection, but avoid
+    ;; panicking. This would perhaps be safer but significantly more
+    ;; confusing to users.
+    (panic "tls13: label or context too long"))
+
+  (let [hkdfLabel (make (slice byte) 0 (+ 2 1 (len "tls13 ") (len label) 1 (len context)))]
+    (set! hkdfLabel (byteorder/BEAppendUint16 hkdfLabel (conv uint16 length)))
+    (set! hkdfLabel (append hkdfLabel (conv byte (+ (len "tls13 ") (len label)))))
+    (set! hkdfLabel (append hkdfLabel (spread "tls13 ")))
+    (set! hkdfLabel (append hkdfLabel (spread label)))
+    (set! hkdfLabel (append hkdfLabel (conv byte (len context))))
+    (set! hkdfLabel (append hkdfLabel (spread context)))
+    (^{:inst [H]} hkdf/Expand hash secret (conv string hkdfLabel) length)))
+
+
+^{:go/end 47} (go/func extract :type-params [^hash/Hash H] ^{:tag (slice byte)} [^{:tag (func [] [H])} hash ^{:tag (slice byte)} newSecret ^:go/grouped ^{:tag (slice byte)} currentSecret]
+  (when (== newSecret nil)
+    (set! newSecret (make (slice byte) (.Size (hash)))))
+
+  (^{:inst [H]} hkdf/Extract hash newSecret currentSecret))
+
+
+^{:go/end 54} (go/func deriveSecret :type-params [^hash/Hash H] ^{:tag (slice byte)} [^{:tag (func [] [H])} hash ^{:tag (slice byte)} secret ^string label ^hash/Hash transcript]
+  (when (== transcript nil)
+    (set! transcript (hash)))
+
+  (^{:inst [H]} ExpandLabel hash secret label (.Sum transcript nil) (.Size transcript)))
+
+
+(go/const
+  ^{:line 57} [^{:val "res binder"} resumptionBinderLabel "res binder"]
+  ^{:line 58} [^{:val "c e traffic"} clientEarlyTrafficLabel "c e traffic"]
+  ^{:line 59} [^{:val "c hs traffic"} clientHandshakeTrafficLabel "c hs traffic"]
+  ^{:line 60} [^{:val "s hs traffic"} serverHandshakeTrafficLabel "s hs traffic"]
+  ^{:line 61} [^{:val "c ap traffic"} clientApplicationTrafficLabel "c ap traffic"]
+  ^{:line 62} [^{:val "s ap traffic"} serverApplicationTrafficLabel "s ap traffic"]
+  ^{:line 63} [^{:val "e exp master"} earlyExporterLabel "e exp master"]
+  ^{:line 64} [^{:val "exp master"} exporterLabel "exp master"]
+  ^{:line 65} [^{:val "res master"} resumptionLabel "res master"])
+
+
+(go/type EarlySecret (struct
+    ^{:line 69 :tag (slice byte)} secret
+    ^{:line 70 :tag (func [] [hash/Hash])} hash))
+
+
+^{:go/end 78} (go/func NewEarlySecret :type-params [^hash/Hash H] ^{:tag (* EarlySecret)} [^{:tag (func [] [H])} h ^{:tag (slice byte)} psk]
+  (addr ^{:go/breaks [2 4]} (lit EarlySecret
+      :secret (^{:inst [H]} extract h psk nil)
+      :hash ^{:go/end 76} (fn ^hash/Hash [] (h)))))
+
+
+
+^{:go/end 82} (go/method ResumptionBinderKey ^{:tag (slice byte)} [^{:tag (* EarlySecret)} s]
+  (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) resumptionBinderLabel nil))
+
+
+
+
+^{:go/end 88} (go/method ClientEarlyTrafficSecret "ClientEarlyTrafficSecret derives the client_early_traffic_secret from the\nearly secret and the transcript up to the ClientHello.\n" ^{:tag (slice byte)} [^{:tag (* EarlySecret)} s ^hash/Hash transcript]
+  (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) clientEarlyTrafficLabel transcript))
+
+
+(go/type HandshakeSecret (struct
+    ^{:line 91 :tag (slice byte)} secret
+    ^{:line 92 :tag (func [] [hash/Hash])} hash))
+
+
+^{:go/end 101} (go/method HandshakeSecret ^{:tag (* HandshakeSecret)} [^{:tag (* EarlySecret)} s ^{:tag (slice byte)} sharedSecret]
+  (let [derived (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) "derived" nil)]
+    (addr ^{:go/breaks [2 4]} (lit HandshakeSecret
+        :secret (^{:inst [hash/Hash]} extract (.-hash s) sharedSecret derived)
+        :hash (.-hash s)))))
+
+
+
+
+
+^{:go/end 107} (go/method ClientHandshakeTrafficSecret "ClientHandshakeTrafficSecret derives the client_handshake_traffic_secret from\nthe handshake secret and the transcript up to the ServerHello.\n" ^{:tag (slice byte)} [^{:tag (* HandshakeSecret)} s ^hash/Hash transcript]
+  (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) clientHandshakeTrafficLabel transcript))
+
+
+
+
+^{:go/end 113} (go/method ServerHandshakeTrafficSecret "ServerHandshakeTrafficSecret derives the server_handshake_traffic_secret from\nthe handshake secret and the transcript up to the ServerHello.\n" ^{:tag (slice byte)} [^{:tag (* HandshakeSecret)} s ^hash/Hash transcript]
+  (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) serverHandshakeTrafficLabel transcript))
+
+
+(go/type MasterSecret (struct
+    ^{:line 116 :tag (slice byte)} secret
+    ^{:line 117 :tag (func [] [hash/Hash])} hash))
+
+
+^{:go/end 126} (go/method MasterSecret ^{:tag (* MasterSecret)} [^{:tag (* HandshakeSecret)} s]
+  (let [derived (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) "derived" nil)]
+    (addr ^{:go/breaks [2 4]} (lit MasterSecret
+        :secret (^{:inst [hash/Hash]} extract (.-hash s) nil derived)
+        :hash (.-hash s)))))
+
+
+
+
+
+^{:go/end 132} (go/method ClientApplicationTrafficSecret "ClientApplicationTrafficSecret derives the client_application_traffic_secret_0\nfrom the master secret and the transcript up to the server Finished.\n" ^{:tag (slice byte)} [^{:tag (* MasterSecret)} s ^hash/Hash transcript]
+  (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) clientApplicationTrafficLabel transcript))
+
+
+
+
+^{:go/end 138} (go/method ServerApplicationTrafficSecret "ServerApplicationTrafficSecret derives the server_application_traffic_secret_0\nfrom the master secret and the transcript up to the server Finished.\n" ^{:tag (slice byte)} [^{:tag (* MasterSecret)} s ^hash/Hash transcript]
+  (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) serverApplicationTrafficLabel transcript))
+
+
+
+
+^{:go/end 144} (go/method ResumptionMasterSecret "ResumptionMasterSecret derives the resumption_master_secret from the master secret\nand the transcript up to the client Finished.\n" ^{:tag (slice byte)} [^{:tag (* MasterSecret)} s ^hash/Hash transcript]
+  (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) resumptionLabel transcript))
+
+
+(go/type ExporterMasterSecret (struct
+    ^{:line 147 :tag (slice byte)} secret
+    ^{:line 148 :tag (func [] [hash/Hash])} hash))
+
+
+
+
+^{:go/end 158} (go/method ExporterMasterSecret "ExporterMasterSecret derives the exporter_master_secret from the master secret\nand the transcript up to the server Finished.\n" ^{:tag (* ExporterMasterSecret)} [^{:tag (* MasterSecret)} s ^hash/Hash transcript]
+  (addr ^{:go/breaks [2 4]} (lit ExporterMasterSecret
+      :secret (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) exporterLabel transcript)
+      :hash (.-hash s))))
+
+
+
+
+
+^{:go/end 167} (go/method EarlyExporterMasterSecret "EarlyExporterMasterSecret derives the exporter_master_secret from the early secret\nand the transcript up to the ClientHello.\n" ^{:tag (* ExporterMasterSecret)} [^{:tag (* EarlySecret)} s ^hash/Hash transcript]
+  (addr ^{:go/breaks [2 4]} (lit ExporterMasterSecret
+      :secret (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) earlyExporterLabel transcript)
+      :hash (.-hash s))))
+
+
+
+^{:go/end 174} (go/method Exporter ^{:tag (slice byte)} [^{:tag (* ExporterMasterSecret)} s ^string label ^{:tag (slice byte)} context ^int length]
+  (let [secret (^{:inst [hash/Hash]} deriveSecret (.-hash s) (.-secret s) label nil)
+      ^{:line 171} h ((.-hash s))]
+    (.Write h context)
+    (^{:inst [hash/Hash]} ExpandLabel (.-hash s) secret "exporter" (.Sum h nil) length)))
+
+
+^{:go/end 178} (go/func TestingOnlyExporterSecret ^{:tag (slice byte)} [^{:tag (* ExporterMasterSecret)} s]
+  (.-secret s))

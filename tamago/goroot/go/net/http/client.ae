@@ -1,0 +1,1069 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; HTTP client. See RFC 7230 through 7235.
+;;
+;; This is the high-level Client interface.
+;; The low-level implementation is in transport.go.
+
+(in-ns 'go.net.http) (go/file "client.go" :imports [
+
+
+    ^{:line 13} [context "context"]
+    ^{:line 14} [tls "crypto/tls"]
+    ^{:line 15} [base64 "encoding/base64"]
+    ^{:line 16} [errors "errors"]
+    ^{:line 17} [fmt "fmt"]
+    ^{:line 18} [io "io"]
+    ^{:line 19} [log "log"]
+    ^{:line 20} [ascii "net/http/internal/ascii"]
+    ^{:line 21} [url "net/url"]
+    ^{:line 22} [reflect "reflect"]
+    ^{:line 23} [slices "slices"]
+    ^{:line 24} [strings "strings"]
+    ^{:line 25} [sync "sync"]
+    ^{:line 26} [atomic "sync/atomic"]
+    ^{:line 27} [time "time"]
+
+    ^{:line 29} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Client "A Client is an HTTP client. Its zero value ([DefaultClient]) is a\nusable client that uses [DefaultTransport].\n\nThe [Client.Transport] typically has internal state (cached TCP\nconnections), so Clients should be reused instead of created as\nneeded. Clients are safe for concurrent use by multiple goroutines.\n\nA Client is higher-level than a [RoundTripper] (such as [Transport])\nand additionally handles HTTP details such as cookies and\nredirects.\n\nWhen following redirects, the Client will forward all headers set on the\ninitial [Request] except:\n\n  - when forwarding sensitive headers like \"Authorization\",\n    \"WWW-Authenticate\", and \"Cookie\" to untrusted targets.\n    These headers will be ignored when following a redirect to a domain\n    that is not a subdomain match or exact match of the initial domain.\n    For example, a redirect from \"foo.com\" to either \"foo.com\" or \"sub.foo.com\"\n    will forward the sensitive headers, but a redirect to \"bar.com\" will not.\n  - when forwarding the \"Cookie\" header with a non-nil cookie Jar.\n    Since each redirect may mutate the state of the cookie jar,\n    a redirect may possibly alter a cookie set in the initial request.\n    When forwarding the \"Cookie\" header, any mutated cookies will be omitted,\n    with the expectation that the Jar will insert those mutated cookies\n    with the updated values (assuming the origin matches).\n    If Jar is nil, the initial cookies are forwarded without change.\n" (struct
+
+
+
+    ^{:line 63 :tag RoundTripper :doc "Transport specifies the mechanism by which individual\nHTTP requests are made.\nIf nil, DefaultTransport is used.\n"} Transport
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 79 :tag (func [^{:tag (* Request)} req ^{:tag (slice (* Request))} via] [error]) :doc "CheckRedirect specifies the policy for handling redirects.\nIf CheckRedirect is not nil, the client calls it before\nfollowing an HTTP redirect. The arguments req and via are\nthe upcoming request and the requests made already, oldest\nfirst. If CheckRedirect returns an error, the Client's Get\nmethod returns both the previous Response (with its Body\nclosed) and CheckRedirect's error (wrapped in a url.Error)\ninstead of issuing the Request req.\nAs a special case, if CheckRedirect returns ErrUseLastResponse,\nthen the most recent response is returned with its body\nunclosed, along with a nil error.\n\nIf CheckRedirect is nil, the Client uses its default policy,\nwhich is to stop after 10 consecutive requests.\n"} CheckRedirect
+
+
+
+
+
+
+
+
+
+
+    ^{:line 90 :tag CookieJar :doc "Jar specifies the cookie jar.\n\nThe Jar is used to insert relevant cookies into every\noutbound Request and is updated with the cookie values\nof every inbound Response. The Jar is consulted for every\nredirect that the Client follows.\n\nIf Jar is nil, cookies are only sent if they are explicitly\nset on the Request.\n"} Jar
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 107 :tag time/Duration :doc "Timeout specifies a time limit for requests made by this\nClient. The timeout includes connection time, any\nredirects, and reading the response body. The timer remains\nrunning after Get, Head, Post, or Do return and will\ninterrupt reading of the Response.Body.\n\nA Timeout of zero means no timeout.\n\nThe Client cancels requests to the underlying Transport\nas if the Request's Context ended.\n\nFor compatibility, the Client will also use the deprecated\nCancelRequest method on Transport if found. New\nRoundTripper implementations should use the Request's Context\nfor cancellation instead of implementing CancelRequest.\n"} Timeout))
+
+
+
+(go/var ^{:doc "DefaultClient is the default [Client] and is used by [Get], [Head], and [Post].\n"} DefaultClient (addr (lit Client)))
+
+
+
+
+
+
+(go/type RoundTripper "RoundTripper is an interface representing the ability to execute a\nsingle HTTP transaction, obtaining the [Response] for a given [Request].\n\nA RoundTripper must be safe for concurrent use by multiple\ngoroutines.\n" (interface
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "RoundTrip executes a single HTTP transaction, returning\na Response for the provided Request.\n\nRoundTrip should not attempt to interpret the response. In\nparticular, RoundTrip must return err == nil if it obtained\na response, regardless of the response's HTTP status code.\nA non-nil err should be reserved for failure to obtain a\nresponse. Similarly, RoundTrip should not attempt to\nhandle higher-level protocol details such as redirects,\nauthentication, or cookies.\n\nRoundTrip should not modify the request, except for\nconsuming and closing the Request's Body. RoundTrip may\nread fields of the request in a separate goroutine. Callers\nshould not mutate or reuse the request until the Response's\nBody has been closed.\n\nRoundTrip must always close the body, including on errors,\nbut depending on the implementation may do so in a separate\ngoroutine even after RoundTrip returns. This means that\ncallers wanting to reuse the body for subsequent requests\nmust arrange to wait for the Close call before doing so.\n\nThe Request's URL and Header fields must be initialized.\n"} RoundTrip [(* Request)] :results [(* Response) error])))
+
+
+
+
+
+^{:go/end 173} (go/func refererForURL "refererForURL returns a referer without any authentication info or\nan empty string if lastReq scheme is https and newReq scheme is http.\nIf the referer was explicitly set, then it will continue to be used.\n" ^string [^{:tag (* url/URL)} lastReq ^{:tag (* url/URL)} newReq ^string explicitRef]
+  ;; https://tools.ietf.org/html/rfc7231#section-5.5.2
+  ;;   "Clients SHOULD NOT include a Referer header field in a
+  ;;    (non-secure) HTTP request if the referring page was
+  ;;    transferred with a secure protocol."
+  (when (and (== (.-Scheme lastReq) "https") (== (.-Scheme newReq) "http"))
+    (return ""))
+
+  (when (!= explicitRef "")
+    (return explicitRef))
+
+
+  (let [referer (.String lastReq)]
+    (when (!= (.-User lastReq) nil)
+      ;; This is not very efficient, but is the best we can
+      ;; do without:
+      ;; - introducing a new method on URL
+      ;; - creating a race condition
+      ;; - copying the URL struct manually, which would cause
+      ;;   maintenance problems down the line
+      (let [auth (+ (.String (.-User lastReq)) "@")]
+        (set! referer (strings/Replace referer auth "" 1))))
+
+    ^{:line 172} referer))
+
+
+
+^{:go/end 197} (go/method send "didTimeout is non-nil only if err != nil.\n" [^{:tag (* Client)} c ^{:tag (* Request)} req ^time/Time deadline] :results [^{:tag (* Response)} resp ^{:tag (func [] [bool])} didTimeout ^error err]
+  (let [cookieURL (.-URL req)]
+    (when (!= (.-Host req) "")
+      (set! cookieURL (cloneURL cookieURL))
+      (set! (.-Host cookieURL) (.-Host req)))
+
+    (when (!= (.-Jar c) nil)
+      (range [_ cookie (.Cookies (.-Jar c) cookieURL)]
+        (.AddCookie req cookie)))
+
+
+    (set! (values resp didTimeout err) (send req (.transport c) deadline))
+    (when (!= err nil)
+      (return nil didTimeout err))
+
+    (when (!= (.-Jar c) nil)
+      (when [rc (.Cookies resp)] (> (len rc) 0)
+        (.SetCookies (.-Jar c) cookieURL rc)))
+
+
+    (return resp nil nil)))
+
+
+^{:go/end 204} (go/method deadline ^time/Time [^{:tag (* Client)} c]
+  (when (> (.-Timeout c) 0)
+    (return (.Add (time/Now) (.-Timeout c))))
+
+  (lit time/Time))
+
+
+^{:go/end 211} (go/method transport ^RoundTripper [^{:tag (* Client)} c]
+  (when (!= (.-Transport c) nil)
+    (return (.-Transport c)))
+
+  ^{:line 210} DefaultTransport)
+
+
+
+(go/var ^{:doc "ErrSchemeMismatch is returned when a server returns an HTTP response to an HTTPS client.\n"} ErrSchemeMismatch (errors/New "http: server gave HTTP response to HTTPS client"))
+
+
+
+^{:go/end 309} (go/func send "send issues an HTTP request.\nCaller should close resp.Body when done reading from it.\n" [^{:tag (* Request)} ireq ^RoundTripper rt ^time/Time deadline] :results [^{:tag (* Response)} resp ^{:tag (func [] [bool])} didTimeout ^error err]
+  (let [req ireq] ; req is either the original request, or a modified fork
+
+    (when (== rt nil)
+      (.closeBody req)
+      (return nil alwaysFalse (errors/New "http: no Client.Transport or DefaultTransport")))
+
+
+    (when (== (.-URL req) nil)
+      (.closeBody req)
+      (return nil alwaysFalse (errors/New "http: nil Request.URL")))
+
+
+    (when (!= (.-RequestURI req) "")
+      (.closeBody req)
+      (return nil alwaysFalse (errors/New "http: Request.RequestURI can't be set in client requests")))
+
+
+    ;; forkReq forks req into a shallow clone of ireq the first
+    ;; time it's called.
+    (let [forkReq ^{:go/end 243} (fn []
+          (when (== ireq req)
+            (set! req (new Request))
+            (set! @req @ireq)))] ; shallow clone
+
+
+
+      ;; Most the callers of send (Get, Post, et al) don't need
+      ;; Headers, leaving it uninitialized. We guarantee to the
+      ;; Transport that this has been initialized, though.
+      (when (== (.-Header req) nil)
+        (forkReq)
+        (set! (.-Header req) (make Header)))
+
+
+      (when [u (.-User (.-URL req))] (and (!= u nil) (== (.Get (.-Header req) "Authorization") ""))
+        (let [username (.Username u)
+            (values password _) (.Password u)]
+          (forkReq)
+          (set! (.-Header req) (cloneOrMakeHeader (.-Header ireq)))
+          (.Set (.-Header req) "Authorization" (+ "Basic " (basicAuth username password)))))
+
+
+      (when (not (.IsZero deadline))
+        (forkReq))
+
+      (let [(values stopTimer ^:assign didTimeout) (setRequestCancel req rt deadline)]
+
+        (set! (values resp err) (.RoundTrip rt req))
+        (when (!= err nil)
+          (stopTimer)
+          (when (!= resp nil)
+            (log/Printf "RoundTripper returned a response & error; ignoring response"))
+
+          (when [(values tlsErr ok) (assert tls/RecordHeaderError err)] ok
+            ;; If we get a bad TLS record header, check to see if the
+            ;; response looks like HTTP and give a more helpful error.
+            ;; See golang.org/issue/11111.
+            (when (== (conv string (subslice (.-RecordHeader tlsErr))) "HTTP/")
+              (set! err ErrSchemeMismatch)))
+
+
+          (return nil didTimeout err))
+
+        (when (== resp nil)
+          (return nil didTimeout (fmt/Errorf "http: RoundTripper implementation (%T) returned a nil *Response with a nil error" rt)))
+
+        (when (== (.-Body resp) nil)
+          ;; The documentation on the Body field says “The http Client and Transport
+          ;; guarantee that Body is always non-nil, even on responses without a body
+          ;; or responses with a zero-length body.” Unfortunately, we didn't document
+          ;; that same constraint for arbitrary RoundTripper implementations, and
+          ;; RoundTripper implementations in the wild (mostly in tests) assume that
+          ;; they can use a nil Body to mean an empty one (similar to Request.Body).
+          ;; (See https://golang.org/issue/38095.)
+          ;;
+          ;; If the ContentLength allows the Body to be empty, fill in an empty one
+          ;; here to ensure that it is non-nil.
+          (when (and (> (.-ContentLength resp) 0) (!= (.-Method req) "HEAD"))
+            (return nil didTimeout (fmt/Errorf "http: RoundTripper implementation (%T) returned a *Response with content length %d but a nil Body" rt (.-ContentLength resp))))
+
+          (set! (.-Body resp) (io/NopCloser (strings/NewReader ""))))
+
+        (when (not (.IsZero deadline))
+          (set! (.-Body resp) (addr ^{:go/breaks [2 4 6]} (lit cancelTimerBody
+                :stop stopTimer
+                :rc (.-Body resp)
+                :reqDidTimeout didTimeout))))
+
+
+        (return resp nil nil)))))
+
+
+
+
+
+^{:go/end 320} (go/func timeBeforeContextDeadline "timeBeforeContextDeadline reports whether the non-zero Time t is\nbefore ctx's deadline, if any. If ctx does not have a deadline, it\nalways reports true (the deadline is considered infinite).\n" ^bool [^time/Time t ^context/Context ctx]
+  (let [(values d ok) (.Deadline ctx)]
+    (when (not ok)
+      (return true))
+
+    (.Before t d)))
+
+
+
+
+
+
+
+^{:go/breaks [[6 346]] :go/end 347} (go/func knownRoundTripperImpl "knownRoundTripperImpl reports whether rt is a RoundTripper that's\nmaintained by the Go team and known to implement the latest\noptional semantics (notably contexts). The Request is used\nto check whether this particular request is using an alternate protocol,\nin which case we need to check the RoundTripper for that protocol.\n" ^bool [^RoundTripper rt ^{:tag (* Request)} req]
+  (type-switch [t rt]
+    (case [(* Transport)]
+      (when [altRT (.alternateRoundTripper t req)] (!= altRT nil)
+        (return (knownRoundTripperImpl altRT req)))
+
+      (return true))
+    (case [http2RoundTripper]
+      (return true)))
+
+  ;; There's a very minor chance of a false positive with this.
+  ;; Instead of detecting our golang.org/x/net/http2.Transport,
+  ;; it might detect a Transport type in a different http2
+  ;; package. But I know of none, and the only problem would be
+  ;; some temporarily leaked goroutines if the transport didn't
+  ;; support contexts. So this is a good enough heuristic:
+  (when (== (.String (reflect/TypeOf rt)) "*http2.Transport")
+    (return true))
+
+  false)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 422} (go/func setRequestCancel "setRequestCancel sets req.Cancel and adds a deadline context to req\nif deadline is non-zero. The RoundTripper's type is used to\ndetermine whether the legacy CancelRequest behavior should be used.\n\nAs background, there are three ways to cancel a request:\nFirst was Transport.CancelRequest. (deprecated)\nSecond was Request.Cancel.\nThird was Request.Context.\nThis function populates the second and third, and uses the first if it really needs to.\n" [^{:tag (* Request)} req ^RoundTripper rt ^time/Time deadline] :results [^{:tag (func [])} stopTimer ^{:tag (func [] [bool])} didTimeout]
+  (when (.IsZero deadline)
+    (return nop alwaysFalse))
+
+  (let [knownTransport (knownRoundTripperImpl rt req)
+      ^{:line 363} oldCtx (.Context req)]
+
+    (when (and (== (.-Cancel req) nil) knownTransport)
+      ;; If they already had a Request.Context that's
+      ;; expiring sooner, do nothing:
+      (when (not (timeBeforeContextDeadline deadline oldCtx))
+        (return nop alwaysFalse))
+
+
+      (let [^{:tag (func [])} cancelCtx (zero (func []))]
+        (set! (values (.-ctx req) cancelCtx) (context/WithDeadline oldCtx deadline))
+        (return cancelCtx ^{:go/end 374} (fn ^bool [] (.After (time/Now) deadline)))))
+
+    (let [initialReqCancel (.-Cancel req) ; the user's original Request.Cancel, if any
+
+        ^{:line 378 :tag (func [])} cancelCtx (zero (func []))]
+      (when (timeBeforeContextDeadline deadline oldCtx)
+        (set! (values (.-ctx req) cancelCtx) (context/WithDeadline oldCtx deadline)))
+
+
+      (let [cancel (make (chan (struct)))]
+        (set! (.-Cancel req) cancel)
+
+        (let [doCancel ^{:go/end 395} (fn []
+              ;; The second way in the func comment above:
+              (close cancel)
+              ;; The first way, used only for RoundTripper
+              ;; implementations written before Go 1.5 or Go 1.6.
+              (let-type [canceler (interface (CancelRequest [(* Request)]))]
+                (when [(values v ok) (assert canceler rt)] ok
+                  (.CancelRequest v req))))
+
+
+
+            ^{:line 397} stopTimerCh (make (chan (struct)))]
+          (set! stopTimer (sync/OnceFunc ^{:go/end 403} (fn []
+                (close stopTimerCh)
+                (when (!= cancelCtx nil)
+                  (cancelCtx)))))
+
+
+
+          (let [timer (time/NewTimer (time/Until deadline))
+              ^{:line 406 :tag atomic/Bool} timedOut (zero atomic/Bool)]
+
+            (go (^{:go/end 419} (fn []
+                  (select
+                    (case (<! initialReqCancel)
+                      (doCancel)
+                      (.Stop timer))
+                    (case (<! (.-C timer))
+                      (.Store timedOut true)
+                      (doCancel))
+                    (case (<! stopTimerCh)
+                      (.Stop timer))))))
+
+
+
+            (return stopTimer (.-Load timedOut))))))))
+
+
+
+
+
+
+
+^{:go/end 432} (go/func basicAuth "See 2 (end of page 4) https://www.ietf.org/rfc/rfc2617.txt\n\"To receive authorization, the client sends the userid and password,\nseparated by a single colon (\":\") character, within a base64\nencoded string in the credentials.\"\nIt is not meant to be urlencoded.\n" ^string [^string username ^string password]
+  (let [auth (+ username ":" password)]
+    (.EncodeToString base64/StdEncoding (conv (slice byte) auth))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 461} (go/func Get "Get issues a GET to the specified URL. If the response is one of\nthe following redirect codes, Get follows the redirect, up to a\nmaximum of 10 redirects:\n\n\t301 (Moved Permanently)\n\t302 (Found)\n\t303 (See Other)\n\t307 (Temporary Redirect)\n\t308 (Permanent Redirect)\n\nAn error is returned if there were too many redirects or if there\nwas an HTTP protocol error. A non-2xx response doesn't cause an\nerror. Any returned error will be of type [*url.Error]. The url.Error\nvalue's Timeout method will report true if the request timed out.\n\nWhen err is nil, resp always contains a non-nil resp.Body.\nCaller should close resp.Body when done reading from it.\n\nGet is a wrapper around DefaultClient.Get.\n\nTo make a request with custom headers, use [NewRequest] and\nDefaultClient.Do.\n\nTo make a request with a specified context.Context, use [NewRequestWithContext]\nand DefaultClient.Do.\n" [^string url] :results [^{:tag (* Response)} resp ^error err]
+  (.Get DefaultClient url))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 492} (go/method Get "Get issues a GET to the specified URL. If the response is one of the\nfollowing redirect codes, Get follows the redirect after calling the\n[Client.CheckRedirect] function:\n\n\t301 (Moved Permanently)\n\t302 (Found)\n\t303 (See Other)\n\t307 (Temporary Redirect)\n\t308 (Permanent Redirect)\n\nAn error is returned if the [Client.CheckRedirect] function fails\nor if there was an HTTP protocol error. A non-2xx response doesn't\ncause an error. Any returned error will be of type [*url.Error]. The\nurl.Error value's Timeout method will report true if the request\ntimed out.\n\nWhen err is nil, resp always contains a non-nil resp.Body.\nCaller should close resp.Body when done reading from it.\n\nTo make a request with custom headers, use [NewRequest] and [Client.Do].\n\nTo make a request with a specified context.Context, use [NewRequestWithContext]\nand Client.Do.\n" [^{:tag (* Client)} c ^string url] :results [^{:tag (* Response)} resp ^error err]
+  (let [(values req ^:assign err) (NewRequest "GET" url nil)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.Do c req)))
+
+
+^{:go/end 494} (go/func alwaysFalse ^bool [] false)
+
+
+
+
+
+(go/var ^{:doc "ErrUseLastResponse can be returned by Client.CheckRedirect hooks to\ncontrol how redirects are processed. If returned, the next request\nis not sent and the most recent response is returned with its body\nunclosed.\n"} ErrUseLastResponse (errors/New "net/http: use last response"))
+
+
+
+^{:go/end 510} (go/method checkRedirect "checkRedirect calls either the user's configured CheckRedirect\nfunction, or the default.\n" ^error [^{:tag (* Client)} c ^{:tag (* Request)} req ^{:tag (slice (* Request))} via]
+  (let [fn (.-CheckRedirect c)]
+    (when (== fn nil)
+      (set! fn defaultCheckRedirect))
+
+    (go/call fn req via)))
+
+
+
+
+^{:go/end 542} (go/func redirectBehavior "redirectBehavior describes what should happen when the\nclient encounters a 3xx status code from the server.\n" [^string reqMethod ^{:tag (* Response)} resp ^{:tag (* Request)} ireq] :results [^string redirectMethod ^bool shouldRedirect ^bool includeBody]
+  (switch (.-StatusCode resp)
+    (case [301 302 303]
+      (set! redirectMethod reqMethod)
+      (set! shouldRedirect true)
+      (set! includeBody false)
+
+      ;; RFC 2616 allowed automatic redirection only with GET and
+      ;; HEAD requests. RFC 7231 lifts this restriction, but we still
+      ;; restrict other methods to GET to maintain compatibility.
+      ;; See Issue 18570.
+      (when (and (!= reqMethod "GET") (!= reqMethod "HEAD"))
+        (set! redirectMethod "GET")))
+
+    (case [307 308]
+      (set! redirectMethod reqMethod)
+      (set! shouldRedirect true)
+      (set! includeBody true)
+
+      (when (and (== (.-GetBody ireq) nil) (!= (.outgoingLength ireq) 0))
+        ;; We had a request body, and 307/308 require
+        ;; re-sending it, but GetBody is not defined. So just
+        ;; return this response to the user instead of an
+        ;; error, like we did in Go 1.7 and earlier.
+        (set! shouldRedirect false))))
+
+
+  (return redirectMethod shouldRedirect includeBody))
+
+
+
+
+^{:go/end 554} (go/func urlErrorOp "urlErrorOp returns the (*url.Error).Op value to use for the\nprovided (*Request).Method value.\n" ^string [^string method]
+  (when (== method "")
+    (return "Get"))
+
+  (when [(values lowerMethod ok) (ascii/ToLower method)] ok
+    (return (+ (subslice method _ 1) (subslice lowerMethod 1))))
+
+  ^{:line 553} method)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 605} (go/method Do "Do sends an HTTP request and returns an HTTP response, following\npolicy (such as redirects, cookies, auth) as configured on the\nclient.\n\nAn error is returned if caused by client policy (such as\nCheckRedirect), or failure to speak HTTP (such as a network\nconnectivity problem). A non-2xx status code doesn't cause an\nerror.\n\nIf the returned error is nil, the [Response] will contain a non-nil\nBody which the user is expected to close. If the Body is not both\nread to EOF and closed, the [Client]'s underlying [RoundTripper]\n(typically [Transport]) may not be able to re-use a persistent TCP\nconnection to the server for a subsequent \"keep-alive\" request.\nNote, however, that [Transport] will automatically try to read a\n[Response] Body to EOF asynchronously up to a conservative limit\nwhen a Body is closed.\n\nThe request Body, if non-nil, will be closed by the underlying\nTransport, even on errors. The Body may be closed asynchronously after\nDo returns.\n\nOn error, any Response can be ignored. A non-nil Response with a\nnon-nil error only occurs when CheckRedirect fails, and even then\nthe returned [Response.Body] is already closed.\n\nGenerally [Get], [Post], or [PostForm] will be used instead of Do.\n\nIf the server replies with a redirect, the Client first uses the\nCheckRedirect function to determine whether the redirect should be\nfollowed. If permitted, a 301, 302, or 303 redirect causes\nsubsequent requests to use HTTP method GET\n(or HEAD if the original request was HEAD), with no body.\nA 307 or 308 redirect preserves the original HTTP method and body,\nprovided that the [Request.GetBody] function is defined.\nThe [NewRequest] function automatically sets GetBody for common\nstandard library body types.\n\nNote that the [Client] redirect behavior does not follow the WHATWG\nFetch standard. This is because it was written before established\nstandards existed. As such, by modern standards, [Client] has a\nrather permissive behavior. For example, sensitive headers are\nretained on redirect to a subdomain or to a different scheme on the\nsame host.\n\nAny returned error will be of type [*url.Error]. The url.Error\nvalue's Timeout method will report true if the request timed out.\n" [^{:tag (* Client)} c ^{:tag (* Request)} req] :results [(* Response) error]
+  (.do c req))
+
+
+(go/var ^{:tag (func [^{:tag (* Response)} retres ^error reterr])} testHookClientDoResult)
+
+^{:go/end 767} (go/method do [^{:tag (* Client)} c ^{:tag (* Request)} req] :results [^{:tag (* Response)} retres ^error reterr]
+  (when (!= testHookClientDoResult nil)
+    (defer (^{:go/end 611} (fn [] (testHookClientDoResult retres reterr)))))
+
+  (when (== (.-URL req) nil)
+    (.closeBody req)
+    (return nil (addr ^{:go/breaks [2 4]} (lit url/Error
+          :Op (urlErrorOp (.-Method req))
+          :Err (errors/New "http: nil Request.URL")))))
+
+
+  (set! _ @c) ; panic early if c is nil; see go.dev/issue/53521
+
+  (let [
+      ^:var ^{:line 623} deadline (.deadline c)
+      ^{:line 624 :tag (slice (* Request))} reqs (zero (slice (* Request)))
+      ^{:line 625 :tag (* Response)} resp (zero (* Response))
+      ^:var ^{:line 626} copyHeaders (.makeHeadersCopier c req)
+      ^:var ^{:line 627} reqBodyClosed false ; have we closed the current req.Body?
+
+      ;; Redirect behavior:
+      ^{:line 630 :tag string} redirectMethod (zero string)
+      ^:var ^{:line 631} includeBody true
+      ^:var ^{:line 632} stripSensitiveHeaders false
+
+      ^{:line 634} uerr ^{:go/end 650} (fn ^error [^error err]
+        ;; the body may have been closed already by c.send()
+        (when (not reqBodyClosed)
+          (.closeBody req))
+
+        (let [^string urlStr (zero string)]
+          (if (and (!= resp nil) (!= (.-Request resp) nil))
+            (set! urlStr (stripPassword (.-URL (.-Request resp))))
+
+            (set! urlStr (stripPassword (.-URL req))))
+
+          (addr ^{:go/breaks [2 4 6]} (lit url/Error
+              :Op (urlErrorOp (.-Method (aget reqs 0)))
+              :URL urlStr
+              :Err err))))]
+
+
+    (while true
+      ;; For all but the first request, create the next
+      ;; request hop and replace req.
+      (when (> (len reqs) 0)
+        (let [loc (.Get (.-Header resp) "Location")]
+          (when (== loc "")
+            ;; While most 3xx responses include a Location, it is not
+            ;; required and 3xx responses without a Location have been
+            ;; observed in the wild. See issues #17773 and #49281.
+            (return resp nil))
+
+          (let [(values u err) (.Parse (.-URL req) loc)]
+            (when (!= err nil)
+              (.closeBody resp)
+              (return nil (uerr (fmt/Errorf "failed to parse Location header %q: %v" loc err))))
+
+            (let [host ""]
+              (when (and (!= (.-Host req) "") (!= (.-Host req) (.-Host (.-URL req))))
+                ;; If the caller specified a custom Host header and the
+                ;; redirect location is relative, preserve the Host header
+                ;; through the redirect. See issue #22233.
+                (when [(values u _) (url/Parse loc)] (and (!= u nil) (not (.IsAbs u)))
+                  (set! host (.-Host req))))
+
+
+              (let [ireq (aget reqs 0)]
+                (set! req (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit Request
+                      :Method redirectMethod
+                      :Response resp
+                      :URL u
+                      :Header (make Header)
+                      :Host host
+                      :Cancel (.-Cancel ireq)
+                      :ctx (.-ctx ireq))))
+
+                (when (and includeBody (!= (.-GetBody ireq) nil))
+                  (set! (values (.-Body req) err) ((.-GetBody ireq)))
+                  (when (!= err nil)
+                    (.closeBody resp)
+                    (return nil (uerr err)))
+
+                  (set! (.-GetBody req) (.-GetBody ireq))
+                  (set! (.-ContentLength req) (.-ContentLength ireq)))
+
+
+                ;; Copy original headers before setting the Referer,
+                ;; in case the user set Referer on their first request.
+                ;; If they really want to override, they can do it in
+                ;; their CheckRedirect func.
+                (when (and (not stripSensitiveHeaders) (!= (.-Host (.-URL (aget reqs 0))) (.-Host (.-URL req))))
+                  (when (not (shouldCopyHeaderOnRedirect (.-URL (aget reqs 0)) (.-URL req)))
+                    (set! stripSensitiveHeaders true)))
+
+
+                (copyHeaders req stripSensitiveHeaders (not includeBody))
+                ;; Add the Referer header from the most recent
+                ;; request URL to the new one, if it's not https->http:
+                (when [ref (refererForURL (.-URL (aget reqs (- (len reqs) 1))) (.-URL req) (.Get (.-Header req) "Referer"))] (!= ref "")
+                  (.Set (.-Header req) "Referer" ref))
+
+                (set! err (.checkRedirect c req reqs))
+
+                ;; Sentinel error to let users select the
+                ;; previous response, without closing its
+                ;; body. See Issue 10069.
+                (when (== err ErrUseLastResponse)
+                  (return resp nil))
+
+
+                ;; Close the previous response's body. But
+                ;; read at least some of the body so if it's
+                ;; small the underlying TCP connection will be
+                ;; re-used. No need to check for errors: if it
+                ;; fails, the Transport won't reuse it anyway.
+                (let [^:const ^{:val 2048} maxBodySlurpSize (<< 2 10)]
+                  (when (or (== (.-ContentLength resp) -1) (<= (.-ContentLength resp) maxBodySlurpSize))
+                    (io/CopyN io/Discard (.-Body resp) maxBodySlurpSize))
+
+                  (.Close (.-Body resp))
+
+                  (when (!= err nil)
+                    ;; Special case for Go 1 compatibility: return both the response
+                    ;; and an error if the CheckRedirect function failed.
+                    ;; See https://golang.org/issue/3795
+                    ;; The resp.Body has already been closed.
+                    (let [ue (uerr err)]
+                      (set! (.-URL (assert (* url/Error) ue)) loc)
+                      (return resp ue)))))))))
+
+
+
+      (set! reqs (append reqs req))
+      (let [^error err (zero error)
+          ^{:line 744 :tag (func [] [bool])} didTimeout (zero (func [] [bool]))]
+        (when [(set! (values resp didTimeout err) (.send c req deadline))] (!= err nil)
+          ;; c.send() always closes req.Body
+          (set! reqBodyClosed true)
+          (when (and (not (.IsZero deadline)) (didTimeout))
+            (set! err (addr (lit timeoutError (+ (.Error err) " (Client.Timeout exceeded while awaiting headers)")))))
+
+          (return nil (uerr err)))
+
+
+        (let [(values ^bool shouldRedirect ^bool includeBodyOnHop) (zero bool)]
+          (set! (values redirectMethod shouldRedirect includeBodyOnHop) (redirectBehavior (.-Method req) resp (aget reqs 0)))
+          (when (not shouldRedirect)
+            (return resp nil))
+
+          (when (not includeBodyOnHop)
+            ;; Once a hop drops the body, we never send it again
+            ;; (because we're now handling a redirect for a request with no body).
+            (set! includeBody false))
+
+
+          (.closeBody req))))))
+
+
+
+
+
+
+^{:go/end 843} (go/method makeHeadersCopier "makeHeadersCopier makes a function that copies headers from the\ninitial Request, ireq. For every redirect, this function must be called\nso that it can copy headers into the upcoming Request.\n" ^{:tag (func [^{:tag (* Request)} req ^bool stripSensitiveHeaders ^bool stripBodyHeaders])} [^{:tag (* Client)} c ^{:tag (* Request)} ireq]
+  ;; The headers to copy are from the very initial request.
+  ;; We use a closured callback to keep a reference to these original headers.
+  (let [
+      ^:var ^{:line 776} ireqhdr (cloneOrMakeHeader (.-Header ireq))
+      ^{:line 777 :tag (map string (slice (* Cookie)))} icookies (zero (map string (slice (* Cookie))))]
+
+    (when (and (!= (.-Jar c) nil) (!= (.Get (.-Header ireq) "Cookie") ""))
+      (set! icookies (make (map string (slice (* Cookie)))))
+      (range [_ c (.Cookies ireq)]
+        (aset icookies (.-Name c) (append (aget icookies (.-Name c)) c))))
+
+
+
+    ^{:go/end 842} (fn [^{:tag (* Request)} req ^bool stripSensitiveHeaders ^bool stripBodyHeaders]
+      ;; If Jar is present and there was some initial cookies provided
+      ;; via the request header, then we may need to alter the initial
+      ;; cookies as we follow redirects since each redirect may end up
+      ;; modifying a pre-existing cookie.
+      ;;
+      ;; Since cookies already set in the request header do not contain
+      ;; information about the original domain and path, the logic below
+      ;; assumes any new set cookies override the original cookie
+      ;; regardless of domain or path.
+      ;;
+      ;; See https://golang.org/issue/17494
+      (when (and (!= (.-Jar c) nil) (!= icookies nil))
+        (let [^bool changed (zero bool)
+            ^{:line 800} resp (.-Response req)] ; The response that caused the upcoming redirect
+          (range [_ c (.Cookies resp)]
+            (when [(values _ ok) (aget icookies (.-Name c))] ok
+              (delete icookies (.-Name c))
+              (set! changed true)))
+
+
+          (when changed
+            (.Del ireqhdr "Cookie")
+            (let [^{:tag (slice string)} ss (zero (slice string))]
+              (range [_ cs icookies]
+                (range [_ c cs]
+                  (set! ss (append ss (+ (.-Name c) "=" (.-Value c))))))
+
+
+              (^{:inst [(slice string) string]} slices/Sort ss) ; Ensure deterministic headers
+              (.Set ireqhdr "Cookie" (strings/Join ss "; "))))))
+
+
+
+      ;; Copy the initial request's Header values
+      ;; (at least the safe ones).
+      (range [k vv ireqhdr]
+        (let [sensitive false
+            ^{:line 824} body false]
+          (switch (CanonicalHeaderKey k)
+            (case ^{:go/breaks [4]} ["Authorization" "Www-Authenticate" "Cookie" "Cookie2"
+                "Proxy-Authorization" "Proxy-Authenticate"]
+              (set! sensitive true))
+
+            (case ^{:go/breaks [3]} ["Content-Encoding" "Content-Language" "Content-Location"
+                "Content-Type"]
+              ;; Headers relating to the body which is removed for
+              ;; POST to GET redirects
+              ;; https://fetch.spec.whatwg.org/#http-redirect-fetch
+              (set! body true)))
+
+
+          (when (and (not (and sensitive stripSensitiveHeaders)) (not (and body stripBodyHeaders)))
+            (aset (.-Header req) k vv)))))))
+
+
+
+
+
+^{:go/breaks [[4 849]] :go/end 850} (go/func defaultCheckRedirect ^error [^{:tag (* Request)} req ^{:tag (slice (* Request))} via]
+  (when (>= (len via) 10)
+    (return (errors/New "stopped after 10 redirects")))
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 870} (go/func Post "Post issues a POST to the specified URL.\n\nCaller should close resp.Body when done reading from it.\n\nIf the provided body is an [io.Closer], it is closed after the\nrequest.\n\nPost is a wrapper around DefaultClient.Post.\n\nTo set custom headers, use [NewRequest] and DefaultClient.Do.\n\nSee the [Client.Do] method documentation for details on how redirects\nare handled.\n\nTo make a request with a specified context.Context, use [NewRequestWithContext]\nand DefaultClient.Do.\n" [^string url ^string contentType ^io/Reader body] :results [^{:tag (* Response)} resp ^error err]
+  (.Post DefaultClient url contentType body))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 893} (go/method Post "Post issues a POST to the specified URL.\n\nCaller should close resp.Body when done reading from it.\n\nIf the provided body is an [io.Closer], it is closed after the\nrequest.\n\nTo set custom headers, use [NewRequest] and [Client.Do].\n\nTo make a request with a specified context.Context, use [NewRequestWithContext]\nand [Client.Do].\n\nSee the [Client.Do] method documentation for details on how redirects\nare handled.\n" [^{:tag (* Client)} c ^string url ^string contentType ^io/Reader body] :results [^{:tag (* Response)} resp ^error err]
+  (let [(values req ^:assign err) (NewRequest "POST" url body)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.Set (.-Header req) "Content-Type" contentType)
+    (.Do c req)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 913} (go/func PostForm "PostForm issues a POST to the specified URL, with data's keys and\nvalues URL-encoded as the request body.\n\nThe Content-Type header is set to application/x-www-form-urlencoded.\nTo set other headers, use [NewRequest] and DefaultClient.Do.\n\nWhen err is nil, resp always contains a non-nil resp.Body.\nCaller should close resp.Body when done reading from it.\n\nPostForm is a wrapper around DefaultClient.PostForm.\n\nSee the [Client.Do] method documentation for details on how redirects\nare handled.\n\nTo make a request with a specified [context.Context], use [NewRequestWithContext]\nand DefaultClient.Do.\n" [^string url ^url/Values data] :results [^{:tag (* Response)} resp ^error err]
+  (.PostForm DefaultClient url data))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 931} (go/method PostForm "PostForm issues a POST to the specified URL,\nwith data's keys and values URL-encoded as the request body.\n\nThe Content-Type header is set to application/x-www-form-urlencoded.\nTo set other headers, use [NewRequest] and [Client.Do].\n\nWhen err is nil, resp always contains a non-nil resp.Body.\nCaller should close resp.Body when done reading from it.\n\nSee the [Client.Do] method documentation for details on how redirects\nare handled.\n\nTo make a request with a specified context.Context, use [NewRequestWithContext]\nand Client.Do.\n" [^{:tag (* Client)} c ^string url ^url/Values data] :results [^{:tag (* Response)} resp ^error err]
+  (.Post c url "application/x-www-form-urlencoded" (strings/NewReader (.Encode data))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 949} (go/func Head "Head issues a HEAD to the specified URL. If the response is one of\nthe following redirect codes, Head follows the redirect, up to a\nmaximum of 10 redirects:\n\n\t301 (Moved Permanently)\n\t302 (Found)\n\t303 (See Other)\n\t307 (Temporary Redirect)\n\t308 (Permanent Redirect)\n\nHead is a wrapper around DefaultClient.Head.\n\nTo make a request with a specified [context.Context], use [NewRequestWithContext]\nand DefaultClient.Do.\n" [^string url] :results [^{:tag (* Response)} resp ^error err]
+  (.Head DefaultClient url))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 969} (go/method Head "Head issues a HEAD to the specified URL. If the response is one of the\nfollowing redirect codes, Head follows the redirect after calling the\n[Client.CheckRedirect] function:\n\n\t301 (Moved Permanently)\n\t302 (Found)\n\t303 (See Other)\n\t307 (Temporary Redirect)\n\t308 (Permanent Redirect)\n\nTo make a request with a specified [context.Context], use [NewRequestWithContext]\nand [Client.Do].\n" [^{:tag (* Client)} c ^string url] :results [^{:tag (* Response)} resp ^error err]
+  (let [(values req ^:assign err) (NewRequest "HEAD" url nil)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.Do c req)))
+
+
+
+
+
+
+
+
+
+^{:go/end 985} (go/method CloseIdleConnections "CloseIdleConnections closes any connections on its [Transport] which\nwere previously connected from previous requests but are now\nsitting idle in a \"keep-alive\" state. It does not interrupt any\nconnections currently in use.\n\nIf [Client.Transport] does not have a [Client.CloseIdleConnections] method\nthen this method does nothing.\n" [^{:tag (* Client)} c]
+  (let-type [closeIdler (interface
+        (CloseIdleConnections []))]
+
+    (when [(values tr ok) (assert closeIdler (.transport c))] ok
+      (.CloseIdleConnections tr))))
+
+
+
+
+
+
+
+(go/type cancelTimerBody "cancelTimerBody is an io.ReadCloser that wraps rc with two features:\n 1. On Read error or close, the stop func is called.\n 2. On Read failure, if reqDidTimeout is true, the error is wrapped and\n    marked as net.Error that hit its timeout.\n" (struct
+    ^{:line 992 :tag (func [])} stop ; stops the time.Timer waiting to cancel the request
+    ^{:line 993 :tag io/ReadCloser} rc
+    ^{:line 994 :tag (func [] [bool])} reqDidTimeout))
+
+
+^{:go/end 1009} (go/method Read [^{:tag (* cancelTimerBody)} b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (set! (values n err) (.Read (.-rc b) p))
+  (when (== err nil)
+    (return n nil))
+
+  (when (== err io/EOF)
+    (return n err))
+
+  (when ((.-reqDidTimeout b))
+    (set! err (addr (lit timeoutError (+ (.Error err) " (Client.Timeout or context cancellation while reading body)")))))
+
+  (return n err))
+
+
+^{:go/end 1015} (go/method Close ^error [^{:tag (* cancelTimerBody)} b]
+  (let [err (.Close (.-rc b))]
+    ((.-stop b))
+    ^{:line 1014} err))
+
+
+^{:go/end 1039} (go/func shouldCopyHeaderOnRedirect ^bool [^{:tag (* url/URL)} initial ^{:tag (* url/URL)} dest]
+  ;; Permit sending auth/cookie headers from "foo.com"
+  ;; to "sub.foo.com".
+
+  ;; Note that we don't send all cookies to subdomains
+  ;; automatically. This function is only used for
+  ;; Cookies set explicitly on the initial outgoing
+  ;; client request. Cookies automatically added via the
+  ;; CookieJar mechanism continue to follow each
+  ;; cookie's scope as set by Set-Cookie. But for
+  ;; outgoing requests with the Cookie header set
+  ;; directly, we don't know their scope, so we assume
+  ;; it's for *.domain.com.
+
+  (let [(values ihost err1) (httpguts/PunycodeHostPort (.Hostname initial))
+      (values dhost err2) (httpguts/PunycodeHostPort (.Hostname dest))]
+    (when (or (!= err1 nil) (!= err2 nil))
+      (return false))
+
+    (let [(values ^:assign ihost ok1) (ascii/ToLower ihost)
+        (values ^:assign dhost ok2) (ascii/ToLower dhost)]
+      (and ok1 ok2 (isDomainOrSubdomain dhost ihost)))))
+
+
+
+
+
+
+^{:go/end 1062} (go/func isDomainOrSubdomain "isDomainOrSubdomain reports whether sub is a subdomain (or exact\nmatch) of the parent domain.\n\nBoth domains must already be in canonical form.\n" ^bool [^string sub ^string parent]
+  (when (== sub parent)
+    (return true))
+
+  ;; If sub contains a :, it's probably an IPv6 address (and is definitely not a hostname).
+  ;; Don't check the suffix in this case, to avoid matching the contents of a IPv6 zone.
+  ;; For example, "::1%.www.example.com" is not a subdomain of "www.example.com".
+  (when (strings/ContainsAny sub ":%")
+    (return false))
+
+  ;; If sub is "foo.example.com" and parent is "example.com",
+  ;; that means sub must end in "."+parent.
+  ;; Do it without allocating.
+  (when (not (strings/HasSuffix sub parent))
+    (return false))
+
+  (== (aget sub (- (len sub) (len parent) 1)) \.))
+
+
+^{:go/end 1070} (go/func stripPassword ^string [^{:tag (* url/URL)} u]
+  (let [(values _ passSet) (.Password (.-User u))]
+    (when passSet
+      (return (strings/Replace (.String u) (+ (.String (.-User u)) "@") (+ (.Username (.-User u)) ":***@") 1)))
+
+    (.String u)))

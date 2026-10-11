@@ -1,0 +1,536 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.runtime.gc.internal.gen) (go/file "gen.go" :imports [
+
+
+    ^{:line 8} [heap "container/heap"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [maphash "hash/maphash"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [log "log"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [reflect "reflect"]
+    ^{:line 16} [strings "strings"]])
+
+
+(go/const ^{:val true} logCompile true)
+
+^{:go/end 23} (go/func fatalf [^string f & ^{:tag (slice any)} args]
+  (panic (fmt/Sprintf f (spread args))))
+
+
+(go/type File (struct
+    ^{:line 26 :tag io/Writer} w
+    ^{:line 27 :tag (slice (* Func))} funcs
+    ^{:line 28 :tag (slice fileConst)} consts))
+
+
+^{:go/end 33} (go/func NewFile ^{:tag (* File)} [^io/Writer w]
+  (addr (lit File :w w)))
+
+
+^{:go/end 37} (go/method AddFunc [^{:tag (* File)} f ^{:tag (* Func)} fn]
+  (set! (.-funcs f) (append (.-funcs f) fn)))
+
+
+(go/type fileConst (struct
+    ^{:line 40 :tag string} name
+    ^{:line 41 :tag any} data))
+
+
+^{:go/end 49} (go/method AddConst [^{:tag (* File)} f ^string name ^any data]
+  ;; TODO: It would be nice if this were unified with "const" ops, but the
+  ;; reason I added this was for []*Func consts, which would take an overhaul
+  ;; to represent in "const" ops.
+  (set! (.-consts f) (append (.-consts f) (lit fileConst name data))))
+
+
+(go/type Func (struct
+    ^{:line 52 :tag string} name
+    ^{:line 53 :tag int} nArgs
+    ^{:line 54 :tag int} idGen
+    ^{:line 55 :tag (slice (* op))} ops))
+
+
+^{:go/end 61} (go/func NewFunc ^{:tag (* Func)} [^string name]
+  (let [fn (addr (lit Func :name name))]
+    ^{:line 60} fn))
+
+
+
+
+^{:go/end 80} (go/method attach "attach adds x to fn's op list. If x has any unattached arguments, this adds\nthose first (recursively).\n" [^{:tag (* Func)} fn ^{:tag (* op)} x]
+  ;; Make sure the arguments are attached to the function.
+  (range [_ arg (.-args x)]
+    (let [argFn (.-fn arg)]
+      (cond (== argFn nil)
+        (.attach fn arg)
+        (!= argFn fn)
+        (panic "ops from different functions"))))
+
+
+
+  (set! (.-fn x) fn)
+  (set! (.-id x) (.-idGen fn))
+  (inc! (.-idGen fn))
+  (set! (.-ops fn) (append (.-ops fn) x)))
+
+
+^{:go/end 89} (go/func Arg :type-params [^{:tag (wrap T)} W ^Word T] ^T [^{:tag (* Func)} fn]
+  (let [loc (lit locReg :cls regClassGP :reg (.-nArgs fn))]
+    (inc! (.-nArgs fn))
+    (let [^W x (zero W)
+        ^{:line 86} o (addr (lit op :op "arg" :kind (.kind x) :c loc))]
+      (.attach fn o)
+      (.wrap x o))))
+
+
+^{:go/end 98} (go/func Return [& ^{:tag (slice Value)} results]
+  (let [args (make (slice (* op)) (len results))]
+    (range [i res results]
+      (aset args i (.getOp res)))
+
+    (let [^void x (zero void)]
+      ^{:go/via [valAny]} (.initOp x (addr (lit op :op "return" :kind voidKind :args args))))))
+
+
+(go/type op (struct
+    ^{:line 101 :tag string} op
+    ^{:line 102 :tag (* kind)} kind
+    ^{:line 103 :tag (slice (* op))} args
+
+    ^{:line 105 :tag int} id
+    ^{:line 106 :tag (* Func)} fn
+
+
+
+
+
+
+    ^{:line 113 :tag any :doc "c depends on \"op\".\n\narg locReg - The register containing the argument value\nconst any  - The constant value\nderef int  - Byte offset from args[0]\n"} c
+    ^{:line 114 :tag string} name))
+
+
+^{:go/end 119} (go/method String ^string [^{:tag (* op)} o]
+  (fmt/Sprintf "v%02d" (.-id o)))
+
+
+^{:go/end 123} (go/func imm ^{:tag (* op)} [^any val]
+  (addr (lit op :op "imm" :c val)))
+
+
+^{:go/breaks [[5 134]] :go/end 135} (go/method equalNoName ^bool [^{:tag (* op)} o ^{:tag (* op)} o2]
+  (when (or (!= (.-op o) (.-op o2)) (!= (.-c o) (.-c o2)) (!= (len (.-args o)) (len (.-args o2))))
+    (return false))
+
+  (range [i arg (.-args o)]
+    (when (!= (aget (.-args o2) i) arg)
+      (return false)))
+
+
+  true)
+
+
+^{:go/end 152} (go/method write [^{:tag (* op)} o ^io/Writer w]
+  (fmt/Fprintf w "v%02d = %s" (.-id o) (.-op o))
+  (range [_ arg (.-args o)]
+    (fmt/Fprintf w " v%02d" (.-id arg)))
+
+  (when (!= (.-c o) nil)
+    (fmt/Fprintf w " %v" (.-c o)))
+
+  (when (!= (.-name o) "")
+    (fmt/Fprintf w " %q" (.-name o)))
+
+  (when (!= (.-kind o) nil)
+    (fmt/Fprintf w " [%s]" (.-typ (.-kind o))))
+
+  (fmt/Fprintf w "\n"))
+
+
+^{:go/end 159} (go/method write [^{:tag (* Func)} fn ^io/Writer w]
+  (fmt/Fprintf w "FUNC %s\n" (.-name fn))
+  (range [_ op (.-ops fn)]
+    (.write op w)))
+
+
+
+^{:go/end 206} (go/method Compile [^{:tag (* File)} f]
+  ;; TODO: CSE constants across the whole file
+
+  (fmt/Fprintf (.-w f) "#include \"go_asm.h\"\n#include \"textflag.h\"\n\n")
+
+
+
+
+  (range [_ c (.-consts f)]
+    (.emitConst f (.-name c) (.-data c)))
+
+
+  (let [trace ^{:go/end 179} (fn [^{:tag (* Func)} fn ^string step]
+        (when (not logCompile)
+          (return))
+
+        (log/Printf "## Compiling %s: %s" (.-name fn) step)
+        (.write fn os/Stderr))]
+
+
+    (range [_ fn (.-funcs f)]
+      (trace fn "initial")
+
+      (while true
+        (when (.cse fn)
+          (trace fn "post cse")
+          (continue))
+
+        (when (.deadcode fn)
+          (trace fn "post deadcode")
+          (continue))
+
+        (break))
+
+      (.addLoads fn)
+      (trace fn "post addLoads")
+
+      ;; Assigning locations requires ops to be in dependency order.
+      (.schedule fn)
+      (trace fn "post schedule")
+
+      (let [locs (.assignLocs fn)]
+
+        (.emit fn f locs)))))
+
+
+
+
+^{:go/end 253} (go/method cse "cse performs common subexpression elimination.\n" ^bool [^{:tag (* Func)} fn]
+  ;; Compute structural hashes
+  (let [hashes (make (map (* op) uint64))
+      ^{:line 212 :tag maphash/Hash} h (zero maphash/Hash)
+      ^{:line 213 :tag (array 8 byte)} bbuf (zero (array 8 byte))]
+    (range [_ op (.-ops fn)]
+      ;; We ignore the name for canonicalization.
+      (.Reset h)
+      (.WriteString h (.-op op))
+      ;; TODO: Ideally we would hash o1.c, but we don't have a good way to do that.
+      (range [_ arg (.-args op)]
+        (when [(values _ ok) (aget hashes arg)] (not ok)
+          (panic "ops not in dependency order"))
+
+        ^{:go/via [littleEndian]} (.PutUint64 binary/NativeEndian (subslice bbuf) (aget hashes arg))
+        (.Write h (subslice bbuf)))
+
+      (aset hashes op (.Sum64 h)))
+
+
+    (let [canon (make (map uint64 (slice (* op))))
+        ^{:line 230} lookup ^{:go/end 239} (fn ^{:tag (* op)} [^{:tag (* op)} o]
+          (let [hash (aget hashes o)]
+            (range [_ o2 (aget canon hash)]
+              (when (.equalNoName o o2)
+                (return o2)))
+
+
+            (aset canon hash (append (aget canon hash) o))
+            ^{:line 238} o))
+
+
+        ;; Canonicalize ops.
+        ^{:line 242} dirty false]
+      (range [_ op (.-ops fn)]
+        (range [i arg (.-args op)]
+          (let [newArg (lookup arg)]
+            (when (!= arg newArg)
+              (set! dirty true)
+              (aset (.-args op) i newArg)))))
+
+
+
+      ^{:line 252} dirty)))
+
+
+
+^{:go/end 287} (go/method deadcode "deadcode eliminates unused ops.\n" ^bool [^{:tag (* Func)} fn]
+  (let [marks (make (map (* op) bool))
+      ^{:line 258 :tag (func [^{:tag (* op)} o])} mark (zero (func [^{:tag (* op)} o]))]
+    (set! mark ^{:go/end 267} (fn [^{:tag (* op)} o]
+        (when (aget marks o)
+          (return))
+
+        (aset marks o true)
+        (range [_ arg (.-args o)]
+          (mark arg))))
+
+
+    ;; Mark operations that have a side-effect.
+    (range [_ op (.-ops fn)]
+      (switch (.-op op)
+        (case ["return"]
+          (mark op))))
+
+
+    ;; Discard unmarked operations
+    (when (== (len marks) (len (.-ops fn)))
+      (return false))
+
+    ^{:go/breaks [4]} (let [newOps (make (slice (* op)) 0 (len marks))]
+      (range [_ op (.-ops fn)]
+        (when (aget marks op)
+          (set! newOps (append newOps op))))
+
+
+      (set! (.-ops fn) newOps)
+      true)))
+
+
+
+
+(go/var ^{:doc "canMem is a map from operation to a bitmap of which arguments can use a\ndirect memory reference.\n"} canMem (lit (map string uint64)
+    ^{:line 292} ["VPERMB" (<< 1 0)]
+    ^{:line 293} ["VPERMI2B" (<< 1 0)]
+    ^{:line 294} ["VPERMT2B" (<< 1 0)]
+    ^{:line 295} ["VGF2P8AFFINEQB" (<< 1 0)]
+    ^{:line 296} ["VPORQ" (<< 1 0)]
+    ^{:line 297} ["VPSUBQ" (<< 1 0)]
+    ^{:line 298} ["VPSHUFBITQMB" (<< 1 0)]))
+
+
+
+^{:go/end 332} (go/method addLoads "addLoads inserts load ops for ops that can't take memory inputs directly.\n" [^{:tag (* Func)} fn]
+  ;; A lot of operations can directly take memory locations. If there's only a
+  ;; single reference to a deref operation, and the operation can do the deref
+  ;; itself, eliminate the deref. If there's more than one reference, then we
+  ;; leave the load so we can share the value in the register.
+  (let [nRefs (.opRefs fn)
+      ^{:line 308} loads (make (map (* op) (* op)))] ; deref -> load
+    (range [_ o (.-ops fn)]
+      (let [canMask (aget canMem (.-op o))]
+        (range [i arg (.-args o)]
+          ;; TODO: Many AVX-512 operations that support memory operands also
+          ;; support a ".BCST" suffix that performs a broadcasting memory
+          ;; load. If the const can be broadcast and all uses support
+          ;; broadcast load, it would be nice to use .BCST. I'm not sure if
+          ;; that belongs in this pass or a different one.
+          (when (or (== (.-op arg) "deref") (== (.-op arg) "const"))
+            ;; These produce memory locations.
+            (when (or (== (bit-and canMask ^uint64 (<< 1 i)) 0) (> (aget nRefs arg) 1))
+              ;; This argument needs to be loaded into a register.
+              (let [(values load ok) (aget loads arg)]
+                (when (not ok)
+                  (set! load (makeLoad arg))
+                  (.attach fn load)
+                  (aset loads arg load))
+
+                (aset (.-args o) i load)))))))))
+
+
+
+
+
+
+^{:go/end 342} (go/method opRefs ^{:tag (map (* op) int)} [^{:tag (* Func)} fn]
+  (let [refs (make (map (* op) int))]
+    (range [_ o1 (.-ops fn)]
+      (range [_ arg (.-args o1)]
+        (inc! (aget refs arg))))
+
+
+    ^{:line 341} refs))
+
+
+^{:go/end 359} (go/func makeLoad ^{:tag (* op)} [^{:tag (* op)} deref]
+  (let [^string inst (zero string)]
+    (switch (.-reg (.-kind deref))
+      (default
+        (fatalf "don't know how to load %v" (.-reg (.-kind deref))))
+      (case [regClassGP]
+        (set! inst "MOVQ"))
+      (case [regClassZ]
+        (set! inst "VMOVDQU64")))
+
+    ;; The load references deref rather than deref.args[0] because when we
+    ;; assign locations, the deref op gets the memory location to load from,
+    ;; while its argument has some other location (like a register). Also, the
+    ;; offset to deref is attached to the deref op.
+    (addr (lit op :op inst :kind (.-kind deref) :args (lit (slice (* op)) deref)))))
+
+
+(go/type opHeap (slice (* op)))
+
+^{:go/end 363} (go/method Len ^int [^opHeap h] (len h))
+^{:go/end 364} (go/method Swap [^opHeap h ^int i ^int j] (set! (values (aget h i) (aget h j)) (values (aget h j) (aget h i))))
+^{:go/end 381} (go/method Less ^bool [^opHeap h ^int i ^int j]
+  (let [priority ^{:go/breaks [[4 375]] :go/end 376} (fn ^int [^{:tag (* op)} o]
+        (when (or (== (.-op o) "deref") (== (.-op o) "const"))
+          ;; Input to memory load
+          (return 1))
+
+        (when (and (> (len (.-args o)) 0) ^:go/paren (or (== (.-op (aget (.-args o) 0)) "deref") (== (.-op (aget (.-args o) 0)) "const")))
+          ;; Memory load
+          (return 2))
+
+        100)]
+
+    (when [(values p1 p2) (values (priority (aget h i)) (priority (aget h j)))] (!= p1 p2)
+      (return (< p1 p2)))
+
+    (< (.-id (aget h i)) (.-id (aget h j)))))
+
+
+^{:go/end 385} (go/method Push [^{:tag (* opHeap)} h ^any x]
+  (set! @h (append @h (assert (* op) x))))
+
+
+^{:go/end 393} (go/method Pop ^any [^{:tag (* opHeap)} h]
+  (let [old @h
+      ^{:line 389} n (len old)
+      ^{:line 390} x (aget old (- n 1))]
+    (set! @h (subslice old 0 (- n 1)))
+    ^{:line 392} x))
+
+
+
+^{:go/end 444} (go/method schedule "schedule ensures fn's ops are in dependency order.\n" [^{:tag (* Func)} fn]
+  ;; TODO: This tends to generate a huge amount of register pressure, mostly
+  ;; because it floats loads as early as possible and partly because it has no
+  ;; concept of rematerialization and CSE can make rematerializable values
+  ;; live for a very long time. It some sense it doesn't matter because we
+  ;; don't run out of registers for anything we need.
+
+  (let [missing (make (map (* op) int))
+      ^{:line 404} uses (make (map (* op) (slice (* op))))
+      ^{:line 405 :tag opHeap} h (zero opHeap)]
+    (range [_ op (.-ops fn)]
+      (if (== (len (.-args op)) 0)
+        (set! h (append h op))
+
+        (aset missing op (len (.-args op))))
+
+      (range [_ arg (.-args op)]
+        (aset uses arg (append (aget uses arg) op))))
+
+
+    (heap/Init (addr h))
+
+    (let [newOps (make (slice (* op)) 0 (len (.-ops fn)))]
+      (while (> (len h) 0)
+        (when false
+          (log/Printf "schedule: %s" h))
+
+        (let [top (aget h 0)]
+          (set! newOps (append newOps top))
+          (heap/Pop (addr h))
+          (range [_ o (aget uses top)]
+            (dec! (aget missing o))
+            (when (== (aget missing o) 0)
+              (heap/Push (addr h) o)))))
+
+
+
+      (when (!= (len newOps) (len (.-ops fn)))
+        (log/Print "schedule didn't schedule all ops")
+        (log/Print "before:")
+        (.write fn os/Stderr)
+        (set! (.-ops fn) newOps)
+        (log/Print "after:")
+        (.write fn os/Stderr)
+        (log/Fatal "bad schedule"))
+
+
+      (set! (.-ops fn) newOps))))
+
+
+^{:go/end 505} (go/method emit [^{:tag (* Func)} fn ^{:tag (* File)} f ^{:tag (map (* op) loc)} locs]
+  (let [w (.-w f)]
+
+    ;; Emit constants first
+    (range [_ o (.-ops fn)]
+      (when (== (.-op o) "const")
+        (let [name (.-name (assert locMem (aget locs o)))]
+          (.emitConst f name (.-c o)))))
+
+
+
+    (fmt/Fprintf w "TEXT %s(SB), NOSPLIT, $0-0\n" (.-name fn))
+
+    ;; Emit body
+    (range [_ o (.-ops fn)]
+      (switch (.-op o)
+        (case ["const" "arg" "return" "deref" "imm"]
+          ;; Does not produce code
+          (continue)))
+
+      (switch (.-op o)
+        (case ["addConst"]
+          (fatalf "addConst not lowered")))
+
+
+      (let [opName (.-op o)]
+        ;; A ".mask" suffix is used to distinguish AVX-512 ops that use the same
+        ;; mnemonic for regular and masked mode.
+        (set! opName (strings/TrimSuffix opName ".mask"))
+
+        (fmt/Fprintf w "\t%s" opName)
+        (when (== (.-op o) "VGF2P8AFFINEQB")
+          ;; Hidden immediate, but always 0
+          ;;
+          ;; TODO: Replace this with an imm input.
+          (fmt/Fprintf w " $0,"))
+
+        (range [i arg (.-args o)]
+          (if (== i 0)
+            (fmt/Fprintf w " ")
+
+            (fmt/Fprintf w ", "))
+
+          (if (== (.-op arg) "imm")
+            (fmt/Fprintf w "$0x%x" (.-c arg))
+
+            (fmt/Fprint w (.LocString (aget locs arg)))))
+
+
+        (if [(values _ ok) (aget opRMW (.-op o))] ok (do)
+          ;; Read-modify-write instructions, so the output is already in the
+          ;; arguments above.
+
+          (fmt/Fprintf w ", %s" (.LocString (aget locs o))))
+
+        (fmt/Fprintf w "\n")))
+
+    (fmt/Fprintf w "\tRET\n")
+    (fmt/Fprintf w "\n")))
+
+
+^{:go/end 537} (go/method emitConst [^{:tag (* File)} f ^string name ^any data]
+  (type-switch [data data]
+    (case [(slice (* Func))]
+      (fmt/Fprintf (.-w f) "GLOBL %s(SB), RODATA, $%#x\n" name (* (len data) 8))
+      (range [i fn data]
+        (fmt/Fprintf (.-w f) "DATA  %s+%#02x(SB)/8, " name (* 8 i))
+        (if (== fn nil)
+          (fmt/Fprintf (.-w f) "$0\n")
+
+          (fmt/Fprintf (.-w f) "$%s(SB)\n" (.-name fn))))
+
+
+      (fmt/Fprintf (.-w f) "\n")
+      (return)))
+
+
+  ;; Assume it's a numeric slice or array
+  (let [rv (reflect/ValueOf data)
+      ^{:line 525} sz (conv int (.Size (.Elem (.Type rv))))]
+    (fmt/Fprintf (.-w f) "GLOBL %s(SB), RODATA, $%#x\n" name (* (.Len rv) sz))
+    (for [wi 0] (< wi (/ (* sz (.Len rv)) 8)) (inc! wi) ; Iterate over words
+      (let [^uint64 word (zero uint64)]
+        (for [j 0] (< j (/ 8 sz)) (inc! j) ; Iterate over elements in this word
+          (let [d (.Uint (.Index rv (+ (/ (* wi 8) sz) j)))]
+            (set! word bit-or (<< d (* j sz 8)))))
+
+        (fmt/Fprintf (.-w f) "DATA  %s+%#02x(SB)/8, $%#016x\n" name (* 8 wi) word)))
+
+
+    (fmt/Fprintf (.-w f) "\n")))

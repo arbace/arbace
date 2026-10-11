@@ -1,0 +1,118 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "checkptr.go" :imports [
+
+    ^{:line 7} [unsafe "unsafe"]])
+
+^{:go/end 28} (go/func checkptrAlignment [^unsafe/Pointer p ^{:tag (* _type)} elem ^uintptr n]
+  ;; nil pointer is always suitably aligned (#47430).
+  (when (== p nil)
+    (return))
+
+
+  ;; Check that (*[n]elem)(p) is appropriately aligned.
+  ;; Note that we allow unaligned pointers if the types they point to contain
+  ;; no pointers themselves. See issue 37298.
+  ;; TODO(mdempsky): What about fieldAlign?
+  (when (and (.Pointers elem) (!= (bit-and (conv uintptr p) (- (conv uintptr (.-Align_ elem)) 1)) 0))
+    (throw "checkptr: misaligned pointer conversion"))
+
+
+  ;; Check that (*[n]elem)(p) doesn't straddle multiple heap objects.
+  ;; TODO(mdempsky): Fix #46938 so we don't need to worry about overflow here.
+  (when (checkptrStraddles p (* n (.-Size_ elem)))
+    (throw "checkptr: converted pointer straddles multiple allocations")))
+
+
+
+
+
+^{:go/end 48} (go/func checkptrStraddles "checkptrStraddles reports whether the first size-bytes of memory\naddressed by ptr is known to straddle more than one Go allocation.\n" ^bool [^unsafe/Pointer ptr ^uintptr size]
+  (when (<= size 1)
+    (return false))
+
+
+  ;; Check that add(ptr, size-1) won't overflow. This avoids the risk
+  ;; of producing an illegal pointer value (assuming ptr is legal).
+  (when (>= (conv uintptr ptr) (- (- size 1)))
+    (return true))
+
+  (let [end (add ptr (- size 1))]
+
+    ;; TODO(mdempsky): Detect when [ptr, end] contains Go allocations,
+    ;; but neither ptr nor end point into one themselves.
+
+    (!= (checkptrBase ptr) (checkptrBase end))))
+
+
+^{:go/end 70} (go/func checkptrArithmetic [^unsafe/Pointer p ^{:tag (slice unsafe/Pointer)} originals]
+  (when (and (< 0 (conv uintptr p)) (< (conv uintptr p) minLegalPointer))
+    (throw "checkptr: pointer arithmetic computed bad pointer value"))
+
+
+  ;; Check that if the computed pointer p points into a heap
+  ;; object, then one of the original pointers must have pointed
+  ;; into the same object.
+  (let [base (checkptrBase p)]
+    (when (== base 0)
+      (return))
+
+
+    (range [_ original originals]
+      (when (== base (checkptrBase original))
+        (return)))
+
+
+
+    (throw "checkptr: pointer arithmetic result points to invalid allocation")))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 118]] :go/end 119} (go/func ^{:go/linkname "checkptrBase"} checkptrBase "checkptrBase returns the base address for the allocation containing\nthe address p.\n\nImportantly, if p1 and p2 point into the same variable, then\ncheckptrBase(p1) == checkptrBase(p2). However, the converse/inverse\nis not necessarily true as allocations can have trailing padding,\nand multiple variables may be packed into a single allocation.\n\ncheckptrBase should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bytedance/sonic\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^uintptr [^unsafe/Pointer p]
+  ;; stack
+  (when [gp (getg)] (and (<= (.-lo (.-stack gp)) (conv uintptr p)) (< (conv uintptr p) (.-hi (.-stack gp))))
+    ;; TODO(mdempsky): Walk the stack to identify the
+    ;; specific stack frame or even stack object that p
+    ;; points into.
+    ;;
+    ;; In the mean time, use "1" as a pseudo-address to
+    ;; represent the stack. This is an invalid address on
+    ;; all platforms, so it's guaranteed to be distinct
+    ;; from any of the addresses we might return below.
+    (return 1))
+
+
+  ;; heap (must check after stack because of #35068)
+  (when [(values base _ _) (findObject (conv uintptr p) 0 0)] (!= base 0)
+    (return base))
+
+
+  ;; data or bss
+  (range [_ datap (activeModules)]
+    (when (and (<= (.-data datap) (conv uintptr p)) (< (conv uintptr p) (.-edata datap)))
+      (return (.-data datap)))
+
+    (when (and (<= (.-bss datap) (conv uintptr p)) (< (conv uintptr p) (.-ebss datap)))
+      (return (.-bss datap))))
+
+
+
+  0)

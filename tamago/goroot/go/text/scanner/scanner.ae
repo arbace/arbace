@@ -1,0 +1,791 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package scanner provides a scanner and tokenizer for UTF-8-encoded text.
+;; It takes an io.Reader providing the source, which then can be tokenized
+;; through repeated calls to the Scan function. For compatibility with
+;; existing tools, the NUL character is not allowed. If the first character
+;; in the source is a UTF-8 encoded byte order mark (BOM), it is discarded.
+;;
+;; By default, a [Scanner] skips white space and Go comments and recognizes all
+;; literals as defined by the Go language specification. It may be
+;; customized to recognize only a subset of those literals and to recognize
+;; different identifier and white space characters.
+(in-ns 'go.text.scanner) (go/file "scanner.go" :doc "Package scanner provides a scanner and tokenizer for UTF-8-encoded text.\nIt takes an io.Reader providing the source, which then can be tokenized\nthrough repeated calls to the Scan function. For compatibility with\nexisting tools, the NUL character is not allowed. If the first character\nin the source is a UTF-8 encoded byte order mark (BOM), it is discarded.\n\nBy default, a [Scanner] skips white space and Go comments and recognizes all\nliterals as defined by the Go language specification. It may be\ncustomized to recognize only a subset of those literals and to recognize\ndifferent identifier and white space characters.\n" :imports [
+
+
+    ^{:line 18} [bytes "bytes"]
+    ^{:line 19} [fmt "fmt"]
+    ^{:line 20} [io "io"]
+    ^{:line 21} [os "os"]
+    ^{:line 22} [unicode "unicode"]
+    ^{:line 23} [utf8 "unicode/utf8"]])
+
+
+
+
+(go/type Position "Position is a value that represents a source position.\nA position is valid if Line > 0.\n" (struct
+    ^{:line 29 :tag string} Filename ; filename, if any
+    ^{:line 30 :tag int} Offset ; byte offset, starting at 0
+    ^{:line 31 :tag int} Line ; line number, starting at 1
+    ^{:line 32 :tag int} Column)) ; column number, starting at 1 (character count per line)
+
+
+
+^{:go/end 36} (go/method IsValid "IsValid reports whether the position is valid.\n" ^bool [^{:tag (* Position)} pos] (> (.-Line pos) 0))
+
+^{:go/end 47} (go/method String ^string [^Position pos]
+  (let [s (.-Filename pos)]
+    (when (== s "")
+      (set! s "<input>"))
+
+    (when (.IsValid pos)
+      (set! s + (fmt/Sprintf ":%d:%d" (.-Line pos) (.-Column pos))))
+
+    ^{:line 46} s))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const "Predefined mode bits to control recognition of tokens. For instance,\nto configure a [Scanner] such that it only recognizes (Go) identifiers,\nintegers, and skips comments, set the Scanner's Mode field to:\n\n\tScanIdents | ScanInts | ScanComments | SkipComments\n\nWith the exceptions of comments, which are skipped if SkipComments is\nset, unrecognized tokens are not ignored. Instead, the scanner simply\nreturns the respective individual characters (or possibly sub-tokens).\nFor instance, if the mode is ScanIdents (not ScanStrings), the string\n\"foo\" is scanned as the token sequence '\"' [Ident] '\"'.\n\nUse GoTokens to configure the Scanner such that it accepts all Go\nliteral tokens including Go identifiers. Comments will be skipped.\n"
+  ^{:line 64} [^{:val 4} ScanIdents (<< 1 (- Ident))]
+  ^{:line 65} [^{:val 8} ScanInts (<< 1 (- Int))]
+  ^{:line 66} [^{:val 16} ScanFloats (<< 1 (- Float))] ; includes Ints and hexadecimal floats
+  ^{:line 67} [^{:val 32} ScanChars (<< 1 (- Char))]
+  ^{:line 68} [^{:val 64} ScanStrings (<< 1 (- String))]
+  ^{:line 69} [^{:val 128} ScanRawStrings (<< 1 (- RawString))]
+  ^{:line 70} [^{:val 256} ScanComments (<< 1 (- Comment))]
+  ^{:line 71} [^{:val 512} SkipComments (<< 1 (- skipComment))] ; if set with ScanComments, comments become white space
+  ^{:line 72} [^{:val 1012} GoTokens (bit-or ScanIdents ScanFloats ScanChars ScanStrings ScanRawStrings ScanComments SkipComments)])
+
+
+
+(go/const "The result of Scan is one of these tokens or a Unicode character.\n"
+  ^{:line 77} [^{:val -1} EOF (- (+ iota 1))]
+  ^{:line 78} [^{:val -2} Ident]
+  ^{:line 79} [^{:val -3} Int]
+  ^{:line 80} [^{:val -4} Float]
+  ^{:line 81} [^{:val -5} Char]
+  ^{:line 82} [^{:val -6} String]
+  ^{:line 83} [^{:val -7} RawString]
+  ^{:line 84} [^{:val -8} Comment]
+
+
+  ^{:line 87} [^{:val -9 :doc "internal use only\n"} skipComment])
+
+
+(go/var tokenString (lit (map rune string)
+    ^{:line 91} [EOF "EOF"]
+    ^{:line 92} [Ident "Ident"]
+    ^{:line 93} [Int "Int"]
+    ^{:line 94} [Float "Float"]
+    ^{:line 95} [Char "Char"]
+    ^{:line 96} [String "String"]
+    ^{:line 97} [RawString "RawString"]
+    ^{:line 98} [Comment "Comment"]))
+
+
+
+^{:go/end 107} (go/func TokenString "TokenString returns a printable string for a token or Unicode character.\n" ^string [^rune tok]
+  (when [(values s found) (aget tokenString tok)] found
+    (return s))
+
+  (fmt/Sprintf "%q" (conv string tok)))
+
+
+
+
+(go/const ^{:val 4294977024 :doc "GoWhitespace is the default value for the [Scanner]'s Whitespace field.\nIts value selects Go's white space characters.\n"} GoWhitespace (bit-or (<< 1 \tab) (<< 1 \newline) (<< 1 \return) (<< 1 \space)))
+
+(go/const ^{:val 1024} bufLen 1024) ; at least utf8.UTFMax
+
+
+(go/type Scanner "A Scanner implements reading of Unicode characters and tokens from an [io.Reader].\n" (struct
+
+    ^{:line 118 :tag io/Reader :doc "Input\n"} src
+
+
+    ^{:line 121 :tag (array (+ bufLen 1) byte) :doc "Source buffer\n"} srcBuf ; +1 for sentinel for common case of s.next()
+    ^{:line 122 :tag int} srcPos ; reading position (srcBuf index)
+    ^{:line 123 :tag int} srcEnd ; source end (srcBuf index)
+
+
+    ^{:line 126 :tag int :doc "Source position\n"} srcBufOffset ; byte offset of srcBuf[0] in source
+    ^{:line 127 :tag int} line ; line count
+    ^{:line 128 :tag int} column ; character count
+    ^{:line 129 :tag int} lastLineLen ; length of last line in characters (for correct column reporting)
+    ^{:line 130 :tag int} lastCharLen ; length of last character in bytes
+
+
+
+
+
+    ^{:line 136 :tag bytes/Buffer :doc "Token text buffer\nTypically, token text is stored completely in srcBuf, but in general\nthe token text's head may be buffered in tokBuf while the token text's\ntail is stored in srcBuf.\n"} tokBuf ; token text head that is not in srcBuf anymore
+    ^{:line 137 :tag int} tokPos ; token text tail position (srcBuf index); valid if >= 0
+    ^{:line 138 :tag int} tokEnd ; token text tail end (srcBuf index)
+
+
+    ^{:line 141 :tag rune :doc "One character look-ahead\n"} ch ; character before current srcPos
+
+
+
+    ^{:line 145 :tag (func [^{:tag (* Scanner)} s ^string msg]) :doc "Error is called for each error encountered. If no Error\nfunction is set, the error is reported to os.Stderr.\n"} Error
+
+
+    ^{:line 148 :tag int :doc "ErrorCount is incremented by one for each error encountered.\n"} ErrorCount
+
+
+
+
+    ^{:line 153 :tag uint :doc "The Mode field controls which tokens are recognized. For instance,\nto recognize Ints, set the ScanInts bit in Mode. The field may be\nchanged at any time.\n"} Mode
+
+
+
+
+
+    ^{:line 159 :tag uint64 :doc "The Whitespace field controls which characters are recognized\nas white space. To recognize a character ch <= ' ' as white space,\nset the ch'th bit in Whitespace (the Scanner's behavior is undefined\nfor values ch > ' '). The field may be changed at any time.\n"} Whitespace
+
+
+
+
+
+
+    ^{:line 166 :tag (func [^rune ch ^int i] [bool]) :doc "IsIdentRune is a predicate controlling the characters accepted\nas the ith rune in an identifier. The set of valid characters\nmust not intersect with the set of white space characters.\nIf no IsIdentRune function is set, regular Go identifiers are\naccepted instead. The field may be changed at any time.\n"} IsIdentRune
+
+
+
+
+
+
+
+
+    ^{:line 175 :doc "Start position of most recently scanned token; set by Scan.\nCalling Init or Next invalidates the position (Line == 0).\nThe Filename field is always left untouched by the Scanner.\nIf an error is reported (via Error) and Position is invalid,\nthe scanner is not inside a token. Call Pos to obtain an error\nposition in that case, or to obtain the position immediately\nafter the most recently scanned token.\n"} Position))
+
+
+
+
+
+^{:go/end 212} (go/method Init "Init initializes a [Scanner] with a new source and returns s.\n[Scanner.Error] is set to nil, [Scanner.ErrorCount] is set to 0, [Scanner.Mode] is set to [GoTokens],\nand [Scanner.Whitespace] is set to [GoWhitespace].\n" ^{:tag (* Scanner)} [^{:tag (* Scanner)} s ^io/Reader src]
+  (set! (.-src s) src)
+
+  ;; initialize source buffer
+  ;; (the first call to next() will fill it by calling src.Read)
+  (aset (.-srcBuf s) 0 utf8/RuneSelf) ; sentinel
+  (set! (.-srcPos s) 0)
+  (set! (.-srcEnd s) 0)
+
+  ;; initialize source position
+  (set! (.-srcBufOffset s) 0)
+  (set! (.-line s) 1)
+  (set! (.-column s) 0)
+  (set! (.-lastLineLen s) 0)
+  (set! (.-lastCharLen s) 0)
+
+  ;; initialize token text buffer
+  ;; (required for first call to next()).
+  (set! (.-tokPos s) -1)
+
+  ;; initialize one character look-ahead
+  (set! (.-ch s) -2) ; no char read yet, not EOF
+
+  ;; initialize public fields
+  (set! (.-Error s) nil)
+  (set! (.-ErrorCount s) 0)
+  (set! (.-Mode s) GoTokens)
+  (set! (.-Whitespace s) GoWhitespace)
+  (set! ^{:go/via [Position]} (.-Line s) 0) ; invalidate token position
+
+  ^{:line 211} s)
+
+
+
+
+
+
+^{:go/end 296} (go/method next "next reads and returns the next Unicode character. It is designed such\nthat only a minimal amount of work needs to be done in the common ASCII\ncase (one test to check for both ASCII and end-of-buffer, and one test\nto check for newlines).\n" ^rune [^{:tag (* Scanner)} s]
+  (let [(values ch width) (values (conv rune (aget (.-srcBuf s) (.-srcPos s))) 1)]
+
+    (when (>= ch utf8/RuneSelf)
+      ;; uncommon case: not ASCII or not enough bytes
+      (while (and (> (+ (.-srcPos s) utf8/UTFMax) (.-srcEnd s)) (not (utf8/FullRune (subslice (.-srcBuf s) (.-srcPos s) (.-srcEnd s)))))
+        ;; not enough bytes: read some more, but first
+        ;; save away token text if any
+        (when (>= (.-tokPos s) 0)
+          (.Write (.-tokBuf s) (subslice (.-srcBuf s) (.-tokPos s) (.-srcPos s)))
+          (set! (.-tokPos s) 0))
+        ;; s.tokEnd is set by Scan()
+
+        ;; move unread bytes to beginning of buffer
+        (copy (subslice (.-srcBuf s) 0) (subslice (.-srcBuf s) (.-srcPos s) (.-srcEnd s)))
+        (set! (.-srcBufOffset s) + (.-srcPos s))
+        ;; read more bytes
+        ;; (an io.Reader must return io.EOF when it reaches
+        ;; the end of what it is reading - simply returning
+        ;; n == 0 will make this loop retry forever; but the
+        ;; error is in the reader implementation in that case)
+        (let [i (- (.-srcEnd s) (.-srcPos s))
+            (values n err) (.Read (.-src s) (subslice (.-srcBuf s) i bufLen))]
+          (set! (.-srcPos s) 0)
+          (set! (.-srcEnd s) (+ i n))
+          (aset (.-srcBuf s) (.-srcEnd s) utf8/RuneSelf) ; sentinel
+          (when (!= err nil)
+            (when (!= err io/EOF)
+              (.error s (.Error err)))
+
+            (when (== (.-srcEnd s) 0)
+              (when (> (.-lastCharLen s) 0)
+                ;; previous character was not EOF
+                (inc! (.-column s)))
+
+              (set! (.-lastCharLen s) 0)
+              (return EOF))
+
+            ;; If err == EOF, we won't be getting more
+            ;; bytes; break to avoid infinite loop. If
+            ;; err is something else, we don't know if
+            ;; we can get more bytes; thus also break.
+            (break))))
+
+
+      ;; at least one byte
+      (set! ch (conv rune (aget (.-srcBuf s) (.-srcPos s))))
+      (when (>= ch utf8/RuneSelf)
+        ;; uncommon case: not ASCII
+        (set! (values ch width) (utf8/DecodeRune (subslice (.-srcBuf s) (.-srcPos s) (.-srcEnd s))))
+        (when (and (== ch utf8/RuneError) (== width 1))
+          ;; advance for correct error position
+          (set! (.-srcPos s) + width)
+          (set! (.-lastCharLen s) width)
+          (inc! (.-column s))
+          (.error s "invalid UTF-8 encoding")
+          (return ch))))
+
+
+
+
+    ;; advance
+    (set! (.-srcPos s) + width)
+    (set! (.-lastCharLen s) width)
+    (inc! (.-column s))
+
+    ;; special situations
+    (switch ch
+      (case [0]
+        ;; for compatibility with other tools
+        (.error s "invalid character NUL"))
+      (case [\newline]
+        (inc! (.-line s))
+        (set! (.-lastLineLen s) (.-column s))
+        (set! (.-column s) 0)))
+
+
+    ^{:line 295} ch))
+
+
+
+
+
+
+
+
+^{:go/end 312} (go/method Next "Next reads and returns the next Unicode character.\nIt returns [EOF] at the end of the source. It reports\na read error by calling s.Error, if not nil; otherwise\nit prints an error message to [os.Stderr]. Next does not\nupdate the [Scanner.Position] field; use [Scanner.Pos]() to\nget the current position.\n" ^rune [^{:tag (* Scanner)} s]
+  (set! (.-tokPos s) -1) ; don't collect token text
+  (set! ^{:go/via [Position]} (.-Line s) 0) ; invalidate token position
+  (let [ch (.Peek s)]
+    (when (!= ch EOF)
+      (set! (.-ch s) (.next s)))
+
+    ^{:line 311} ch))
+
+
+
+
+
+^{:go/end 326} (go/method Peek "Peek returns the next Unicode character in the source without advancing\nthe scanner. It returns [EOF] if the scanner's position is at the last\ncharacter of the source.\n" ^rune [^{:tag (* Scanner)} s]
+  (when (== (.-ch s) -2)
+    ;; this code is only run for the very first character
+    (set! (.-ch s) (.next s))
+    (when (== (.-ch s) \ufeff)
+      (set! (.-ch s) (.next s)))) ; ignore BOM
+
+
+  (.-ch s))
+
+
+^{:go/end 340} (go/method error [^{:tag (* Scanner)} s ^string msg]
+  (set! (.-tokEnd s) (- (.-srcPos s) (.-lastCharLen s))) ; make sure token text is terminated
+  (inc! (.-ErrorCount s))
+  (when (!= (.-Error s) nil)
+    ((.-Error s) s msg)
+    (return))
+
+  (let [pos (.-Position s)]
+    (when (not (.IsValid pos))
+      (set! pos (.Pos s)))
+
+    (fmt/Fprintf os/Stderr "%s: %s\n" pos msg)))
+
+
+^{:go/end 344} (go/method errorf [^{:tag (* Scanner)} s ^string format & ^{:tag (slice any)} args]
+  (.error s (fmt/Sprintf format (spread args))))
+
+
+^{:go/end 351} (go/method isIdentRune ^bool [^{:tag (* Scanner)} s ^rune ch ^int i]
+  (when (!= (.-IsIdentRune s) nil)
+    (return (and (!= ch EOF) ((.-IsIdentRune s) ch i))))
+
+  (or (== ch \_) (unicode/IsLetter ch) (and (unicode/IsDigit ch) (> i 0))))
+
+
+^{:go/end 360} (go/method scanIdentifier ^rune [^{:tag (* Scanner)} s]
+  ;; we know the zero'th rune is OK; start scanning at the next one
+  (let [ch (.next s)]
+    (for [i 1] (.isIdentRune s ch i) (inc! i)
+      (set! ch (.next s)))
+
+    ^{:line 359} ch))
+
+
+^{:go/end 362} (go/func lower ^rune [^rune ch] (bit-or (- \a \A) ch)) ; returns lower-case ch iff ch is ASCII letter
+^{:go/end 363} (go/func isDecimal ^bool [^rune ch] (and (<= \0 ch) (<= ch \9)))
+^{:go/end 364} (go/func isHex ^bool [^rune ch] (or (and (<= \0 ch) (<= ch \9)) (and (<= \a (lower ch)) (<= (lower ch) \f))))
+
+
+
+
+
+
+
+^{:go/end 397} (go/method digits "digits accepts the sequence { digit | '_' } starting with ch0.\nIf base <= 10, digits accepts any decimal digit but records\nthe first invalid digit >= base in *invalid if *invalid == 0.\ndigits returns the first rune that is not part of the sequence\nanymore, and a bitset describing whether the sequence contained\ndigits (bit 0 is set), or separators '_' (bit 1 is set).\n" [^{:tag (* Scanner)} s ^rune ch0 ^int base ^{:tag (* rune)} invalid] :results [^rune ch ^int digsep]
+  (set! ch ch0)
+  (if (<= base 10)
+    (let [max (conv rune (+ \0 base))]
+      (while (or (isDecimal ch) (== ch \_))
+        (let [ds 1]
+          (cond (== ch \_)
+            (set! ds 2)
+            (and (>= ch max) (== @invalid 0))
+            (set! @invalid ch))
+
+          (set! digsep bit-or ds)
+          (set! ch (.next s)))))
+
+
+    (while (or (isHex ch) (== ch \_))
+      (let [ds 1]
+        (when (== ch \_)
+          (set! ds 2))
+
+        (set! digsep bit-or ds)
+        (set! ch (.next s)))))
+
+
+  (return))
+
+
+^{:go/end 483} (go/method scanNumber [^{:tag (* Scanner)} s ^rune ch ^bool seenDot] :results [rune rune]
+  (let [base 10 ; number base
+      ^{:line 401} prefix (conv rune 0) ; one of 0 (decimal), '0' (0-octal), 'x', 'o', or 'b'
+      ^{:line 402} digsep 0 ; bit 0: digit present, bit 1: '_' present
+      ^{:line 403} invalid (conv rune 0) ; invalid digit in literal, or 0
+
+      ;; integer part
+      ^{:line 406 :tag rune} tok (zero rune)
+      ^{:line 407 :tag int} ds (zero int)]
+    (when (not seenDot)
+      (set! tok Int)
+      (when (== ch \0)
+        (set! ch (.next s))
+        (switch (lower ch)
+          (case [\x]
+            (set! ch (.next s))
+            (set! (values base prefix) (values 16 \x)))
+          (case [\o]
+            (set! ch (.next s))
+            (set! (values base prefix) (values 8 \o)))
+          (case [\b]
+            (set! ch (.next s))
+            (set! (values base prefix) (values 2 \b)))
+          (default
+            (set! (values base prefix) (values 8 \0))
+            (set! digsep 1)))) ; leading 0
+
+
+      (set! (values ch ds) (.digits s ch base (addr invalid)))
+      (set! digsep bit-or ds)
+      (when (and (== ch \.) (!= (bit-and (.-Mode s) ScanFloats) 0))
+        (set! ch (.next s))
+        (set! seenDot true)))
+
+
+
+    ;; fractional part
+    (when seenDot
+      (set! tok Float)
+      (when (or (== prefix \o) (== prefix \b))
+        (.error s (+ "invalid radix point in " (litname prefix))))
+
+      (set! (values ch ds) (.digits s ch base (addr invalid)))
+      (set! digsep bit-or ds))
+
+
+    (when (== (bit-and digsep 1) 0)
+      (.error s (+ (litname prefix) " has no digits")))
+
+
+    ;; exponent
+    (if [e (lower ch)] (and ^:go/paren (or (== e \e) (== e \p)) (!= (bit-and (.-Mode s) ScanFloats) 0)) (do
+        (switch
+          (case [(and (== e \e) (!= prefix 0) (!= prefix \0))]
+            (.errorf s "%q exponent requires decimal mantissa" ch))
+          (case [(and (== e \p) (!= prefix \x))]
+            (.errorf s "%q exponent requires hexadecimal mantissa" ch)))
+
+        (set! ch (.next s))
+        (set! tok Float)
+        (when (or (== ch \+) (== ch \-))
+          (set! ch (.next s)))
+
+        (set! (values ch ds) (.digits s ch 10 nil))
+        (set! digsep bit-or ds)
+        (when (== (bit-and ds 1) 0)
+          (.error s "exponent has no digits")))
+
+      (when (and (== prefix \x) (== tok Float))
+        (.error s "hexadecimal mantissa requires a 'p' exponent")))
+
+
+    (when (and (== tok Int) (!= invalid 0))
+      (.errorf s "invalid digit %q in %s" invalid (litname prefix)))
+
+
+    (when (!= (bit-and digsep 2) 0)
+      (set! (.-tokEnd s) (- (.-srcPos s) (.-lastCharLen s))) ; make sure token text is terminated
+      (when [i (invalidSep (.TokenText s))] (>= i 0)
+        (.error s "'_' must separate successive digits")))
+
+
+
+    (return tok ch)))
+
+
+^{:go/end 496} (go/func litname ^string [^rune prefix]
+  (switch prefix
+    (default
+      (return "decimal literal"))
+    (case [\x]
+      (return "hexadecimal literal"))
+    (case [\o \0]
+      (return "octal literal"))
+    (case [\b]
+      (return "binary literal"))))
+
+
+
+
+^{:go/end 536} (go/func invalidSep "invalidSep returns the index of the first invalid separator in x, or -1.\n" ^int [^string x]
+  ^{:go/breaks [[5 535]]} (let [x1 \space ; prefix char, we only care if it's 'x'
+      ^{:line 501} d \. ; digit, one of '_', '0' (a digit), or '.' (anything else)
+      ^{:line 502} i 0]
+
+    ;; a prefix counts as a digit
+    (when (and (>= (len x) 2) (== (aget x 0) \0))
+      (set! x1 (lower (conv rune (aget x 1))))
+      (when (or (== x1 \x) (== x1 \o) (== x1 \b))
+        (set! d \0)
+        (set! i 2)))
+
+
+
+    ;; mantissa and exponent
+    (for [] (< i (len x)) (inc! i)
+      (let [p d] ; previous digit
+        (set! d (conv rune (aget x i)))
+        (switch
+          (case [(== d \_)]
+            (when (!= p \0)
+              (return i)))
+
+          (case [(or (isDecimal d) (and (== x1 \x) (isHex d)))]
+            (set! d \0))
+          (default
+            (when (== p \_)
+              (return (- i 1)))
+
+            (set! d \.)))))
+
+
+    (when (== d \_)
+      (return (- (len x) 1)))
+
+
+    -1))
+
+
+^{:go/breaks [[4 545]] :go/end 546} (go/func digitVal ^int [^rune ch]
+  (switch
+    (case [(and (<= \0 ch) (<= ch \9))]
+      (return (conv int (- ch \0))))
+    (case [(and (<= \a (lower ch)) (<= (lower ch) \f))]
+      (return (conv int (+ (- (lower ch) \a) 10)))))
+
+  16) ; larger than any legal digit val
+
+
+^{:go/end 557} (go/method scanDigits ^rune [^{:tag (* Scanner)} s ^rune ch ^int base ^int n]
+  (while (and (> n 0) (< (digitVal ch) base))
+    (set! ch (.next s))
+    (dec! n))
+
+  (when (> n 0)
+    (.error s "invalid char escape"))
+
+  ^{:line 556} ch)
+
+
+^{:go/end 577} (go/method scanEscape ^rune [^{:tag (* Scanner)} s ^rune quote]
+  (let [ch (.next s)] ; read character after '/'
+    (switch ch
+      (case [\a \b \f \n \r \t \v \\ quote]
+        ;; nothing to do
+        (set! ch (.next s)))
+      (case [\0 \1 \2 \3 \4 \5 \6 \7]
+        (set! ch (.scanDigits s ch 8 3)))
+      (case [\x]
+        (set! ch (.scanDigits s (.next s) 16 2)))
+      (case [\u]
+        (set! ch (.scanDigits s (.next s) 16 4)))
+      (case [\U]
+        (set! ch (.scanDigits s (.next s) 16 8)))
+      (default
+        (.error s "invalid char escape")))
+
+    ^{:line 576} ch))
+
+
+^{:go/end 594} (go/method scanString [^{:tag (* Scanner)} s ^rune quote] :results [^int n]
+  (let [ch (.next s)] ; read character after quote
+    (while (!= ch quote)
+      (when (or (== ch \newline) (< ch 0))
+        (.error s "literal not terminated")
+        (return))
+
+      (if (== ch \\)
+        (set! ch (.scanEscape s quote))
+
+        (set! ch (.next s)))
+
+      (inc! n))
+
+    (return)))
+
+
+^{:go/end 605} (go/method scanRawString [^{:tag (* Scanner)} s]
+  (let [ch (.next s)] ; read character after '`'
+    (while (!= ch \`)
+      (when (< ch 0)
+        (.error s "literal not terminated")
+        (return))
+
+      (set! ch (.next s)))))
+
+
+
+^{:go/end 611} (go/method scanChar [^{:tag (* Scanner)} s]
+  (when (!= (.scanString s \') 1)
+    (.error s "invalid char literal")))
+
+
+
+^{:go/end 639} (go/method scanComment ^rune [^{:tag (* Scanner)} s ^rune ch]
+  ;; ch == '/' || ch == '*'
+  (when (== ch \/)
+    ;; line comment
+    (set! ch (.next s)) ; read character after "//"
+    (while (and (!= ch \newline) (>= ch 0))
+      (set! ch (.next s)))
+
+    (return ch))
+
+
+  ;; general comment
+  (set! ch (.next s)) ; read character after "/*"
+  (while true
+    (when (< ch 0)
+      (.error s "comment not terminated")
+      (break))
+
+    (let [ch0 ch]
+      (set! ch (.next s))
+      (when (and (== ch0 \*) (== ch \/))
+        (set! ch (.next s))
+        (break))))
+
+
+  ^{:line 638} ch)
+
+
+
+
+
+
+
+^{:go/end 742} (go/method Scan "Scan reads the next token or Unicode character from source and returns it.\nIt only recognizes tokens t for which the respective [Scanner.Mode] bit (1<<-t) is set.\nIt returns [EOF] at the end of the source. It reports scanner errors (read and\ntoken errors) by calling s.Error, if not nil; otherwise it prints an error\nmessage to [os.Stderr].\n" ^rune [^{:tag (* Scanner)} s]
+  (let [ch (.Peek s)]
+
+    ;; reset token text position
+    (set! (.-tokPos s) -1)
+    (set! ^{:go/via [Position]} (.-Line s) 0)
+
+    (label :redo
+      ;; skip white space
+      (while (!= (bit-and (.-Whitespace s) ^uint64 (<< 1 (conv uint ch))) 0)
+        (set! ch (.next s))))
+
+
+    ;; start collecting token text
+    (.Reset (.-tokBuf s))
+    (set! (.-tokPos s) (- (.-srcPos s) (.-lastCharLen s)))
+
+    ;; set token position
+    ;; (this is a slightly optimized version of the code in Pos())
+    (set! ^{:go/via [Position]} (.-Offset s) (+ (.-srcBufOffset s) (.-tokPos s)))
+    (if (> (.-column s) 0) (do
+        ;; common case: last character was not a '\n'
+        (set! ^{:go/via [Position]} (.-Line s) (.-line s))
+        (set! ^{:go/via [Position]} (.-Column s) (.-column s)))
+      (do
+        ;; last character was a '\n'
+        ;; (we cannot be at the beginning of the source
+        ;; since we have called next() at least once)
+        (set! ^{:go/via [Position]} (.-Line s) (- (.-line s) 1))
+        (set! ^{:go/via [Position]} (.-Column s) (.-lastLineLen s))))
+
+
+    ;; determine token value
+    (let [tok ch]
+      (switch
+        (case [(.isIdentRune s ch 0)]
+          (if (!= (bit-and (.-Mode s) ScanIdents) 0) (do
+              (set! tok Ident)
+              (set! ch (.scanIdentifier s)))
+
+            (set! ch (.next s))))
+
+        (case [(isDecimal ch)]
+          (if (!= (bit-and (.-Mode s) (bit-or ScanInts ScanFloats)) 0)
+            (set! (values tok ch) (.scanNumber s ch false))
+
+            (set! ch (.next s))))
+
+        (default
+          (switch ch
+            (case [EOF]
+              (break))
+            (case [\"]
+              (when (!= (bit-and (.-Mode s) ScanStrings) 0)
+                (.scanString s \")
+                (set! tok String))
+
+              (set! ch (.next s)))
+            (case [\']
+              (when (!= (bit-and (.-Mode s) ScanChars) 0)
+                (.scanChar s)
+                (set! tok Char))
+
+              (set! ch (.next s)))
+            (case [\.]
+              (set! ch (.next s))
+              (when (and (isDecimal ch) (!= (bit-and (.-Mode s) ScanFloats) 0))
+                (set! (values tok ch) (.scanNumber s ch true))))
+
+            (case [\/]
+              (set! ch (.next s))
+              (when (and ^:go/paren (or (== ch \/) (== ch \*)) (!= (bit-and (.-Mode s) ScanComments) 0))
+                (when (!= (bit-and (.-Mode s) SkipComments) 0)
+                  (set! (.-tokPos s) -1) ; don't collect token text
+                  (set! ch (.scanComment s ch))
+                  (goto :redo))
+
+                (set! ch (.scanComment s ch))
+                (set! tok Comment)))
+
+            (case [\`]
+              (when (!= (bit-and (.-Mode s) ScanRawStrings) 0)
+                (.scanRawString s)
+                (set! tok RawString))
+
+              (set! ch (.next s)))
+            (default
+              (set! ch (.next s))))))
+
+
+
+      ;; end of token text
+      (set! (.-tokEnd s) (- (.-srcPos s) (.-lastCharLen s)))
+
+      (set! (.-ch s) ch)
+      ^{:line 741} tok)))
+
+
+
+
+
+
+^{:go/end 766} (go/method Pos "Pos returns the position of the character immediately after\nthe character or token returned by the last call to [Scanner.Next] or [Scanner.Scan].\nUse the [Scanner.Position] field for the start position of the most\nrecently scanned token.\n" [^{:tag (* Scanner)} s] :results [^Position pos]
+  (set! (.-Filename pos) ^{:go/via [Position]} (.-Filename s))
+  (set! (.-Offset pos) (- (+ (.-srcBufOffset s) (.-srcPos s)) (.-lastCharLen s)))
+  (switch
+    (case [(> (.-column s) 0)]
+      ;; common case: last character was not a '\n'
+      (set! (.-Line pos) (.-line s))
+      (set! (.-Column pos) (.-column s)))
+    (case [(> (.-lastLineLen s) 0)]
+      ;; last character was a '\n'
+      (set! (.-Line pos) (- (.-line s) 1))
+      (set! (.-Column pos) (.-lastLineLen s)))
+    (default
+      ;; at the beginning of the source
+      (set! (.-Line pos) 1)
+      (set! (.-Column pos) 1)))
+
+  (return))
+
+
+
+
+^{:go/end 792} (go/method TokenText "TokenText returns the string corresponding to the most recently scanned token.\nValid after calling [Scanner.Scan] and in calls of [Scanner.Error].\n" ^string [^{:tag (* Scanner)} s]
+  (when (< (.-tokPos s) 0)
+    ;; no token text
+    (return ""))
+
+
+  (when (< (.-tokEnd s) (.-tokPos s))
+    ;; if EOF was reached, s.tokEnd is set to -1 (s.srcPos == 0)
+    (set! (.-tokEnd s) (.-tokPos s)))
+
+  ;; s.tokEnd >= s.tokPos
+
+  (when (== (.Len (.-tokBuf s)) 0)
+    ;; common case: the entire token text is still in srcBuf
+    (return (conv string (subslice (.-srcBuf s) (.-tokPos s) (.-tokEnd s)))))
+
+
+  ;; part of the token text was saved in tokBuf: save the rest in
+  ;; tokBuf as well and return its content
+  (.Write (.-tokBuf s) (subslice (.-srcBuf s) (.-tokPos s) (.-tokEnd s)))
+  (set! (.-tokPos s) (.-tokEnd s)) ; ensure idempotency of TokenText() call
+  (.String (.-tokBuf s)))

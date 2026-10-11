@@ -1,0 +1,390 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "mcache.go" :imports [
+
+
+    ^{:line 8} [atomic "internal/runtime/atomic"]
+    ^{:line 9} [gc "internal/runtime/gc"]
+    ^{:line 10} [sys "internal/runtime/sys"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+(go/type mcache "Per-thread (in Go, per-P) cache for small objects.\nThis includes a small object cache and local allocation stats.\nNo locking needed because it is per-thread (per-P).\n\nmcaches are allocated from non-GC'd memory, so any heap pointers\nmust be specially handled.\n" (struct
+    ^{:line 21 :tag sys/NotInHeap} _
+
+
+
+    ^{:line 25 :tag int64 :doc "The following members are accessed on every malloc,\nso they are grouped here for better caching.\n"} nextSample ; trigger heap sample after allocating this many bytes
+    ^{:line 26 :tag int} memProfRate ; cached mem profile rate, used to detect changes
+    ^{:line 27 :tag uintptr} scanAlloc ; bytes of scannable heap allocated
+
+    ;; Allocator cache for tiny objects w/o pointers.
+    ;; See "Tiny allocator" comment in malloc.go.
+
+
+
+
+
+
+
+
+
+
+    ^{:line 41 :tag uintptr :doc "tiny points to the beginning of the current tiny block, or\nnil if there is no current tiny block.\n\ntiny is a heap pointer. Since mcache is in non-GC'd memory,\nwe handle it by clearing it in releaseAll during mark\ntermination.\n\ntinyAllocs is the number of tiny allocations performed\nby the P that owns this mcache.\n"} tiny
+    ^{:line 42 :tag uintptr} tinyoffset
+    ^{:line 43 :tag uintptr} tinyAllocs
+
+    ;; The rest is not accessed on every malloc.
+
+
+    ^{:line 48 :tag (array numSpanClasses (* mspan)) :doc "alloc contains spans to allocate from, indexed by spanClass.\n"} alloc
+
+    ;; TODO(thepudds): better to interleave alloc and reusableScan/reusableNoscan so that
+    ;; a single malloc call can often access both in the same cache line for a given spanClass.
+    ;; It's not interleaved right now in part to have slightly smaller diff, and might be
+    ;; negligible effect on current microbenchmarks.
+
+
+
+    ^{:line 57 :tag (array numSpanClasses gclinkptr) :doc "reusableNoscan contains linked lists of reusable noscan heap objects, indexed by spanClass.\nThe next pointers are stored in the first word of the heap objects.\n"} reusableNoscan
+
+    ^{:line 59 :tag (array _NumStackOrders stackfreelist)} stackcache
+
+
+
+
+
+    ^{:line 65 :tag atomic/Uint32 :doc "flushGen indicates the sweepgen during which this mcache\nwas last flushed. If flushGen != mheap_.sweepgen, the spans\nin this mcache are stale and need to be flushed so they\ncan be swept. This is done in acquirep.\n"} flushGen))
+
+
+
+
+
+
+
+
+(go/type gclink "A gclink is a node in a linked list of blocks, like mlink,\nbut it is opaque to the garbage collector.\nThe GC does not trace the pointers during collection,\nand the compiler does not emit write barriers for assignments\nof gclinkptr values. Code should store references to gclinks\nas gclinkptr, not as *gclink.\n" (struct
+    ^{:line 75 :tag gclinkptr} next))
+
+
+
+
+(go/type gclinkptr "A gclinkptr is a pointer to a gclink, but it is opaque\nto the garbage collector.\n" uintptr)
+
+
+
+
+^{:go/end 87} (go/method ptr "ptr returns the *gclink form of p.\nThe result should be used for accessing fields, not stored\nin other data structures.\n" ^{:tag (* gclink)} [^gclinkptr p]
+  (conv (* gclink) (conv unsafe/Pointer p)))
+
+
+(go/type stackfreelist (struct
+    ^{:line 90 :tag gclinkptr} list ; linked list of free stacks
+    ^{:line 91 :tag uintptr} size)) ; total size of stacks in list
+
+
+
+(go/var ^{:tag mspan :doc "dummy mspan that contains no free objects.\n"} emptymspan)
+
+^{:go/end 111} (go/func allocmcache ^{:tag (* mcache)} []
+  (let [^{:tag (* mcache)} c (zero (* mcache))]
+    (systemstack ^{:go/end 104} (fn []
+        (lock (addr (.-lock mheap_)))
+        (set! c (conv (* mcache) (.alloc (.-cachealloc mheap_))))
+        (.Store (.-flushGen c) (.-sweepgen mheap_))
+        (unlock (addr (.-lock mheap_)))))
+
+    (range [i (.-alloc c)]
+      (aset (.-alloc c) i (addr emptymspan)))
+
+    (set! (.-nextSample c) (nextSample))
+
+    ^{:line 110} c))
+
+
+
+
+
+
+
+
+^{:go/end 133} (go/func freemcache "freemcache releases resources associated with this\nmcache and puts the object onto a free list.\n\nIn some cases there is no way to simply release\nresources, such as statistics, so donate them to\na different mcache (the recipient).\n" [^{:tag (* mcache)} c]
+  (systemstack ^{:go/end 132} (fn []
+      (.releaseAll c)
+      (stackcache_clear c)
+
+      ;; NOTE(rsc,rlh): If gcworkbuffree comes back, we need to coordinate
+      ;; with the stealing of gcworkbufs during garbage collection to avoid
+      ;; a race where the workbuf is double-freed.
+      ;; gcworkbuffree(c.gcworkbuf)
+
+      (lock (addr (.-lock mheap_)))
+      (.free (.-cachealloc mheap_) (conv unsafe/Pointer c))
+      (unlock (addr (.-lock mheap_))))))
+
+
+
+
+
+
+
+^{:go/end 153} (go/func getMCache "getMCache is a convenience function which tries to obtain an mcache.\n\nReturns nil if we're not bootstrapping or we don't have a P. The caller's\nP must not change, so we must be in a non-preemptible state.\n" ^{:tag (* mcache)} [^{:tag (* m)} mp]
+  ;; Grab the mcache, since that's where stats live.
+  (let [pp (.ptr (.-p mp))
+      ^{:line 142 :tag (* mcache)} c (zero (* mcache))]
+    (if (== pp nil)
+      ;; We will be called without a P while bootstrapping,
+      ;; in which case we use mcache0, which is set in mallocinit.
+      ;; mcache0 is cleared when bootstrapping is complete,
+      ;; by procresize.
+      (set! c mcache0)
+
+      (set! c (.-mcache pp)))
+
+    ^{:line 152} c))
+
+
+
+
+
+
+
+^{:go/end 239} (go/method refill "refill acquires a new span of span class spc for c. This span will\nhave at least one free object. The current span in c must be full.\n\nMust run in a non-preemptible context since otherwise the owner of\nc could change.\n" [^{:tag (* mcache)} c ^spanClass spc]
+  ;; Return the current cached span to the central lists.
+  (let [s (aget (.-alloc c) spc)]
+
+    (when (!= (.-allocCount s) (.-nelems s))
+      (throw "refill of span with free space remaining"))
+
+
+    ;; TODO(thepudds): we might be able to allow mallocgcTiny to reuse 16 byte objects from spc==5,
+    ;; but for now, just clear our reusable objects for tinySpanClass.
+    (when (== spc tinySpanClass)
+      (aset (.-reusableNoscan c) spc 0))
+
+    (when (!= (aget (.-reusableNoscan c) spc) 0)
+      (throw "refill of span with reusable pointers remaining on pointer free list"))
+
+
+    (when (!= s (addr emptymspan))
+      ;; Mark this span as no longer cached.
+      (when (!= (.-sweepgen s) (+ (.-sweepgen mheap_) 3))
+        (throw "bad sweepgen in refill"))
+
+      (.uncacheSpan (.-mcentral (aget (.-central mheap_) spc)) s)
+
+      ;; Count up how many slots were used and record it.
+      (let [stats (.acquire (.-heapStats memstats))
+          ^{:line 186} slotsUsed (- (conv int64 (.-allocCount s)) (conv int64 (.-allocCountBeforeCache s)))]
+        (atomic/Xadd64 (addr (aget (.-smallAllocCount stats) (.sizeclass spc))) slotsUsed)
+
+        ;; Flush tinyAllocs.
+        (when (== spc tinySpanClass)
+          (atomic/Xadd64 (addr (.-tinyAllocCount stats)) (conv int64 (.-tinyAllocs c)))
+          (set! (.-tinyAllocs c) 0))
+
+        (.release (.-heapStats memstats))
+
+        ;; Count the allocs in inconsistent, internal stats.
+        (let [bytesAllocated (* slotsUsed (conv int64 (.-elemsize s)))]
+          (.Add (.-totalAlloc gcController) bytesAllocated)
+
+          ;; Clear the second allocCount just to be safe.
+          (set! (.-allocCountBeforeCache s) 0))))
+
+
+    ;; Get a new cached span from the central lists.
+    (set! s (.cacheSpan (.-mcentral (aget (.-central mheap_) spc))))
+    (when (== s nil)
+      (throw "out of memory"))
+
+
+    (when (== (.-allocCount s) (.-nelems s))
+      (throw "span has no free space"))
+
+
+    ;; Indicate that this span is cached and prevent asynchronous
+    ;; sweeping in the next sweep phase.
+    (set! (.-sweepgen s) (+ (.-sweepgen mheap_) 3))
+
+    ;; Store the current alloc count for accounting later.
+    (set! (.-allocCountBeforeCache s) (.-allocCount s))
+
+    ;; Update heapLive and flush scanAlloc.
+    ;;
+    ;; We have not yet allocated anything new into the span, but we
+    ;; assume that all of its slots will get used, so this makes
+    ;; heapLive an overestimate.
+    ;;
+    ;; When the span gets uncached, we'll fix up this overestimate
+    ;; if necessary (see releaseAll).
+    ;;
+    ;; We pick an overestimate here because an underestimate leads
+    ;; the pacer to believe that it's in better shape than it is,
+    ;; which appears to lead to more memory used. See #53738 for
+    ;; more details.
+    (let [usedBytes (* (conv uintptr (.-allocCount s)) (.-elemsize s))]
+      (.update gcController (- (conv int64 (* (.-npages s) pageSize)) (conv int64 usedBytes)) (conv int64 (.-scanAlloc c)))
+      (set! (.-scanAlloc c) 0)
+
+      (aset (.-alloc c) spc s))))
+
+
+
+^{:go/end 288} (go/method allocLarge "allocLarge allocates a span for a large object.\n" ^{:tag (* mspan)} [^{:tag (* mcache)} c ^uintptr size ^bool noscan]
+  (when (< (+ size pageSize) size)
+    (throw "out of memory"))
+
+  (let [npages (>> size gc/PageShift)]
+    (when (!= (bit-and size pageMask) 0)
+      (inc! npages))
+
+
+    ;; Deduct credit for this span allocation and sweep if
+    ;; necessary. mHeap_Alloc will also sweep npages, so this only
+    ;; pays the debt down to npage pages.
+    (deductSweepCredit (* npages pageSize) npages)
+
+    (let [spc (makeSpanClass 0 noscan)
+        ^{:line 257} s (.alloc mheap_ npages spc)]
+      (when (== s nil)
+        (throw "out of memory"))
+
+
+      ;; Count the alloc in consistent, external stats.
+      (let [stats (.acquire (.-heapStats memstats))]
+        (atomic/Xadd64 (addr (.-largeAlloc stats)) (conv int64 (* npages pageSize)))
+        (atomic/Xadd64 (addr (.-largeAllocCount stats)) 1)
+        (.release (.-heapStats memstats))
+
+        ;; Count the alloc in inconsistent, internal stats.
+        (.Add (.-totalAlloc gcController) (conv int64 (* npages pageSize)))
+
+        ;; Update heapLive.
+        (.update gcController (conv int64 (* (.-npages s) pageSize)) 0)
+
+        ;; Put the large span in the mcentral swept list so that it's
+        ;; visible to the background sweeper.
+        (.push (.fullSwept (.-mcentral (aget (.-central mheap_) spc)) (.-sweepgen mheap_)) s)
+
+        ;; Adjust s.limit down to the object-containing part of the span.
+        ;;
+        ;; This is just to create a slightly tighter bound on the limit.
+        ;; It's totally OK if the garbage collector, in particular
+        ;; conservative scanning, can temporarily observes an inflated
+        ;; limit. It will simply mark the whole object or just skip it
+        ;; since we're in the mark phase anyway.
+        (set! (.-limit s) (+ (.base s) size))
+        (.initHeapBits s)
+        ^{:line 287} s))))
+
+
+^{:go/end 345} (go/method releaseAll [^{:tag (* mcache)} c]
+  ;; Take this opportunity to flush scanAlloc.
+  (let [scanAlloc (conv int64 (.-scanAlloc c))]
+    (set! (.-scanAlloc c) 0)
+
+    (let [sg (.-sweepgen mheap_)
+        ^{:line 296} dHeapLive (conv int64 0)]
+      (range [i (.-alloc c)]
+        (let [s (aget (.-alloc c) i)]
+          (when (!= s (addr emptymspan))
+            (let [slotsUsed (- (conv int64 (.-allocCount s)) (conv int64 (.-allocCountBeforeCache s)))]
+              (set! (.-allocCountBeforeCache s) 0)
+
+              ;; Adjust smallAllocCount for whatever was allocated.
+              (let [stats (.acquire (.-heapStats memstats))]
+                (atomic/Xadd64 (addr (aget (.-smallAllocCount stats) (.sizeclass (conv spanClass i)))) slotsUsed)
+                (.release (.-heapStats memstats))
+
+                ;; Adjust the actual allocs in inconsistent, internal stats.
+                ;; We assumed earlier that the full span gets allocated.
+                (.Add (.-totalAlloc gcController) (* slotsUsed (conv int64 (.-elemsize s))))
+
+                (when (!= (.-sweepgen s) (+ sg 1))
+                  ;; refill conservatively counted unallocated slots in gcController.heapLive.
+                  ;; Undo this.
+                  ;;
+                  ;; If this span was cached before sweep, then gcController.heapLive was totally
+                  ;; recomputed since caching this span, so we don't do this for stale spans.
+                  (set! dHeapLive - (* (conv int64 (- (.-nelems s) (.-allocCount s))) (conv int64 (.-elemsize s)))))
+
+
+                ;; Release the span to the mcentral.
+                (.uncacheSpan (.-mcentral (aget (.-central mheap_) i)) s)
+                (aset (.-alloc c) i (addr emptymspan)))))))
+
+
+      ;; Clear tinyalloc pool.
+      (set! (.-tiny c) 0)
+      (set! (.-tinyoffset c) 0)
+
+      ;; Flush tinyAllocs.
+      (let [stats (.acquire (.-heapStats memstats))]
+        (atomic/Xadd64 (addr (.-tinyAllocCount stats)) (conv int64 (.-tinyAllocs c)))
+        (set! (.-tinyAllocs c) 0)
+        (.release (.-heapStats memstats))
+
+        ;; Clear the reusable linked lists.
+        ;; For noscan objects, the nodes of the linked lists are the reusable heap objects themselves,
+        ;; so we can simply clear the linked list head pointers.
+        ;; TODO(thepudds): consider having debug logging of a non-empty reusable lists getting cleared,
+        ;; maybe based on the existing debugReusableLog.
+        (clear (subslice (.-reusableNoscan c)))
+
+        ;; Update heapLive and heapScan.
+        (.update gcController dHeapLive scanAlloc)))))
+
+
+
+
+
+^{:go/end 369} (go/method prepareForSweep "prepareForSweep flushes c if the system has entered a new sweep phase\nsince c was populated. This must happen between the sweep phase\nstarting and the first allocation from c.\n" [^{:tag (* mcache)} c]
+  ;; Alternatively, instead of making sure we do this on every P
+  ;; between starting the world and allocating on that P, we
+  ;; could leave allocate-black on, allow allocation to continue
+  ;; as usual, use a ragged barrier at the beginning of sweep to
+  ;; ensure all cached spans are swept, and then disable
+  ;; allocate-black. However, with this approach it's difficult
+  ;; to avoid spilling mark bits into the *next* GC cycle.
+  (let [sg (.-sweepgen mheap_)
+      ^{:line 359} flushGen (.Load (.-flushGen c))]
+    (cond (== flushGen sg)
+      (return)
+      (!= flushGen (- sg 2)) (do
+        (println "bad flushGen" flushGen "in prepareForSweep; sweepgen" sg)
+        (throw "bad flushGen")))
+
+    (.releaseAll c)
+    (stackcache_clear c)
+    (.Store (.-flushGen c) (.-sweepgen mheap_)))) ; Synchronizes with gcStart
+
+
+
+
+^{:go/end 382} (go/method addReusableNoscan "addReusableNoscan adds a noscan object pointer to the reusable pointer free list\nfor a span class.\n" [^{:tag (* mcache)} c ^spanClass spc ^uintptr ptr]
+  (when (not runtimeFreegcEnabled)
+    (return))
+
+
+  ;; Add to the reusable pointers free list.
+  (let [v (conv gclinkptr ptr)]
+    (set! (.-next (.ptr v)) (aget (.-reusableNoscan c) spc))
+    (aset (.-reusableNoscan c) spc v)))
+
+
+
+
+^{:go/end 391} (go/method hasReusableNoscan "hasReusableNoscan reports whether there is a reusable object available for\na noscan spc.\n" ^bool [^{:tag (* mcache)} c ^spanClass spc]
+  (when (not runtimeFreegcEnabled)
+    (return false))
+
+  (!= (aget (.-reusableNoscan c) spc) 0))

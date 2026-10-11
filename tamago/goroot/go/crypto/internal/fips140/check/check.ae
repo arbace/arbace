@@ -1,0 +1,107 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package check implements the FIPS 140 load-time code+data verification.
+;; Every FIPS package providing cryptographic functionality except hmac and sha256
+;; must import crypto/internal/fips140/check, so that the verification happens
+;; before initialization of package global variables.
+;; The hmac and sha256 packages are used by this package, so they cannot import it.
+;; Instead, those packages must be careful not to change global variables during init.
+;; (If necessary, we could have check call a PostCheck function in those packages
+;; after the check has completed.)
+(in-ns 'go.crypto.internal.fips140.check) (go/file "check.go" :doc "Package check implements the FIPS 140 load-time code+data verification.\nEvery FIPS package providing cryptographic functionality except hmac and sha256\nmust import crypto/internal/fips140/check, so that the verification happens\nbefore initialization of package global variables.\nThe hmac and sha256 packages are used by this package, so they cannot import it.\nInstead, those packages must be careful not to change global variables during init.\n(If necessary, we could have check call a PostCheck function in those packages\nafter the check has completed.)\n" :imports [
+
+
+    ^{:line 16} [fips140 "crypto/internal/fips140"]
+    ^{:line 17} [hmac "crypto/internal/fips140/hmac"]
+    ^{:line 18} [sha256 "crypto/internal/fips140/sha256"]
+    ^{:line 19} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 20} [godebug "crypto/internal/fips140deps/godebug"]
+    ^{:line 21} [io "io"]
+    ^{:line 22} [unsafe "unsafe"]])
+
+
+
+
+(go/var ^{:tag bool :doc "Verified is set when verification succeeded. It can be expected to always be\ntrue when [fips140.Enabled] is true, or init would have panicked.\n"} Verified)
+
+
+
+
+
+(go/var ^{:tag (struct ^{:tag (array 16 byte)} Magic ^{:tag (array 32 byte)} Sum ^uintptr Self ^{:tag (array 4 (struct ^{:tag unsafe/Pointer :doc "Note: These must be unsafe.Pointer, not uintptr,\nor else checkptr panics about turning uintptrs\ninto pointers into the data segment during\ngo test -race.\n"} Start ^unsafe/Pointer End))} Sects) :doc "Linkinfo holds the go:fipsinfo symbol prepared by the linker.\nSee cmd/link/internal/ld/fips.go for details.\n" :go/linkname "Linkinfo go:fipsinfo"} Linkinfo)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const ^{:val (byte-string " Go fipsinfo " 0xff "\u0000") :doc "\"\\xff\"+fipsMagic is the expected linkinfo.Magic.\nWe avoid writing that explicitly so that the string does not appear\nelsewhere in normal binaries, just as a precaution.\n"} fipsMagic (byte-string " Go fipsinfo " 0xff "\u0000"))
+
+(go/var ^{:tag (array 32 byte)} zeroSum)
+
+^{:go/end 108} (go/func init []
+  (when (not fips140/Enabled)
+    (return))
+
+
+  (when [err (fips140/Supported)] (!= err nil)
+    (panic (+ "fips140: " (.Error err))))
+
+
+  (when (or (!= (aget (.-Magic Linkinfo) 0) 0xff) (!= (conv string (subslice (.-Magic Linkinfo) 1)) fipsMagic) (== (.-Sum Linkinfo) zeroSum))
+    (panic "fips140: no verification checksum found"))
+
+
+  (let [h (^{:inst [(* sha256/Digest)]} hmac/New sha256/New (make (slice byte) 32))
+      ^{:line 68} w (conv io/Writer h)]
+
+    ;; /*
+    ;; // Uncomment for debugging.
+    ;; // Commented (as opposed to a const bool flag)
+    ;; // to avoid import "os" in default builds.
+    ;; f, err := os.Create("fipscheck.o")
+    ;; if err != nil {
+    ;; panic(err)
+    ;; }
+    ;; w = io.MultiWriter(h, f)
+    ;; */
+
+    (.Write w (conv (slice byte) "go fips object v1\n"))
+
+    (let [^{:tag (array 8 byte)} nbuf (zero (array 8 byte))]
+      (range [_ sect (.-Sects Linkinfo)]
+        (let [n (- (conv uintptr (.-End sect)) (conv uintptr (.-Start sect)))]
+          (byteorder/BEPutUint64 (subslice nbuf) (conv uint64 n))
+          (.Write w (subslice nbuf))
+          (.Write w (unsafe/Slice (conv (* byte) (.-Start sect)) n))))
+
+      (let [sum (.Sum h nil)]
+
+        (when (!= (conv (array 32 byte) sum) (.-Sum Linkinfo))
+          (panic "fips140: verification mismatch"))
+
+
+        ;; "The temporary value(s) generated during the integrity test of the
+        ;; module’s software or firmware shall [05.10] be zeroised from the module
+        ;; upon completion of the integrity test"
+        (clear sum)
+        (clear (subslice nbuf))
+        (.Reset h)
+
+        (when (== (godebug/Value "fips140") "debug")
+          (println "fips140: verified code+data"))
+
+
+        (set! Verified true)))))

@@ -1,0 +1,113 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Counter (CTR) mode.
+
+;; CTR converts a block cipher into a stream cipher by
+;; repeatedly encrypting an incrementing counter and
+;; xoring the resulting stream of data with the input.
+
+;; See NIST SP 800-38A, pp 13-15
+
+(in-ns 'go.crypto.cipher) (go/file "ctr.go" :imports [
+
+
+    ^{:line 16} [bytes "bytes"]
+    ^{:line 17} [aes "crypto/internal/fips140/aes"]
+    ^{:line 18} [alias "crypto/internal/fips140/alias"]
+    ^{:line 19} [fips140only "crypto/internal/fips140only"]
+    ^{:line 20} [subtle "crypto/subtle"]])
+
+
+(go/type ctr (struct
+    ^{:line 24 :tag Block} b
+    ^{:line 25 :tag (slice byte)} ctr
+    ^{:line 26 :tag (slice byte)} out
+    ^{:line 27 :tag int} outUsed))
+
+
+(go/const ^{:val 512} streamBufferSize 512)
+
+
+
+
+(go/type ctrAble "ctrAble is an interface implemented by ciphers that have a specific optimized\nimplementation of CTR. crypto/aes doesn't use this anymore, and we'd like to\neventually remove it.\n" (interface
+    (NewCTR ^Stream [^{:tag (slice byte)} iv])))
+
+
+
+
+^{:go/end 64} (go/func NewCTR "NewCTR returns a [Stream] which encrypts/decrypts using the given [Block] in\ncounter mode. The length of iv must be the same as the [Block]'s block size.\n" ^Stream [^Block block ^{:tag (slice byte)} iv]
+  (when [(values block ok) (assert (* aes/Block) block)] ok
+    (return (lit aesCtrWrapper (aes/NewCTR block iv))))
+
+  (when (fips140only/Enforced)
+    (panic "crypto/cipher: use of CTR with non-AES ciphers is not allowed in FIPS 140-only mode"))
+
+  (when [(values ctr ok) (assert ctrAble block)] ok
+    (return (.NewCTR ctr iv)))
+
+  (when (!= (len iv) (.BlockSize block))
+    (panic "cipher.NewCTR: IV length must equal block size"))
+
+  (let [bufSize streamBufferSize]
+    (when (< bufSize (.BlockSize block))
+      (set! bufSize (.BlockSize block)))
+
+    (addr ^{:go/breaks [2 4 6 8]} (lit ctr
+        :b block
+        :ctr (bytes/Clone iv)
+        :out (make (slice byte) 0 bufSize)
+        :outUsed 0))))
+
+
+
+
+(go/type aesCtrWrapper "aesCtrWrapper hides extra methods from aes.CTR.\n" (struct
+    ^{:line 68 :tag (* aes/CTR)} c))
+
+
+^{:go/end 73} (go/method XORKeyStream [^aesCtrWrapper x ^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (.XORKeyStream (.-c x) dst src))
+
+
+^{:go/end 94} (go/method refill [^{:tag (* ctr)} x]
+  (let [remain (- (len (.-out x)) (.-outUsed x))]
+    (copy (.-out x) (subslice (.-out x) (.-outUsed x)))
+    (set! (.-out x) (subslice (.-out x) _ (cap (.-out x))))
+    (let [bs (.BlockSize (.-b x))]
+      (while (<= remain (- (len (.-out x)) bs))
+        (.Encrypt (.-b x) (subslice (.-out x) remain) (.-ctr x))
+        (set! remain + bs)
+
+        ;; Increment counter
+        (for [i (- (len (.-ctr x)) 1)] (>= i 0) (dec! i)
+          (inc! (aget (.-ctr x) i))
+          (when (!= (aget (.-ctr x) i) 0)
+            (break))))
+
+
+
+      (set! (.-out x) (subslice (.-out x) _ remain))
+      (set! (.-outUsed x) 0))))
+
+
+^{:go/end 115} (go/method XORKeyStream [^{:tag (* ctr)} x ^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (when (< (len dst) (len src))
+    (panic "crypto/cipher: output smaller than input"))
+
+  (when (alias/InexactOverlap (subslice dst _ (len src)) src)
+    (panic "crypto/cipher: invalid buffer overlap"))
+
+  (when [(values _ ok) (assert (* aes/Block) (.-b x))] ok
+    (panic "crypto/cipher: internal error: generic CTR used with AES"))
+
+  (while (> (len src) 0)
+    (when (>= (.-outUsed x) (- (len (.-out x)) (.BlockSize (.-b x))))
+      (.refill x))
+
+    (let [n (subtle/XORBytes dst src (subslice (.-out x) (.-outUsed x)))]
+      (set! dst (subslice dst n))
+      (set! src (subslice src n))
+      (set! (.-outUsed x) + n))))

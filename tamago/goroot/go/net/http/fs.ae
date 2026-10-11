@@ -1,0 +1,1122 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; HTTP file system request handler
+
+(in-ns 'go.net.http) (go/file "fs.go" :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [godebug "internal/godebug"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [fs "io/fs"]
+    ^{:line 15} [mime "mime"]
+    ^{:line 16} [multipart "mime/multipart"]
+    ^{:line 17} [internal "net/http/internal"]
+    ^{:line 18} [textproto "net/textproto"]
+    ^{:line 19} [url "net/url"]
+    ^{:line 20} [os "os"]
+    ^{:line 21} [path "path"]
+    ^{:line 22} [filepath "path/filepath"]
+    ^{:line 23} [sort "sort"]
+    ^{:line 24} [strconv "strconv"]
+    ^{:line 25} [strings "strings"]
+    ^{:line 26} [time "time"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Dir "A Dir implements [FileSystem] using the native file system restricted to a\nspecific directory tree.\n\nWhile the [FileSystem.Open] method takes '/'-separated paths, a Dir's string\nvalue is a directory path on the native file system, not a URL, so it is separated\nby [filepath.Separator], which isn't necessarily '/'.\n\nNote that Dir could expose sensitive files and directories. Dir will follow\nsymlinks pointing out of the directory tree, which can be especially dangerous\nif serving from a directory in which users are able to create arbitrary symlinks.\nDir will also allow access to files and directories starting with a period,\nwhich could expose sensitive directories like .git or sensitive files like\n.htpasswd. To exclude files with a leading period, remove the files/directories\nfrom the server or create a custom FileSystem implementation.\n\nAn empty Dir is treated as \".\".\n" string)
+
+
+
+
+^{:go/end 69} (go/func mapOpenError "mapOpenError maps the provided non-nil error from opening name\nto a possibly better non-nil error. In particular, it turns OS-specific errors\nabout opening files in non-directories into fs.ErrNotExist. See Issues 18984 and 49552.\n" ^error [^error originalErr ^string name ^rune sep ^{:tag (func [string] [fs/FileInfo error])} stat]
+  (when (or (errors/Is originalErr fs/ErrNotExist) (errors/Is originalErr fs/ErrPermission))
+    (return originalErr))
+
+
+  (let [parts (strings/Split name (conv string sep))]
+    (range [i parts]
+      (when (== (aget parts i) "")
+        (continue))
+
+      (let [(values fi err) (stat (strings/Join (subslice parts _ (+ i 1)) (conv string sep)))]
+        (when (!= err nil)
+          (return originalErr))
+
+        (when (not (.IsDir fi))
+          (return fs/ErrNotExist))))
+
+
+    ^{:line 68} originalErr))
+
+
+
+
+
+(go/var ^{:doc "errInvalidUnsafePath is returned by Dir.Open when the call to\nfilepath.Localize fails. filepath.Localize returns an error if the path\ncannot be represented by the operating system.\n"} errInvalidUnsafePath (errors/New "http: invalid or unsafe file path"))
+
+
+
+^{:go/end 97} (go/method Open "Open implements [FileSystem] using [os.Open], opening files for reading rooted\nand relative to the directory d.\n" [^Dir d ^string name] :results [File error]
+  (let [path (subslice (path/Clean (+ "/" name)) 1)]
+    (when (== path "")
+      (set! path "."))
+
+    (let [(values ^:assign path err) (filepath/Localize path)]
+      (when (!= err nil)
+        (return nil errInvalidUnsafePath))
+
+      (let [dir (conv string d)]
+        (when (== dir "")
+          (set! dir "."))
+
+        (let [fullName (filepath/Join dir path)
+            (values f ^:assign err) (os/Open fullName)]
+          (when (!= err nil)
+            (return nil (mapOpenError err fullName filepath/Separator os/Stat)))
+
+          (return f nil))))))
+
+
+
+
+
+
+
+
+
+(go/type FileSystem "A FileSystem implements access to a collection of named files.\nThe elements in a file path are separated by slash ('/', U+002F)\ncharacters, regardless of host operating system convention.\nSee the [FileServer] function to convert a FileSystem to a [Handler].\n\nThis interface predates the [fs.FS] interface, which can be used instead:\nthe [FS] adapter function converts an fs.FS to a FileSystem.\n" (interface
+    (Open [^string name] :results [File error])))
+
+
+
+
+
+
+(go/type File "A File is returned by a [FileSystem]'s Open method and can be\nserved by the [FileServer] implementation.\n\nThe methods should behave the same as those on an [*os.File].\n" (interface
+    ^{:line 115} io/Closer
+    ^{:line 116} io/Reader
+    ^{:line 117} io/Seeker
+    (Readdir [^int count] :results [(slice fs/FileInfo) error])
+    (Stat [] :results [fs/FileInfo error])))
+
+
+(go/type anyDirs (interface
+    (len ^int [])
+    (name ^string [^int i])
+    (isDir ^bool [^int i])))
+
+
+(go/type fileInfoDirs (slice fs/FileInfo))
+
+^{:go/end 130} (go/method len ^int [^fileInfoDirs d] (len d))
+^{:go/end 131} (go/method isDir ^bool [^fileInfoDirs d ^int i] (.IsDir (aget d i)))
+^{:go/end 132} (go/method name ^string [^fileInfoDirs d ^int i] (.Name (aget d i)))
+
+(go/type dirEntryDirs (slice fs/DirEntry))
+
+^{:go/end 136} (go/method len ^int [^dirEntryDirs d] (len d))
+^{:go/end 137} (go/method isDir ^bool [^dirEntryDirs d ^int i] (.IsDir (aget d i)))
+^{:go/end 138} (go/method name ^string [^dirEntryDirs d ^int i] (.Name (aget d i)))
+
+^{:go/end 179} (go/func dirList [^ResponseWriter w ^{:tag (* Request)} r ^File f]
+  ;; Prefer to use ReadDir instead of Readdir,
+  ;; because the former doesn't require calling
+  ;; Stat on every entry of a directory on Unix.
+  (let [^anyDirs dirs (zero anyDirs)
+      ^{:line 145 :tag error} err (zero error)]
+    (if [(values d ok) (assert fs/ReadDirFile f)] ok
+      (let [^dirEntryDirs list (zero dirEntryDirs)]
+        (set! (values list err) (.ReadDir d -1))
+        (set! dirs list))
+
+      (let [^fileInfoDirs list (zero fileInfoDirs)]
+        (set! (values list err) (.Readdir f -1))
+        (set! dirs list)))
+
+
+    (when (!= err nil)
+      (logf r "http: error reading directory: %v" err)
+      (Error w "Error reading directory" StatusInternalServerError)
+      (return))
+
+    (sort/Slice dirs ^{:go/end 161} (fn ^bool [^int i ^int j] (< (.name dirs i) (.name dirs j))))
+
+    (.Set (.Header w) "Content-Type" "text/html; charset=utf-8")
+    (fmt/Fprintf w "<!doctype html>\n")
+    (fmt/Fprintf w "<meta name=\"viewport\" content=\"width=device-width\">\n")
+    (fmt/Fprintf w "<pre>\n")
+    (for [(values i n) (values 0 (.len dirs))] (< i n) (inc! i)
+      (let [name (.name dirs i)]
+        (when (.isDir dirs i)
+          (set! name + "/"))
+
+        ;; name may contain '?' or '#', which must be escaped to remain
+        ;; part of the URL path, and not indicate the start of a query
+        ;; string or fragment.
+        (let [url (lit url/URL :Path name)]
+          (fmt/Fprintf w "<a href=\"%s\">%s</a>\n" (.String url) (.Replace htmlReplacer name)))))
+
+    (fmt/Fprintf w "</pre>\n")))
+
+
+
+
+(go/var ^{:doc "GODEBUG=httpservecontentkeepheaders=1 restores the pre-1.23 behavior of not deleting\nCache-Control, Content-Encoding, Etag, or Last-Modified headers on ServeContent errors.\n"} httpservecontentkeepheaders (godebug/New "httpservecontentkeepheaders"))
+
+
+
+
+
+^{:go/end 213} (go/func serveError "serveError serves an error from ServeFile, ServeFileFS, and ServeContent.\nBecause those can all be configured by the caller by setting headers like\nEtag, Last-Modified, and Cache-Control to send on a successful response,\nthe error path needs to clear them, since they may not be meant for errors.\n" [^ResponseWriter w ^string text ^int code]
+  (let [h (.Header w)
+
+      ^{:line 192} nonDefault false]
+    (range [_ k ^{:go/breaks [2 3 4 5]} (lit (slice string)
+          "Cache-Control"
+          "Content-Encoding"
+          "Etag"
+          "Last-Modified")]
+
+      (when (not (.has h k))
+        (continue))
+
+      (if (== (.Value httpservecontentkeepheaders) "1")
+        (set! nonDefault true)
+
+        (.Del h k)))
+
+
+    (when nonDefault
+      (.IncNonDefault httpservecontentkeepheaders))
+
+
+    (Error w text code)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 259} (go/func ServeContent "ServeContent replies to the request using the content in the\nprovided ReadSeeker. The main benefit of ServeContent over [io.Copy]\nis that it handles Range requests properly, sets the MIME type, and\nhandles If-Match, If-Unmodified-Since, If-None-Match, If-Modified-Since,\nand If-Range requests.\n\nIf the response's Content-Type header is not set, ServeContent\nfirst tries to deduce the type from name's file extension and,\nif that fails, falls back to reading the first block of the content\nand passing it to [DetectContentType].\nThe name is otherwise unused; in particular it can be empty and is\nnever sent in the response.\n\nIf modtime is not the zero time or Unix epoch, ServeContent\nincludes it in a Last-Modified header in the response. If the\nrequest includes an If-Modified-Since header, ServeContent uses\nmodtime to decide whether the content needs to be sent at all.\n\nThe content's Seek method must work: ServeContent uses\na seek to the end of the content to determine its size.\nNote that [*os.File] implements the [io.ReadSeeker] interface.\n\nIf the caller has set w's ETag header formatted per RFC 7232, section 2.3,\nServeContent uses it to handle requests using If-Match, If-None-Match, or If-Range.\n\nIf an error occurs when serving the request (for example, when\nhandling an invalid range request), ServeContent responds with an\nerror message. By default, ServeContent strips the Cache-Control,\nContent-Encoding, ETag, and Last-Modified headers from error responses.\nThe GODEBUG setting httpservecontentkeepheaders=1 causes ServeContent\nto preserve these headers.\n" [^ResponseWriter w ^{:tag (* Request)} req ^string name ^time/Time modtime ^io/ReadSeeker content]
+  (let [sizeFunc ^{:go/end 257} (fn [] :results [int64 error]
+        (let [(values size err) (.Seek content 0 io/SeekEnd)]
+          (when (!= err nil)
+            (return 0 errSeeker))
+
+          (set! (values _ err) (.Seek content 0 io/SeekStart))
+          (when (!= err nil)
+            (return 0 errSeeker))
+
+          (return size nil)))]
+
+    (serveContent w req name modtime sizeFunc content)))
+
+
+
+
+
+
+(go/var ^{:doc "errSeeker is returned by ServeContent's sizeFunc when the content\ndoesn't seek properly. The underlying Seeker's error text isn't\nincluded in the sizeFunc reply so it's not sent over HTTP to end\nusers.\n"} errSeeker (errors/New "seeker can't seek"))
+
+
+
+(go/var ^{:doc "errNoOverlap is returned by serveContent's parseRange if first-byte-pos of\nall of the byte-range-spec values is greater than the content size.\n"} errNoOverlap (errors/New "invalid range: failed to overlap"))
+
+
+
+
+
+^{:go/end 432} (go/func serveContent "if name is empty, filename is unknown. (used for mime type, before sniffing)\nif modtime.IsZero(), modtime is unknown.\ncontent must be seeked to the beginning of the file.\nThe sizeFunc is called at most once. Its error, if any, is sent in the HTTP response.\n" [^ResponseWriter w ^{:tag (* Request)} r ^string name ^time/Time modtime ^{:tag (func [] [int64 error])} sizeFunc ^io/ReadSeeker content]
+  (setLastModified w modtime)
+  (let [(values done rangeReq) (checkPreconditions w r modtime)]
+    (when done
+      (return))
+
+
+    (let [code StatusOK
+
+        ;; If Content-Type isn't set, use the file's extension to find it, but
+        ;; if the Content-Type is unset explicitly, do not sniff the type.
+        (values ctypes haveType) (aget (.Header w) "Content-Type")
+        ^{:line 287 :tag string} ctype (zero string)]
+      (cond (not haveType) (do
+          (set! ctype (mime/TypeByExtension (filepath/Ext name)))
+          (when (== ctype "")
+            ;; read a chunk to decide between utf-8 text and binary
+            (let [^{:tag (array internal/SniffLen byte)} buf (zero (array internal/SniffLen byte))
+                (values n _) (io/ReadFull content (subslice buf))]
+              (set! ctype (DetectContentType (subslice buf _ n)))
+              (let [(values _ err) (.Seek content 0 io/SeekStart)] ; rewind to output whole file
+                (when (!= err nil)
+                  (serveError w "seeker can't seek" StatusInternalServerError)
+                  (return)))))
+
+
+          (.Set (.Header w) "Content-Type" ctype))
+        (> (len ctypes) 0)
+        (set! ctype (aget ctypes 0)))
+
+
+      (let [(values size err) (sizeFunc)]
+        (when (!= err nil)
+          (serveError w (.Error err) StatusInternalServerError)
+          (return))
+
+        (when (< size 0)
+          ;; Should never happen but just to be sure
+          (serveError w "negative content size computed" StatusInternalServerError)
+          (return))
+
+
+        ;; handle Content-Range header.
+        (let [sendSize size
+            ^{:line 319 :tag io/Reader} sendContent content
+            (values ranges ^:assign err) (parseRange rangeReq size)]
+          (switch err
+            (case [nil])
+            (case [errNoOverlap]
+              (when (== size 0)
+                ;; Some clients add a Range header to all requests to
+                ;; limit the size of the response. If the file is empty,
+                ;; ignore the range header and respond with a 200 rather
+                ;; than a 416.
+                (set! ranges nil)
+                (break))
+
+              (.Set (.Header w) "Content-Range" (fmt/Sprintf "bytes */%d" size))
+              (fallthrough))
+            (default
+              (serveError w (.Error err) StatusRequestedRangeNotSatisfiable)
+              (return)))
+
+
+          (when (> (sumRangesSize ranges) size)
+            ;; The total number of bytes in all the ranges
+            ;; is larger than the size of the file by
+            ;; itself, so this is probably an attack, or a
+            ;; dumb client. Ignore the range request.
+            (set! ranges nil))
+
+          (switch
+            (case [(== (len ranges) 1)]
+              ;; RFC 7233, Section 4.1:
+              ;; "If a single part is being transferred, the server
+              ;; generating the 206 response MUST generate a
+              ;; Content-Range header field, describing what range
+              ;; of the selected representation is enclosed, and a
+              ;; payload consisting of the range.
+              ;; ...
+              ;; A server MUST NOT generate a multipart response to
+              ;; a request for a single range, since a client that
+              ;; does not request multiple parts might not support
+              ;; multipart responses."
+              (let [ra (aget ranges 0)]
+                (when [(values _ err) (.Seek content (.-start ra) io/SeekStart)] (!= err nil)
+                  (serveError w (.Error err) StatusRequestedRangeNotSatisfiable)
+                  (return))
+
+                (set! sendSize (.-length ra))
+                (set! code StatusPartialContent)
+                (.Set (.Header w) "Content-Range" (.contentRange ra size))))
+            (case [(> (len ranges) 1)]
+              (set! sendSize (rangesMIMESize ranges ctype size))
+              (set! code StatusPartialContent)
+
+              (let [(values pr pw) (io/Pipe)
+                  ^{:line 372} mw (multipart/NewWriter pw)]
+                (.Set (.Header w) "Content-Type" (+ "multipart/byteranges; boundary=" (.Boundary mw)))
+                (set! sendContent pr)
+                (defer (.Close pr)) ; cause writing goroutine to fail and exit if CopyN doesn't finish.
+                (go (^{:go/end 394} (fn []
+                      (range [_ ra ranges]
+                        (let [(values part err) (.CreatePart mw (.mimeHeader ra ctype size))]
+                          (when (!= err nil)
+                            (.CloseWithError pw err)
+                            (return))
+
+                          (when [(values _ err) (.Seek content (.-start ra) io/SeekStart)] (!= err nil)
+                            (.CloseWithError pw err)
+                            (return))
+
+                          (when [(values _ err) (io/CopyN part content (.-length ra))] (!= err nil)
+                            (.CloseWithError pw err)
+                            (return))))
+
+
+                      (.Close mw)
+                      (.Close pw)))))))
+
+
+
+          (.Set (.Header w) "Accept-Ranges" "bytes")
+
+          ;; We should be able to unconditionally set the Content-Length here.
+          ;;
+          ;; However, there is a pattern observed in the wild that this breaks:
+          ;; The user wraps the ResponseWriter in one which gzips data written to it,
+          ;; and sets "Content-Encoding: gzip".
+          ;;
+          ;; The user shouldn't be doing this; the serveContent path here depends
+          ;; on serving seekable data with a known length. If you want to compress
+          ;; on the fly, then you shouldn't be using ServeFile/ServeContent, or
+          ;; you should compress the entire file up-front and provide a seekable
+          ;; view of the compressed data.
+          ;;
+          ;; However, since we've observed this pattern in the wild, and since
+          ;; setting Content-Length here breaks code that mostly-works today,
+          ;; skip setting Content-Length if the user set Content-Encoding.
+          ;;
+          ;; If this is a range request, always set Content-Length.
+          ;; If the user isn't changing the bytes sent in the ResponseWrite,
+          ;; the Content-Length will be correct.
+          ;; If the user is changing the bytes sent, then the range request wasn't
+          ;; going to work properly anyway and we aren't worse off.
+          ;;
+          ;; A possible future improvement on this might be to look at the type
+          ;; of the ResponseWriter, and always set Content-Length if it's one
+          ;; that we recognize.
+          (when (or (> (len ranges) 0) (== (.Get (.Header w) "Content-Encoding") ""))
+            (.Set (.Header w) "Content-Length" (strconv/FormatInt sendSize 10)))
+
+          (.WriteHeader w code)
+
+          (when (!= (.-Method r) "HEAD")
+            (io/CopyN w sendContent sendSize)))))))
+
+
+
+
+
+
+^{:go/end 460} (go/func scanETag "scanETag determines if a syntactically valid ETag is present at s. If so,\nthe ETag and remaining text after consuming ETag is returned. Otherwise,\nit returns \"\", \"\".\n" [^string s] :results [^string etag ^string remain]
+  (set! s (textproto/TrimString s))
+  (let [start 0]
+    (when (strings/HasPrefix s "W/")
+      (set! start 2))
+
+    (when (or (< (len (subslice s start)) 2) (!= (aget s start) \"))
+      (return "" ""))
+
+    ;; ETag is either W/"text" or "text".
+    ;; See RFC 7232 2.3.
+    (for [i (+ start 1)] (< i (len s)) (inc! i)
+      (let [c (aget s i)]
+        (switch
+          ;; Character values allowed in ETags.
+          (case [(or (== c 0x21) (and (>= c 0x23) (<= c 0x7E)) (>= c 0x80))])
+          (case [(== c \")]
+            (return (subslice s _ (+ i 1)) (subslice s (+ i 1))))
+          (default
+            (return "" "")))))
+
+
+    (return "" "")))
+
+
+
+
+^{:go/end 466} (go/func etagStrongMatch "etagStrongMatch reports whether a and b match using strong ETag comparison.\nAssumes a and b are valid ETags.\n" ^bool [^string a ^string b]
+  (and (== a b) (!= a "") (== (aget a 0) \")))
+
+
+
+
+^{:go/end 472} (go/func etagWeakMatch "etagWeakMatch reports whether a and b match using weak ETag comparison.\nAssumes a and b are valid ETags.\n" ^bool [^string a ^string b]
+  (== (strings/TrimPrefix a "W/") (strings/TrimPrefix b "W/")))
+
+
+
+
+(go/type condResult "condResult is the result of an HTTP request precondition check.\nSee https://tools.ietf.org/html/rfc7232 section 3.\n" int)
+
+(go/const
+  ^{:line 479} [^{:tag condResult :val 0} condNone iota]
+  ^{:line 480} [^{:val 1} condTrue]
+  ^{:line 481} [^{:val 2} condFalse])
+
+
+^{:go/end 512} (go/func checkIfMatch ^condResult [^ResponseWriter w ^{:tag (* Request)} r]
+  (let [im (.Get (.-Header r) "If-Match")]
+    (when (== im "")
+      (return condNone))
+
+    (while true
+      (set! im (textproto/TrimString im))
+      (when (== (len im) 0)
+        (break))
+
+      (when (== (aget im 0) \,)
+        (set! im (subslice im 1))
+        (continue))
+
+      (when (== (aget im 0) \*)
+        (return condTrue))
+
+      (let [(values etag remain) (scanETag im)]
+        (when (== etag "")
+          (break))
+
+        (when (etagStrongMatch etag (.get (.Header w) "Etag"))
+          (return condTrue))
+
+        (set! im remain)))
+
+
+    ^{:line 511} condFalse))
+
+
+^{:go/end 531} (go/func checkIfUnmodifiedSince ^condResult [^{:tag (* Request)} r ^time/Time modtime]
+  (let [ius (.Get (.-Header r) "If-Unmodified-Since")]
+    (when (or (== ius "") (isZeroTime modtime))
+      (return condNone))
+
+    (let [(values t err) (ParseTime ius)]
+      (when (!= err nil)
+        (return condNone))
+
+
+      ;; The Last-Modified header truncates sub-second precision so
+      ;; the modtime needs to be truncated too.
+      (set! modtime (.Truncate modtime time/Second))
+      (when [ret (.Compare modtime t)] (<= ret 0)
+        (return condTrue))
+
+      ^{:line 530} condFalse)))
+
+
+^{:go/end 561} (go/func checkIfNoneMatch ^condResult [^ResponseWriter w ^{:tag (* Request)} r]
+  (let [inm (.get (.-Header r) "If-None-Match")]
+    (when (== inm "")
+      (return condNone))
+
+    (let [buf inm]
+      (while true
+        (set! buf (textproto/TrimString buf))
+        (when (== (len buf) 0)
+          (break))
+
+        (when (== (aget buf 0) \,)
+          (set! buf (subslice buf 1))
+          (continue))
+
+        (when (== (aget buf 0) \*)
+          (return condFalse))
+
+        (let [(values etag remain) (scanETag buf)]
+          (when (== etag "")
+            (break))
+
+          (when (etagWeakMatch etag (.get (.Header w) "Etag"))
+            (return condFalse))
+
+          (set! buf remain)))
+
+      ^{:line 560} condTrue)))
+
+
+^{:go/end 582} (go/func checkIfModifiedSince ^condResult [^{:tag (* Request)} r ^time/Time modtime]
+  (when (and (!= (.-Method r) "GET") (!= (.-Method r) "HEAD"))
+    (return condNone))
+
+  (let [ims (.Get (.-Header r) "If-Modified-Since")]
+    (when (or (== ims "") (isZeroTime modtime))
+      (return condNone))
+
+    (let [(values t err) (ParseTime ims)]
+      (when (!= err nil)
+        (return condNone))
+
+      ;; The Last-Modified header truncates sub-second precision so
+      ;; the modtime needs to be truncated too.
+      (set! modtime (.Truncate modtime time/Second))
+      (when [ret (.Compare modtime t)] (<= ret 0)
+        (return condFalse))
+
+      ^{:line 581} condTrue)))
+
+
+^{:go/end 613} (go/func checkIfRange ^condResult [^ResponseWriter w ^{:tag (* Request)} r ^time/Time modtime]
+  (when (and (!= (.-Method r) "GET") (!= (.-Method r) "HEAD"))
+    (return condNone))
+
+  (let [ir (.get (.-Header r) "If-Range")]
+    (when (== ir "")
+      (return condNone))
+
+    (let [(values etag _) (scanETag ir)]
+      (when (!= etag "")
+        (if (etagStrongMatch etag (.Get (.Header w) "Etag"))
+          (return condTrue)
+
+          (return condFalse)))
+
+
+      ;; The If-Range value is typically the ETag value, but it may also be
+      ;; the modtime date. See golang.org/issue/8367.
+      (when (.IsZero modtime)
+        (return condFalse))
+
+      (let [(values t err) (ParseTime ir)]
+        (when (!= err nil)
+          (return condFalse))
+
+        (when (== (.Unix t) (.Unix modtime))
+          (return condTrue))
+
+        ^{:line 612} condFalse))))
+
+
+(go/var unixEpochTime (time/Unix 0 0))
+
+
+^{:go/end 620} (go/func isZeroTime "isZeroTime reports whether t is obviously unspecified (either zero or Unix()=0).\n" ^bool [^time/Time t]
+  (or (.IsZero t) (.Equal t unixEpochTime)))
+
+
+^{:go/end 626} (go/func setLastModified [^ResponseWriter w ^time/Time modtime]
+  (when (not (isZeroTime modtime))
+    (.Set (.Header w) "Last-Modified" (.Format (.UTC modtime) TimeFormat))))
+
+
+
+^{:go/end 642} (go/func writeNotModified [^ResponseWriter w]
+  ;; RFC 7232 section 4.1:
+  ;; a sender SHOULD NOT generate representation metadata other than the
+  ;; above listed fields unless said metadata exists for the purpose of
+  ;; guiding cache updates (e.g., Last-Modified might be useful if the
+  ;; response does not have an ETag field).
+  (let [h (.Header w)]
+    (delete h "Content-Type")
+    (delete h "Content-Length")
+    (delete h "Content-Encoding")
+    (when (!= (.Get h "Etag") "")
+      (delete h "Last-Modified"))
+
+    (.WriteHeader w StatusNotModified)))
+
+
+
+
+^{:go/end 677} (go/func checkPreconditions "checkPreconditions evaluates request preconditions and reports whether a precondition\nresulted in sending StatusNotModified or StatusPreconditionFailed.\n" [^ResponseWriter w ^{:tag (* Request)} r ^time/Time modtime] :results [^bool done ^string rangeHeader]
+  ;; This function carefully follows RFC 7232 section 6.
+  (let [ch (checkIfMatch w r)]
+    (when (== ch condNone)
+      (set! ch (checkIfUnmodifiedSince r modtime)))
+
+    (when (== ch condFalse)
+      (.WriteHeader w StatusPreconditionFailed)
+      (return true ""))
+
+    (switch (checkIfNoneMatch w r)
+      (case [condFalse]
+        (if (or (== (.-Method r) "GET") (== (.-Method r) "HEAD")) (do
+            (writeNotModified w)
+            (return true ""))
+          (do
+            (.WriteHeader w StatusPreconditionFailed)
+            (return true ""))))
+
+      (case [condNone]
+        (when (== (checkIfModifiedSince r modtime) condFalse)
+          (writeNotModified w)
+          (return true ""))))
+
+
+
+    (set! rangeHeader (.get (.-Header r) "Range"))
+    (when (and (!= rangeHeader "") (== (checkIfRange w r modtime) condFalse))
+      (set! rangeHeader ""))
+
+    (return false rangeHeader)))
+
+
+
+^{:go/end 763} (go/func serveFile "name is '/'-separated, not filepath.Separator.\n" [^ResponseWriter w ^{:tag (* Request)} r ^FileSystem fs ^string name ^bool redirect]
+  (let [^:const ^{:val "/index.html"} indexPage "/index.html"]
+
+    ;; redirect .../index.html to .../
+    ;; can't use Redirect() because that would make the path absolute,
+    ;; which would be a problem running under StripPrefix
+    (when (strings/HasSuffix (.-Path (.-URL r)) indexPage)
+      (localRedirect w r "./")
+      (return))
+
+
+    (let [(values f err) (.Open fs name)]
+      (when (!= err nil)
+        (let [(values msg code) (toHTTPError err)]
+          (serveError w msg code)
+          (return)))
+
+      (defer (.Close f))
+
+      (let [(values d ^:assign err) (.Stat f)]
+        (when (!= err nil)
+          (let [(values msg code) (toHTTPError err)]
+            (serveError w msg code)
+            (return)))
+
+
+        (when redirect
+          ;; redirect to canonical path: / at end of directory url
+          ;; r.URL.Path always begins with /
+          (let [url (.-Path (.-URL r))]
+            (cond (.IsDir d)
+              (when (!= (aget url (- (len url) 1)) \/)
+                (localRedirect w r (+ (path/Base url) "/"))
+                (return))
+
+              (== (aget url (- (len url) 1)) \/)
+              (let [base (path/Base url)]
+                (when (or (== base "/") (== base "."))
+                  ;; The FileSystem maps a path like "/" or "/./" to a file instead of a directory.
+                  (let [msg "http: attempting to traverse a non-directory"]
+                    (serveError w msg StatusInternalServerError)
+                    (return)))
+
+                (localRedirect w r (+ "../" base))
+                (return)))))
+
+
+
+        (when (.IsDir d)
+          (let [url (.-Path (.-URL r))]
+            ;; redirect if the directory name doesn't end in a slash
+            (when (or (== url "") (!= (aget url (- (len url) 1)) \/))
+              (localRedirect w r (+ (path/Base url) "/"))
+              (return))
+
+
+            ;; use contents of index.html for directory, if present
+            (let [index (+ (strings/TrimSuffix name "/") indexPage)
+                (values ff err) (.Open fs index)]
+              (when (== err nil)
+                (defer (.Close ff))
+                (let [(values dd err) (.Stat ff)]
+                  (when (== err nil)
+                    (set! d dd)
+                    (set! f ff)))))))
+
+
+
+
+        ;; Still a directory? (we didn't find an index.html file)
+        (when (.IsDir d)
+          (when (== (checkIfModifiedSince r (.ModTime d)) condFalse)
+            (writeNotModified w)
+            (return))
+
+          (setLastModified w (.ModTime d))
+          (dirList w r f)
+          (return))
+
+
+        ;; serveContent will check modification time
+        (let [sizeFunc ^{:go/end 761} (fn [] :results [int64 error] (return (.Size d) nil))]
+          (serveContent w r (.Name d) (.ModTime d) sizeFunc f))))))
+
+
+
+
+
+
+
+^{:go/end 782} (go/func toHTTPError "toHTTPError returns a non-specific HTTP error message and status code\nfor a given non-nil error value. It's important that toHTTPError does not\nactually return err.Error(), since msg and httpStatus are returned to users,\nand historically Go's ServeContent always returned just \"404 Not Found\" for\nall errors. We don't want to start leaking information in error messages.\n" [^error err] :results [^string msg ^int httpStatus]
+  (when (errors/Is err fs/ErrNotExist)
+    (return "404 page not found" StatusNotFound))
+
+  (when (errors/Is err fs/ErrPermission)
+    (return "403 Forbidden" StatusForbidden))
+
+  (when (errors/Is err errInvalidUnsafePath)
+    (return "404 page not found" StatusNotFound))
+
+  ;; Default:
+  (return "500 Internal Server Error" StatusInternalServerError))
+
+
+
+
+^{:go/end 798} (go/func localRedirect "localRedirect gives a Moved Permanently response.\nIt does not convert relative paths to absolute paths like Redirect does.\n" [^ResponseWriter w ^{:tag (* Request)} r ^string newPath]
+  ;; There is no reliable way for us to redirect correctly when the path has
+  ;; escaped slashes, since StripPrefix might be in use. Just return 404.
+  (when [p (.EscapedPath (.-URL r))] (or (strings/Contains p "%2f") (strings/Contains p "%2F"))
+    (NotFound w r)
+    (return))
+
+  (when [q (.-RawQuery (.-URL r))] (!= q "")
+    (set! newPath + (+ "?" q)))
+
+  (.Set (.Header w) "Location" newPath)
+  (.WriteHeader w StatusMovedPermanently))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 833} (go/func ServeFile "ServeFile replies to the request with the contents of the named\nfile or directory.\n\nIf the provided file or directory name is a relative path, it is\ninterpreted relative to the current directory and may ascend to\nparent directories. If the provided name is constructed from user\ninput, it should be sanitized before calling [ServeFile].\n\nAs a precaution, ServeFile will reject requests where r.URL.Path\ncontains a \"..\" path element; this protects against callers who\nmight unsafely use [filepath.Join] on r.URL.Path without sanitizing\nit and then use that filepath.Join result as the name argument.\n\nAs another special case, ServeFile redirects any request where r.URL.Path\nends in \"/index.html\" to the same path, without the final\n\"index.html\". To avoid such redirects either modify the path or\nuse [ServeContent].\n\nOutside of those two special cases, ServeFile does not use\nr.URL.Path for selecting the file or directory to serve; only the\nfile or directory provided in the name argument is used.\n" [^ResponseWriter w ^{:tag (* Request)} r ^string name]
+  (when (containsDotDot (.-Path (.-URL r)))
+    ;; Too many programs use r.URL.Path to construct the argument to
+    ;; serveFile. Reject the request under the assumption that happened
+    ;; here and ".." may not be wanted.
+    ;; Note that name might not contain "..", for example if code (still
+    ;; incorrectly) used filepath.Join(myDir, r.URL.Path).
+    (serveError w "invalid URL path" StatusBadRequest)
+    (return))
+
+  (let [(values dir file) (filepath/Split name)]
+    (serveFile w r (conv Dir dir) file false)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 866} (go/func ServeFileFS "ServeFileFS replies to the request with the contents\nof the named file or directory from the file system fsys.\nThe files provided by fsys must implement [io.Seeker].\n\nIf the provided name is constructed from user input, it should be\nsanitized before calling [ServeFileFS].\n\nAs a precaution, ServeFileFS will reject requests where r.URL.Path\ncontains a \"..\" path element; this protects against callers who\nmight unsafely use [filepath.Join] on r.URL.Path without sanitizing\nit and then use that filepath.Join result as the name argument.\n\nAs another special case, ServeFileFS redirects any request where r.URL.Path\nends in \"/index.html\" to the same path, without the final\n\"index.html\". To avoid such redirects either modify the path or\nuse [ServeContent].\n\nOutside of those two special cases, ServeFileFS does not use\nr.URL.Path for selecting the file or directory to serve; only the\nfile or directory provided in the name argument is used.\n" [^ResponseWriter w ^{:tag (* Request)} r ^fs/FS fsys ^string name]
+  (when (containsDotDot (.-Path (.-URL r)))
+    ;; Too many programs use r.URL.Path to construct the argument to
+    ;; serveFile. Reject the request under the assumption that happened
+    ;; here and ".." may not be wanted.
+    ;; Note that name might not contain "..", for example if code (still
+    ;; incorrectly) used filepath.Join(myDir, r.URL.Path).
+    (serveError w "invalid URL path" StatusBadRequest)
+    (return))
+
+  (serveFile w r (FS fsys) name false))
+
+
+^{:go/breaks [[5 877]] :go/end 878} (go/func containsDotDot ^bool [^string v]
+  (when (not (strings/Contains v ".."))
+    (return false))
+
+  (range [ent (strings/FieldsFuncSeq v isSlashRune)]
+    (when (== ent "..")
+      (return true)))
+
+
+  false)
+
+
+^{:go/end 880} (go/func isSlashRune ^bool [^rune r] (or (== r \/) (== r \\)))
+
+(go/type fileHandler (struct
+    ^{:line 883 :tag FileSystem} root))
+
+
+(go/type ioFS (struct
+    ^{:line 887 :tag fs/FS} fsys))
+
+
+(go/type ioFile (struct
+    ^{:line 891 :tag fs/File} file))
+
+
+^{:go/end 907} (go/method Open [^ioFS f ^string name] :results [File error]
+  (if (== name "/")
+    (set! name ".")
+
+    (set! name (strings/TrimPrefix name "/")))
+
+  (let [(values file err) (.Open (.-fsys f) name)]
+    (when (!= err nil)
+      (return nil (mapOpenError err name \/ ^{:go/end 904} (fn [^string path] :results [fs/FileInfo error]
+            (fs/Stat (.-fsys f) path)))))
+
+
+    (return (lit ioFile file) nil)))
+
+
+^{:go/end 909} (go/method Close ^error [^ioFile f] (.Close (.-file f)))
+^{:go/end 910} (go/method Read [^ioFile f ^{:tag (slice byte)} b] :results [int error] (.Read (.-file f) b))
+^{:go/end 911} (go/method Stat [^ioFile f] :results [fs/FileInfo error] (.Stat (.-file f)))
+
+(go/var errMissingSeek (errors/New "io.File missing Seek method"))
+(go/var errMissingReadDir (errors/New "io.File directory missing ReadDir method"))
+
+^{:go/end 922} (go/method Seek [^ioFile f ^int64 offset ^int whence] :results [int64 error]
+  (let [(values s ok) (assert io/Seeker (.-file f))]
+    (when (not ok)
+      (return 0 errMissingSeek))
+
+    (.Seek s offset whence)))
+
+
+^{:go/end 930} (go/method ReadDir [^ioFile f ^int count] :results [(slice fs/DirEntry) error]
+  (let [(values d ok) (assert fs/ReadDirFile (.-file f))]
+    (when (not ok)
+      (return nil errMissingReadDir))
+
+    (.ReadDir d count)))
+
+
+^{:go/end 956} (go/method Readdir [^ioFile f ^int count] :results [(slice fs/FileInfo) error]
+  (let [(values d ok) (assert fs/ReadDirFile (.-file f))]
+    (when (not ok)
+      (return nil errMissingReadDir))
+
+    (let [^{:tag (slice fs/FileInfo)} list (zero (slice fs/FileInfo))]
+      (while true
+        (let [(values dirs err) (.ReadDir d (- count (len list)))]
+          (range [_ dir dirs]
+            (let [(values info err) (.Info dir)]
+              (when (!= err nil)
+                ;; Pretend it doesn't exist, like (*os.File).Readdir does.
+                (continue))
+
+              (set! list (append list info))))
+
+          (when (!= err nil)
+            (return list err))
+
+          (when (or (< count 0) (>= (len list) count))
+            (break))))
+
+
+      (return list nil))))
+
+
+
+
+
+^{:go/end 963} (go/func FS "FS converts fsys to a [FileSystem] implementation,\nfor use with [FileServer] and [NewFileTransport].\nThe files provided by fsys must implement [io.Seeker].\n" ^FileSystem [^fs/FS fsys]
+  (lit ioFS fsys))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 980} (go/func FileServer "FileServer returns a handler that serves HTTP requests\nwith the contents of the file system rooted at root.\n\nAs a special case, the returned file server redirects any request\nending in \"/index.html\" to the same path, without the final\n\"index.html\".\n\nTo use the operating system's file system implementation,\nuse [http.Dir]:\n\n\thttp.Handle(\"/\", http.FileServer(http.Dir(\"/tmp\")))\n\nTo use an [fs.FS] implementation, use [http.FileServerFS] instead.\n" ^Handler [^FileSystem root]
+  (addr (lit fileHandler root)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 993} (go/func FileServerFS "FileServerFS returns a handler that serves HTTP requests\nwith the contents of the file system fsys.\nThe files provided by fsys must implement [io.Seeker].\n\nAs a special case, the returned file server redirects any request\nending in \"/index.html\" to the same path, without the final\n\"index.html\".\n\n\thttp.Handle(\"/\", http.FileServerFS(fsys))\n" ^Handler [^fs/FS root]
+  (FileServer (FS root)))
+
+
+^{:go/end 1002} (go/method ServeHTTP [^{:tag (* fileHandler)} f ^ResponseWriter w ^{:tag (* Request)} r]
+  (let [upath (.-Path (.-URL r))]
+    (when (not (strings/HasPrefix upath "/"))
+      (set! upath (+ "/" upath))
+      (set! (.-Path (.-URL r)) upath))
+
+    (serveFile w r (.-root f) (path/Clean upath) true)))
+
+
+
+(go/type httpRange "httpRange specifies the byte range to be sent to the client.\n" (struct
+    ^{:line 1006 :tag int64} start ^int64 length))
+
+
+^{:go/end 1011} (go/method contentRange ^string [^httpRange r ^int64 size]
+  (fmt/Sprintf "bytes %d-%d/%d" (.-start r) (- (+ (.-start r) (.-length r)) 1) size))
+
+
+^{:go/end 1018} (go/method mimeHeader ^textproto/MIMEHeader [^httpRange r ^string contentType ^int64 size]
+  (lit textproto/MIMEHeader
+    ^{:line 1015} ["Content-Range" (lit _ (.contentRange r size))]
+    ^{:line 1016} ["Content-Type" (lit _ contentType)]))
+
+
+
+
+
+^{:go/end 1094} (go/func parseRange "parseRange parses a Range header string as per RFC 7233.\nerrNoOverlap is returned if none of the ranges overlap.\n" [^string s ^int64 size] :results [(slice httpRange) error]
+  (when (== s "")
+    (return nil nil)) ; header not present
+
+  (let [^:const ^{:val "bytes="} b "bytes="]
+    (when (not (strings/HasPrefix s b))
+      (return nil (errors/New "invalid range")))
+
+    (let [^{:tag (slice httpRange)} ranges (zero (slice httpRange))
+        ^{:line 1031} noOverlap false]
+      (range [ra (strings/SplitSeq (subslice s (len b)) ",")]
+        (set! ra (textproto/TrimString ra))
+        (when (== ra "")
+          (continue))
+
+        (let [(values start end ok) (strings/Cut ra "-")]
+          (when (not ok)
+            (return nil (errors/New "invalid range")))
+
+          (set! (values start end) (values (textproto/TrimString start) (textproto/TrimString end)))
+          (let [^httpRange r (zero httpRange)]
+            (if (== start "") (do
+                ;; If no start is specified, end specifies the
+                ;; range start relative to the end of the file,
+                ;; and we are dealing with <suffix-length>
+                ;; which has to be a non-negative integer as per
+                ;; RFC 7233 Section 2.1 "Byte-Ranges".
+                (when (or (== end "") (== (aget end 0) \-))
+                  (return nil (errors/New "invalid range")))
+
+                (let [(values i err) (strconv/ParseInt end 10 64)]
+                  (when (or (< i 0) (!= err nil))
+                    (return nil (errors/New "invalid range")))
+
+                  (when (> i size)
+                    (set! i size))
+
+                  (set! (.-start r) (- size i))
+                  (set! (.-length r) (- size (.-start r)))))
+
+              (let [(values i err) (strconv/ParseInt start 10 64)]
+                (when (or (!= err nil) (< i 0))
+                  (return nil (errors/New "invalid range")))
+
+                (when (>= i size)
+                  ;; If the range begins after the size of the content,
+                  ;; then it does not overlap.
+                  (set! noOverlap true)
+                  (continue))
+
+                (set! (.-start r) i)
+                (if (== end "")
+                  ;; If no end is specified, range extends to end of the file.
+                  (set! (.-length r) (- size (.-start r)))
+
+                  (let [(values i err) (strconv/ParseInt end 10 64)]
+                    (when (or (!= err nil) (> (.-start r) i))
+                      (return nil (errors/New "invalid range")))
+
+                    (when (>= i size)
+                      (set! i (- size 1)))
+
+                    (set! (.-length r) (+ (- i (.-start r)) 1))))))
+
+
+            (set! ranges (append ranges r)))))
+
+      (when (and noOverlap (== (len ranges) 0))
+        ;; The specified ranges did not overlap with the content.
+        (return nil errNoOverlap))
+
+      (return ranges nil))))
+
+
+
+(go/type countingWriter "countingWriter counts how many bytes have been written to it.\n" int64)
+
+^{:go/end 1102} (go/method Write [^{:tag (* countingWriter)} w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (set! @w + (conv countingWriter (len p)))
+  (return (len p) nil))
+
+
+
+
+^{:go/end 1116} (go/func rangesMIMESize "rangesMIMESize returns the number of bytes it takes to encode the\nprovided ranges as a multipart response.\n" [^{:tag (slice httpRange)} ranges ^string contentType ^int64 contentSize] :results [^int64 encSize]
+  (let [^countingWriter w (zero countingWriter)
+      ^{:line 1108} mw (multipart/NewWriter (addr w))]
+    (range [_ ra ranges]
+      (.CreatePart mw (.mimeHeader ra contentType contentSize))
+      (set! encSize + (.-length ra)))
+
+    (.Close mw)
+    (set! encSize + (conv int64 w))
+    (return)))
+
+
+^{:go/end 1123} (go/func sumRangesSize [^{:tag (slice httpRange)} ranges] :results [^int64 size]
+  (range [_ ra ranges]
+    (set! size + (.-length ra)))
+
+  (return))

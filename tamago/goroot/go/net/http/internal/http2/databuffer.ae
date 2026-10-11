@@ -1,0 +1,145 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.internal.http2) (go/file "databuffer.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [sync "sync"]])
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "Buffer chunks are allocated from a pool to reduce pressure on GC.\nThe maximum wasted space per dataBuffer is 2x the largest size class,\nwhich happens when the dataBuffer has multiple chunks and there is\none unread byte in both the first and last chunks. We use a few size\nclasses to minimize overheads for servers that typically receive very\nsmall request bodies.\n\nTODO: Benchmark to determine if the pools are necessary. The GC may have\nimproved enough that we can instead allocate chunks like this:\nmake([]byte, max(16<<10, expectedBytesRemaining))\n"} dataChunkPools (lit (array ... sync/Pool)
+    (lit _ :New ^{:go/end 24} (fn ^any [] (new (array (<< 1 10) byte))))
+    (lit _ :New ^{:go/end 25} (fn ^any [] (new (array (<< 2 10) byte))))
+    (lit _ :New ^{:go/end 26} (fn ^any [] (new (array (<< 4 10) byte))))
+    (lit _ :New ^{:go/end 27} (fn ^any [] (new (array (<< 8 10) byte))))
+    (lit _ :New ^{:go/end 28} (fn ^any [] (new (array (<< 16 10) byte))))))
+
+
+^{:go/end 44} (go/func getDataBufferChunk ^{:tag (slice byte)} [^int64 size]
+  (switch
+    (case [(<= size (<< 1 10))]
+      (return (subslice (assert (* (array (<< 1 10) byte)) (.Get (aget dataChunkPools 0))))))
+    (case [(<= size (<< 2 10))]
+      (return (subslice (assert (* (array (<< 2 10) byte)) (.Get (aget dataChunkPools 1))))))
+    (case [(<= size (<< 4 10))]
+      (return (subslice (assert (* (array (<< 4 10) byte)) (.Get (aget dataChunkPools 2))))))
+    (case [(<= size (<< 8 10))]
+      (return (subslice (assert (* (array (<< 8 10) byte)) (.Get (aget dataChunkPools 3))))))
+    (default
+      (return (subslice (assert (* (array (<< 16 10) byte)) (.Get (aget dataChunkPools 4))))))))
+
+
+
+^{:go/end 61} (go/func putDataBufferChunk [^{:tag (slice byte)} p]
+  (switch (len p)
+    (case [(<< 1 10)]
+      (.Put (aget dataChunkPools 0) (conv (* (array (<< 1 10) byte)) p)))
+    (case [(<< 2 10)]
+      (.Put (aget dataChunkPools 1) (conv (* (array (<< 2 10) byte)) p)))
+    (case [(<< 4 10)]
+      (.Put (aget dataChunkPools 2) (conv (* (array (<< 4 10) byte)) p)))
+    (case [(<< 8 10)]
+      (.Put (aget dataChunkPools 3) (conv (* (array (<< 8 10) byte)) p)))
+    (case [(<< 16 10)]
+      (.Put (aget dataChunkPools 4) (conv (* (array (<< 16 10) byte)) p)))
+    (default
+      (panic (fmt/Sprintf "unexpected buffer len=%v" (len p))))))
+
+
+
+
+
+
+
+
+(go/type dataBuffer "dataBuffer is an io.ReadWriter backed by a list of data chunks.\nEach dataBuffer is used to read DATA frames on a single stream.\nThe buffer is divided into chunks so the server can limit the\ntotal memory used by a single connection without limiting the\nrequest body size on any single stream.\n" (struct
+    ^{:line 69 :tag (slice (slice byte))} chunks
+    ^{:line 70 :tag int} r ; next byte to read is chunks[0][r]
+    ^{:line 71 :tag int} w ; next byte to write is chunks[len(chunks)-1][w]
+    ^{:line 72 :tag int} size ; total buffered bytes
+    ^{:line 73 :tag int64} expected)) ; we expect at least this many bytes in future Write calls (ignored if <= 0)
+
+
+(go/var errReadEmpty (errors/New "read from empty dataBuffer"))
+
+
+
+^{:go/end 103} (go/method Read "Read copies bytes from the buffer into p.\nIt is an error to read when no data is available.\n" [^{:tag (* dataBuffer)} b ^{:tag (slice byte)} p] :results [int error]
+  (when (== (.-size b) 0)
+    (return 0 errReadEmpty))
+
+  (let [^int ntotal (zero int)]
+    (while (and (> (len p) 0) (> (.-size b) 0))
+      (let [readFrom (.bytesFromFirstChunk b)
+          ^{:line 87} n (copy p readFrom)]
+        (set! p (subslice p n))
+        (set! ntotal + n)
+        (set! (.-r b) + n)
+        (set! (.-size b) - n)
+        ;; If the first chunk has been consumed, advance to the next chunk.
+        (when (== (.-r b) (len (aget (.-chunks b) 0)))
+          (putDataBufferChunk (aget (.-chunks b) 0))
+          (let [end (- (len (.-chunks b)) 1)]
+            (copy (subslice (.-chunks b) _ end) (subslice (.-chunks b) 1))
+            (aset (.-chunks b) end nil)
+            (set! (.-chunks b) (subslice (.-chunks b) _ end))
+            (set! (.-r b) 0)))))
+
+
+    (return ntotal nil)))
+
+
+^{:go/end 110} (go/method bytesFromFirstChunk ^{:tag (slice byte)} [^{:tag (* dataBuffer)} b]
+  (when (== (len (.-chunks b)) 1)
+    (return (subslice (aget (.-chunks b) 0) (.-r b) (.-w b))))
+
+  (subslice (aget (.-chunks b) 0) (.-r b)))
+
+
+
+^{:go/end 115} (go/method Len "Len returns the number of bytes of the unread portion of the buffer.\n" ^int [^{:tag (* dataBuffer)} b]
+  (.-size b))
+
+
+
+^{:go/end 133} (go/method Write "Write appends p to the buffer.\n" [^{:tag (* dataBuffer)} b ^{:tag (slice byte)} p] :results [int error]
+  (let [ntotal (len p)]
+    (while (> (len p) 0)
+      ;; If the last chunk is empty, allocate a new chunk. Try to allocate
+      ;; enough to fully copy p plus any additional bytes we expect to
+      ;; receive. However, this may allocate less than len(p).
+      (let [want (max (.-expected b) (conv int64 (len p)))
+          ^{:line 125} chunk (.lastChunkOrAlloc b want)
+          ^{:line 126} n (copy (subslice chunk (.-w b)) p)]
+        (set! p (subslice p n))
+        (set! (.-w b) + n)
+        (set! (.-size b) + n)
+        (set! (.-expected b) - (conv int64 n))))
+
+    (return ntotal nil)))
+
+
+^{:go/end 146} (go/method lastChunkOrAlloc ^{:tag (slice byte)} [^{:tag (* dataBuffer)} b ^int64 want]
+  (when (!= (len (.-chunks b)) 0)
+    (let [last (aget (.-chunks b) (- (len (.-chunks b)) 1))]
+      (when (< (.-w b) (len last))
+        (return last))))
+
+
+  (let [chunk (getDataBufferChunk want)]
+    (set! (.-chunks b) (append (.-chunks b) chunk))
+    (set! (.-w b) 0)
+    ^{:line 145} chunk))

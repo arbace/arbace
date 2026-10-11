@@ -1,0 +1,118 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.internal.http2) (go/file "writesched_roundrobin.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [math "math"]])
+
+
+(go/type roundRobinWriteScheduler (struct
+
+    ^{:line 14 :tag writeQueue :doc "control contains control frames (SETTINGS, PING, etc.).\n"} control
+
+
+    ^{:line 17 :tag (map uint32 (* writeQueue)) :doc "streams maps stream ID to a queue.\n"} streams
+
+
+
+    ^{:line 21 :tag (* writeQueue) :doc "stream queues are stored in a circular linked list.\nhead is the next stream to write, or nil if there are no streams open.\n"} head
+
+
+    ^{:line 24 :tag writeQueuePool :doc "pool of empty queues for reuse.\n"} queuePool))
+
+
+
+
+
+
+
+^{:go/end 37} (go/func newRoundRobinWriteScheduler "newRoundRobinWriteScheduler constructs a new write scheduler.\nThe round robin scheduler prioritizes control frames\nlike SETTINGS and PING over DATA frames.\nWhen there are no control frames to send, it performs a round-robin\nselection from the ready streams.\n" ^WriteScheduler []
+  (let [ws (addr ^{:go/breaks [2]} (lit roundRobinWriteScheduler
+          :streams (make (map uint32 (* writeQueue)))))]
+
+    ^{:line 36} ws))
+
+
+^{:go/end 57} (go/method OpenStream [^{:tag (* roundRobinWriteScheduler)} ws ^uint32 streamID ^OpenStreamOptions options]
+  (when (!= (aget (.-streams ws) streamID) nil)
+    (panic (fmt/Errorf "stream %d already opened" streamID)))
+
+  (let [q (.get (.-queuePool ws))]
+    (aset (.-streams ws) streamID q)
+    (if (== (.-head ws) nil) (do
+        (set! (.-head ws) q)
+        (set! (.-next q) q)
+        (set! (.-prev q) q))
+      (do
+        ;; Queues are stored in a ring.
+        ;; Insert the new stream before ws.head, putting it at the end of the list.
+        (set! (.-prev q) (.-prev (.-head ws)))
+        (set! (.-next q) (.-head ws))
+        (set! (.-next (.-prev q)) q)
+        (set! (.-prev (.-next q)) q)))))
+
+
+
+^{:go/end 76} (go/method CloseStream [^{:tag (* roundRobinWriteScheduler)} ws ^uint32 streamID]
+  (let [q (aget (.-streams ws) streamID)]
+    (when (== q nil)
+      (return))
+
+    (if (== (.-next q) q)
+      ;; This was the only open stream.
+      (set! (.-head ws) nil)
+      (do
+        (set! (.-next (.-prev q)) (.-next q))
+        (set! (.-prev (.-next q)) (.-prev q))
+        (when (== (.-head ws) q)
+          (set! (.-head ws) (.-next q)))))
+
+
+    (delete (.-streams ws) streamID)
+    (.put (.-queuePool ws) q)))
+
+
+^{:go/end 78} (go/method AdjustStream [^{:tag (* roundRobinWriteScheduler)} ws ^uint32 streamID ^PriorityParam priority])
+
+^{:go/end 97} (go/method Push [^{:tag (* roundRobinWriteScheduler)} ws ^FrameWriteRequest wr]
+  (when (.isControl wr)
+    (.push (.-control ws) wr)
+    (return))
+
+  (let [q (aget (.-streams ws) (.StreamID wr))]
+    (when (== q nil)
+      ;; This is a closed stream.
+      ;; wr should not be a HEADERS or DATA frame.
+      ;; We push the request onto the control queue.
+      (when (> (.DataSize wr) 0)
+        (panic "add DATA on non-open stream"))
+
+      (.push (.-control ws) wr)
+      (return))
+
+    (.push q wr)))
+
+
+^{:go/end 119} (go/method Pop [^{:tag (* roundRobinWriteScheduler)} ws] :results [FrameWriteRequest bool]
+  ;; Control and RST_STREAM frames first.
+  (when (not (.empty (.-control ws)))
+    (return (.shift (.-control ws)) true))
+
+  (when (== (.-head ws) nil)
+    (return (lit FrameWriteRequest) false))
+
+  (let [q (.-head ws)]
+    (while true
+      (when [(values wr ok) (.consume q math/MaxInt32)] ok
+        (set! (.-head ws) (.-next q))
+        (return wr true))
+
+      (set! q (.-next q))
+      (when (== q (.-head ws))
+        (break)))
+
+
+    (return (lit FrameWriteRequest) false)))

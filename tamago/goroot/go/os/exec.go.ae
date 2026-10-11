@@ -1,0 +1,404 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.os) (go/file "exec.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [testlog "internal/testlog"]
+    ^{:line 10} [runtime "runtime"]
+    ^{:line 11} [sync "sync"]
+    ^{:line 12} [atomic "sync/atomic"]
+    ^{:line 13} [syscall "syscall"]
+    ^{:line 14} [time "time"]])
+
+
+(go/var
+
+  ^{:line 19} [^{:doc "ErrProcessDone indicates a [Process] has finished.\n"} ErrProcessDone (errors/New "os: process already finished")]
+
+  ^{:line 21} [^{:doc "errProcessReleased indicates a [Process] has been released.\n"} errProcessReleased (errors/New "os: process already released")]
+
+  ^{:line 23} [^{:doc "ErrNoHandle indicates a [Process] does not have a handle.\n"} ErrNoHandle (errors/New "os: process handle unavailable")])
+
+
+
+(go/type processStatus "processStatus describes the status of a [Process].\n" uint32)
+
+(go/const
+
+  ^{:line 31} [^{:tag processStatus :val 0 :doc "statusOK means that the Process is ready to use.\n"} statusOK iota]
+
+
+
+  ^{:line 35} [^{:val 1 :doc "statusDone indicates that the PID/handle should not be used because\nthe process is done (has been successfully Wait'd on).\n"} statusDone]
+
+
+
+  ^{:line 39} [^{:val 2 :doc "statusReleased indicates that the PID/handle should not be used\nbecause the process is released.\n"} statusReleased])
+
+
+
+(go/type Process "Process stores the information about a process created by [StartProcess].\n" (struct
+
+    ^{:line 45 :tag int :doc "Pid is the operating system process ID.\n"} Pid
+
+
+
+
+
+    ^{:line 51 :tag atomic/Uint32 :doc "state contains the atomic process state.\n\nThis consists of the processStatus fields,\nwhich indicate if the process is done/released.\n"} state
+
+
+    ^{:line 54 :tag sync/RWMutex :doc "Used only when handle is nil\n"} sigMu ; avoid race between wait and signal
+
+
+
+
+
+
+
+    ^{:line 62 :tag (* processHandle) :doc "handle, if not nil, is a pointer to a struct\nthat holds the OS-specific process handle.\nThis pointer is set when Process is created,\nand never changed afterward.\nThis is a pointer to a separate memory allocation\nso that we can use runtime.AddCleanup.\n"} handle
+
+
+    ^{:line 65 :tag runtime/Cleanup :doc "cleanup is used to clean up the process handle.\n"} cleanup))
+
+
+
+
+
+
+
+(go/type processHandle "processHandle holds an operating system handle to a process.\nThis is only used on systems that support that concept,\ncurrently Linux and Windows.\nThis maintains a reference count to the handle,\nand closes the handle when the reference drops to zero.\n" (struct
+
+
+
+
+
+    ^{:line 79 :tag uintptr :doc "The actual handle. This field should not be used directly.\nInstead, use the acquire and release methods.\n\nOn Windows this is a handle returned by OpenProcess.\nOn Linux this is a pidfd.\n"} handle
+
+
+
+    ^{:line 83 :tag atomic/Int32 :doc "Number of active references. When this drops to zero\nthe handle is closed.\n"} refs))
+
+
+
+
+
+
+^{:go/end 103} (go/method acquire "acquire adds a reference and returns the handle.\nThe bool result reports whether acquire succeeded;\nit fails if the handle is already closed.\nEvery successful call to acquire should be paired with a call to release.\n" [^{:tag (* processHandle)} ph] :results [uintptr bool]
+  (while true
+    (let [refs (.Load (.-refs ph))]
+      (when (< refs 0)
+        (panic "internal error: negative process handle reference count"))
+
+      (when (== refs 0)
+        (return 0 false))
+
+      (when (.CompareAndSwap (.-refs ph) refs (+ refs 1))
+        (return (.-handle ph) true)))))
+
+
+
+
+
+^{:go/end 119} (go/method release "release releases a reference to the handle.\n" [^{:tag (* processHandle)} ph]
+  (while true
+    (let [refs (.Load (.-refs ph))]
+      (when (<= refs 0)
+        (panic "internal error: too many releases of process handle"))
+
+      (when (.CompareAndSwap (.-refs ph) refs (- refs 1))
+        (when (== refs 1)
+          (.closeHandle ph))
+
+        (return)))))
+
+
+
+
+
+^{:go/end 127} (go/func newPIDProcess "newPIDProcess returns a [Process] for the given PID.\n" ^{:tag (* Process)} [^int pid]
+  (let [p (addr ^{:go/breaks [2]} (lit Process
+          :Pid pid))]
+
+    ^{:line 126} p))
+
+
+
+^{:go/end 147} (go/func newHandleProcess "newHandleProcess returns a [Process] with the given PID and handle.\n" ^{:tag (* Process)} [^int pid ^uintptr handle]
+  (let [ph (addr ^{:go/breaks [2]} (lit processHandle
+          :handle handle))]
+
+
+    ;; Start the reference count as 1,
+    ;; meaning the reference from the returned Process.
+    (.Store (.-refs ph) 1)
+
+    (let [p (addr ^{:go/breaks [2 4]} (lit Process
+            :Pid pid
+            :handle ph))]
+
+
+      (set! (.-cleanup p) (^{:inst [Process (* processHandle)]} runtime/AddCleanup p (method-expr (* processHandle) release) ph))
+
+      ^{:line 146} p)))
+
+
+
+
+
+^{:go/end 158} (go/func newDoneProcess "newDoneProcess returns a [Process] for the given PID\nthat is already marked as done. This is used on Unix systems\nif the process is known to not exist.\n" ^{:tag (* Process)} [^int pid]
+  (let [p (addr ^{:go/breaks [2]} (lit Process
+          :Pid pid))]
+
+    (.Store (.-state p) (conv uint32 statusDone)) ; No persistent reference, as there is no handle.
+    ^{:line 157} p))
+
+
+
+
+^{:go/end 185} (go/method handleTransientAcquire "handleTransientAcquire returns the process handle or,\nif the process is not ready, the current status.\n" [^{:tag (* Process)} p] :results [uintptr processStatus]
+  (when (== (.-handle p) nil)
+    (panic "handleTransientAcquire called in invalid mode"))
+
+
+  (let [status (conv processStatus (.Load (.-state p)))]
+    (when (!= status statusOK)
+      (return 0 status))
+
+    (let [(values h ok) (.acquire (.-handle p))]
+      (when ok
+        (return h statusOK))
+
+
+      ;; This case means that the handle has been closed.
+      ;; We always set the status to non-zero before closing the handle.
+      ;; If we get here the status must have been set non-zero after
+      ;; we just checked it above.
+      (set! status (conv processStatus (.Load (.-state p))))
+      (when (== status statusOK)
+        (panic "inconsistent process status"))
+
+      (return 0 status))))
+
+
+
+^{:go/end 193} (go/method handleTransientRelease "handleTransientRelease releases a handle returned by handleTransientAcquire.\n" [^{:tag (* Process)} p]
+  (when (== (.-handle p) nil)
+    (panic "handleTransientRelease called in invalid mode"))
+
+  (.release (.-handle p)))
+
+
+
+^{:go/end 202} (go/method pidStatus "pidStatus returns the current process status.\n" ^processStatus [^{:tag (* Process)} p]
+  (when (!= (.-handle p) nil)
+    (panic "pidStatus called in invalid mode"))
+
+
+  (conv processStatus (.Load (.-state p))))
+
+
+
+
+(go/type ProcAttr "ProcAttr holds the attributes that will be applied to a new process\nstarted by StartProcess.\n" (struct
+
+
+    ^{:line 209 :tag string :doc "If Dir is non-empty, the child changes into the directory before\ncreating the process.\n"} Dir
+
+
+
+    ^{:line 213 :tag (slice string) :doc "If Env is non-nil, it gives the environment variables for the\nnew process in the form returned by Environ.\nIf it is nil, the result of Environ will be used.\n"} Env
+
+
+
+
+
+
+
+
+    ^{:line 222 :tag (slice (* File)) :doc "Files specifies the open files inherited by the new process. The\nfirst three entries correspond to standard input, standard output, and\nstandard error. An implementation may support additional entries,\ndepending on the underlying operating system. A nil entry corresponds\nto that file being closed when the process starts.\nOn Unix systems, StartProcess will change these File values\nto blocking mode, which means that SetDeadline will stop working\nand calling Close will not interrupt a Read or Write.\n"} Files
+
+
+
+
+
+    ^{:line 228 :tag (* syscall/SysProcAttr) :doc "Operating system-specific process creation attributes.\nNote that setting this field means that your program\nmay not execute properly or even compile on some\noperating systems.\n"} Sys))
+
+
+
+
+
+(go/type Signal "A Signal represents an operating system signal.\nThe usual underlying implementation is operating system-dependent:\non Unix it is syscall.Signal.\n" (interface
+    (String ^string [])
+    (Signal []))) ; to distinguish from other Stringers
+
+
+
+^{:go/end 240} (go/func Getpid "Getpid returns the process id of the caller.\n" ^int [] (syscall/Getpid))
+
+
+^{:go/end 243} (go/func Getppid "Getppid returns the process id of the caller's parent.\n" ^int [] (syscall/Getppid))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 256} (go/func FindProcess "FindProcess looks for a running process by its pid.\n\nThe [Process] it returns can be used to obtain information\nabout the underlying operating system process.\n\nOn Unix systems, FindProcess always succeeds and returns a Process\nfor the given pid, regardless of whether the process exists. To test whether\nthe process actually exists, see whether p.Signal(syscall.Signal(0)) reports\nan error.\n" [^int pid] :results [(* Process) error]
+  (findProcess pid))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 274} (go/func StartProcess "StartProcess starts a new process with the program, arguments and attributes\nspecified by name, argv and attr. The argv slice will become [os.Args] in the\nnew process, so it normally starts with the program name.\n\nIf the calling goroutine has locked the operating system thread\nwith [runtime.LockOSThread] and modified any inheritable OS-level\nthread state (for example, Linux or Plan 9 name spaces), the new\nprocess will inherit the caller's thread state.\n\nStartProcess is a low-level interface. The [os/exec] package provides\nhigher-level interfaces.\n\nIf there is an error, it will be of type [*PathError].\n" [^string name ^{:tag (slice string)} argv ^{:tag (* ProcAttr)} attr] :results [(* Process) error]
+  (testlog/Open name)
+  (startProcess name argv attr))
+
+
+
+
+
+^{:go/end 299} (go/method Release "Release releases any resources associated with the [Process] p,\nrendering it unusable in the future.\nRelease only needs to be called if [Process.Wait] is not.\n" ^error [^{:tag (* Process)} p]
+  ;; Unfortunately, for historical reasons, on systems other
+  ;; than Windows, Release sets the Pid field to -1.
+  ;; This causes the race detector to report a problem
+  ;; on concurrent calls to Release, but we can't change it now.
+  (when (!= runtime/GOOS "windows")
+    (set! (.-Pid p) -1))
+
+
+  ^{:go/breaks [[3 298]]} (let [oldStatus (.doRelease p statusReleased)]
+
+    ;; For backward compatibility, on Windows only,
+    ;; we return EINVAL on a second call to Release.
+    (when (== runtime/GOOS "windows")
+      (when (== oldStatus statusReleased)
+        (return syscall/EINVAL)))
+
+
+
+    nil))
+
+
+
+
+
+^{:go/end 332} (go/method doRelease "doRelease releases a [Process], setting the status to newStatus.\nIf the previous status is not statusOK, this does nothing.\nIt returns the previous status.\n" ^processStatus [^{:tag (* Process)} p ^processStatus newStatus]
+  (while true
+    (let [state (.Load (.-state p))
+        ^{:line 307} oldStatus (conv processStatus state)]
+      (when (!= oldStatus statusOK)
+        (return oldStatus))
+
+
+      (when (not (.CompareAndSwap (.-state p) state (conv uint32 newStatus)))
+        (continue))
+
+
+      ;; We have successfully released the Process.
+      ;; If it has a handle, release the reference we
+      ;; created in newHandleProcess.
+      (when (!= (.-handle p) nil)
+        ;; No need for more cleanup.
+        ;; We must stop the cleanup before calling release;
+        ;; otherwise the cleanup might run concurrently
+        ;; with the release, which would cause the reference
+        ;; counts to be invalid, causing a panic.
+        (.Stop (.-cleanup p))
+
+        (.release (.-handle p)))
+
+
+      (return statusOK))))
+
+
+
+
+
+
+^{:go/end 339} (go/method Kill "Kill causes the [Process] to exit immediately. Kill does not wait until\nthe Process has actually exited. This only kills the Process itself,\nnot any other processes it may have started.\n" ^error [^{:tag (* Process)} p]
+  (.kill p))
+
+
+
+
+
+
+
+^{:go/end 348} (go/method Wait "Wait waits for the [Process] to exit, and then returns a\nProcessState describing its status and an error, if any.\nWait releases any resources associated with the Process.\nOn most operating systems, the Process must be a child\nof the current process or an error will be returned.\n" [^{:tag (* Process)} p] :results [(* ProcessState) error]
+  (.wait p))
+
+
+
+
+^{:go/end 354} (go/method Signal "Signal sends a signal to the [Process].\nSending [Interrupt] on Windows is not implemented.\n" ^error [^{:tag (* Process)} p ^Signal sig]
+  (.signal p sig))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 366} (go/method WithHandle "WithHandle calls a supplied function f with a valid process handle\nas an argument. The handle is guaranteed to refer to process p\nuntil f returns, even if p terminates. This function cannot be used\nafter [Process.Release] or [Process.Wait].\n\nIf process handles are not supported or a handle is not available,\nit returns [ErrNoHandle]. Currently, process handles are supported\non Linux 5.4 or later (pidfd) and Windows.\n" ^error [^{:tag (* Process)} p ^{:tag (func [^uintptr handle])} f]
+  (.withHandle p f))
+
+
+
+^{:go/end 371} (go/method UserTime "UserTime returns the user CPU time of the exited process and its children.\n" ^time/Duration [^{:tag (* ProcessState)} p]
+  (.userTime p))
+
+
+
+^{:go/end 376} (go/method SystemTime "SystemTime returns the system CPU time of the exited process and its children.\n" ^time/Duration [^{:tag (* ProcessState)} p]
+  (.systemTime p))
+
+
+
+
+
+^{:go/end 383} (go/method Exited "Exited reports whether the program has exited.\nOn Unix systems this reports true if the program exited due to calling exit,\nbut false if the program terminated due to a signal.\n" ^bool [^{:tag (* ProcessState)} p]
+  (.exited p))
+
+
+
+
+^{:go/end 389} (go/method Success "Success reports whether the program exited successfully,\nsuch as with exit status 0 on Unix.\n" ^bool [^{:tag (* ProcessState)} p]
+  (.success p))
+
+
+
+
+
+^{:go/end 396} (go/method Sys "Sys returns system-dependent exit information about\nthe process. Convert it to the appropriate underlying\ntype, such as [syscall.WaitStatus] on Unix, to access its contents.\n" ^any [^{:tag (* ProcessState)} p]
+  (.sys p))
+
+
+
+
+
+
+
+^{:go/end 405} (go/method SysUsage "SysUsage returns system-dependent resource usage information about\nthe exited process. Convert it to the appropriate underlying\ntype, such as [*syscall.Rusage] on Unix, to access its contents.\n(On Unix, *syscall.Rusage matches struct rusage as defined in the\ngetrusage(2) manual page.)\n" ^any [^{:tag (* ProcessState)} p]
+  (.sysUsage p))

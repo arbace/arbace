@@ -1,0 +1,238 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "dnsclient.go" :imports [
+
+
+    ^{:line 8} [cmp "cmp"]
+    ^{:line 9} [bytealg "internal/bytealg"]
+    ^{:line 10} [strconv "internal/strconv"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [_ "unsafe"] ; for go:linkname
+
+    ^{:line 14} [dnsmessage "golang.org/x/net/dns/dnsmessage"]])
+
+
+
+
+
+(go/func ^:extern ^{:go/linkname "runtime_rand runtime.rand"} runtime_rand "provided by runtime\n" ^uint64 [])
+
+^{:go/end 24} (go/func randInt ^int []
+  (conv int (>> (conv uint (runtime_rand)) 1))) ; clear sign bit
+
+
+^{:go/end 28} (go/func randIntn ^int [^int n]
+  (% (randInt) n))
+
+
+
+
+
+^{:go/end 54} (go/func reverseaddr "reverseaddr returns the in-addr.arpa. or ip6.arpa. hostname of the IP\naddress addr suitable for rDNS (PTR) record lookup or an error if it fails\nto parse the IP address.\n" [^string addr] :results [^string arpa ^error err]
+  (let [ip (ParseIP addr)]
+    (when (== ip nil)
+      (return "" (addr (lit DNSError :Err "unrecognized address" :Name addr))))
+
+    (when (!= (.To4 ip) nil)
+      (return (+ (strconv/Itoa (conv int (aget ip 15))) "." (strconv/Itoa (conv int (aget ip 14))) "." (strconv/Itoa (conv int (aget ip 13))) "." (strconv/Itoa (conv int (aget ip 12))) ".in-addr.arpa.") nil))
+
+    ;; Must be IPv6
+    (let [buf (make (slice byte) 0 (+ (* (len ip) 4) (len "ip6.arpa.")))]
+      ;; Add it, in reverse, to the buffer
+      (for [i (- (len ip) 1)] (>= i 0) (dec! i)
+        (let [v (aget ip i)]
+          (set! buf ^{:go/breaks [3 5]} (append buf (aget hexDigit (bit-and v 0xF))
+              \.
+              (aget hexDigit (>> v 4))
+              \.))))
+
+      ;; Append "ip6.arpa." and return (buf already has the final .)
+      (set! buf (append buf (spread "ip6.arpa.")))
+      (return (conv string buf) nil))))
+
+
+^{:go/breaks [[5 73]] :go/end 74} (go/func equalASCIIName ^bool [^dnsmessage/Name x ^dnsmessage/Name y]
+  (when (!= (.-Length x) (.-Length y))
+    (return false))
+
+  (for [i 0] (< i (conv int (.-Length x))) (inc! i)
+    (let [a (aget (.-Data x) i)
+        ^{:line 62} b (aget (.-Data y) i)]
+      (when (and (<= \A a) (<= a \Z))
+        (set! a + 0x20))
+
+      (when (and (<= \A b) (<= b \Z))
+        (set! b + 0x20))
+
+      (when (!= a b)
+        (return false))))
+
+
+  true)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 146} (go/func ^{:go/linkname "isDomainName"} isDomainName "isDomainName checks if a string is a presentation-format domain name\n(currently restricted to hostname-compatible \"preferred name\" LDH labels and\nSRV-like \"underscore labels\"; see golang.org/issue/12421).\n\nisDomainName should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/sagernet/sing\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^bool [^string s]
+  ;; The root domain name is valid. See golang.org/issue/45715.
+  (when (== s ".")
+    (return true))
+
+
+  ;; See RFC 1035, RFC 3696.
+  ;; Presentation format has dots before every label except the first, and the
+  ;; terminal empty label is optional here because we assume fully-qualified
+  ;; (absolute) input. We must therefore reserve space for the first and last
+  ;; labels' length octets in wire format, where they are necessary and the
+  ;; maximum total length is 255.
+  ;; So our _effective_ maximum is 253, but 254 is not rejected if the last
+  ;; character is a dot.
+  (let [l (len s)]
+    (when (or (== l 0) (> l 254) (and (== l 254) (!= (aget s (- l 1)) \.)))
+      (return false))
+
+
+    (let [last (conv byte \.)
+        ^{:line 109} nonNumeric false ; true once we've seen a letter or hyphen
+        ^{:line 110} partlen 0]
+      (for [i 0] (< i (len s)) (inc! i)
+        (let [c (aget s i)]
+          (switch
+            (default
+              (return false))
+            (case [(or (and (<= \a c) (<= c \z)) (and (<= \A c) (<= c \Z)) (== c \_))]
+              (set! nonNumeric true)
+              (inc! partlen))
+            (case [(and (<= \0 c) (<= c \9))]
+              ;; fine
+              (inc! partlen))
+            (case [(== c \-)]
+              ;; Byte before dash cannot be dot.
+              (when (== last \.)
+                (return false))
+
+              (inc! partlen)
+              (set! nonNumeric true))
+            (case [(== c \.)]
+              ;; Byte before dot cannot be dot, dash.
+              (when (or (== last \.) (== last \-))
+                (return false))
+
+              (when (or (> partlen 63) (== partlen 0))
+                (return false))
+
+              (set! partlen 0)))
+
+          (set! last c)))
+
+      (when (or (== last \-) (> partlen 63))
+        (return false))
+
+
+      ^{:line 145} nonNumeric)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 161} (go/func absDomainName "absDomainName returns an absolute domain name which ends with a\ntrailing dot to match pure Go reverse resolver and all other lookup\nroutines.\nSee golang.org/issue/12189.\nBut we don't want to add dots for local names from /etc/hosts.\nIt's hard to tell so we settle on the heuristic that names without dots\n(like \"localhost\" or \"myhost\") do not get trailing dots, but any other\nnames do.\n" ^string [^string s]
+  (when (and (!= (bytealg/IndexByteString s \.) -1) (!= (aget s (- (len s) 1)) \.))
+    (set! s + "."))
+
+  ^{:line 160} s)
+
+
+
+(go/type SRV "An SRV represents a single DNS SRV record.\n" (struct
+    ^{:line 165 :tag string} Target
+    ^{:line 166 :tag uint16} Port
+    ^{:line 167 :tag uint16} Priority
+    ^{:line 168 :tag uint16} Weight))
+
+
+
+(go/type byPriorityWeight "byPriorityWeight sorts SRV records by ascending priority and weight.\n" (slice (* SRV)))
+
+
+
+^{:go/end 196} (go/method shuffleByWeight "shuffleByWeight shuffles SRV records by weight using the algorithm\ndescribed in RFC 2782.\n" [^byPriorityWeight addrs]
+  (let [sum 0]
+    (range [_ addr addrs]
+      (set! sum + (conv int (.-Weight addr))))
+
+    (while (and (> sum 0) (> (len addrs) 1))
+      (let [s 0
+          ^{:line 183} n (randIntn sum)]
+        (range [i addrs]
+          (set! s + (conv int (.-Weight (aget addrs i))))
+          (when (> s n)
+            (when (> i 0)
+              (set! (values (aget addrs 0) (aget addrs i)) (values (aget addrs i) (aget addrs 0))))
+
+            (break)))
+
+
+        (set! sum - (conv int (.-Weight (aget addrs 0))))
+        (set! addrs (subslice addrs 1))))))
+
+
+
+
+^{:go/end 214} (go/method sort "sort reorders SRV records as specified in RFC 2782.\n" [^byPriorityWeight addrs]
+  (^{:inst [byPriorityWeight (* SRV)]} slices/SortFunc addrs ^{:go/end 205} (fn ^int [^{:tag (* SRV)} a ^{:tag (* SRV)} b]
+      (when [r (^{:inst [uint16]} cmp/Compare (.-Priority a) (.-Priority b))] (!= r 0)
+        (return r))
+
+      (^{:inst [uint16]} cmp/Compare (.-Weight a) (.-Weight b))))
+
+  (let [i 0]
+    (for [j 1] (< j (len addrs)) (inc! j)
+      (when (!= (.-Priority (aget addrs i)) (.-Priority (aget addrs j)))
+        (.shuffleByWeight (subslice addrs i j))
+        (set! i j)))
+
+
+    (.shuffleByWeight (subslice addrs i))))
+
+
+
+(go/type MX "An MX represents a single DNS MX record.\n" (struct
+    ^{:line 218 :tag string} Host
+    ^{:line 219 :tag uint16} Pref))
+
+
+
+(go/type byPref "byPref sorts MX records by preference\n" (slice (* MX)))
+
+
+^{:go/end 234} (go/method sort "sort reorders MX records as specified in RFC 5321.\n" [^byPref s]
+  (range [i s]
+    (let [j (randIntn (+ i 1))]
+      (set! (values (aget s i) (aget s j)) (values (aget s j) (aget s i)))))
+
+  (^{:inst [byPref (* MX)]} slices/SortFunc s ^{:go/end 233} (fn ^int [^{:tag (* MX)} a ^{:tag (* MX)} b]
+      (^{:inst [uint16]} cmp/Compare (.-Pref a) (.-Pref b)))))
+
+
+
+
+(go/type NS "An NS represents a single DNS NS record.\n" (struct
+    ^{:line 238 :tag string} Host))

@@ -1,0 +1,174 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.ecdsa) (go/file "hmacdrbg.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fips140 "crypto/internal/fips140"]
+    ^{:line 10} [hmac "crypto/internal/fips140/hmac"]
+    ^{:line 11} [hash "hash"]])
+
+
+
+
+
+
+
+
+
+
+(go/type hmacDRBG "hmacDRBG is an SP 800-90A Rev. 1 HMAC_DRBG.\n\nIt is only intended to be used to generate ECDSA nonces. Since it will be\ninstantiated ex-novo for each signature, its Generate function will only be\ninvoked once or twice (only for P-256, with probability 2⁻³²).\n\nPer Table 2, it has a reseed interval of 2^48 requests, and a maximum request\nsize of 2^19 bits (2^16 bytes, 64 KiB).\n" (struct
+    ^{:line 23 :tag (func [^{:tag (slice byte)} key] [(* hmac/HMAC)])} newHMAC
+
+    ^{:line 25 :tag (* hmac/HMAC)} hK
+    ^{:line 26 :tag (slice byte)} V
+
+    ^{:line 28 :tag uint64} reseedCounter))
+
+
+(go/const
+  ^{:line 32} [^{:val 281474976710656} reseedInterval (<< 1 48)]
+  ^{:line 33} [^{:val 65536} maxRequestSize (/ (<< 1 19) 8)])
+
+
+
+(go/type plainPersonalizationString "plainPersonalizationString is used by HMAC_DRBG as-is.\n" (slice byte))
+
+^{:go/end 39} (go/method isPersonalizationString [plainPersonalizationString])
+
+
+
+
+(go/type blockAlignedPersonalizationString "Each entry in blockAlignedPersonalizationString is written to the HMAC at a\nblock boundary, as specified in draft-irtf-cfrg-det-sigs-with-noise-04,\nSection 4.\n" (slice (slice byte)))
+
+^{:go/end 46} (go/method isPersonalizationString [blockAlignedPersonalizationString])
+
+(go/type personalizationString (interface
+    (isPersonalizationString [])))
+
+
+^{:go/end 118} (go/func newDRBG :type-params [^hash/Hash H] ^{:tag (* hmacDRBG)} [^{:tag (func [] [H])} hash ^{:tag (slice byte)} entropy ^:go/grouped ^{:tag (slice byte)} nonce ^personalizationString s]
+  ;; HMAC_DRBG_Instantiate_algorithm, per Section 10.1.2.3.
+  (fips140/RecordApproved)
+
+  (let [d (addr ^{:go/breaks [2]} (lit hmacDRBG
+          :newHMAC ^{:go/end 59} (fn ^{:tag (* hmac/HMAC)} [^{:tag (slice byte)} key]
+            (^{:inst [H]} hmac/New hash key))))
+
+
+      ^{:line 61} size (.Size (hash))
+
+      ;; K = 0x00 0x00 0x00 ... 0x00
+      ^{:line 64} K (make (slice byte) size)]
+
+    ;; V = 0x01 0x01 0x01 ... 0x01
+    (set! (.-V d) (bytes/Repeat (lit (slice byte) 0x01) size))
+
+    ;; HMAC_DRBG_Update, per Section 10.1.2.2.
+    ;; K = HMAC (K, V || 0x00 || provided_data)
+    (let [h (^{:inst [H]} hmac/New hash K)]
+      (.Write h (.-V d))
+      (.Write h (lit (slice byte) 0x00))
+      (.Write h entropy)
+      (.Write h nonce)
+      (type-switch [s s]
+        (case [plainPersonalizationString]
+          (.Write h s))
+        (case [blockAlignedPersonalizationString]
+          (let [l (+ (len (.-V d)) 1 (len entropy) (len nonce))]
+            (range [_ b s]
+              (pad000 h l)
+              (.Write h b)
+              (set! l (len b))))))
+
+
+      (set! K (.Sum h (subslice K _ 0)))
+      ;; V = HMAC (K, V)
+      (set! h (^{:inst [H]} hmac/New hash K))
+      (.Write h (.-V d))
+      (set! (.-V d) (.Sum h (subslice (.-V d) _ 0)))
+      ;; K = HMAC (K, V || 0x01 || provided_data).
+      (.Reset h)
+      (.Write h (.-V d))
+      (.Write h (lit (slice byte) 0x01))
+      (.Write h entropy)
+      (.Write h nonce)
+      (type-switch [s s]
+        (case [plainPersonalizationString]
+          (.Write h s))
+        (case [blockAlignedPersonalizationString]
+          (let [l (+ (len (.-V d)) 1 (len entropy) (len nonce))]
+            (range [_ b s]
+              (pad000 h l)
+              (.Write h b)
+              (set! l (len b))))))
+
+
+      (set! K (.Sum h (subslice K _ 0)))
+      ;; V = HMAC (K, V)
+      (set! h (^{:inst [H]} hmac/New hash K))
+      (.Write h (.-V d))
+      (set! (.-V d) (.Sum h (subslice (.-V d) _ 0)))
+
+      (set! (.-hK d) h)
+      (set! (.-reseedCounter d) 1)
+      ^{:line 117} d)))
+
+
+
+
+
+
+
+^{:go/end 127} (go/func TestingOnlyNewDRBG "TestingOnlyNewDRBG creates an SP 800-90A Rev. 1 HMAC_DRBG with a plain\npersonalization string.\n\nThis should only be used for ACVP testing. hmacDRBG is not intended to be\nused directly.\n" :type-params [^hash/Hash H] ^{:tag (* hmacDRBG)} [^{:tag (func [] [H])} hash ^{:tag (slice byte)} entropy ^:go/grouped ^{:tag (slice byte)} nonce ^{:go/grouped false :tag (slice byte)} s]
+  (^{:inst [H]} newDRBG hash entropy nonce (conv plainPersonalizationString s)))
+
+
+^{:go/end 134} (go/func pad000 [^{:tag (* hmac/HMAC)} h ^int writtenSoFar]
+  (let [blockSize (.BlockSize h)]
+    (when [rem (% writtenSoFar blockSize)] (!= rem 0)
+      (.Write h (make (slice byte) (- blockSize rem))))))
+
+
+
+
+^{:go/end 175} (go/method Generate "Generate produces at most maxRequestSize bytes of random data in out.\n" [^{:tag (* hmacDRBG)} d ^{:tag (slice byte)} out]
+  ;; HMAC_DRBG_Generate_algorithm, per Section 10.1.2.5.
+  (fips140/RecordApproved)
+
+  (when (> (len out) maxRequestSize)
+    (panic "ecdsa: internal error: request size exceeds maximum"))
+
+
+  (when (> (.-reseedCounter d) reseedInterval)
+    (panic "ecdsa: reseed interval exceeded"))
+
+
+  (let [tlen 0]
+    (while (< tlen (len out))
+      ;; V = HMAC_K(V)
+      ;; T = T || V
+      (.Reset (.-hK d))
+      (.Write (.-hK d) (.-V d))
+      (set! (.-V d) (.Sum (.-hK d) (subslice (.-V d) _ 0)))
+      (set! tlen + (copy (subslice out tlen) (.-V d))))
+
+
+    ;; Note that if this function shows up on ECDSA-level profiles, this can be
+    ;; optimized in the common case by deferring the rest to the next Generate
+    ;; call, which will never come in nearly all cases.
+
+    ;; HMAC_DRBG_Update, per Section 10.1.2.2, without provided_data.
+    ;; K = HMAC (K, V || 0x00)
+    (.Reset (.-hK d))
+    (.Write (.-hK d) (.-V d))
+    (.Write (.-hK d) (lit (slice byte) 0x00))
+    (let [K (.Sum (.-hK d) nil)]
+      ;; V = HMAC (K, V)
+      (set! (.-hK d) ((.-newHMAC d) K))
+      (.Write (.-hK d) (.-V d))
+      (set! (.-V d) (.Sum (.-hK d) (subslice (.-V d) _ 0)))
+
+      (inc! (.-reseedCounter d)))))

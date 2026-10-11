@@ -1,0 +1,237 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.text.template) (go/file "template.go" :imports [
+
+
+    ^{:line 8} [maps "maps"]
+    ^{:line 9} [reflect "reflect"]
+    ^{:line 10} [sync "sync"]
+    ^{:line 11} [parse "text/template/parse"]])
+
+
+
+(go/type common "common holds the information shared by related templates.\n" (struct
+    ^{:line 16 :tag (map string (* Template))} tmpl ; Map from name to defined templates.
+    ^{:line 17 :tag sync/RWMutex} muTmpl ; protects tmpl
+    ^{:line 18 :tag option} option
+
+
+
+    ^{:line 22 :tag sync/RWMutex :doc "We use two maps, one for parsing and one for execution.\nThis separation makes the API cleaner since it doesn't\nexpose reflection to the client.\n"} muFuncs ; protects parseFuncs and execFuncs
+    ^{:line 23 :tag FuncMap} parseFuncs
+    ^{:line 24 :tag (map string reflect/Value)} execFuncs))
+
+
+
+
+
+(go/type Template "Template is the representation of a parsed template. The *parse.Tree\nfield is exported only for use by [html/template] and should be treated\nas unexported by all other clients.\n" (struct
+    ^{:line 31 :tag string} name
+    (* parse/Tree)
+    (* common)
+    ^{:line 34 :tag string} leftDelim
+    ^{:line 35 :tag string} rightDelim))
+
+
+
+^{:go/end 45} (go/func New "New allocates a new, undefined template with the given name.\n" ^{:tag (* Template)} [^string name]
+  (let [t (addr ^{:go/breaks [2]} (lit Template
+          :name name))]
+
+    (.init t)
+    ^{:line 44} t))
+
+
+
+^{:go/end 50} (go/method Name "Name returns the name of the template.\n" ^string [^{:tag (* Template)} t]
+  (.-name t))
+
+
+
+
+
+
+
+
+
+^{:go/end 68} (go/method New "New allocates a new, undefined template associated with the given one and with the same\ndelimiters. The association, which is transitive, allows one template to\ninvoke another with a {{template}} action.\n\nBecause associated templates share underlying data, template construction\ncannot be done safely in parallel. Once the templates are constructed, they\ncan be executed in parallel.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^string name]
+  (.init t)
+  (let [nt (addr ^{:go/breaks [2 4 6 8]} (lit Template
+          :name name
+          :common (.-common t)
+          :leftDelim (.-leftDelim t)
+          :rightDelim (.-rightDelim t)))]
+
+    ^{:line 67} nt))
+
+
+
+^{:go/end 79} (go/method init "init guarantees that t has a valid common structure.\n" [^{:tag (* Template)} t]
+  (when (== (.-common t) nil)
+    (let [c (new common)]
+      (set! (.-tmpl c) (make (map string (* Template))))
+      (set! (.-parseFuncs c) (make FuncMap))
+      (set! (.-execFuncs c) (make (map string reflect/Value)))
+      (set! (.-common t) c))))
+
+
+
+
+
+
+
+
+
+^{:go/end 110} (go/method Clone "Clone returns a duplicate of the template, including all associated\ntemplates. The actual representation is not copied, but the name space of\nassociated templates is, so further calls to [Template.Parse] in the copy will add\ntemplates to the copy but not to the original. Clone can be used to prepare\ncommon templates and use them with variant definitions for other templates\nby adding the variants after the clone is made.\n" [^{:tag (* Template)} t] :results [(* Template) error]
+  (let [nt (.copy t nil)]
+    (.init nt)
+    (when (== (.-common t) nil)
+      (return nt nil))
+
+    (set! ^{:go/via [common]} (.-option nt) ^{:go/via [common]} (.-option t))
+    (.RLock ^{:go/via [common]} (.-muTmpl t))
+    (defer (.RUnlock ^{:go/via [common]} (.-muTmpl t)))
+    (range [k v ^{:go/via [common]} (.-tmpl t)]
+      (when (== k (.-name t))
+        (aset ^{:go/via [common]} (.-tmpl nt) (.-name t) nt)
+        (continue))
+
+      ;; The associated templates share nt's common structure.
+      (let [tmpl (.copy v (.-common nt))]
+        (aset ^{:go/via [common]} (.-tmpl nt) k tmpl)))
+
+    (.RLock ^{:go/via [common]} (.-muFuncs t))
+    (defer (.RUnlock ^{:go/via [common]} (.-muFuncs t)))
+    (^{:inst [FuncMap FuncMap string any]} maps/Copy ^{:go/via [common]} (.-parseFuncs nt) ^{:go/via [common]} (.-parseFuncs t))
+    (^{:inst [(map string reflect/Value) (map string reflect/Value) string reflect/Value]} maps/Copy ^{:go/via [common]} (.-execFuncs nt) ^{:go/via [common]} (.-execFuncs t))
+    (return nt nil)))
+
+
+
+^{:go/end 121} (go/method copy "copy returns a shallow copy of t, with common set to the argument.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^{:tag (* common)} c]
+  (addr ^{:go/breaks [2 4 6 8 10]} (lit Template
+      :name (.-name t)
+      :Tree (.-Tree t)
+      :common c
+      :leftDelim (.-leftDelim t)
+      :rightDelim (.-rightDelim t))))
+
+
+
+
+
+
+
+^{:go/end 140} (go/method AddParseTree "AddParseTree associates the argument parse tree with the template t, giving\nit the specified name. If the template has not been defined, this tree becomes\nits definition. If it has been defined and already has that name, the existing\ndefinition is replaced; otherwise a new template is created, defined, and returned.\n" [^{:tag (* Template)} t ^string name ^{:tag (* parse/Tree)} tree] :results [(* Template) error]
+  (.init t)
+  (.Lock ^{:go/via [common]} (.-muTmpl t))
+  (defer (.Unlock ^{:go/via [common]} (.-muTmpl t)))
+  (let [nt t]
+    (when (!= name (.-name t))
+      (set! nt (.New t name)))
+
+    ;; Even if nt == t, we need to install it in the common.tmpl map.
+    (when (or (.associate t nt tree) (== (.-Tree nt) nil))
+      (set! (.-Tree nt) tree))
+
+    (return nt nil)))
+
+
+
+^{:go/end 155} (go/method Templates "Templates returns a slice of defined templates associated with t.\n" ^{:tag (slice (* Template))} [^{:tag (* Template)} t]
+  (when (== (.-common t) nil)
+    (return nil))
+
+  ;; Return a slice so we don't expose the map.
+  (.RLock ^{:go/via [common]} (.-muTmpl t))
+  (defer (.RUnlock ^{:go/via [common]} (.-muTmpl t)))
+  (let [m (make (slice (* Template)) 0 (len ^{:go/via [common]} (.-tmpl t)))]
+    (range [_ v ^{:go/via [common]} (.-tmpl t)]
+      (set! m (append m v)))
+
+    ^{:line 154} m))
+
+
+
+
+
+
+
+^{:go/end 167} (go/method Delims "Delims sets the action delimiters to the specified strings, to be used in\nsubsequent calls to [Template.Parse], [Template.ParseFiles], or [Template.ParseGlob]. Nested template\ndefinitions will inherit the settings. An empty delimiter stands for the\ncorresponding default: {{ or }}.\nThe return value is the template, so calls can be chained.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^string left ^string right]
+  (.init t)
+  (set! (.-leftDelim t) left)
+  (set! (.-rightDelim t) right)
+  ^{:line 166} t)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 184} (go/method Funcs "Funcs adds the elements of the argument map to the template's function map.\nAny function used in the template must be added before the template is\nparsed. Funcs may be called more than once, including after parsing (for\nexample, after [Template.Clone]), to replace a function of the same name;\nthe replacement is used when the template is executed.\nIt panics if a value in the map is not a function with appropriate return\ntype or if the name cannot be used syntactically as a function in a template.\nThe return value is the template, so calls can be chained.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^FuncMap funcMap]
+  (.init t)
+  (.Lock ^{:go/via [common]} (.-muFuncs t))
+  (defer (.Unlock ^{:go/via [common]} (.-muFuncs t)))
+  (addValueFuncs ^{:go/via [common]} (.-execFuncs t) funcMap)
+  (addFuncs ^{:go/via [common]} (.-parseFuncs t) funcMap)
+  ^{:line 183} t)
+
+
+
+
+^{:go/end 195} (go/method Lookup "Lookup returns the template with the given name that is associated with t.\nIt returns nil if there is no such template or the template has no definition.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^string name]
+  (when (== (.-common t) nil)
+    (return nil))
+
+  (.RLock ^{:go/via [common]} (.-muTmpl t))
+  (defer (.RUnlock ^{:go/via [common]} (.-muTmpl t)))
+  (aget ^{:go/via [common]} (.-tmpl t) name))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 222} (go/method Parse "Parse parses text as a template body for t.\nNamed template definitions ({{define ...}} or {{block ...}} statements) in text\ndefine additional templates associated with t and are removed from the\ndefinition of t itself.\n\nTemplates can be redefined in successive calls to Parse.\nA template definition with a body containing only white space and comments\nis considered empty and will not replace an existing template's body.\nThis allows using Parse to add new named template definitions without\noverwriting the main template body.\n" [^{:tag (* Template)} t ^string text] :results [(* Template) error]
+  (.init t)
+  (.RLock ^{:go/via [common]} (.-muFuncs t))
+  (let [(values trees err) (parse/Parse (.-name t) text (.-leftDelim t) (.-rightDelim t) ^{:go/via [common]} (.-parseFuncs t) (builtins))]
+    (.RUnlock ^{:go/via [common]} (.-muFuncs t))
+    (when (!= err nil)
+      (return nil err))
+
+    ;; Add the newly parsed trees, including the one for t, into our common structure.
+    (range [name tree trees]
+      (when [(values _ err) (.AddParseTree t name tree)] (!= err nil)
+        (return nil err)))
+
+
+    (return t nil)))
+
+
+
+
+
+^{:go/breaks [7] :go/end 238} (go/method associate "associate installs the new template into the group of templates associated\nwith t. The two are already known to share the common structure.\nThe boolean return value reports whether to store this tree as t.Tree.\n" ^bool [^{:tag (* Template)} t ^{:tag (* Template)} new ^{:tag (* parse/Tree)} tree]
+  (when (!= (.-common new) (.-common t))
+    (panic "internal error: associate not common"))
+
+  (when [old (aget ^{:go/via [common]} (.-tmpl t) (.-name new))] (and (!= old nil) (parse/IsEmptyTree (.-Root tree)) (!= (.-Tree old) nil))
+    ;; If a template by that name exists,
+    ;; don't replace it with an empty template.
+    (return false))
+
+  (aset ^{:go/via [common]} (.-tmpl t) (.-name new) new)
+  true)

@@ -1,0 +1,162 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.jsontext) (go/file "pools.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [bits "math/bits"]
+    ^{:line 13} [sync "sync"]])
+
+
+;; TODO(https://go.dev/issue/47657): Use sync.PoolOf.
+
+(go/var
+
+
+
+
+  ^{:line 23} [^{:doc "This owns the internal buffer since there is no io.Writer to output to.\nSince the buffer can get arbitrarily large in normal usage,\nthere is statistical tracking logic to determine whether to recycle\nthe internal buffer or not based on a history of utilization.\n"} bufferedEncoderPool (addr (lit sync/Pool :New ^{:go/end 23} (fn ^any [] (new Encoder))))]
+
+
+
+
+
+  ^{:line 29} [^{:doc "This owns the internal buffer, but it is only used to temporarily store\nbuffered JSON before flushing it to the underlying io.Writer.\nIn a sufficiently efficient streaming mode, we do not expect the buffer\nto grow arbitrarily large. Thus, we avoid recycling large buffers.\n"} streamingEncoderPool (addr (lit sync/Pool :New ^{:go/end 29} (fn ^any [] (new Encoder))))]
+
+
+
+  ^{:line 33} [^{:doc "This does not own the internal buffer since\nit is taken directly from the provided bytes.Buffer.\n"} bytesBufferEncoderPool (addr (lit sync/Pool :New ^{:go/end 33} (fn ^any [] (new Encoder))))])
+
+
+
+
+
+(go/type bufferStatistics "bufferStatistics is statistics to track buffer utilization.\nIt is used to determine whether to recycle a buffer or not\nto avoid https://go.dev/issue/23199.\n" (struct
+    ^{:line 40 :tag int} strikes ; number of times the buffer was under-utilized
+    ^{:line 41 :tag int} prevLen)) ; length of previous buffer
+
+
+^{:go/end 55} (go/func getBufferedEncoder ^{:tag (* Encoder)} [& ^{:tag (slice Options)} opts]
+  (let [e (assert (* Encoder) (.Get bufferedEncoderPool))]
+    (when (== ^{:go/via [encodeBuffer]} (.-Buf (.-s e)) nil)
+      ;; Round up to nearest 2ⁿ to make best use of malloc size classes.
+      ;; See runtime/sizeclasses.go on Go1.15.
+      ;; Logical OR with 63 to ensure 64 as the minimum buffer size.
+      (let [n ^int (<< 1 (bits/Len (conv uint (bit-or (.-prevLen ^{:go/via [encodeBuffer]} (.-bufStats (.-s e))) 63))))]
+        (set! ^{:go/via [encodeBuffer]} (.-Buf (.-s e)) (make (slice byte) 0 n))))
+
+    (.reset (.-s e) (subslice ^{:go/via [encodeBuffer]} (.-Buf (.-s e)) _ 0) nil (spread opts))
+    ^{:line 54} e))
+
+^{:go/end 88} (go/func putBufferedEncoder [^{:tag (* Encoder)} e]
+  (when (> (cap ^{:go/via [encodeBuffer]} (.-availBuffer (.-s e))) (<< 64 10))
+    (set! ^{:go/via [encodeBuffer]} (.-availBuffer (.-s e)) nil)) ; avoid pinning arbitrarily large amounts of memory
+
+
+  ;; Recycle large buffers only if sufficiently utilized.
+  ;; If a buffer is under-utilized enough times sequentially,
+  ;; then it is discarded, ensuring that a single large buffer
+  ;; won't be kept alive by a continuous stream of small usages.
+  ;;
+  ;; The worst case utilization is computed as:
+  ;;	MIN_UTILIZATION_THRESHOLD / (1 + MAX_NUM_STRIKES)
+  ;;
+  ;; For the constants chosen below, this is (25%)/(1+4) ⇒ 5%.
+  ;; This may seem low, but it ensures a lower bound on
+  ;; the absolute worst-case utilization. Without this check,
+  ;; this would be theoretically 0%, which is infinitely worse.
+  ;;
+  ;; See https://go.dev/issue/27735.
+  (switch
+    (case [(<= (cap ^{:go/via [encodeBuffer]} (.-Buf (.-s e))) (<< 4 10))] ; always recycle buffers smaller than 4KiB
+      (set! (.-strikes ^{:go/via [encodeBuffer]} (.-bufStats (.-s e))) 0))
+    (case [(<= (/ (cap ^{:go/via [encodeBuffer]} (.-Buf (.-s e))) 4) (len ^{:go/via [encodeBuffer]} (.-Buf (.-s e))))] ; at least 25% utilization
+      (set! (.-strikes ^{:go/via [encodeBuffer]} (.-bufStats (.-s e))) 0))
+    (case [(< (.-strikes ^{:go/via [encodeBuffer]} (.-bufStats (.-s e))) 4)] ; at most 4 strikes
+      (inc! (.-strikes ^{:go/via [encodeBuffer]} (.-bufStats (.-s e)))))
+    (default ; discard the buffer; too large and too often under-utilized
+      (set! (.-strikes ^{:go/via [encodeBuffer]} (.-bufStats (.-s e))) 0)
+      (set! (.-prevLen ^{:go/via [encodeBuffer]} (.-bufStats (.-s e))) (len ^{:go/via [encodeBuffer]} (.-Buf (.-s e)))) ; heuristic for size to allocate next time
+      (set! ^{:go/via [encodeBuffer]} (.-Buf (.-s e)) nil)))
+
+  (.Put bufferedEncoderPool e))
+
+
+^{:go/end 100} (go/func getStreamingEncoder ^{:tag (* Encoder)} [^io/Writer w & ^{:tag (slice Options)} opts]
+  (if [(values _ ok) (assert (* bytes/Buffer) w)] ok
+    (let [e (assert (* Encoder) (.Get bytesBufferEncoderPool))]
+      (.reset (.-s e) nil w (spread opts)) ; buffer taken from bytes.Buffer
+      (return e))
+
+    (let [e (assert (* Encoder) (.Get streamingEncoderPool))]
+      (.reset (.-s e) (subslice ^{:go/via [encodeBuffer]} (.-Buf (.-s e)) _ 0) w (spread opts)) ; preserve existing buffer
+      (return e))))
+
+
+^{:go/end 115} (go/func putStreamingEncoder [^{:tag (* Encoder)} e]
+  (when (> (cap ^{:go/via [encodeBuffer]} (.-availBuffer (.-s e))) (<< 64 10))
+    (set! ^{:go/via [encodeBuffer]} (.-availBuffer (.-s e)) nil)) ; avoid pinning arbitrarily large amounts of memory
+
+  (if [(values _ ok) (assert (* bytes/Buffer) ^{:go/via [encodeBuffer]} (.-wr (.-s e)))] ok (do
+      (set! (values ^{:go/via [encodeBuffer]} (.-wr (.-s e)) ^{:go/via [encodeBuffer]} (.-Buf (.-s e))) (values nil nil)) ; avoid pinning the provided bytes.Buffer
+      (.Put bytesBufferEncoderPool e))
+    (do
+      (set! ^{:go/via [encodeBuffer]} (.-wr (.-s e)) nil) ; avoid pinning the provided io.Writer
+      (when (> (cap ^{:go/via [encodeBuffer]} (.-Buf (.-s e))) (<< 64 10))
+        (set! ^{:go/via [encodeBuffer]} (.-Buf (.-s e)) nil)) ; avoid pinning arbitrarily large amounts of memory
+
+      (.Put streamingEncoderPool e))))
+
+
+
+(go/var
+
+  ^{:line 119} [^{:doc "This does not own the internal buffer since it is externally provided.\n"} bufferedDecoderPool (addr (lit sync/Pool :New ^{:go/end 119} (fn ^any [] (new Decoder))))]
+
+
+
+
+
+  ^{:line 125} [^{:doc "This owns the internal buffer, but it is only used to temporarily store\nbuffered JSON fetched from the underlying io.Reader.\nIn a sufficiently efficient streaming mode, we do not expect the buffer\nto grow arbitrarily large. Thus, we avoid recycling large buffers.\n"} streamingDecoderPool (addr (lit sync/Pool :New ^{:go/end 125} (fn ^any [] (new Decoder))))]
+
+
+
+  ^{:line 129} [^{:doc "This does not own the internal buffer since\nit is taken directly from the provided bytes.Buffer.\n"} bytesBufferDecoderPool bufferedDecoderPool])
+
+
+^{:go/end 136} (go/func getBufferedDecoder ^{:tag (* Decoder)} [^{:tag (slice byte)} b & ^{:tag (slice Options)} opts]
+  (let [d (assert (* Decoder) (.Get bufferedDecoderPool))]
+    (.reset (.-s d) b nil (spread opts))
+    ^{:line 135} d))
+
+^{:go/end 140} (go/func putBufferedDecoder [^{:tag (* Decoder)} d]
+  (set! ^{:go/via [decodeBuffer]} (.-buf (.-s d)) nil) ; avoid pinning the provided buffer
+  (.Put bufferedDecoderPool d))
+
+
+^{:go/end 152} (go/func getStreamingDecoder ^{:tag (* Decoder)} [^io/Reader r & ^{:tag (slice Options)} opts]
+  (if [(values _ ok) (assert (* bytes/Buffer) r)] ok
+    (let [d (assert (* Decoder) (.Get bytesBufferDecoderPool))]
+      (.reset (.-s d) nil r (spread opts)) ; buffer taken from bytes.Buffer
+      (return d))
+
+    (let [d (assert (* Decoder) (.Get streamingDecoderPool))]
+      (.reset (.-s d) (subslice ^{:go/via [decodeBuffer]} (.-buf (.-s d)) _ 0) r (spread opts)) ; preserve existing buffer
+      (return d))))
+
+
+^{:go/end 164} (go/func putStreamingDecoder [^{:tag (* Decoder)} d]
+  (if [(values _ ok) (assert (* bytes/Buffer) ^{:go/via [decodeBuffer]} (.-rd (.-s d)))] ok (do
+      (set! (values ^{:go/via [decodeBuffer]} (.-rd (.-s d)) ^{:go/via [decodeBuffer]} (.-buf (.-s d))) (values nil nil)) ; avoid pinning the provided bytes.Buffer
+      (.Put bytesBufferDecoderPool d))
+    (do
+      (set! ^{:go/via [decodeBuffer]} (.-rd (.-s d)) nil) ; avoid pinning the provided io.Reader
+      (when (> (cap ^{:go/via [decodeBuffer]} (.-buf (.-s d))) (<< 64 10))
+        (set! ^{:go/via [decodeBuffer]} (.-buf (.-s d)) nil)) ; avoid pinning arbitrarily large amounts of memory
+
+      (.Put streamingDecoderPool d))))

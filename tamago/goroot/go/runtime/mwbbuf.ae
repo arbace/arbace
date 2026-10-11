@@ -1,0 +1,272 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This implements the write barrier buffer. The write barrier itself
+;; is gcWriteBarrier and is implemented in assembly.
+;;
+;; See mbarrier.go for algorithmic details on the write barrier. This
+;; file deals only with the buffer.
+;;
+;; The write barrier has a fast path and a slow path. The fast path
+;; simply enqueues to a per-P write barrier buffer. It's written in
+;; assembly and doesn't clobber any general purpose registers, so it
+;; doesn't have the usual overheads of a Go call.
+;;
+;; When the buffer fills up, the write barrier invokes the slow path
+;; (wbBufFlush) to flush the buffer to the GC work queues. In this
+;; path, since the compiler didn't spill registers, we spill *all*
+;; registers and disallow any GC safe points that could observe the
+;; stack frame (since we don't know the types of the spilled
+;; registers).
+
+(in-ns 'go.runtime) (go/file "mwbbuf.go" :imports [
+
+
+    ^{:line 26} [goarch "internal/goarch"]
+    ^{:line 27} [atomic "internal/runtime/atomic"]
+    ^{:line 28} [unsafe "unsafe"]])
+
+
+
+
+(go/const ^{:val false :doc "testSmallBuf forces a small write barrier buffer to stress write\nbarrier flushing.\n"} testSmallBuf false)
+
+
+
+
+
+
+
+
+(go/type wbBuf "wbBuf is a per-P buffer of pointers queued by the write barrier.\nThis buffer is flushed to the GC workbufs when it fills up and on\nvarious GC transitions.\n\nThis is closely related to a \"sequential store buffer\" (SSB),\nexcept that SSBs are usually used for maintaining remembered sets,\nwhile this is used for marking.\n" (struct
+
+
+
+
+
+
+    ^{:line 49 :tag uintptr :doc "next points to the next slot in buf. It must not be a\npointer type because it can point past the end of buf and\nmust be updated without write barriers.\n\nThis is a pointer rather than an index to optimize the\nwrite barrier assembly.\n"} next
+
+
+
+
+    ^{:line 54 :tag uintptr :doc "end points to just past the end of buf. It must not be a\npointer type because it points past the end of buf and must\nbe updated without write barriers.\n"} end
+
+
+    ^{:line 57 :tag (array wbBufEntries uintptr) :doc "buf stores a series of pointers to execute write barriers on.\n"} buf))
+
+
+(go/const
+
+
+
+
+
+
+
+
+
+  ^{:line 70} [^{:val 512 :doc "wbBufEntries is the maximum number of pointers that can be\nstored in the write barrier buffer.\n\nThis trades latency for throughput amortization. Higher\nvalues amortize flushing overhead more, but increase the\nlatency of flushing. Higher values also increase the cache\nfootprint of the buffer.\n\nTODO: What is the latency cost of this? Tune this value.\n"} wbBufEntries 512]
+
+
+
+  ^{:line 74} [^{:val 8 :doc "Maximum number of entries that we need to ask from the\nbuffer in a single call.\n"} wbMaxEntriesPerCall 8])
+
+
+
+^{:go/end 93} (go/method reset "reset empties b by resetting its next and end pointers.\n" [^{:tag (* wbBuf)} b]
+  (let [start (conv uintptr (conv unsafe/Pointer (addr (aget (.-buf b) 0))))]
+    (set! (.-next b) start)
+    (if testSmallBuf
+      ;; For testing, make the buffer smaller but more than
+      ;; 1 write barrier's worth, so it tests both the
+      ;; immediate flush and delayed flush cases.
+      (set! (.-end b) (conv uintptr (conv unsafe/Pointer (addr (aget (.-buf b) (+ wbMaxEntriesPerCall 1))))))
+
+      (set! (.-end b) (+ start (* (conv uintptr (len (.-buf b))) (unsafe/Sizeof (aget (.-buf b) 0))))))
+
+
+    (when (!= (% (- (.-end b) (.-next b)) (unsafe/Sizeof (aget (.-buf b) 0))) 0)
+      (throw "bad write barrier buffer bounds"))))
+
+
+
+
+
+
+
+
+^{:go/end 102} (go/method ^:go/nosplit discard "discard resets b's next pointer, but not its end pointer.\n\nThis must be nosplit because it's called by wbBufFlush.\n" [^{:tag (* wbBuf)} b]
+  (set! (.-next b) (conv uintptr (conv unsafe/Pointer (addr (aget (.-buf b) 0))))))
+
+
+
+^{:go/end 107} (go/method empty "empty reports whether b contains no pointers.\n" ^bool [^{:tag (* wbBuf)} b]
+  (== (.-next b) (conv uintptr (conv unsafe/Pointer (addr (aget (.-buf b) 0))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 138} (go/method ^:go/nosplit ^:go/nowritebarrierrec get1 "getX returns space in the write barrier buffer to store X pointers.\ngetX will flush the buffer if necessary. Callers should use this as:\n\n\tbuf := &getg().m.p.ptr().wbBuf\n\tp := buf.get2()\n\tp[0], p[1] = old, new\n\t... actual memory write ...\n\nThe caller must ensure there are no preemption points during the\nabove sequence. There must be no preemption points while buf is in\nuse because it is a per-P resource. There must be no preemption\npoints between the buffer put and the write to memory because this\ncould allow a GC phase change, which could result in missed write\nbarriers.\n\ngetX must be nowritebarrierrec to because write barriers here would\ncorrupt the write barrier buffer. It (and everything it calls, if\nit called anything) has to be nosplit to avoid scheduling on to a\ndifferent P and a different buffer.\n" ^{:tag (* (array 1 uintptr))} [^{:tag (* wbBuf)} b]
+  (when (> (+ (.-next b) goarch/PtrSize) (.-end b))
+    (wbBufFlush))
+
+  (let [p (conv (* (array 1 uintptr)) (conv unsafe/Pointer (.-next b)))]
+    (set! (.-next b) + goarch/PtrSize)
+    ^{:line 137} p))
+
+
+
+
+^{:go/end 149} (go/method ^:go/nosplit ^:go/nowritebarrierrec get2 ^{:tag (* (array 2 uintptr))} [^{:tag (* wbBuf)} b]
+  (when (> (+ (.-next b) (* 2 goarch/PtrSize)) (.-end b))
+    (wbBufFlush))
+
+  (let [p (conv (* (array 2 uintptr)) (conv unsafe/Pointer (.-next b)))]
+    (set! (.-next b) + (* 2 goarch/PtrSize))
+    ^{:line 148} p))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 183} (go/func ^:go/nosplit ^:go/nowritebarrierrec wbBufFlush "wbBufFlush flushes the current P's write barrier buffer to the GC\nworkbufs.\n\nThis must not have write barriers because it is part of the write\nbarrier implementation.\n\nThis and everything it calls must be nosplit because 1) the stack\ncontains untyped slots from gcWriteBarrier and 2) there must not be\na GC safe point between the write barrier test in the caller and\nflushing the buffer.\n\nTODO: A \"go:nosplitrec\" annotation would be perfect for this.\n" []
+  ;; Note: Every possible return from this function must reset
+  ;; the buffer's next pointer to prevent buffer overflow.
+
+  (when (> (.-dying (.-m (getg))) 0)
+    ;; We're going down. Not much point in write barriers
+    ;; and this way we can allow write barriers in the
+    ;; panic path.
+    (.discard (.-wbBuf (.ptr (.-p (.-m (getg))))))
+    (return))
+
+
+  ;; Switch to the system stack so we don't have to worry about
+  ;; safe points.
+  (systemstack ^{:go/end 182} (fn []
+      (wbBufFlush1 (.ptr (.-p (.-m (getg))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 273} (go/func ^:go/nowritebarrierrec ^:go/systemstack wbBufFlush1 "wbBufFlush1 flushes p's write barrier buffer to the GC work queue.\n\nThis must not have write barriers because it is part of the write\nbarrier implementation, so this may lead to infinite loops or\nbuffer corruption.\n\nThis must be non-preemptible because it uses the P's workbuf.\n" [^{:tag (* p)} pp]
+  ;; Get the buffered pointers.
+  (let [start (conv uintptr (conv unsafe/Pointer (addr (aget (.-buf (.-wbBuf pp)) 0))))
+      ^{:line 198} n (/ (- (.-next (.-wbBuf pp)) start) (unsafe/Sizeof (aget (.-buf (.-wbBuf pp)) 0)))
+      ^{:line 199} ptrs (subslice (.-buf (.-wbBuf pp)) _ n)]
+
+    ;; Poison the buffer to make extra sure nothing is enqueued
+    ;; while we're processing the buffer.
+    (set! (.-next (.-wbBuf pp)) 0)
+
+    (when useCheckmark
+      ;; Slow path for checkmark mode.
+      (range [_ ptr ptrs]
+        (shade ptr))
+
+      (.reset (.-wbBuf pp))
+      (return))
+
+
+    ;; Mark all of the pointers in the buffer and record only the
+    ;; pointers we greyed. We use the buffer itself to temporarily
+    ;; record greyed pointers.
+    ;;
+    ;; TODO: Should scanObject/scanblock just stuff pointers into
+    ;; the wbBuf? Then this would become the sole greying path.
+    ;;
+    ;; TODO: We could avoid shading any of the "new" pointers in
+    ;; the buffer if the stack has been shaded, or even avoid
+    ;; putting them in the buffer at all (which would double its
+    ;; capacity). This is slightly complicated with the buffer; we
+    ;; could track whether any un-shaded goroutine has used the
+    ;; buffer, or just track globally whether there are any
+    ;; un-shaded stacks and flush after each stack scan.
+    (let [gcw (addr (.-gcw pp))
+        ^{:line 229} pos 0]
+      (range [_ ptr ptrs]
+        (when (< ptr minLegalPointer)
+          ;; nil pointers are very common, especially
+          ;; for the "old" values. Filter out these and
+          ;; other "obvious" non-heap pointers ASAP.
+          ;;
+          ;; TODO: Should we filter out nils in the fast
+          ;; path to reduce the rate of flushes?
+          (continue))
+
+        (when (tryDeferToSpanScan ptr gcw)
+          (continue))
+
+        (let [(values obj span objIndex) (findObject ptr 0 0)]
+          (when (== obj 0)
+            (continue))
+
+          ;; TODO: Consider making two passes where the first
+          ;; just prefetches the mark bits.
+          (let [mbits (.markBitsForIndex span objIndex)]
+            (when (.isMarked mbits)
+              (continue))
+
+            (.setMarked mbits)
+
+            ;; Mark span.
+            (let [(values arena pageIdx pageMask) (pageIndexOf (.base span))]
+              (when (== (bit-and (aget (.-pageMarks arena) pageIdx) pageMask) 0)
+                (atomic/Or8 (addr (aget (.-pageMarks arena) pageIdx)) pageMask))
+
+
+              (when (.noscan (.-spanclass span))
+                (set! (.-bytesMarked gcw) + (conv uint64 (.-elemsize span)))
+                (continue))
+
+              (aset ptrs pos obj)
+              (inc! pos)))))
+
+
+      ;; Enqueue the greyed objects.
+      (.putObjBatch gcw (subslice ptrs _ pos))
+
+      (.reset (.-wbBuf pp)))))

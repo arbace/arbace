@@ -1,0 +1,473 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http) (go/file "clientconn.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [net "net"]
+    ^{:line 12} [httptrace "net/http/httptrace"]
+    ^{:line 13} [url "net/url"]
+    ^{:line 14} [sync "sync"]])
+
+
+
+
+
+
+(go/type ClientConn "A ClientConn is a client connection to an HTTP server.\n\nUnlike a [Transport], a ClientConn represents a single connection.\nMost users should use a Transport rather than creating client connections directly.\n" (struct
+    ^{:line 22 :tag genericClientConn} cc
+
+    ^{:line 24 :tag sync/Mutex} stateHookMu
+    ^{:line 25 :tag (func [(* ClientConn)])} userStateHook
+    ^{:line 26 :tag bool} stateHookRunning
+    ^{:line 27 :tag int} lastAvailable
+    ^{:line 28 :tag int} lastInFlight
+    ^{:line 29 :tag bool} lastClosed))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type newClientConner "newClientConner is the interface implemented by HTTP/2 transports to create new client conns.\n\nThe http package (this package) needs a way to ask the http2 package to\ncreate a client connection.\n\nTransport.TLSNextProto[\"h2\"] contains a function which appears to do this,\nbut for historical reasons it does not: The TLSNextProto function adds a\n*tls.Conn to the http2.Transport's connection pool and returns a RoundTripper\nwhich is backed by that connection pool. NewClientConn needs a way to get a\nsingle client connection out of the http2 package.\n\nThe http2 package registers a RoundTripper with Transport.RegisterProtocol.\nIf this RoundTripper implements newClientConner, then Transport.NewClientConn will use\nit to create new HTTP/2 client connections.\n" (interface
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "NewClientConn creates a new client connection from a net.Conn.\n\nThe RoundTripper returned by NewClientConn must implement genericClientConn.\n(We don't define NewClientConn as returning genericClientConn,\nbecause either we'd need to make genericClientConn an exported type\nor define it as a type alias. Neither is particularly appealing.)\n\nThe state hook passed here is the internal state hook\n(ClientConn.maybeRunStateHook). The internal state hook calls\nthe user state hook (if any), which is set by the user with\nClientConn.SetStateHook.\n\nThe client connection should arrange to call the internal state hook\nwhen the connection closes, when requests complete, and when the\nconnection concurrency limit changes.\n\nThe client connection must call the internal state hook when the connection state\nchanges asynchronously, such as when a request completes.\n\nThe internal state hook need not be called after synchronous changes to the state:\nClose, Reserve, Release, and RoundTrip calls which don't start a request\ndo not need to call the hook.\n\nThe general idea is that if we call (for example) Close,\nwe know that the connection state has probably changed and we\ndon't need the state hook to tell us that.\nHowever, if the connection closes asynchronously\n(because, for example, the other end of the conn closed it),\nthe state hook needs to inform us.\n"} NewClientConn [^net/Conn nc ^{:tag (func [])} internalStateHook] :results [RoundTripper error])))
+
+
+
+
+
+
+(go/type genericClientConn "genericClientConn is an interface implemented by HTTP/2 client conns\nreturned from newClientConner.NewClientConn.\n\nSee the newClientConner doc comment for more information.\n" (interface
+    (Close ^error [])
+    (Err ^error [])
+    (RoundTrip [^{:tag (* Request)} req] :results [(* Response) error])
+    (Reserve ^error [])
+    (Release [])
+    (Available ^int [])
+    (InFlight ^int [])))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 206} (go/method NewClientConn "NewClientConn creates a new client connection to the given address.\n\nIf scheme is \"http\", the connection is unencrypted.\nIf scheme is \"https\", the connection uses TLS.\n\nThe protocol used for the new connection is determined by the scheme,\nTransport.Protocols configuration field, and protocols supported by the\nserver. See Transport.Protocols for more details.\n\nIf Transport.Proxy is set and indicates that a request sent to the given\naddress should use a proxy, the new connection uses that proxy.\n\nNewClientConn always creates a new connection,\neven if the Transport has an existing cached connection to the given host.\n\nThe new connection is not added to the Transport's connection cache,\nand will not be used by [Transport.RoundTrip].\nIt does not count against the MaxIdleConns and MaxConnsPerHost limits.\n\nThe caller is responsible for closing the new connection.\n" [^{:tag (* Transport)} t ^context/Context ctx ^string scheme ^string address] :results [(* ClientConn) error]
+  (.Do (.-nextProtoOnce t) (.-onceSetNextProtoDefaults t))
+
+  (when (!= (.-h2Config t) nil)
+    ;; Handle x/net/http2.Transport.NewClientConn passing us a net.Conn
+    ;; to create a ClientConn from.
+    (when [(values cc err) (.http2NewClientConnFromContext t ctx)] (!= err errors/ErrUnsupported)
+      (return cc err)))
+
+
+
+  (switch scheme
+    (case ["http" "https"])
+    (default
+      (return nil (fmt/Errorf "net/http: invalid scheme %q" scheme))))
+
+
+  (let [(values host port err) (net/SplitHostPort address)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (== port "")
+      (set! port (schemePort scheme)))
+
+
+    (let [^{:tag (* url/URL)} proxyURL (zero (* url/URL))]
+      (when (!= (.-Proxy t) nil)
+        ;; Transport.Proxy takes a *Request, so create a fake one to pass it.
+        (let [req (addr ^{:go/breaks [2 4 6 [8 149] 10 12 14 16 18]} (lit Request
+                :ctx ctx
+                :Method "GET"
+                :URL (addr ^{:go/breaks [2 4 6]} (lit url/URL
+                    :Scheme scheme
+                    :Host host
+                    :Path "/"))
+
+                :Proto "HTTP/1.1"
+                :ProtoMajor 1
+                :ProtoMinor 1
+                :Header (make Header)
+                :Body NoBody
+                :Host host))
+
+            ^{:line 156 :tag error} err (zero error)]
+          (set! (values proxyURL err) ((.-Proxy t) req))
+          (when (!= err nil)
+            (return nil err))))
+
+
+
+      (let [cm ^{:go/breaks [2 4 6]} (lit connectMethod
+            :targetScheme scheme
+            :targetAddr (net/JoinHostPort host port)
+            :proxyURL proxyURL)
+
+
+          ;; The state hook is a bit tricky:
+          ;; The persistConn has a state hook which calls ClientConn.maybeRunStateHook,
+          ;; which in turn calls the user-provided state hook (if any).
+          ;;
+          ;; ClientConn.maybeRunStateHook handles debouncing hook calls for both
+          ;; HTTP/1 and HTTP/2.
+          ;;
+          ;; Since there's no need to change the persistConn's hook, we set it at creation time.
+          ^{:line 177} cc (addr (lit ClientConn))
+          ^:const ^{:line 178 :val true} isClientConn true
+          (values pconn ^:assign err) (.dialConn t ctx cm isClientConn (.-maybeRunStateHook cc))]
+        (when (!= err nil)
+          (return nil err))
+
+
+        ;; Note that cc.maybeRunStateHook may have been called
+        ;; in the short window between dialConn and now.
+        ;; This is fine.
+        (.Lock (.-stateHookMu cc))
+        (defer (.Unlock (.-stateHookMu cc)))
+        (if (!= (.-alt pconn) nil)
+          ;; If pconn.alt is set, this is a connection implemented in another package
+          ;; (probably x/net/http2) or the bundled copy in h2_bundle.go.
+          (let [(values gc ok) (assert genericClientConn (.-alt pconn))]
+            (when (not ok)
+              (return nil (errors/New "http: NewClientConn returned something that is not a ClientConn")))
+
+            (set! (.-cc cc) gc)
+            (set! (.-lastAvailable cc) (.Available gc)))
+          (do
+            ;; This is an HTTP/1 connection.
+            (set! (.-availch pconn) (make (chan (struct)) 1))
+            (>! (.-availch pconn) (lit (struct)))
+            (set! (.-cc cc) (lit http1ClientConn pconn))
+            (set! (.-lastAvailable cc) 1)))
+
+        (return cc nil)))))
+
+
+
+
+^{:go/end 213} (go/method Close "Close closes the connection.\nOutstanding RoundTrip calls are interrupted.\n" ^error [^{:tag (* ClientConn)} cc]
+  (defer (.maybeRunStateHook cc))
+  (.Close (.-cc cc)))
+
+
+
+
+
+^{:go/end 220} (go/method Err "Err reports any fatal connection errors.\nIt returns nil if the connection is usable.\nIf it returns non-nil, the connection can no longer be used.\n" ^error [^{:tag (* ClientConn)} cc]
+  (.Err (.-cc cc)))
+
+
+^{:go/breaks [[9 243]] :go/end 244} (go/func validateClientConnRequest ^error [^{:tag (* Request)} req]
+  (when (== (.-URL req) nil)
+    (return (errors/New "http: nil Request.URL")))
+
+  (when (== (.-Header req) nil)
+    (return (errors/New "http: nil Request.Header")))
+
+  ;; Validate the outgoing headers.
+  (when [err (validateHeaders (.-Header req))] (!= err "")
+    (return (fmt/Errorf "http: invalid header %s" err)))
+
+  ;; Validate the outgoing trailers too.
+  (when [err (validateHeaders (.-Trailer req))] (!= err "")
+    (return (fmt/Errorf "http: invalid trailer %s" err)))
+
+  (when (and (!= (.-Method req) "") (not (validMethod (.-Method req))))
+    (return (fmt/Errorf "http: invalid method %q" (.-Method req))))
+
+  (when (== (.-Host (.-URL req)) "")
+    (return (errors/New "http: no Host in request URL")))
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 272} (go/method RoundTrip "RoundTrip implements the [RoundTripper] interface.\n\nThe request is sent on the client connection,\nregardless of the URL being requested or any proxy settings.\n\nIf the connection is at its concurrency limit,\nRoundTrip waits for the connection to become available\nbefore sending the request.\n" [^{:tag (* ClientConn)} cc ^{:tag (* Request)} req] :results [(* Response) error]
+  (defer (.maybeRunStateHook cc))
+  (when (and (== (.-URL req) nil) (== (.-Method req) ":ping"))
+    ;; Undocumented feature for sending a PING frame to a HTTP/2 connection,
+    ;; included to support x/net/http2.ClientConn.Ping.
+    (let [(values pinger ok) (assert (interface
+            (Ping ^error [context/Context])) ^{:line 259} (.-cc cc))]
+
+      (when (not ok)
+        (return nil (errors/New "http: ClientConn does not support PING")))
+
+      (return nil (.Ping pinger (.Context req)))))
+
+  (when [err (validateClientConnRequest req)] (!= err nil)
+    (.Release cc)
+    (return nil err))
+
+  (.RoundTrip (.-cc cc) req))
+
+
+
+
+
+^{:go/end 279} (go/method Available "Available reports the number of requests that may be sent\nto the connection without blocking.\nIt returns 0 if the connection is closed.\n" ^int [^{:tag (* ClientConn)} cc]
+  (.Available (.-cc cc)))
+
+
+
+
+
+^{:go/end 286} (go/method InFlight "InFlight reports the number of requests in flight,\nincluding reserved requests.\nIt returns 0 if the connection is closed.\n" ^int [^{:tag (* ClientConn)} cc]
+  (.InFlight (.-cc cc)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 304} (go/method Reserve "Reserve reserves a concurrency slot on the connection.\nIf Reserve returns nil, one additional RoundTrip call may be made\nwithout waiting for an existing request to complete.\n\nThe reserved concurrency slot is accounted as an in-flight request.\nA successful call to RoundTrip will decrement the Available count\nand increment the InFlight count.\n\nEach successful call to Reserve should be followed by exactly one call\nto RoundTrip or Release, which will consume or release the reservation.\n\nIf the connection is closed or at its concurrency limit,\nReserve returns an error.\n" ^error [^{:tag (* ClientConn)} cc]
+  (defer (.maybeRunStateHook cc))
+  (.Reserve (.-cc cc)))
+
+
+
+
+^{:go/end 311} (go/method Release "Release releases an unused concurrency slot reserved by Reserve.\nIf there are no reserved concurrency slots, it has no effect.\n" [^{:tag (* ClientConn)} cc]
+  (defer (.maybeRunStateHook cc))
+  (.Release (.-cc cc)))
+
+
+
+
+^{:go/end 344} (go/method shouldRunStateHook "shouldRunStateHook returns the user's state hook if we should call it,\nor nil if we don't need to call it at this time.\n" ^{:tag (func [(* ClientConn)])} [^{:tag (* ClientConn)} cc ^bool stopRunning]
+  (.Lock (.-stateHookMu cc))
+  (defer (.Unlock (.-stateHookMu cc)))
+  (when (== (.-cc cc) nil)
+    (return nil))
+
+  (when stopRunning
+    (set! (.-stateHookRunning cc) false))
+
+  (when (== (.-userStateHook cc) nil)
+    (return nil))
+
+  (when (.-stateHookRunning cc)
+    (return nil))
+
+  (let [
+      ^:var ^{:line 331} available (.Available cc)
+      ^:var ^{:line 332} inFlight (.InFlight cc)
+      ^:var ^{:line 333} closed (!= (.Err cc) nil)
+
+      ^{:line 335 :tag (func [(* ClientConn)])} hook (zero (func [(* ClientConn)]))]
+    (when (or (> available (.-lastAvailable cc)) (< inFlight (.-lastInFlight cc)) (!= closed (.-lastClosed cc)))
+      (set! hook (.-userStateHook cc))
+      (set! (.-stateHookRunning cc) true))
+
+    (set! (.-lastAvailable cc) available)
+    (set! (.-lastInFlight cc) inFlight)
+    (set! (.-lastClosed cc) closed)
+    ^{:line 343} hook))
+
+
+^{:go/end 371} (go/method maybeRunStateHook [^{:tag (* ClientConn)} cc]
+  (let [hook (.shouldRunStateHook cc false)]
+    (when (== hook nil)
+      (return))
+
+    ;; Run the hook synchronously.
+    ;;
+    ;; This means that if, for example, the user calls resp.Body.Close to finish a request,
+    ;; the Close call will synchronously run the hook, giving the hook the chance to
+    ;; return the ClientConn to a connection pool before the next request is made.
+    (hook cc)
+    ;; The connection state may have changed while the hook was running,
+    ;; in which case we need to run it again.
+    ;;
+    ;; If we do need to run the hook again, do so in a new goroutine to avoid blocking
+    ;; the current goroutine indefinitely.
+    (set! hook (.shouldRunStateHook cc true))
+    (when (!= hook nil)
+      (go (^{:go/end 369} (fn []
+            (while (!= hook nil)
+              (hook cc)
+              (set! hook (.shouldRunStateHook cc true)))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 390} (go/method SetStateHook "SetStateHook arranges for f to be called when the state of the connection changes.\nAt most one call to f is made at a time.\nIf the connection's state has changed since it was created,\nf is called immediately in a separate goroutine.\nf may be called synchronously from RoundTrip or Response.Body.Close.\n\nIf SetStateHook is called multiple times, the new hook replaces the old one.\nIf f is nil, no further calls will be made to f after SetStateHook returns.\n\nf is called when Available increases (more requests may be sent on the connection),\nInFlight decreases (existing requests complete), or Err begins returning non-nil\n(the connection is no longer usable).\n" [^{:tag (* ClientConn)} cc ^{:tag (func [(* ClientConn)])} f]
+  (.Lock (.-stateHookMu cc))
+  (set! (.-userStateHook cc) f)
+  (.Unlock (.-stateHookMu cc))
+  (.maybeRunStateHook cc))
+
+
+
+
+(go/type http1ClientConn "http1ClientConn is a genericClientConn implementation backed by\nan HTTP/1 *persistConn (pconn.alt is nil).\n" (struct
+    ^{:line 395 :tag (* persistConn)} pconn))
+
+
+^{:go/end 415} (go/method RoundTrip [^http1ClientConn cc ^{:tag (* Request)} req] :results [(* Response) error]
+  (let [ctx (.Context req)
+      ^{:line 400} trace (httptrace/ContextClientTrace ctx)
+
+      ;; Convert Request.Cancel into context cancellation.
+      (values ^:assign ctx cancel) (context/WithCancelCause (.Context req))]
+    (when (!= (.-Cancel req) nil)
+      (go (awaitLegacyCancel ctx cancel req)))
+
+
+    (let [treq (addr (lit transportRequest :Request req :trace trace :ctx ctx :cancel cancel))
+        (values resp err) (.roundTrip (.-pconn cc) treq)]
+      (when (!= err nil)
+        (return nil err))
+
+      (set! (.-Request resp) req)
+      (return resp nil))))
+
+
+^{:go/breaks [4] :go/end 420} (go/method Close ^error [^http1ClientConn cc]
+  (.close (.-pconn cc) (errors/New "ClientConn closed"))
+  nil)
+
+
+^{:go/end 429} (go/method Err ^error [^http1ClientConn cc]
+  (select
+    (case (<! (.-closech (.-pconn cc)))
+      (return (.-closed (.-pconn cc))))
+    (default
+      (return nil))))
+
+
+
+^{:go/breaks [[6 437]] :go/end 438} (go/method Available ^int [^http1ClientConn cc]
+  (.Lock (.-mu (.-pconn cc)))
+  (defer (.Unlock (.-mu (.-pconn cc))))
+  (when (or (!= (.-closed (.-pconn cc)) nil) (.-reserved (.-pconn cc)) (.-inFlight (.-pconn cc)))
+    (return 0))
+
+  1)
+
+
+^{:go/breaks [[6 446]] :go/end 447} (go/method InFlight ^int [^http1ClientConn cc]
+  (.Lock (.-mu (.-pconn cc)))
+  (defer (.Unlock (.-mu (.-pconn cc))))
+  (when (and (== (.-closed (.-pconn cc)) nil) ^:go/paren (or (.-reserved (.-pconn cc)) (.-inFlight (.-pconn cc))))
+    (return 1))
+
+  0)
+
+
+^{:go/breaks [8] :go/end 462} (go/method Reserve ^error [^http1ClientConn cc]
+  (.Lock (.-mu (.-pconn cc)))
+  (defer (.Unlock (.-mu (.-pconn cc))))
+  (when (!= (.-closed (.-pconn cc)) nil)
+    (return (.-closed (.-pconn cc))))
+
+  (select
+    (case (<! (.-availch (.-pconn cc))))
+    (default
+      (return (errors/New "connection is unavailable"))))
+
+  (set! (.-reserved (.-pconn cc)) true)
+  nil)
+
+
+^{:go/end 475} (go/method Release [^http1ClientConn cc]
+  (.Lock (.-mu (.-pconn cc)))
+  (defer (.Unlock (.-mu (.-pconn cc))))
+  (when (.-reserved (.-pconn cc))
+    (select
+      (case (>! (.-availch (.-pconn cc)) (lit (struct))))
+      (default
+        (panic "cannot release reservation")))
+
+    (set! (.-reserved (.-pconn cc)) false)))

@@ -1,0 +1,164 @@
+;; NXP Watchdog Timer (WDOG) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package bee implements a driver for the NXP Watchdog Timer (WDOG)
+;; adopting the following reference specifications:
+;;   - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11
+;;
+;; This package is only meant to be used with `GOOS=tamago` as supported by the
+;; TamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.wdog) (go/file "wdog.go" :doc "Package bee implements a driver for the NXP Watchdog Timer (WDOG)\nadopting the following reference specifications:\n  - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11\n\nThis package is only meant to be used with `GOOS=tamago` as supported by the\nTamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 18} [sync "sync"]
+
+    ^{:line 20} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "WDOG registers\n"
+  ^{:line 25} [^{:val 0} WDOGx_WCR 0x00]
+  ^{:line 26} [^{:val 8} WCR_WT 8]
+  ^{:line 27} [^{:val 6} WCR_SRE 6]
+  ^{:line 28} [^{:val 5} WCR_WDA 5]
+  ^{:line 29} [^{:val 4} WCR_SRS 4]
+  ^{:line 30} [^{:val 3} WCR_WDT 3]
+  ^{:line 31} [^{:val 2} WCR_WDE 2]
+
+  ^{:line 33} [^{:val 2} WDOGx_WSR 0x02]
+
+  ^{:line 35} [^{:val 4} WDOGx_WRSR 0x04]
+  ^{:line 36} [^{:val 4} WRSR_POR 4]
+  ^{:line 37} [^{:val 1} WRSR_TOUT 1]
+  ^{:line 38} [^{:val 0} WRSR_SFTW 0]
+
+  ^{:line 40} [^{:val 6} WDOGx_WICR 0x06]
+  ^{:line 41} [^{:val 15} WICR_WIE 15]
+  ^{:line 42} [^{:val 14} WICR_WTIS 14]
+  ^{:line 43} [^{:val 0} WICR_WICT 0]
+
+  ^{:line 45} [^{:val 8} WDOGx_WMCR 0x08]
+  ^{:line 46} [^{:val 0} WMCR_PDE 0])
+
+
+
+(go/const "WDOG service sequence\n"
+  ^{:line 51} [^{:val 21845} wsr_seq1 0x5555]
+  ^{:line 52} [^{:val 43690} wsr_seq2 0xaaaa])
+
+
+
+(go/type WDOG "WDOG represents a Watchdog Timer instance.\n" (struct
+    ^{:line 57} sync/Mutex
+
+
+    ^{:line 60 :tag int :doc "Module index\n"} Index
+
+    ^{:line 62 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 64 :tag uint32 :doc "Clock gate register\n"} CCGR
+
+    ^{:line 66 :tag int :doc "Clock gate\n"} CG
+
+    ^{:line 68 :tag int :doc "Interrupt ID\n"} IRQ
+
+
+    ^{:line 71 :tag uint32 :doc "control registers\n"} wcr
+    ^{:line 72 :tag uint32} wsr
+    ^{:line 73 :tag uint32} wrsr
+    ^{:line 74 :tag uint32} wicr
+    ^{:line 75 :tag uint32} wmcr))
+
+
+
+
+
+^{:go/end 100} (go/method Init "Init initializes a Watchdog Timer instance. The initialization is required\nwithin 16 seconds of reset de-assertion to clear the power-down counter\nevent.\n" [^{:tag (* WDOG)} hw]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (or (== (.-Base hw) 0) (== (.-CCGR hw) 0))
+    (panic "invalid WDOG instance"))
+
+
+  (set! (.-wcr hw) (+ (.-Base hw) WDOGx_WCR))
+  (set! (.-wsr hw) (+ (.-Base hw) WDOGx_WSR))
+  (set! (.-wrsr hw) (+ (.-Base hw) WDOGx_WRSR))
+  (set! (.-wicr hw) (+ (.-Base hw) WDOGx_WICR))
+  (set! (.-wmcr hw) (+ (.-Base hw) WDOGx_WMCR))
+
+  ;; enable clock
+  (reg/SetN (.-CCGR hw) (.-CG hw) 2r11 2r11)
+
+  ;; p4085, 59.5.3 Power-down counter event, IMX6ULLRM
+  (reg/Clear16 (.-wmcr hw) WMCR_PDE))
+
+
+
+
+
+^{:go/end 107} (go/method EnableInterrupt "EnableInterrupt enables interrupt generation before the Watchdog timeout\nevent per argument delay. The delay must be specified in milliseconds with\n127500 as maximum value, the timeout resolution is 500ms.\n" [^{:tag (* WDOG)} hw ^int delay]
+  (reg/SetN16 (.-wicr hw) WICR_WICT 0xffff (bit-or (<< 1 WICR_WIE) (conv uint16 (/ delay 500)))))
+
+
+
+^{:go/end 112} (go/method ClearInterrupt "ClearInterrupt clears the interrupt status register.\n" [^{:tag (* WDOG)} hw]
+  (reg/Set16 (.-wicr hw) WICR_WTIS))
+
+
+
+
+
+
+^{:go/end 125} (go/method EnableTimeout "EnableTimeout activates the Watchdog Timer to trigger a reset after the\nargument timeout. The timeout must be specified in milliseconds with 128000\nas maximum value, the timeout resolution is 500ms. The timeout can be\nprevented, or reconfigured, with Service().\n" [^{:tag (* WDOG)} hw ^int timeout]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (reg/SetN16 (.-wcr hw) WCR_WT 0xff (conv uint16 (- (/ timeout 500) 1)))
+  (reg/Set16 (.-wcr hw) WCR_WDT)
+  (reg/Set16 (.-wcr hw) WCR_WDE))
+
+
+
+^{:go/end 148} (go/method Service "Service prevents the timeout condition on a previously enabled Watchdog.\n" [^{:tag (* WDOG)} hw ^int timeout]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  ;; In case we are a TrustZone Watchdog the Normal World OS might
+  ;; disable our clock, which keeps the timeout but prevents servicing,
+  ;; therefore we re-enable the clock.
+  (reg/SetN (.-CCGR hw) (.-CG hw) 2r11 2r11)
+
+  ;; update timeout
+  (reg/SetN16 (.-wcr hw) WCR_WT 0xff (conv uint16 (- (/ timeout 500) 1)))
+
+  (when (== (reg/GetN16 (.-wicr hw) WICR_WIE 1) 1)
+    ;; clear interrupt status
+    (reg/Set16 (.-wicr hw) WICR_WTIS))
+
+
+  ;; perform service sequence
+  (reg/Write16 (.-wsr hw) wsr_seq1)
+  (reg/Write16 (.-wsr hw) wsr_seq2))
+
+
+
+^{:go/end 153} (go/method Reset "Reset asserts the watchdog reset signal.\n" [^{:tag (* WDOG)} hw]
+  (reg/Clear16 (.-wcr hw) WCR_WDA))
+
+
+
+^{:go/end 159} (go/method SoftwareReset "SoftwareReset asserts the watchdog software reset signal.\n" [^{:tag (* WDOG)} hw]
+  (reg/Set16 (.-wcr hw) WCR_SRE)
+  (reg/Clear16 (.-wcr hw) WCR_SRS))
+
+
+
+
+^{:go/end 165} (go/method ResetSource "ResetSource reads the watchdog reset status register which records the\nsource of the output reset assertion.\n" ^uint16 [^{:tag (* WDOG)} hw]
+  (reg/Read16 (.-wrsr hw)))

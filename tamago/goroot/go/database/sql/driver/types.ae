@@ -1,0 +1,305 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.database.sql.driver) (go/file "types.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [reflect "reflect"]
+    ^{:line 10} [strconv "strconv"]
+    ^{:line 11} [time "time"]
+    ^{:line 12} [uuid "uuid"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type ValueConverter "ValueConverter is the interface providing the ConvertValue method.\n\nVarious implementations of ValueConverter are provided by the\ndriver package to provide consistent implementations of conversions\nbetween drivers. The ValueConverters have several uses:\n\n  - converting from the [Value] types as provided by the sql package\n    into a database table's specific column type and making sure it\n    fits, such as making sure a particular int64 fits in a\n    table's uint16 column.\n\n  - converting a value as given from the database into one of the\n    driver [Value] types.\n\n  - by the [database/sql] package, for converting from a driver's [Value] type\n    to a user's type in a scan.\n" (interface
+
+    (^{:doc "ConvertValue converts a value to a driver Value.\n"} ConvertValue [^any v] :results [Value error])))
+
+
+
+
+
+
+
+
+
+
+(go/type Valuer "Valuer is the interface providing the Value method.\n\nErrors returned by the [Value] method are wrapped by the database/sql package.\nThis allows callers to use [errors.Is] for precise error handling after operations\nlike [database/sql.Query], [database/sql.Exec], or [database/sql.QueryRow].\n\nTypes implementing Valuer interface are able to convert\nthemselves to a driver [Value].\n" (interface
+
+
+    (^{:doc "Value returns a driver Value.\nValue must not panic.\n"} Value [] :results [Value error])))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag boolType :doc "Bool is a [ValueConverter] that converts input values to bool.\n\nThe conversion rules are:\n  - booleans are returned unchanged\n  - for integer types,\n    1 is true\n    0 is false,\n    other integers are an error\n  - for strings and []byte, same rules as [strconv.ParseBool]\n  - all other types are an error\n"} Bool)
+
+(go/type boolType (struct))
+
+(go/var ^ValueConverter _ (lit boolType))
+
+^{:go/end 66} (go/method String ^string [boolType] "Bool")
+
+^{:go/end 103} (go/method ConvertValue [boolType ^any src] :results [Value error]
+  (type-switch [s src]
+    (case [bool]
+      (return s nil))
+    (case [string]
+      (let [(values b err) (strconv/ParseBool s)]
+        (when (!= err nil)
+          (return nil (fmt/Errorf "sql/driver: couldn't convert %q into type bool" s)))
+
+        (return b nil)))
+    (case [(slice byte)]
+      (let [(values b err) (strconv/ParseBool (conv string s))]
+        (when (!= err nil)
+          (return nil (fmt/Errorf "sql/driver: couldn't convert %q into type bool" s)))
+
+        (return b nil))))
+
+
+  (let [sv (reflect/ValueOf src)]
+    (switch (.Kind sv)
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+        (let [iv (.Int sv)]
+          (when (or (== iv 1) (== iv 0))
+            (return (== iv 1) nil))
+
+          (return nil (fmt/Errorf "sql/driver: couldn't convert %d into type bool" iv))))
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64]
+        (let [uv (.Uint sv)]
+          (when (or (== uv 1) (== uv 0))
+            (return (== uv 1) nil))
+
+          (return nil (fmt/Errorf "sql/driver: couldn't convert %d into type bool" uv)))))
+
+
+    (return nil (fmt/Errorf "sql/driver: couldn't convert %v (%T) into type bool" src src))))
+
+
+
+
+(go/var ^{:tag int32Type :doc "Int32 is a [ValueConverter] that converts input values to int64,\nrespecting the limits of an int32 value.\n"} Int32)
+
+(go/type int32Type (struct))
+
+(go/var ^ValueConverter _ (lit int32Type))
+
+^{:go/end 136} (go/method ConvertValue [int32Type ^any v] :results [Value error]
+  (let [rv (reflect/ValueOf v)]
+    (switch (.Kind rv)
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+        (let [i64 (.Int rv)]
+          (when (or (> i64 (- (<< 1 31) 1)) (< i64 (- (<< 1 31))))
+            (return nil (fmt/Errorf "sql/driver: value %d overflows int32" v)))
+
+          (return i64 nil)))
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64]
+        (let [u64 (.Uint rv)]
+          (when (> u64 (- (<< 1 31) 1))
+            (return nil (fmt/Errorf "sql/driver: value %d overflows int32" v)))
+
+          (return (conv int64 u64) nil)))
+      (case [reflect/String]
+        (let [(values i err) (strconv/Atoi (.String rv))]
+          (when (!= err nil)
+            (return nil (fmt/Errorf "sql/driver: value %q can't be converted to int32" v)))
+
+          (return (conv int64 i) nil))))
+
+    (return nil (fmt/Errorf "sql/driver: unsupported value %v (type %T) converting to int32" v v))))
+
+
+
+
+
+
+(go/var ^{:tag stringType :doc "String is a [ValueConverter] that converts its input to a string.\nIf the value is already a string or []byte, it's unchanged.\nIf the value is of another type, conversion to string is done\nwith fmt.Sprintf(\"%v\", v).\n"} String)
+
+(go/type stringType (struct))
+
+^{:go/end 152} (go/method ConvertValue [stringType ^any v] :results [Value error]
+  (type-switch v
+    (case [string (slice byte)]
+      (return v nil)))
+
+  (return (fmt/Sprintf "%v" v) nil))
+
+
+
+
+(go/type Null "Null is a type that implements [ValueConverter] by allowing nil\nvalues but otherwise delegating to another [ValueConverter].\n" (struct
+    ^{:line 157 :tag ValueConverter} Converter))
+
+
+^{:go/end 165} (go/method ConvertValue [^Null n ^any v] :results [Value error]
+  (when (== v nil)
+    (return nil nil))
+
+  (.ConvertValue (.-Converter n) v))
+
+
+
+
+(go/type NotNull "NotNull is a type that implements [ValueConverter] by disallowing nil\nvalues but otherwise delegating to another [ValueConverter].\n" (struct
+    ^{:line 170 :tag ValueConverter} Converter))
+
+
+^{:go/end 178} (go/method ConvertValue [^NotNull n ^any v] :results [Value error]
+  (when (== v nil)
+    (return nil (fmt/Errorf "nil value not allowed")))
+
+  (.ConvertValue (.-Converter n) v))
+
+
+
+^{:go/breaks [[6 191]] :go/end 192} (go/func IsValue "IsValue reports whether v is a valid [Value] parameter type.\n" ^bool [^any v]
+  (when (== v nil)
+    (return true))
+
+  (type-switch v
+    (case [(slice byte) bool float64 int64 string time/Time]
+      (return true))
+    (case [decimalDecompose]
+      (return true)))
+
+  false)
+
+
+
+
+^{:go/end 198} (go/func IsScanValue "IsScanValue is equivalent to [IsValue].\nIt exists for compatibility.\n" ^bool [^any v]
+  (IsValue v))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag defaultConverter :doc "DefaultParameterConverter is the default implementation of\n[ValueConverter] that's used when a [Stmt] doesn't implement\n[ColumnConverter].\n\nDefaultParameterConverter returns its argument directly if\nIsValue(arg). Otherwise, if the argument implements [Valuer], its\nValue method is used to return a [Value]. As a fallback, the provided\nargument's underlying type is used to convert it to a [Value]:\nunderlying integer types are converted to int64, floats to float64,\nbool, string, and []byte to themselves. If the argument is a nil\npointer, defaultConverter.ConvertValue returns a nil [Value].\nIf the argument is a non-nil pointer, it is dereferenced and\ndefaultConverter.ConvertValue is called recursively. Other types\nare an error.\n"} DefaultParameterConverter)
+
+(go/type defaultConverter (struct))
+
+(go/var ^ValueConverter _ (lit defaultConverter))
+
+(go/var valuerReflectType ((inst reflect/TypeFor Valuer)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 240} (go/func callValuerValue "callValuerValue returns vr.Value(), with one exception:\nIf vr.Value is an auto-generated method on a pointer type and the\npointer is nil, it would panic at runtime in the panicwrap\nmethod. Treat it like nil instead.\nIssue 8415.\n\nThis is so people can implement driver.Value on value types and\nstill use nil pointers to those types to mean nil/NULL, just like\nstring/*string.\n\nThis function is mirrored in the database/sql package.\n" [^Valuer vr] :results [^Value v ^error err]
+  (when [rv (reflect/ValueOf vr)] (and (== (.Kind rv) reflect/Pointer)
+      (.IsNil rv)
+      (.Implements (.Elem (.Type rv)) valuerReflectType))
+    (return nil nil))
+
+  (.Value vr))
+
+
+^{:go/end 299} (go/method ConvertValue [defaultConverter ^any v] :results [Value error]
+  (when (IsValue v)
+    (return v nil))
+
+
+  (type-switch [vr v]
+    (case [Valuer]
+      (let [(values sv err) (callValuerValue vr)]
+        (when (!= err nil)
+          (return nil err))
+
+        (when (not (IsValue sv))
+          (return nil (fmt/Errorf "non-Value type %T returned from Value" sv)))
+
+        (return sv nil)))
+
+    ;; For now, continue to prefer the Valuer interface over the decimal decompose interface.
+    (case [decimalDecompose]
+      (return vr nil))
+
+    (case [uuid/UUID]
+      (return (.String vr) nil)))
+
+
+  (let [rv (reflect/ValueOf v)]
+    (switch (.Kind rv)
+      (case [reflect/Pointer]
+        ;; indirect pointers
+        (if (.IsNil rv)
+          (return nil nil)
+
+          (return (.ConvertValue (lit defaultConverter) (.Interface (.Elem rv))))))
+
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+        (return (.Int rv) nil))
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32]
+        (return (conv int64 (.Uint rv)) nil))
+      (case [reflect/Uint64]
+        (let [u64 (.Uint rv)]
+          (when (>= u64 (<< 1 63))
+            (return nil (fmt/Errorf "uint64 values with high bit set are not supported")))
+
+          (return (conv int64 u64) nil)))
+      (case [reflect/Float32 reflect/Float64]
+        (return (.Float rv) nil))
+      (case [reflect/Bool]
+        (return (.Bool rv) nil))
+      (case [reflect/Slice]
+        (let [ek (.Kind (.Elem (.Type rv)))]
+          (when (== ek reflect/Uint8)
+            (return (.Bytes rv) nil))
+
+          (return nil (fmt/Errorf "unsupported type %T, a slice of %s" v ek))))
+      (case [reflect/String]
+        (return (.String rv) nil)))
+
+    (return nil (fmt/Errorf "unsupported type %T, a %s" v (.Kind rv)))))
+
+
+(go/type decimalDecompose (interface
+
+
+
+    (^{:doc "Decompose returns the internal decimal state into parts.\nIf the provided buf has sufficient capacity, buf may be returned as the coefficient with\nthe value set and length set as appropriate.\n"} Decompose [^{:tag (slice byte)} buf] :results [^byte form ^bool negative ^{:tag (slice byte)} coefficient ^int32 exponent])))

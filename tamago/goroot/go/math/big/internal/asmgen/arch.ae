@@ -1,0 +1,235 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.math.big.internal.asmgen) (go/file "arch.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [strings "strings"]])
+
+
+;; Note: Exported fields and methods are expected to be used
+;; by function generators (like the ones in add.go and so on).
+;; Unexported fields and methods should not be.
+
+
+(go/type Arch "An Arch defines how to generate assembly for a specific architecture.\n" (struct
+    ^{:line 18 :tag string} Name ; name of architecture
+    ^{:line 19 :tag string} Build ; build tag
+    ^{:line 20 :tag int} WordBits ; length of word in bits (32 or 64)
+    ^{:line 21 :tag int} WordBytes ; length of word in bytes (4 or 8)
+    ^{:line 22 :tag bool} CarrySafeLoop ; whether loops preserve carry flag across iterations
+
+
+    ^{:line 25 :tag (slice string) :doc "Registers.\n"} regs ; usable general registers, in allocation order
+    ^{:line 26 :tag string} reg0 ; dedicated zero register
+    ^{:line 27 :tag string} regCarry ; dedicated carry register, for systems with no hardware carry bits
+    ^{:line 28 :tag string} regAltCarry ; dedicated secondary carry register, for systems with no hardware carry bits
+    ^{:line 29 :tag string} regTmp ; dedicated temporary register
+
+
+
+
+    ^{:line 34 :tag bool :doc "regShift indicates that the architecture supports\nusing REG1>>REG2 and REG1<<REG2 as the first source\noperand in an arithmetic instruction. (32-bit ARM does this.)\n"} regShift
+
+
+
+
+    ^{:line 39 :tag (func [(* Func)]) :doc "setup is called to emit any per-architecture function prologue,\nimmediately after the TEXT line has been emitted.\nIf setup is nil, it is taken to be a no-op.\n"} setup
+
+
+
+
+    ^{:line 44 :tag (func [(* Asm) Hint] [string]) :doc "hint returns the register to use for a given hint.\nReturning an empty string indicates no preference.\nIf hint is nil, it is considered to return an empty string.\n"} hint
+
+
+
+
+
+
+    ^{:line 51 :tag (func [^string name] [bool]) :doc "op3 reports whether the named opcode accepts 3 operands\n(true on most instructions on most systems, but not true of x86 instructions).\nThe assembler unconditionally turns op x,z,z into op x,z.\nIf op3 returns false, then the assembler will turn op x,y,z into mov y,z; op x,z.\nIf op3 is nil, then all opcodes are assumed to accept 3 operands.\n"} op3
+
+
+    ^{:line 54 :tag bool :doc "memOK indicates that arithmetic instructions can use memory references (like on x86)\n"} memOK
+
+
+
+
+
+    ^{:line 60 :tag int :doc "maxColumns is the default maximum number of vector columns\nto process in a single [Pipe.Loop] block.\n0 means unlimited.\n[Pipe.SetMaxColumns] overrides this.\n"} maxColumns
+
+
+    ^{:line 63 :tag string :doc "Instruction names.\n"} mov ; move (word-sized)
+    ^{:line 64 :tag string} add ; add with no carry involvement
+    ^{:line 65 :tag string} adds ; add, setting but not using carry
+    ^{:line 66 :tag string} adc ; add, using but not setting carry
+    ^{:line 67 :tag string} adcs ; add, setting and using carry
+    ^{:line 68 :tag string} sub ; sub with no carry involvement
+    ^{:line 69 :tag string} subs ; sub, setting but not using carry
+    ^{:line 70 :tag string} sbc ; sub, using but not setting carry
+    ^{:line 71 :tag string} sbcs ; sub, setting and using carry
+    ^{:line 72 :tag string} mul ; multiply
+    ^{:line 73 :tag string} mulhi ; multiply producing high bits
+    ^{:line 74 :tag string} lsh ; left shift
+    ^{:line 75 :tag string} lshd ; double-width left shift
+    ^{:line 76 :tag string} rsh ; right shift
+    ^{:line 77 :tag string} rshd ; double-width right shift
+    ^{:line 78 :tag string} and ; bitwise and
+    ^{:line 79 :tag string} or ; bitwise or
+    ^{:line 80 :tag string} xor ; bitwise xor
+    ^{:line 81 :tag string} neg ; negate
+    ^{:line 82 :tag string} rsb ; reverse subtract
+    ^{:line 83 :tag string} sltu ; set less-than unsigned (dst = src2 < src1), for carry-less systems
+    ^{:line 84 :tag string} sgtu ; set greater-than unsigned (dst = src2 > src1), for carry-less systems
+    ^{:line 85 :tag string} lea ; load effective address
+
+
+
+
+
+    ^{:line 91 :tag (func [^{:tag (* Asm)} a ^Reg src1 ^Reg src2 ^Reg dst ^Carry carry] [bool]) :doc "addF and subF implement a.Add and a.Sub\non systems where the situation is more complicated than\nthe six basic instructions (add, adds, adcs, sub, subs, sbcs).\nThey return a boolean indicating whether the operation was handled.\n"} addF
+    ^{:line 92 :tag (func [^{:tag (* Asm)} a ^Reg src1 ^Reg src2 ^Reg dst ^Carry carry] [bool])} subF
+
+
+
+
+
+    ^{:line 98 :tag (func [^{:tag (* Asm)} a ^Reg src1 ^Reg src2 ^Reg dstlo ^Reg dsthi]) :doc "mulF and mulWideF implement Mul and MulWide.\nThey call Fatalf if the operation is unsupported.\nAn architecture can set the mul field instead of mulF.\nmulWide is optional, but otherwise mulhi should be set.\n"} mulWideF
+
+
+
+
+    ^{:line 103 :tag string :doc "addWords is a printf format taking src1, src2, dst\nand sets dst = WordBytes*src1+src2.\nIt may modify the carry flag.\n"} addWords
+
+
+
+
+
+    ^{:line 109 :tag bool :doc "subCarryIsBorrow is true when the actual processor carry bit used in subtraction\nis really a “borrow” bit, meaning 1 means borrow and 0 means no borrow.\nIn contrast, most systems (except x86) use a carry bit with the opposite\nmeaning: 0 means a borrow happened, and 1 means it didn't.\n"} subCarryIsBorrow
+
+
+
+
+    ^{:line 114 :tag string :doc "Jump instruction printf formats.\njmpZero and jmpNonZero are printf formats taking src, label\nand jump to label if src is zero / non-zero.\n"} jmpZero
+    ^{:line 115 :tag string} jmpNonZero
+
+
+
+
+    ^{:line 120 :tag string :doc "loopTop is a printf format taking src, label that should\njump to label if src is zero, or else set up for a loop.\nIf loopTop is not set, jmpZero is used.\n"} loopTop
+
+
+
+
+
+    ^{:line 126 :tag string :doc "loopBottom is a printf format taking dst, label that should\ndecrement dst and then jump to label if src is non-zero.\nIf loopBottom is not set, a subtraction is used followed by\nuse of jmpNonZero.\n"} loopBottom
+
+
+
+
+    ^{:line 131 :tag string :doc "loopBottomNeg is like loopBottom but used in negative-index\nloops, which only happen memIndex is also set (only on 386).\nIt increments dst instead of decrementing it.\n"} loopBottomNeg
+
+
+
+
+
+
+
+    ^{:line 139 :tag (func [^{:tag (* Asm)} a ^int off ^Reg ix ^RegPtr ptr] [Reg]) :doc "Indexed memory access.\nIf set, memIndex returns a memory reference for a mov instruction\naddressing off(ptr)(ix*WordBytes).\nUsing memIndex costs an extra register but allows the end-of-loop\nto do a single increment/decrement instead of advancing two or three pointers.\nThis is particularly important on 386.\n"} memIndex
+
+
+
+
+
+
+    ^{:line 146 :tag (func [^{:tag (* Asm)} a ^RegPtr ptr ^{:tag (slice Reg)} regs]) :doc "Incrementing/decrementing memory access.\nloadIncN loads memory at ptr into regs, incrementing ptr by WordBytes after each reg.\nloadDecN loads memory at ptr into regs, decrementing ptr by WordBytes before each reg.\nstoreIncN and storeDecN are the same, but storing from regs instead of loading into regs.\nIf missing, the assembler accesses memory and advances pointers using separate instructions.\n"} loadIncN
+    ^{:line 147 :tag (func [^{:tag (* Asm)} a ^RegPtr ptr ^{:tag (slice Reg)} regs])} loadDecN
+    ^{:line 148 :tag (func [^{:tag (* Asm)} a ^RegPtr ptr ^{:tag (slice Reg)} regs])} storeIncN
+    ^{:line 149 :tag (func [^{:tag (* Asm)} a ^RegPtr ptr ^{:tag (slice Reg)} regs])} storeDecN
+
+
+
+    ^{:line 153 :tag (map Option (func [^{:tag (* Asm)} a ^string label])) :doc "options is a map from optional CPU features to functions that test for them.\nThe test function should jump to label if the feature is available.\n"} options))
+
+
+
+
+^{:go/end 160} (go/method HasShiftWide "HasShiftWide reports whether the Arch has working LshWide/RshWide instructions.\nIf not, calling them will panic.\n" ^bool [^{:tag (* Arch)} a]
+  (!= (.-lshd a) ""))
+
+
+
+
+(go/type Hint "A Hint is a hint about what a register will be used for,\nso that an appropriate one can be selected.\n" uint)
+
+(go/const
+  ^{:line 167} [^{:tag Hint :val 0} HintNone iota]
+  ^{:line 168} [^{:val 1} HintShiftCount] ; shift count (CX on x86)
+  ^{:line 169} [^{:val 2} HintMulSrc] ; mul source operand (AX on x86)
+  ^{:line 170} [^{:val 3} HintMulHi] ; wide mul high output (DX on x86)
+  ^{:line 171} [^{:val 4} HintMemOK] ; a memory reference is okay
+  ^{:line 172} [^{:val 5} HintCarry] ; carry flag
+  ^{:line 173} [^{:val 6} HintAltCarry]) ; secondary carry flag
+
+
+
+
+
+(go/type Reg "A Reg is an allocated register or other assembly operand.\n(For example, a constant might have name \"$123\"\nand a memory reference might have name \"0(R8)\".)\n" (struct ^string name))
+
+
+^{:go/end 182} (go/method IsImm "IsImm reports whether r is an immediate value.\n" ^bool [^Reg r] (strings/HasPrefix (.-name r) "$"))
+
+
+^{:go/end 185} (go/method IsMem "IsMem reports whether r is a memory value.\n" ^bool [^Reg r] (strings/HasSuffix (.-name r) ")"))
+
+
+^{:go/end 188} (go/method String "String returns the assembly syntax for r.\n" ^string [^Reg r] (.-name r))
+
+
+^{:go/end 191} (go/method Valid "Valid reports whether is valid, meaning r is not the zero value of Reg (a register with no name).\n" ^bool [^Reg r] (!= (.-name r) ""))
+
+
+
+
+(go/type RegPtr "A RegPtr is like a Reg but expected to hold a pointer.\nThe separate Go type helps keeps pointers and scalars separate and avoid mistakes;\nit is okay to convert to Reg as needed to use specific routines.\n" (struct ^string name))
+
+
+^{:go/end 199} (go/method String "String returns the assembly syntax for r.\n" ^string [^RegPtr r] (.-name r))
+
+
+^{:go/end 202} (go/method Valid "Valid reports whether is valid, meaning r is not the zero value of RegPtr (a register with no name).\n" ^bool [^RegPtr r] (!= (.-name r) ""))
+
+
+^{:go/end 205} (go/method mem "mem returns a memory reference to off bytes from the pointer r.\n" ^Reg [^{:tag (* RegPtr)} r ^int off] (lit Reg (fmt/Sprintf "%d(%s)" off r)))
+
+
+
+
+
+(go/type Carry "A Carry is a flag field explaining how an instruction sets and uses the carry flags.\nDifferent operations expect different sets of bits.\nAdd and Sub expect: UseCarry or 0, SetCarry, KeepCarry, or SmashCarry; and AltCarry or 0.\nClearCarry, SaveCarry, and ConvertCarry expect: AddCarry or SubCarry; and AltCarry or 0.\n" uint)
+
+(go/const
+  ^{:line 214} [^{:tag Carry :val 1} SetCarry (<< 1 iota)] ; sets carry
+  ^{:line 215} [^{:val 2} UseCarry] ; uses carry
+  ^{:line 216} [^{:val 4} KeepCarry] ; must preserve carry
+  ^{:line 217} [^{:val 8} SmashCarry] ; can modify carry or not, whatever is easiest
+
+  ^{:line 219} [^{:val 16} AltCarry] ; use the secondary carry flag
+  ^{:line 220} [^{:val 32} AddCarry] ; use add carry flag semantics (for ClearCarry, ConvertCarry)
+  ^{:line 221} [^{:val 64} SubCarry]) ; use sub carry flag semantics (for ClearCarry, ConvertCarry)
+
+
+
+(go/type Option "An Option denotes an optional CPU feature that can be tested at runtime.\n" int)
+
+(go/const
+  ^{:line 228} [^{:tag Option :val 0} _ iota]
+
+
+
+
+
+
+  ^{:line 235} [^{:val 1 :doc "OptionAltCarry checks whether there is an add instruction\nthat uses a secondary carry flag, so that two different sums\ncan be accumulated in parallel with independent carry flags.\nSome architectures (MIPS, Loong64, RISC-V) provide this\nfunctionality natively, indicated by asm.Carry().Valid() being true.\n"} OptionAltCarry])

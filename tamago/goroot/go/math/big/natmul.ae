@@ -1,0 +1,354 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Multiplication.
+
+(in-ns 'go.math.big) (go/file "natmul.go" :imports [])
+
+
+
+
+(go/var ^{:doc "Operands that are shorter than karatsubaThreshold are multiplied using\n\"grade school\" multiplication; for longer operands the Karatsuba algorithm\nis used.\n"} karatsubaThreshold 40) ; see calibrate_test.go
+
+
+
+^{:go/end 63} (go/method mul "mul sets z = x*y, using stk for temporary storage.\nThe caller may pass stk == nil to request that mul obtain and release one itself.\n" ^nat [^nat z ^{:tag (* stack)} stk ^nat x ^nat y]
+  (let [m (len x)
+      ^{:line 18} n (len y)]
+
+    (switch
+      (case [(< m n)]
+        (return (.mul z stk y x)))
+      (case [(or (== m 0) (== n 0))]
+        (return (subslice z _ 0)))
+      (case [(== n 1)]
+        (return (.mulAddWW z x (aget y 0) 0))))
+
+    ;; m >= n > 1
+
+    ;; determine if z can be reused
+    (when (or (alias z x) (alias z y))
+      (set! z nil)) ; z is an alias for x or y - cannot reuse
+
+    (set! z (.make z (+ m n)))
+
+    ;; use basic multiplication if the numbers are small
+    (when (< n karatsubaThreshold)
+      (basicMul z x y)
+      (return (.norm z)))
+
+
+    (when (== stk nil)
+      (set! stk (getStack))
+      (defer (.free stk)))
+
+
+    ;; Let x = x1:x0 where x0 is the same length as y.
+    ;; Compute z = x0*y and then add in x1*y in sections
+    ;; if needed.
+    (karatsuba stk (subslice z _ (* 2 n)) (subslice x _ n) y)
+
+    (when (< n m)
+      (clear (subslice z (* 2 n)))
+      (defer (.restore stk (.save stk)))
+      (let [t (.nat stk (* 2 n))]
+        (for [i n] (< i m) (set! i + n)
+          (set! t (.mul t stk (subslice x i (min (+ i n) (len x))) y))
+          (addTo (subslice z i) t))))
+
+
+
+    (.norm z)))
+
+
+
+
+
+(go/var ^{:doc "Operands that are shorter than basicSqrThreshold are squared using\n\"grade school\" multiplication; for operands longer than karatsubaSqrThreshold\nwe use the Karatsuba algorithm optimized for x == y.\n"} basicSqrThreshold 12) ; see calibrate_test.go
+(go/var karatsubaSqrThreshold 80) ; see calibrate_test.go
+
+
+
+^{:go/end 107} (go/method sqr "sqr sets z = x*x, using stk for temporary storage.\nThe caller may pass stk == nil to request that sqr obtain and release one itself.\n" ^nat [^nat z ^{:tag (* stack)} stk ^nat x]
+  (let [n (len x)]
+    (switch
+      (case [(== n 0)]
+        (return (subslice z _ 0)))
+      (case [(== n 1)]
+        (let [d (aget x 0)]
+          (set! z (.make z 2))
+          (set! (values (aget z 1) (aget z 0)) (mulWW d d))
+          (return (.norm z)))))
+
+
+    (when (alias z x)
+      (set! z nil)) ; z is an alias for x - cannot reuse
+
+    (set! z (.make z (* 2 n)))
+
+    (when (and (< n basicSqrThreshold) (< n karatsubaSqrThreshold))
+      (basicMul z x x)
+      (return (.norm z)))
+
+
+    (when (== stk nil)
+      (set! stk (getStack))
+      (defer (.free stk)))
+
+
+    (when (< n karatsubaSqrThreshold)
+      (basicSqr stk z x)
+      (return (.norm z)))
+
+
+    (karatsubaSqr stk z x)
+    (.norm z)))
+
+
+
+
+
+
+^{:go/end 133} (go/func basicSqr "basicSqr sets z = x*x and is asymptotically faster than basicMul\nby about a factor of 2, but slower for small arguments due to overhead.\nRequirements: len(x) > 0, len(z) == 2*len(x)\nThe (non-normalized) result is placed in z.\n" [^{:tag (* stack)} stk ^nat z ^nat x]
+  (let [n (len x)]
+    (when (< n basicSqrThreshold)
+      (basicMul z x x)
+      (return))
+
+
+    (defer (.restore stk (.save stk)))
+    (let [t (.nat stk (* 2 n))]
+      (clear t)
+      (set! (values (aget z 1) (aget z 0)) (mulWW (aget x 0) (aget x 0))) ; the initial square
+      (for [i 1] (< i n) (inc! i)
+        (let [d (aget x i)]
+          ;; z collects the squares x[i] * x[i]
+          (set! (values (aget z (+ (* 2 i) 1)) (aget z (* 2 i))) (mulWW d d))
+          ;; t collects the products x[i] * x[j] where j < i
+          (aset t (* 2 i) (addMulVVWW (subslice t i (* 2 i)) (subslice t i (* 2 i)) (subslice x 0 i) d 0))))
+
+      (aset t (- (* 2 n) 1) (lshVU (subslice t 1 (- (* 2 n) 1)) (subslice t 1 (- (* 2 n) 1)) 1)) ; double the j < i products
+      (addVV z z t)))) ; combine the result
+
+
+
+^{:go/end 147} (go/method mulAddWW "mulAddWW returns z = x*y + r.\n" ^nat [^nat z ^nat x ^Word y ^Word r]
+  (let [m (len x)]
+    (when (or (== m 0) (== y 0))
+      (return (.setWord z r))) ; result is r
+
+    ;; m > 0
+
+    (set! z (.make z (+ m 1)))
+    (aset z m (mulAddVWW (subslice z 0 m) x y r))
+
+    (.norm z)))
+
+
+
+
+^{:go/end 158} (go/func basicMul "basicMul multiplies x and y and leaves the result in z.\nThe (non-normalized) result is placed in z[0 : len(x) + len(y)].\n" [^nat z ^nat x ^nat y]
+  (clear (subslice z 0 (+ (len x) (len y)))) ; initialize z
+  (range [i d y]
+    (when (!= d 0)
+      (aset z (+ (len x) i) (addMulVVWW (subslice z i (+ i (len x))) (subslice z i (+ i (len x))) x d 0)))))
+
+
+
+
+
+
+
+
+^{:go/end 250} (go/func karatsuba "karatsuba multiplies x and y,\nwriting the (non-normalized) result to z.\nx and y must have the same length n,\nand z must have length twice that.\n" [^{:tag (* stack)} stk ^nat z ^nat x ^nat y]
+  (let [n (len y)]
+    (when (or (!= (len x) n) (!= (len z) (* 2 n)))
+      (panic "bad karatsuba length"))
+
+
+    ;; Fall back to basic algorithm if small enough.
+    (when (or (< n karatsubaThreshold) (< n 2))
+      (basicMul z x y)
+      (return))
+
+
+    ;; Let the notation x1:x0 denote the nat (x1<<N)+x0 for some N,
+    ;; and similarly z2:z1:z0 = (z2<<2N)+(z1<<N)+z0.
+    ;;
+    ;; (Note that z0, z1, z2 might be ≥ 2**N, in which case the high
+    ;; bits of, say, z0 are being added to the low bits of z1 in this notation.)
+    ;;
+    ;; Karatsuba multiplication is based on the observation that
+    ;;
+    ;;	x1:x0 * y1:y0 = x1*y1:(x0*y1+y0*x1):x0*y0
+    ;;	              = x1*y1:((x0-x1)*(y1-y0)+x1*y1+x0*y0):x0*y0
+    ;;
+    ;; The second form uses only three half-width multiplications
+    ;; instead of the four that the straightforward first form does.
+    ;;
+    ;; We call the three pieces z0, z1, z2:
+    ;;
+    ;;	z0 = x0*y0
+    ;;	z2 = x1*y1
+    ;;	z1 = (x0-x1)*(y1-y0) + z0 + z2
+
+    (let [n2 (/ (+ n 1) 2)
+        (values x0 x1) (values (addr (lit Int :abs (.norm (subslice x _ n2)))) (addr (lit Int :abs (.norm (subslice x n2)))))
+        (values y0 y1) (values (addr (lit Int :abs (.norm (subslice y _ n2)))) (addr (lit Int :abs (.norm (subslice y n2)))))
+        ^{:line 199} z0 (addr (lit Int :abs (subslice z 0 (* 2 n2))))
+        ^{:line 200} z2 (addr (lit Int :abs (subslice z (* 2 n2))))]
+
+      ;; Allocate temporary storage for z1; repurpose z0 to hold tx and ty.
+      (defer (.restore stk (.save stk)))
+      (let [z1 (addr (lit Int :abs (.nat stk (+ (* 2 n2) 1))))
+          ^{:line 205} tx (addr (lit Int :abs (subslice z 0 n2)))
+          ^{:line 206} ty (addr (lit Int :abs (subslice z n2 (* 2 n2))))]
+
+        (.Sub tx x0 x1)
+        (.Sub ty y1 y0)
+        (.mul z1 stk tx ty)
+
+        (clear z)
+        (.mul z0 stk x0 y0)
+        (.mul z2 stk x1 y1)
+        (.Add z1 z1 z0)
+        (.Add z1 z1 z2)
+        (addTo (subslice z n2) (.-abs z1))
+
+        ;; Debug mode: double-check answer and print trace on failure.
+        (let [^:const ^{:val false} debug false]
+          (when debug
+            (let [zz (make nat (len z))]
+              (basicMul zz x y)
+              (when (!= (.cmp z zz) 0)
+                ;; All the temps were aliased to z and gone. Recompute.
+                (set! z0 (new Int))
+                (.mul z0 stk x0 y0)
+                (set! tx (.Sub (new Int) x1 x0))
+                (set! ty (.Sub (new Int) y0 y1))
+                (set! z2 (new Int))
+                (.mul z2 stk x1 y1)
+                (print "karatsuba wrong\n")
+                (trace "x " (addr (lit Int :abs x)))
+                (trace "y " (addr (lit Int :abs y)))
+                (trace "z " (addr (lit Int :abs z)))
+                (trace "zz" (addr (lit Int :abs zz)))
+                (trace "x0" x0)
+                (trace "x1" x1)
+                (trace "y0" y0)
+                (trace "y1" y1)
+                (trace "tx" tx)
+                (trace "ty" ty)
+                (trace "z0" z0)
+                (trace "z1" z1)
+                (trace "z2" z2)
+                (panic "karatsuba")))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 332} (go/func karatsubaSqr "karatsubaSqr squares x,\nwriting the (non-normalized) result to z.\nz must have length 2*len(x).\nIt is analogous to [karatsuba] but can run faster\nknowing both multiplicands are the same value.\n" [^{:tag (* stack)} stk ^nat z ^nat x]
+  (let [n (len x)]
+    (when (!= (len z) (* 2 n))
+      (panic "bad karatsubaSqr length"))
+
+
+    (when (or (< n karatsubaSqrThreshold) (< n 2))
+      (basicSqr stk z x)
+      (return))
+
+
+    ;; Recall that for karatsuba we want to compute:
+    ;;
+    ;;	x1:x0 * y1:y0 = x1y1:(x0y1+y0x1):x0y0
+    ;;                = x1y1:((x0-x1)*(y1-y0)+x1y1+x0y0):x0y0
+    ;;	              = z2:z1:z0
+    ;; where:
+    ;;
+    ;;	z0 = x0y0
+    ;;	z2 = x1y1
+    ;;	z1 = (x0-x1)*(y1-y0) + z0 + z2
+    ;;
+    ;; When x = y, these simplify to:
+    ;;
+    ;;	z0 = x0²
+    ;;	z2 = x1²
+    ;;	z1 = z0 + z2 - (x0-x1)²
+
+    (let [n2 (/ (+ n 1) 2)
+        (values x0 x1) (values (addr (lit Int :abs (.norm (subslice x _ n2)))) (addr (lit Int :abs (.norm (subslice x n2)))))
+        ^{:line 287} z0 (addr (lit Int :abs (subslice z 0 (* 2 n2))))
+        ^{:line 288} z2 (addr (lit Int :abs (subslice z (* 2 n2))))]
+
+      ;; Allocate temporary storage for z1; repurpose z0 to hold tx.
+      (defer (.restore stk (.save stk)))
+      (let [z1 (addr (lit Int :abs (.nat stk (+ (* 2 n2) 1))))
+          ^{:line 293} tx (addr (lit Int :abs (subslice z 0 n2)))]
+
+        (.Sub tx x0 x1)
+        (set! (.-abs z1) (.sqr (.-abs z1) stk (.-abs tx)))
+        (set! (.-neg z1) true)
+
+        (clear z)
+        (set! (.-abs z0) (.sqr (.-abs z0) stk (.-abs x0)))
+        (set! (.-abs z2) (.sqr (.-abs z2) stk (.-abs x1)))
+        (.Add z1 z1 z0)
+        (.Add z1 z1 z2)
+        (addTo (subslice z n2) (.-abs z1))
+
+        ;; Debug mode: double-check answer and print trace on failure.
+        (let [^:const ^{:val false} debug false]
+          (when debug
+            (let [zz (make nat (len z))]
+              (basicSqr stk zz x)
+              (when (!= (.cmp z zz) 0)
+                ;; All the temps were aliased to z and gone. Recompute.
+                (set! tx (.Sub (new Int) x0 x1))
+                (set! z0 (.Mul (new Int) x0 x0))
+                (set! z2 (.Mul (new Int) x1 x1))
+                (set! z1 (.Mul (new Int) tx tx))
+                (.Neg z1 z1)
+                (.Add z1 z1 z0)
+                (.Add z1 z1 z2)
+                (print "karatsubaSqr wrong\n")
+                (trace "x " (addr (lit Int :abs x)))
+                (trace "z " (addr (lit Int :abs z)))
+                (trace "zz" (addr (lit Int :abs zz)))
+                (trace "x0" x0)
+                (trace "x1" x1)
+                (trace "z0" z0)
+                (trace "z1" z1)
+                (trace "z2" z2)
+                (panic "karatsubaSqr")))))))))
+
+
+
+
+
+^{:go/end 350} (go/func ifmt "ifmt returns the debug formatting of the Int x: 0xHEX.\n" ^string [^{:tag (* Int)} x]
+  (let [(values neg s t) (values "" (.Text x 16) "")]
+    (when (== s "") ; happens for denormalized zero
+      (set! s "0x0"))
+
+    (when (== (aget s 0) \-)
+      (set! (values neg s) (values "-" (subslice s 1))))
+
+
+    ;; Add _ between words.
+    (let [^:const ^{:val 16} D (/ _W 4)] ; digits per chunk
+      (while (> (len s) D)
+        (set! (values s t) (values (subslice s _ (- (len s) D)) (+ (subslice s (- (len s) D)) "_" t))))
+
+      (+ neg s t))))
+
+
+
+^{:go/end 355} (go/func trace "trace prints a single debug value.\n" [^string name ^{:tag (* Int)} x]
+  (print name "=" (ifmt x) "\n"))

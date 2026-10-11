@@ -1,0 +1,382 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.hpke) (go/file "kem.go" :imports [
+
+
+    ^{:line 8} [ecdh "crypto/ecdh"]
+    ^{:line 9} [rand "crypto/internal/rand"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [byteorder "internal/byteorder"]
+    ^{:line 12} [slices "slices"]])
+
+
+
+
+(go/type KEM "A KEM is a Key Encapsulation Mechanism, one of the three components of an\nHPKE ciphersuite.\n" (interface
+
+    (^{:doc "ID returns the HPKE KEM identifier.\n"} ID ^uint16 [])
+
+
+    (^{:doc "GenerateKey generates a new key pair.\n"} GenerateKey [] :results [PrivateKey error])
+
+
+
+
+    (^{:doc "NewPublicKey deserializes a public key from bytes.\n\nIt implements DeserializePublicKey, as defined in RFC 9180.\n"} NewPublicKey [(slice byte)] :results [PublicKey error])
+
+
+
+
+    (^{:doc "NewPrivateKey deserializes a private key from bytes.\n\nIt implements DeserializePrivateKey, as defined in RFC 9180.\n"} NewPrivateKey [(slice byte)] :results [PrivateKey error])
+
+
+
+
+    (^{:doc "DeriveKeyPair derives a key pair from the given input keying material.\n\nIt implements DeriveKeyPair, as defined in RFC 9180.\n"} DeriveKeyPair [^{:tag (slice byte)} ikm] :results [PrivateKey error])
+
+    (encSize ^int [])))
+
+
+
+
+
+
+^{:go/end 69} (go/func NewKEM "NewKEM returns the KEM implementation for the given KEM ID.\n\nApplications are encouraged to use specific implementations like [DHKEM] or\n[MLKEM768X25519] instead, unless runtime agility is required.\n" [^uint16 id] :results [KEM error]
+  (switch id
+    (case [0x0010] ; DHKEM(P-256, HKDF-SHA256)
+      (return (DHKEM (ecdh/P256)) nil))
+    (case [0x0011] ; DHKEM(P-384, HKDF-SHA384)
+      (return (DHKEM (ecdh/P384)) nil))
+    (case [0x0012] ; DHKEM(P-521, HKDF-SHA512)
+      (return (DHKEM (ecdh/P521)) nil))
+    (case [0x0020] ; DHKEM(X25519, HKDF-SHA256)
+      (return (DHKEM (ecdh/X25519)) nil))
+    (case [0x0041] ; ML-KEM-768
+      (return (MLKEM768) nil))
+    (case [0x0042] ; ML-KEM-1024
+      (return (MLKEM1024) nil))
+    (case [0x647a] ; MLKEM768-X25519
+      (return (MLKEM768X25519) nil))
+    (case [0x0050] ; MLKEM768-P256
+      (return (MLKEM768P256) nil))
+    (case [0x0051] ; MLKEM1024-P384
+      (return (MLKEM1024P384) nil))
+    (default
+      (return nil (errors/New "unsupported KEM")))))
+
+
+
+
+
+
+
+
+(go/type PublicKey "A PublicKey is an instantiation of a KEM (one of the three components of an\nHPKE ciphersuite) with an encapsulation key (i.e. the public key).\n\nA PublicKey is usually obtained from a method of the corresponding [KEM] or\n[PrivateKey], such as [KEM.NewPublicKey] or [PrivateKey.PublicKey].\n" (interface
+
+    (^{:doc "KEM returns the instantiated KEM.\n"} KEM ^KEM [])
+
+
+    (^{:doc "Bytes returns the public key as the output of SerializePublicKey.\n"} Bytes ^{:tag (slice byte)} [])
+
+    (encap [] :results [^{:tag (slice byte)} sharedSecret ^{:tag (slice byte)} enc ^error err])))
+
+
+
+
+
+
+
+(go/type PrivateKey "A PrivateKey is an instantiation of a KEM (one of the three components of\nan HPKE ciphersuite) with a decapsulation key (i.e. the secret key).\n\nA PrivateKey is usually obtained from a method of the corresponding [KEM],\nsuch as [KEM.GenerateKey] or [KEM.NewPrivateKey].\n" (interface
+
+    (^{:doc "KEM returns the instantiated KEM.\n"} KEM ^KEM [])
+
+
+
+
+
+
+    (^{:doc "Bytes returns the private key as the output of SerializePrivateKey, as\ndefined in RFC 9180.\n\nNote that for X25519 this might not match the input to NewPrivateKey.\nThis is a requirement of RFC 9180, Section 7.1.2.\n"} Bytes [] :results [(slice byte) error])
+
+
+    (^{:doc "PublicKey returns the corresponding PublicKey.\n"} PublicKey ^PublicKey [])
+
+    (decap [^{:tag (slice byte)} enc] :results [^{:tag (slice byte)} sharedSecret ^error err])))
+
+
+(go/type dhKEM (struct
+    ^{:line 109 :tag KDF} kdf
+    ^{:line 110 :tag uint16} id
+    ^{:line 111 :tag ecdh/Curve} curve
+    ^{:line 112 :tag uint16} Nsecret
+    ^{:line 113 :tag uint16} Nsk
+    ^{:line 114 :tag int} Nenc))
+
+
+^{:go/end 124} (go/method extractAndExpand [^{:tag (* dhKEM)} kem ^{:tag (slice byte)} dhKey ^{:tag (slice byte)} kemContext] :results [(slice byte) error]
+  (let [suiteID (byteorder/BEAppendUint16 (conv (slice byte) "KEM") (.-id kem))
+      (values eaePRK err) (.labeledExtract (.-kdf kem) suiteID nil "eae_prk" dhKey)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.labeledExpand (.-kdf kem) suiteID eaePRK "shared_secret" kemContext (.-Nsecret kem))))
+
+
+^{:go/end 128} (go/method ID ^uint16 [^{:tag (* dhKEM)} kem]
+  (.-id kem))
+
+
+^{:go/end 132} (go/method encSize ^int [^{:tag (* dhKEM)} kem]
+  (.-Nenc kem))
+
+
+(go/var dhKEMP256 (addr (lit dhKEM (HKDFSHA256) 0x0010 (ecdh/P256) 32 32 65)))
+(go/var dhKEMP384 (addr (lit dhKEM (HKDFSHA384) 0x0011 (ecdh/P384) 48 48 97)))
+(go/var dhKEMP521 (addr (lit dhKEM (HKDFSHA512) 0x0012 (ecdh/P521) 64 66 133)))
+(go/var dhKEMX25519 (addr (lit dhKEM (HKDFSHA256) 0x0020 (ecdh/X25519) 32 32 32)))
+
+
+
+
+
+
+
+
+
+^{:go/end 163} (go/func DHKEM "DHKEM returns a KEM implementing one of\n\n  - DHKEM(P-256, HKDF-SHA256)\n  - DHKEM(P-384, HKDF-SHA384)\n  - DHKEM(P-521, HKDF-SHA512)\n  - DHKEM(X25519, HKDF-SHA256)\n\ndepending on curve.\n" ^KEM [^ecdh/Curve curve]
+  (switch curve
+    (case [(ecdh/P256)]
+      (return dhKEMP256))
+    (case [(ecdh/P384)]
+      (return dhKEMP384))
+    (case [(ecdh/P521)]
+      (return dhKEMP521))
+    (case [(ecdh/X25519)]
+      (return dhKEMX25519))
+    (default
+      ;; The set of ecdh.Curve implementations is closed, because the
+      ;; interface has unexported methods. Therefore, this default case is
+      ;; only hit if a new curve is added that DHKEM doesn't support.
+      (return (lit unsupportedCurveKEM)))))
+
+
+
+(go/type unsupportedCurveKEM (struct))
+
+^{:go/breaks [3] :go/end 169} (go/method ID ^uint16 [unsupportedCurveKEM]
+  0)
+
+^{:go/end 172} (go/method GenerateKey [unsupportedCurveKEM] :results [PrivateKey error]
+  (return nil (errors/New "unsupported curve")))
+
+^{:go/end 175} (go/method NewPublicKey [unsupportedCurveKEM (slice byte)] :results [PublicKey error]
+  (return nil (errors/New "unsupported curve")))
+
+^{:go/end 178} (go/method NewPrivateKey [unsupportedCurveKEM (slice byte)] :results [PrivateKey error]
+  (return nil (errors/New "unsupported curve")))
+
+^{:go/end 181} (go/method DeriveKeyPair [unsupportedCurveKEM (slice byte)] :results [PrivateKey error]
+  (return nil (errors/New "unsupported curve")))
+
+^{:go/breaks [3] :go/end 184} (go/method encSize ^int [unsupportedCurveKEM]
+  0)
+
+
+(go/type dhKEMPublicKey (struct
+    ^{:line 187 :tag (* dhKEM)} kem
+    ^{:line 188 :tag (* ecdh/PublicKey)} pub))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 213} (go/func NewDHKEMPublicKey "NewDHKEMPublicKey returns a PublicKey implementing\n\n  - DHKEM(P-256, HKDF-SHA256)\n  - DHKEM(P-384, HKDF-SHA384)\n  - DHKEM(P-521, HKDF-SHA512)\n  - DHKEM(X25519, HKDF-SHA256)\n\ndepending on the underlying curve of pub ([ecdh.X25519], [ecdh.P256],\n[ecdh.P384], or [ecdh.P521]).\n\nThis function is meant for applications that already have an instantiated\ncrypto/ecdh public key. Otherwise, applications should use the\n[KEM.NewPublicKey] method of [DHKEM].\n" [^{:tag (* ecdh/PublicKey)} pub] :results [PublicKey error]
+  (let [(values kem ok) (assert (* dhKEM) (DHKEM (.Curve pub)))]
+    (when (not ok)
+      (return nil (errors/New "unsupported curve")))
+
+    ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4]} (lit dhKEMPublicKey
+          :kem kem
+          :pub pub))
+      nil)))
+
+
+^{:go/end 221} (go/method NewPublicKey [^{:tag (* dhKEM)} kem ^{:tag (slice byte)} data] :results [PublicKey error]
+  (let [(values pub err) (.NewPublicKey (.-curve kem) data)]
+    (when (!= err nil)
+      (return nil err))
+
+    (NewDHKEMPublicKey pub)))
+
+
+^{:go/end 225} (go/method KEM ^KEM [^{:tag (* dhKEMPublicKey)} pk]
+  (.-kem pk))
+
+
+^{:go/end 229} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* dhKEMPublicKey)} pk]
+  (.Bytes (.-pub pk)))
+
+
+
+
+(go/var ^{:tag (func [] [(* ecdh/PrivateKey)]) :doc "testingOnlyGenerateKey is only used during testing, to provide\na fixed test key to use when checking the RFC 9180 vectors.\n"} testingOnlyGenerateKey)
+
+^{:go/end 256} (go/method encap [^{:tag (* dhKEMPublicKey)} pk] :results [^{:tag (slice byte)} sharedSecret ^{:tag (slice byte)} encapPub ^error err]
+  (let [(values privEph ^:assign err) (.GenerateKey (.Curve (.-pub pk)) rand/Reader)]
+    (when (!= err nil)
+      (return nil nil err))
+
+    (when (!= testingOnlyGenerateKey nil)
+      (set! privEph (testingOnlyGenerateKey)))
+
+    (let [(values dhVal ^:assign err) (.ECDH privEph (.-pub pk))]
+      (when (!= err nil)
+        (return nil nil err))
+
+      (let [encPubEph (.Bytes (.PublicKey privEph))
+
+          ^{:line 249} encPubRecip (.Bytes (.-pub pk))
+          ^{:line 250} kemContext (append encPubEph (spread encPubRecip))]
+        (set! (values sharedSecret err) (.extractAndExpand (.-kem pk) dhVal kemContext))
+        (when (!= err nil)
+          (return nil nil err))
+
+        (return sharedSecret encPubEph nil)))))
+
+
+(go/type dhKEMPrivateKey (struct
+    ^{:line 259 :tag (* dhKEM)} kem
+    ^{:line 260 :tag ecdh/KeyExchanger} priv))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 286} (go/func NewDHKEMPrivateKey "NewDHKEMPrivateKey returns a PrivateKey implementing\n\n  - DHKEM(P-256, HKDF-SHA256)\n  - DHKEM(P-384, HKDF-SHA384)\n  - DHKEM(P-521, HKDF-SHA512)\n  - DHKEM(X25519, HKDF-SHA256)\n\ndepending on the underlying curve of priv ([ecdh.X25519], [ecdh.P256],\n[ecdh.P384], or [ecdh.P521]).\n\nThis function is meant for applications that already have an instantiated\ncrypto/ecdh private key, or another implementation of a [ecdh.KeyExchanger]\n(e.g. a hardware key). Otherwise, applications should use the\n[KEM.NewPrivateKey] method of [DHKEM].\n" [^ecdh/KeyExchanger priv] :results [PrivateKey error]
+  (let [(values kem ok) (assert (* dhKEM) (DHKEM (.Curve priv)))]
+    (when (not ok)
+      (return nil (errors/New "unsupported curve")))
+
+    ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4]} (lit dhKEMPrivateKey
+          :kem kem
+          :priv priv))
+      nil)))
+
+
+^{:go/end 294} (go/method GenerateKey [^{:tag (* dhKEM)} kem] :results [PrivateKey error]
+  (let [(values priv err) (.GenerateKey (.-curve kem) rand/Reader)]
+    (when (!= err nil)
+      (return nil err))
+
+    (NewDHKEMPrivateKey priv)))
+
+
+^{:go/end 302} (go/method NewPrivateKey [^{:tag (* dhKEM)} kem ^{:tag (slice byte)} ikm] :results [PrivateKey error]
+  (let [(values priv err) (.NewPrivateKey (.-curve kem) ikm)]
+    (when (!= err nil)
+      (return nil err))
+
+    (NewDHKEMPrivateKey priv)))
+
+
+^{:go/end 335} (go/method DeriveKeyPair [^{:tag (* dhKEM)} kem ^{:tag (slice byte)} ikm] :results [PrivateKey error]
+  ;; DeriveKeyPair from RFC 9180 Section 7.1.3.
+  (let [suiteID (byteorder/BEAppendUint16 (conv (slice byte) "KEM") (.-id kem))
+      (values prk err) (.labeledExtract (.-kdf kem) suiteID nil "dkp_prk" ikm)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (== kem dhKEMX25519)
+      (let [(values s err) (.labeledExpand (.-kdf kem) suiteID prk "sk" nil (.-Nsk kem))]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (.NewPrivateKey kem s))))
+
+    (let [^uint8 counter (zero uint8)]
+      (while (< counter 4)
+        (let [(values s err) (.labeledExpand (.-kdf kem) suiteID prk "candidate" (lit (slice byte) counter) (.-Nsk kem))]
+          (when (!= err nil)
+            (return nil err))
+
+          (when (== kem dhKEMP521)
+            (set! (aget s 0) bit-and 0x01))
+
+          (let [(values r ^:assign err) (.NewPrivateKey kem s)]
+            (when (!= err nil)
+              (inc! counter)
+              (continue))
+
+            (return r nil))))
+
+      (panic "chance of four rejections is < 2^-128"))))
+
+
+^{:go/end 339} (go/method KEM ^KEM [^{:tag (* dhKEMPrivateKey)} k]
+  (.-kem k))
+
+
+^{:go/end 363} (go/method Bytes [^{:tag (* dhKEMPrivateKey)} k] :results [(slice byte) error]
+  ;; Bizarrely, RFC 9180, Section 7.1.2 says SerializePrivateKey MUST clamp
+  ;; the output, which I thought we all agreed to instead do as part of the DH
+  ;; function, letting private keys be random bytes.
+  ;;
+  ;; At the same time, it says DeserializePrivateKey MUST also clamp, implying
+  ;; that the input doesn't have to be clamped, so Bytes by spec doesn't
+  ;; necessarily match the NewPrivateKey input.
+  ;;
+  ;; I'm sure this will not lead to any unexpected behavior or interop issue.
+  (let [(values priv ok) (assert (* ecdh/PrivateKey) (.-priv k))]
+    (when (not ok)
+      (return nil (errors/New "ecdh: private key does not support Bytes")))
+
+    (when (== (.-kem k) dhKEMX25519)
+      (let [b (.Bytes priv)]
+        (set! (aget b 0) bit-and 248)
+        (set! (aget b 31) bit-and 127)
+        (set! (aget b 31) bit-or 64)
+        (return b nil)))
+
+    (return (.Bytes priv) nil)))
+
+
+^{:go/end 370} (go/method PublicKey ^PublicKey [^{:tag (* dhKEMPrivateKey)} k]
+  (addr ^{:go/breaks [2 4]} (lit dhKEMPublicKey
+      :kem (.-kem k)
+      :pub (.PublicKey (.-priv k)))))
+
+
+
+^{:go/end 383} (go/method decap [^{:tag (* dhKEMPrivateKey)} k ^{:tag (slice byte)} encPubEph] :results [(slice byte) error]
+  (let [(values pubEph err) (.NewPublicKey (.Curve (.-priv k)) encPubEph)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values dhVal ^:assign err) (.ECDH (.-priv k) pubEph)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [kemContext (append (^{:inst [(slice byte) byte]} slices/Clip encPubEph) (spread (.Bytes (.PublicKey (.-priv k)))))]
+        (.extractAndExpand (.-kem k) dhVal kemContext)))))

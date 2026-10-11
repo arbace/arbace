@@ -1,0 +1,918 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file provides an internal debug logging facility. The debug
+;; log is a lightweight, in-memory, per-M ring buffer. By default, the
+;; runtime prints the debug log on panic.
+;;
+;; To print something to the debug log, call dlog to obtain a dlogger
+;; and use the methods on that to add values. The values will be
+;; space-separated in the output (much like println).
+;;
+;; This facility can be enabled by passing -tags debuglog when
+;; building. Without this tag, dlog calls compile to nothing.
+;;
+;; Implementation notes
+;;
+;; There are two implementations of the dlog interface: dloggerImpl and
+;; dloggerFake. dloggerFake is a no-op implementation. dlogger is type-aliased
+;; to one or the other depending on the debuglog build tag. However, both types
+;; always exist and are always built. This helps ensure we compile as much of
+;; the implementation as possible in the default build configuration, while also
+;; enabling us to achieve good test coverage of the real debuglog implementation
+;; even when the debuglog build tag is not set.
+
+(in-ns 'go.runtime) (go/file "debuglog.go" :imports [
+
+
+    ^{:line 29} [abi "internal/abi"]
+    ^{:line 30} [byteorder "internal/byteorder"]
+    ^{:line 31} [atomic "internal/runtime/atomic"]
+    ^{:line 32} [sys "internal/runtime/sys"]
+    ^{:line 33} [unsafe "unsafe"]])
+
+
+
+
+
+(go/const ^{:val 16384 :doc "debugLogBytes is the size of each per-M ring buffer. This is\nallocated off-heap to avoid blowing up the M and hence the GC'd\nheap size.\n"} debugLogBytes (<< 16 10))
+
+
+
+(go/const ^{:val 2048 :doc "debugLogStringLimit is the maximum number of bytes in a string.\nAbove this, the string will be truncated with \"..(n more bytes)..\"\n"} debugLogStringLimit (/ debugLogBytes 8))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 65} (go/func ^:go/nosplit ^:go/nowritebarrierrec dlog "dlog returns a debug logger. The caller can use methods on the\nreturned logger to add values, which will be space-separated in the\nfinal output, much like println. The caller must call end() to\nfinish the message.\n\ndlog can be used from highly-constrained corners of the runtime: it\nis safe to use in the signal handler, from within the write\nbarrier, from within the stack implementation, and in places that\nmust be recursively nosplit.\n\nThis will be compiled away if built without the debuglog build tag.\nHowever, argument construction may not be. If any of the arguments\nare not literals or trivial expressions, consider protecting the\ncall with \"if dlogEnabled\".\n" ^dlogger []
+  ;; dlog1 is defined to either dlogImpl or dlogFake.
+  (dlog1))
+
+
+
+
+^{:go/end 71} (go/func ^:go/nosplit ^:go/nowritebarrierrec dlogFake ^dloggerFake []
+  (lit dloggerFake))
+
+
+
+
+^{:go/end 140} (go/func ^:go/nosplit ^:go/nowritebarrierrec dlogImpl ^{:tag (* dloggerImpl)} []
+  ;; Get the time.
+  (let [(values tick nano) (values (conv uint64 (cputicks)) (conv uint64 (nanotime)))
+
+      ;; Try to get a cached logger.
+      ^{:line 80} l (getCachedDlogger)]
+
+    ;; If we couldn't get a cached logger, try to get one from the
+    ;; global pool.
+    (when (== l nil)
+      (let [allp (conv (* uintptr) (conv unsafe/Pointer (addr allDloggers)))
+          ^{:line 86} all (conv (* dloggerImpl) (conv unsafe/Pointer (atomic/Loaduintptr allp)))]
+        (for [l1 all] (!= l1 nil) (set! l1 (.-allLink l1))
+          (when (and (== (.Load (.-owned l1)) 0) (.CompareAndSwap (.-owned l1) 0 1))
+            (set! l l1)
+            (break)))))
+
+
+
+
+    ;; If that failed, allocate a new logger.
+    (when (== l nil)
+      ;; Use sysAllocOS instead of sysAlloc because we want to interfere
+      ;; with the runtime as little as possible, and sysAlloc updates accounting.
+      (set! l (conv (* dloggerImpl) (sysAllocOS (unsafe/Sizeof (lit dloggerImpl)) "debug log")))
+      (when (== l nil)
+        (throw "failed to allocate debug log"))
+
+      (set! (.-data (.-r (.-w l))) (addr (.-data (.-w l))))
+      (.Store (.-owned l) 1)
+
+      ;; Prepend to allDloggers list.
+      (let [headp (conv (* uintptr) (conv unsafe/Pointer (addr allDloggers)))]
+        (while true
+          (let [head (atomic/Loaduintptr headp)]
+            (set! (.-allLink l) (conv (* dloggerImpl) (conv unsafe/Pointer head)))
+            (when (atomic/Casuintptr headp head (conv uintptr (conv unsafe/Pointer l)))
+              (break))))))
+
+
+
+
+    ;; If the time delta is getting too high, write a new sync
+    ;; packet. We set the limit so we don't write more than 6
+    ;; bytes of delta in the record header.
+    (let [^:const ^{:val 2097151} deltaLimit (- (<< 1 (* 3 7)) 1)] ; ~2ms between sync packets
+      (when (or (> (- tick (.-tick (.-w l))) deltaLimit) (> (- nano (.-nano (.-w l))) deltaLimit))
+        (.writeSync (.-w l) tick nano))
+
+
+      ;; Reserve space for framing header.
+      (.ensure (.-w l) debugLogHeaderSize)
+      (set! (.-write (.-w l)) + debugLogHeaderSize)
+
+      ;; Write record header.
+      (.uvarint (.-w l) (- tick (.-tick (.-w l))))
+      (.uvarint (.-w l) (- nano (.-nano (.-w l))))
+      (let [gp (getg)]
+        (if (and (!= gp nil) (!= (.-m gp) nil) (!= (.-p (.-m gp)) 0))
+          (.varint (.-w l) (conv int64 (.-id (.ptr (.-p (.-m gp))))))
+
+          (.varint (.-w l) -1))
+
+
+        ^{:line 139} l))))
+
+
+
+
+
+
+(go/type dloggerImpl "A dloggerImpl writes to the debug log.\n\nTo obtain a dloggerImpl, call dlog(). When done with the dloggerImpl, call\nend().\n" (struct
+    ^{:line 147 :tag sys/NotInHeap} _
+    ^{:line 148 :tag debugLogWriter} w
+
+
+    ^{:line 151 :tag (* dloggerImpl) :doc "allLink is the next dlogger in the allDloggers list.\n"} allLink
+
+
+
+    ^{:line 155 :tag atomic/Uint32 :doc "owned indicates that this dlogger is owned by an M. This is\naccessed atomically.\n"} owned))
+
+
+
+
+
+(go/var ^{:tag (* dloggerImpl) :doc "allDloggers is a list of all dloggers, linked through\ndlogger.allLink. This is accessed atomically. This is prepend only,\nso it doesn't need to protect against ABA races.\n"} allDloggers)
+
+
+(go/type dloggerFake "A dloggerFake is a no-op implementation of dlogger.\n" (struct))
+
+
+^{:go/end 167} (go/method ^:go/nosplit end [^dloggerFake l])
+
+
+^{:go/end 187} (go/method ^:go/nosplit end [^{:tag (* dloggerImpl)} l]
+  ;; Fill in framing header.
+  (let [size (- (.-write (.-w l)) (.-end (.-r (.-w l))))]
+    (when (not (.writeFrameAt (.-w l) (.-end (.-r (.-w l))) size))
+      (throw "record too large"))
+
+
+    ;; Commit the record.
+    (set! (.-end (.-r (.-w l))) (.-write (.-w l)))
+
+    ;; Attempt to return this logger to the cache.
+    (when (putCachedDlogger l)
+      (return))
+
+
+    ;; Return the logger to the global pool.
+    (.Store (.-owned l) 0)))
+
+
+(go/const
+  ^{:line 190} [^{:val 1} debugLogUnknown (+ 1 iota)]
+  ^{:line 191} [^{:val 2} debugLogBoolTrue]
+  ^{:line 192} [^{:val 3} debugLogBoolFalse]
+  ^{:line 193} [^{:val 4} debugLogInt]
+  ^{:line 194} [^{:val 5} debugLogUint]
+  ^{:line 195} [^{:val 6} debugLogHex]
+  ^{:line 196} [^{:val 7} debugLogPtr]
+  ^{:line 197} [^{:val 8} debugLogString]
+  ^{:line 198} [^{:val 9} debugLogConstString]
+  ^{:line 199} [^{:val 10} debugLogHexdump]
+  ^{:line 200} [^{:val 11} debugLogOverflow]
+
+  ^{:line 202} [^{:val 12} debugLogPC]
+  ^{:line 203} [^{:val 13} debugLogTraceback])
+
+
+
+^{:go/end 207} (go/method ^:go/nosplit b ^dloggerFake [^dloggerFake l ^bool x] l)
+
+
+^{:go/end 217} (go/method ^:go/nosplit b ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^bool x]
+  (if x
+    (.byte (.-w l) debugLogBoolTrue)
+
+    (.byte (.-w l) debugLogBoolFalse))
+
+  ^{:line 216} l)
+
+
+
+^{:go/end 220} (go/method ^:go/nosplit i ^dloggerFake [^dloggerFake l ^int x] l)
+
+
+^{:go/end 225} (go/method ^:go/nosplit i ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^int x]
+  (.i64 l (conv int64 x)))
+
+
+
+^{:go/end 228} (go/method ^:go/nosplit i8 ^dloggerFake [^dloggerFake l ^int8 x] l)
+
+
+^{:go/end 233} (go/method ^:go/nosplit i8 ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^int8 x]
+  (.i64 l (conv int64 x)))
+
+
+
+^{:go/end 236} (go/method ^:go/nosplit i16 ^dloggerFake [^dloggerFake l ^int16 x] l)
+
+
+^{:go/end 241} (go/method ^:go/nosplit i16 ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^int16 x]
+  (.i64 l (conv int64 x)))
+
+
+
+^{:go/end 244} (go/method ^:go/nosplit i32 ^dloggerFake [^dloggerFake l ^int32 x] l)
+
+
+^{:go/end 249} (go/method ^:go/nosplit i32 ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^int32 x]
+  (.i64 l (conv int64 x)))
+
+
+
+^{:go/end 252} (go/method ^:go/nosplit i64 ^dloggerFake [^dloggerFake l ^int64 x] l)
+
+
+^{:go/end 259} (go/method ^:go/nosplit i64 ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^int64 x]
+  (.byte (.-w l) debugLogInt)
+  (.varint (.-w l) x)
+  ^{:line 258} l)
+
+
+
+^{:go/end 262} (go/method ^:go/nosplit u ^dloggerFake [^dloggerFake l ^uint x] l)
+
+
+^{:go/end 267} (go/method ^:go/nosplit u ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^uint x]
+  (.u64 l (conv uint64 x)))
+
+
+
+^{:go/end 270} (go/method ^:go/nosplit uptr ^dloggerFake [^dloggerFake l ^uintptr x] l)
+
+
+^{:go/end 275} (go/method ^:go/nosplit uptr ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^uintptr x]
+  (.u64 l (conv uint64 x)))
+
+
+
+^{:go/end 278} (go/method ^:go/nosplit u8 ^dloggerFake [^dloggerFake l ^uint8 x] l)
+
+
+^{:go/end 283} (go/method ^:go/nosplit u8 ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^uint8 x]
+  (.u64 l (conv uint64 x)))
+
+
+
+^{:go/end 286} (go/method ^:go/nosplit u16 ^dloggerFake [^dloggerFake l ^uint16 x] l)
+
+
+^{:go/end 291} (go/method ^:go/nosplit u16 ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^uint16 x]
+  (.u64 l (conv uint64 x)))
+
+
+
+^{:go/end 294} (go/method ^:go/nosplit u32 ^dloggerFake [^dloggerFake l ^uint32 x] l)
+
+
+^{:go/end 299} (go/method ^:go/nosplit u32 ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^uint32 x]
+  (.u64 l (conv uint64 x)))
+
+
+
+^{:go/end 302} (go/method ^:go/nosplit u64 ^dloggerFake [^dloggerFake l ^uint64 x] l)
+
+
+^{:go/end 309} (go/method ^:go/nosplit u64 ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^uint64 x]
+  (.byte (.-w l) debugLogUint)
+  (.uvarint (.-w l) x)
+  ^{:line 308} l)
+
+
+
+^{:go/end 312} (go/method ^:go/nosplit hex ^dloggerFake [^dloggerFake l ^uint64 x] l)
+
+
+^{:go/end 319} (go/method ^:go/nosplit hex ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^uint64 x]
+  (.byte (.-w l) debugLogHex)
+  (.uvarint (.-w l) x)
+  ^{:line 318} l)
+
+
+
+^{:go/end 322} (go/method ^:go/nosplit p ^dloggerFake [^dloggerFake l ^any x] l)
+
+
+^{:go/end 339} (go/method ^:go/nosplit p ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^any x]
+  (.byte (.-w l) debugLogPtr)
+  (if (== x nil)
+    (.uvarint (.-w l) 0)
+
+    (let [v (efaceOf (addr x))]
+      (switch (.Kind (.-_type v))
+        (case [abi/Chan abi/Func abi/Map abi/Pointer abi/UnsafePointer]
+          (.uvarint (.-w l) (conv uint64 (conv uintptr (.-data v)))))
+        (default
+          (throw "not a pointer type")))))
+
+
+  ^{:line 338} l)
+
+
+
+^{:go/end 342} (go/method ^:go/nosplit s ^dloggerFake [^dloggerFake l ^string x] l)
+
+
+^{:go/end 374} (go/method ^:go/nosplit s ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^string x]
+  (let [strData (unsafe/StringData x)
+      ^{:line 347} datap (addr firstmoduledata)]
+    (if (and (> (len x) 4) (<= (.-etext datap) (conv uintptr (conv unsafe/Pointer strData))) (< (conv uintptr (conv unsafe/Pointer strData)) (.-end datap))) (do
+        ;; String constants are in the rodata section, which
+        ;; isn't recorded in moduledata. But it has to be
+        ;; somewhere between etext and end.
+        (.byte (.-w l) debugLogConstString)
+        (.uvarint (.-w l) (conv uint64 (len x)))
+        (.uvarint (.-w l) (conv uint64 (- (conv uintptr (conv unsafe/Pointer strData)) (.-etext datap)))))
+      (do
+        (.byte (.-w l) debugLogString)
+        ;; We can't use unsafe.Slice as it may panic, which isn't safe
+        ;; in this (potentially) nowritebarrier context.
+        (let [^{:tag (slice byte)} b (zero (slice byte))
+            ^{:line 360} bb (conv (* slice) (conv unsafe/Pointer (addr b)))]
+          (set! (.-array bb) (conv unsafe/Pointer strData))
+          (set! (values (.-len bb) (.-cap bb)) (values (len x) (len x)))
+          (when (> (len b) debugLogStringLimit)
+            (set! b (subslice b _ debugLogStringLimit)))
+
+          (.uvarint (.-w l) (conv uint64 (len b)))
+          (.bytes (.-w l) b)
+          (when (!= (len b) (len x))
+            (.byte (.-w l) debugLogOverflow)
+            (.uvarint (.-w l) (conv uint64 (- (len x) (len b))))))))
+
+
+    ^{:line 373} l))
+
+
+
+^{:go/end 377} (go/method ^:go/nosplit hexdump ^dloggerFake [^dloggerFake l ^unsafe/Pointer p ^uintptr bytes] l)
+
+
+^{:go/end 400} (go/method ^:go/nosplit hexdump ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^unsafe/Pointer p ^uintptr bytes]
+  (let [^{:tag (slice byte)} b (zero (slice byte))
+      ^{:line 382} bb (conv (* slice) (conv unsafe/Pointer (addr b)))]
+    (set! (.-array bb) (conv unsafe/Pointer p))
+    (set! (values (.-len bb) (.-cap bb)) (values (conv int bytes) (conv int bytes)))
+    (when (> (len b) debugLogStringLimit)
+      (set! b (subslice b _ debugLogStringLimit)))
+
+
+    (.byte (.-w l) debugLogHexdump)
+    (.uvarint (.-w l) (conv uint64 (conv uintptr p)))
+    (.uvarint (.-w l) (conv uint64 (len b)))
+    (.bytes (.-w l) b)
+
+    (when (!= (conv uintptr (len b)) bytes)
+      (.byte (.-w l) debugLogOverflow)
+      (.uvarint (.-w l) (- (conv uint64 bytes) (conv uint64 (len b)))))
+
+
+    ^{:line 399} l))
+
+
+
+^{:go/end 403} (go/method ^:go/nosplit pc ^dloggerFake [^dloggerFake l ^uintptr x] l)
+
+
+^{:go/end 410} (go/method ^:go/nosplit pc ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^uintptr x]
+  (.byte (.-w l) debugLogPC)
+  (.uvarint (.-w l) (conv uint64 x))
+  ^{:line 409} l)
+
+
+
+^{:go/end 413} (go/method ^:go/nosplit traceback ^dloggerFake [^dloggerFake l ^{:tag (slice uintptr)} x] l)
+
+
+^{:go/end 423} (go/method ^:go/nosplit traceback ^{:tag (* dloggerImpl)} [^{:tag (* dloggerImpl)} l ^{:tag (slice uintptr)} x]
+  (.byte (.-w l) debugLogTraceback)
+  (.uvarint (.-w l) (conv uint64 (len x)))
+  (range [_ pc x]
+    (.uvarint (.-w l) (conv uint64 pc)))
+
+  ^{:line 422} l)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type debugLogWriter "A debugLogWriter is a ring buffer of binary debug log records.\n\nA log record consists of a 2-byte framing header and a sequence of\nfields. The framing header gives the size of the record as a little\nendian 16-bit value. Each field starts with a byte indicating its\ntype, followed by type-specific data. If the size in the framing\nheader is 0, it's a sync record consisting of two little endian\n64-bit values giving a new time base.\n\nBecause this is a ring buffer, new records will eventually\noverwrite old records. Hence, it maintains a reader that consumes\nthe log as it gets overwritten. That reader state is where an\nactual log reader would start.\n" (struct
+    ^{:line 439 :tag sys/NotInHeap} _
+    ^{:line 440 :tag uint64} write
+    ^{:line 441 :tag debugLogBuf} data
+
+
+
+    ^{:line 445 :tag uint64 :doc "tick and nano are the time bases from the most recently\nwritten sync record.\n"} tick ^{:tag uint64 :doc "tick and nano are the time bases from the most recently\nwritten sync record.\n"} nano
+
+
+
+
+    ^{:line 450 :tag debugLogReader :doc "r is a reader that consumes records as they get overwritten\nby the writer. It also acts as the initial reader state\nwhen printing the log.\n"} r
+
+
+
+    ^{:line 454 :tag (array 10 byte) :doc "buf is a scratch buffer for encoding. This is here to\nreduce stack usage.\n"} buf))
+
+
+(go/type debugLogBuf (struct
+    ^{:line 458 :tag sys/NotInHeap} _
+    ^{:line 459 :tag (array debugLogBytes byte)} b))
+
+
+(go/const
+
+
+  ^{:line 465} [^{:val 2 :doc "debugLogHeaderSize is the number of bytes in the framing\nheader of every dlog record.\n"} debugLogHeaderSize 2]
+
+
+  ^{:line 468} [^{:val 18 :doc "debugLogSyncSize is the number of bytes in a sync record.\n"} debugLogSyncSize (+ debugLogHeaderSize (* 2 8))])
+
+
+
+^{:go/end 485} (go/method ^:go/nosplit ensure [^{:tag (* debugLogWriter)} l ^uint64 n]
+  (while (>= (+ (.-write l) n) (+ (.-begin (.-r l)) (conv uint64 (len (.-b (.-data l))))))
+    ;; Consume record at begin.
+    (when (== (.skip (.-r l)) (bit-not (conv uint64 0)))
+      ;; Wrapped around within a record.
+      ;;
+      ;; TODO(austin): It would be better to just
+      ;; eat the whole buffer at this point, but we
+      ;; have to communicate that to the reader
+      ;; somehow.
+      (throw "record wrapped around"))))
+
+
+
+
+
+^{:go/end 492} (go/method ^:go/nosplit writeFrameAt ^bool [^{:tag (* debugLogWriter)} l ^uint64 pos ^uint64 size]
+  (aset (.-b (.-data l)) (% pos (conv uint64 (len (.-b (.-data l))))) (conv uint8 size))
+  (aset (.-b (.-data l)) (% (+ pos 1) (conv uint64 (len (.-b (.-data l))))) (conv uint8 (>> size 8)))
+  (<= size 0xFFFF))
+
+
+
+^{:go/end 503} (go/method ^:go/nosplit writeSync [^{:tag (* debugLogWriter)} l ^uint64 tick ^uint64 nano]
+  (set! (values (.-tick l) (.-nano l)) (values tick nano))
+  (.ensure l debugLogHeaderSize)
+  (.writeFrameAt l (.-write l) 0)
+  (set! (.-write l) + debugLogHeaderSize)
+  (.writeUint64LE l tick)
+  (.writeUint64LE l nano)
+  (set! (.-end (.-r l)) (.-write l)))
+
+
+
+^{:go/end 510} (go/method ^:go/nosplit writeUint64LE [^{:tag (* debugLogWriter)} l ^uint64 x]
+  (let [^{:tag (array 8 byte)} b (zero (array 8 byte))]
+    (byteorder/LEPutUint64 (subslice b) x)
+    (.bytes l (subslice b))))
+
+
+
+^{:go/end 518} (go/method ^:go/nosplit byte [^{:tag (* debugLogWriter)} l ^byte x]
+  (.ensure l 1)
+  (let [pos (.-write l)]
+    (inc! (.-write l))
+    (aset (.-b (.-data l)) (% pos (conv uint64 (len (.-b (.-data l))))) x)))
+
+
+
+^{:go/end 530} (go/method ^:go/nosplit bytes [^{:tag (* debugLogWriter)} l ^{:tag (slice byte)} x]
+  (.ensure l (conv uint64 (len x)))
+  (let [pos (.-write l)]
+    (set! (.-write l) + (conv uint64 (len x)))
+    (while (> (len x) 0)
+      (let [n (copy (subslice (.-b (.-data l)) (% pos (conv uint64 (len (.-b (.-data l)))))) x)]
+        (set! pos + (conv uint64 n))
+        (set! x (subslice x n))))))
+
+
+
+
+^{:go/end 541} (go/method ^:go/nosplit varint [^{:tag (* debugLogWriter)} l ^int64 x]
+  (let [^uint64 u (zero uint64)]
+    (if (< x 0)
+      (set! u (bit-or (<< (bit-not (conv uint64 x)) 1) 1)) ; complement i, bit 0 is 1
+
+      (set! u (<< (conv uint64 x) 1))) ; do not complement i, bit 0 is 0
+
+    (.uvarint l u)))
+
+
+
+^{:go/end 554} (go/method ^:go/nosplit uvarint [^{:tag (* debugLogWriter)} l ^uint64 u]
+  (let [i 0]
+    (while (>= u 0x80)
+      (aset (.-buf l) i (bit-or (conv byte u) 0x80))
+      (set! u >> 7)
+      (inc! i))
+
+    (aset (.-buf l) i (conv byte u))
+    (inc! i)
+    (.bytes l (subslice (.-buf l) _ i))))
+
+
+(go/type debugLogReader (struct
+    ^{:line 557 :tag (* debugLogBuf)} data
+
+
+
+    ^{:line 561 :tag uint64 :doc "begin and end are the positions in the log of the beginning\nand end of the log data, modulo len(data).\n"} begin ^{:tag uint64 :doc "begin and end are the positions in the log of the beginning\nand end of the log data, modulo len(data).\n"} end
+
+
+    ^{:line 564 :tag uint64 :doc "tick and nano are the current time base at begin.\n"} tick ^{:tag uint64 :doc "tick and nano are the current time base at begin.\n"} nano))
+
+
+
+^{:go/end 585} (go/method ^:go/nosplit skip ^uint64 [^{:tag (* debugLogReader)} r]
+  ;; Read size at pos.
+  (when (> (+ (.-begin r) debugLogHeaderSize) (.-end r))
+    (return (bit-not (conv uint64 0))))
+
+  (let [size (conv uint64 (.readUint16LEAt r (.-begin r)))]
+    (when (== size 0)
+      ;; Sync packet.
+      (set! (.-tick r) (.readUint64LEAt r (+ (.-begin r) debugLogHeaderSize)))
+      (set! (.-nano r) (.readUint64LEAt r (+ (.-begin r) debugLogHeaderSize 8)))
+      (set! size debugLogSyncSize))
+
+    (when (> (+ (.-begin r) size) (.-end r))
+      (return (bit-not (conv uint64 0))))
+
+    (set! (.-begin r) + size)
+    ^{:line 584} size))
+
+
+
+^{:go/end 591} (go/method ^:go/nosplit readUint16LEAt ^uint16 [^{:tag (* debugLogReader)} r ^uint64 pos]
+  (bit-or (conv uint16 (aget (.-b (.-data r)) (% pos (conv uint64 (len (.-b (.-data r)))))))
+    (<< (conv uint16 (aget (.-b (.-data r)) (% (+ pos 1) (conv uint64 (len (.-b (.-data r))))))) 8)))
+
+
+
+^{:go/end 601} (go/method ^:go/nosplit readUint64LEAt ^uint64 [^{:tag (* debugLogReader)} r ^uint64 pos]
+  (let [^{:tag (array 8 byte)} b (zero (array 8 byte))]
+    (range [i b]
+      (aset b i (aget (.-b (.-data r)) (% pos (conv uint64 (len (.-b (.-data r)))))))
+      (inc! pos))
+
+    (byteorder/LEUint64 (subslice b))))
+
+
+^{:go/end 641} (go/method peek [^{:tag (* debugLogReader)} r] :results [^uint64 tick]
+  ;; Consume any sync records.
+  (let [size (conv uint64 0)]
+    (while (== size 0)
+      (when (> (+ (.-begin r) debugLogHeaderSize) (.-end r))
+        (return (bit-not (conv uint64 0))))
+
+      (set! size (conv uint64 (.readUint16LEAt r (.-begin r))))
+      (when (!= size 0)
+        (break))
+
+      (when (> (+ (.-begin r) debugLogSyncSize) (.-end r))
+        (return (bit-not (conv uint64 0))))
+
+      ;; Sync packet.
+      (set! (.-tick r) (.readUint64LEAt r (+ (.-begin r) debugLogHeaderSize)))
+      (set! (.-nano r) (.readUint64LEAt r (+ (.-begin r) debugLogHeaderSize 8)))
+      (set! (.-begin r) + debugLogSyncSize))
+
+
+    ;; Peek tick delta.
+    (when (> (+ (.-begin r) size) (.-end r))
+      (return (bit-not (conv uint64 0))))
+
+    (let [pos (+ (.-begin r) debugLogHeaderSize)
+        ^{:line 628 :tag uint64} u (zero uint64)]
+      (for [i (conv uint 0)] _ (set! i + 7)
+        (let [b (aget (.-b (.-data r)) (% pos (conv uint64 (len (.-b (.-data r))))))]
+          (inc! pos)
+          (set! u bit-or (<< (conv uint64 (bit-and-not b 0x80)) i))
+          (when (== (bit-and b 0x80) 0)
+            (break))))
+
+
+      (when (> pos (+ (.-begin r) size))
+        (return (bit-not (conv uint64 0))))
+
+      (+ (.-tick r) u))))
+
+
+^{:go/end 656} (go/method header [^{:tag (* debugLogReader)} r] :results [^uint64 end ^uint64 tick ^uint64 nano ^int p]
+  ;; Read size. We've already skipped sync packets and checked
+  ;; bounds in peek.
+  (let [size (conv uint64 (.readUint16LEAt r (.-begin r)))]
+    (set! end (+ (.-begin r) size))
+    (set! (.-begin r) + debugLogHeaderSize)
+
+    ;; Read tick, nano, and p.
+    (set! tick (+ (.uvarint r) (.-tick r)))
+    (set! nano (+ (.uvarint r) (.-nano r)))
+    (set! p (conv int (.varint r)))
+
+    (return)))
+
+
+^{:go/end 669} (go/method uvarint ^uint64 [^{:tag (* debugLogReader)} r]
+  (let [^uint64 u (zero uint64)]
+    (for [i (conv uint 0)] _ (set! i + 7)
+      (let [b (aget (.-b (.-data r)) (% (.-begin r) (conv uint64 (len (.-b (.-data r))))))]
+        (inc! (.-begin r))
+        (set! u bit-or (<< (conv uint64 (bit-and-not b 0x80)) i))
+        (when (== (bit-and b 0x80) 0)
+          (break))))
+
+
+    ^{:line 668} u))
+
+
+^{:go/end 680} (go/method varint ^int64 [^{:tag (* debugLogReader)} r]
+  (let [u (.uvarint r)
+      ^{:line 673 :tag int64} v (zero int64)]
+    (if (== (bit-and u 1) 0)
+      (set! v (conv int64 (>> u 1)))
+
+      (set! v (bit-not (conv int64 (>> u 1)))))
+
+    ^{:line 679} v))
+
+
+^{:go/end 778} (go/method printVal ^bool [^{:tag (* debugLogReader)} r]
+  ^{:go/breaks [[4 777]]} (let [typ (aget (.-b (.-data r)) (% (.-begin r) (conv uint64 (len (.-b (.-data r))))))]
+    (inc! (.-begin r))
+
+    (switch typ
+      (default
+        (print "<unknown field type " (conv hex typ) " pos " (- (.-begin r) 1) " end " (.-end r) ">\n")
+        (return false))
+
+      (case [debugLogUnknown]
+        (print "<unknown kind>"))
+
+      (case [debugLogBoolTrue]
+        (print true))
+
+      (case [debugLogBoolFalse]
+        (print false))
+
+      (case [debugLogInt]
+        (print (.varint r)))
+
+      (case [debugLogUint]
+        (print (.uvarint r)))
+
+      (case [debugLogHex debugLogPtr]
+        (print (conv hex (.uvarint r))))
+
+      (case [debugLogString]
+        (let [sl (.uvarint r)]
+          (when (> (+ (.-begin r) sl) (.-end r))
+            (set! (.-begin r) (.-end r))
+            (print "<string length corrupted>")
+            (break))
+
+          (while (> sl 0)
+            (let [b (subslice (.-b (.-data r)) (% (.-begin r) (conv uint64 (len (.-b (.-data r))))))]
+              (when (> (conv uint64 (len b)) sl)
+                (set! b (subslice b _ sl)))
+
+              (set! (.-begin r) + (conv uint64 (len b)))
+              (set! sl - (conv uint64 (len b)))
+              (gwrite b)))))
+
+
+      (case [debugLogConstString]
+        (let [(values len ptr) (values (conv int (.uvarint r)) (conv uintptr (.uvarint r)))]
+          (set! ptr + (.-etext firstmoduledata))
+          ;; We can't use unsafe.String as it may panic, which isn't safe
+          ;; in this (potentially) nowritebarrier context.
+          (let [str ^{:go/breaks [2 4]} (lit stringStruct
+                :str (conv unsafe/Pointer ptr)
+                :len len)
+
+              ^{:line 735} s @(conv (* string) (conv unsafe/Pointer (addr str)))]
+            (print s))))
+
+      (case [debugLogOverflow]
+        (print "..(" (.uvarint r) " more bytes).."))
+
+      (case [debugLogHexdump]
+        (let [p (conv uintptr (.uvarint r))
+            ^{:line 743} bl (.uvarint r)]
+          (when (> (+ (.-begin r) bl) (.-end r))
+            (set! (.-begin r) (.-end r))
+            (print "<hexdump length corrupted>")
+            (break))
+
+          (println) ; Start on a new line
+          (let [hd (lit hexdumper :addr p)]
+            (while (> bl 0)
+              (let [b (subslice (.-b (.-data r)) (% (.-begin r) (conv uint64 (len (.-b (.-data r))))))]
+                (when (> (conv uint64 (len b)) bl)
+                  (set! b (subslice b _ bl)))
+
+                (set! (.-begin r) + (conv uint64 (len b)))
+                (set! bl - (conv uint64 (len b)))
+                (.write hd b)))
+
+            (.close hd))))
+
+      (case [debugLogPC]
+        (printDebugLogPC (conv uintptr (.uvarint r)) false))
+
+      (case [debugLogTraceback]
+        (let [n (conv int (.uvarint r))]
+          (for [i 0] (< i n) (inc! i)
+            (print "\n\t")
+            ;; gentraceback PCs are always return PCs.
+            ;; Convert them to call PCs.
+            ;;
+            ;; TODO(austin): Expand inlined frames.
+            (printDebugLogPC (conv uintptr (.uvarint r)) true)))))
+
+
+
+    true))
+
+
+
+^{:go/end 785} (go/func printDebugLog "printDebugLog prints the debug log.\n" []
+  (when dlogEnabled
+    (printDebugLogImpl)))
+
+
+
+^{:go/end 899} (go/func printDebugLogImpl []
+  ;; This function should not panic or throw since it is used in
+  ;; the fatal panic path and this may deadlock.
+
+  (printlock)
+
+  ;; Get the list of all debug logs.
+  (let [allp (conv (* uintptr) (conv unsafe/Pointer (addr allDloggers)))
+      ^{:line 795} all (conv (* dloggerImpl) (conv unsafe/Pointer (atomic/Loaduintptr allp)))
+
+      ;; Count the logs.
+      ^{:line 798} n 0]
+    (for [l all] (!= l nil) (set! l (.-allLink l))
+      (inc! n))
+
+    (when (== n 0)
+      (printunlock)
+      (return))
+
+
+    ;; Prepare read state for all logs.
+    (let-type [readState (struct
+          ^{:line 809} debugLogReader
+          ^{:line 810 :tag bool} first
+          ^{:line 811 :tag uint64} lost
+          ^{:line 812 :tag uint64} nextTick)]
+
+      ;; Use sysAllocOS instead of sysAlloc because we want to interfere
+      ;; with the runtime as little as possible, and sysAlloc updates accounting.
+      (let [state1 (sysAllocOS (* (unsafe/Sizeof (lit readState)) (conv uintptr n)) "debug log")]
+        (when (== state1 nil)
+          (println "failed to allocate read state for" n "logs")
+          (printunlock)
+          (return))
+
+        (let [state (subslice (conv (* (array (<< 1 20) readState)) state1) _ n)]
+          (do
+            (let [l all]
+              (range [i state]
+                (let [s (addr (aget state i))]
+                  (set! (.-debugLogReader s) (.-r (.-w l)))
+                  (set! (.-first s) true)
+                  (set! (.-lost s) (.-begin (.-r (.-w l))))
+                  (set! (.-nextTick s) ^{:go/via [debugLogReader]} (.peek s))
+                  (set! l (.-allLink l))))))
+
+
+
+          ;; Print records.
+          (while true
+            ;; Find the next record.
+            (let [^{:tag (struct ^uint64 tick ^int i)} best (zero (struct
+                    ^{:line 839 :tag uint64} tick
+                    ^{:line 840 :tag int} i))]
+
+              (set! (.-tick best) (bit-not (conv uint64 0)))
+              (range [i state]
+                (when (< (.-nextTick (aget state i)) (.-tick best))
+                  (set! (.-tick best) (.-nextTick (aget state i)))
+                  (set! (.-i best) i)))
+
+
+              (when (== (.-tick best) (bit-not (conv uint64 0)))
+                (break))
+
+
+              ;; Print record.
+              (let [s (addr (aget state (.-i best)))]
+                (when (.-first s)
+                  (print ">> begin log " (.-i best))
+                  (when (!= (.-lost s) 0)
+                    (print "; lost first " (>> (.-lost s) 10) "KB"))
+
+                  (print " <<\n")
+                  (set! (.-first s) false))
+
+
+                (let [(values end _ nano p) ^{:go/via [debugLogReader]} (.header s)
+                    ^{:line 865} oldEnd ^{:go/via [debugLogReader]} (.-end s)]
+                  (set! ^{:go/via [debugLogReader]} (.-end s) end)
+
+                  (print "[")
+                  (let [^{:tag (array 21 byte)} tmpbuf (zero (array 21 byte))
+                      ^{:line 870} pnano (- (conv int64 nano) runtimeInitTime)]
+                    (when (< pnano 0)
+                      ;; Logged before runtimeInitTime was set.
+                      (set! pnano 0))
+
+                    (let [pnanoBytes (itoaDiv (subslice tmpbuf) (conv uint64 pnano) 9)]
+                      (print (slicebytetostringtmp (conv (* byte) (noescape (conv unsafe/Pointer (addr (aget pnanoBytes 0))))) (len pnanoBytes)))
+                      (print " P " p "] ")
+
+                      (for [i 0] (< ^{:go/via [debugLogReader]} (.-begin s) ^{:go/via [debugLogReader]} (.-end s)) (inc! i)
+                        (when (> i 0)
+                          (print " "))
+
+                        (when (not ^{:go/via [debugLogReader]} (.printVal s))
+                          ;; Abort this P log.
+                          (print "<aborting P log>")
+                          (set! end oldEnd)
+                          (break)))
+
+
+                      (println)
+
+                      ;; Move on to the next record.
+                      (set! ^{:go/via [debugLogReader]} (.-begin s) end)
+                      (set! ^{:go/via [debugLogReader]} (.-end s) oldEnd)
+                      (set! (.-nextTick s) ^{:go/via [debugLogReader]} (.peek s))))))))
+
+
+          (printunlock))))))
+
+
+
+
+^{:go/end 920} (go/func printDebugLogPC "printDebugLogPC prints a single symbolized PC. If returnPC is true,\npc is a return PC that must first be converted to a call PC.\n" [^uintptr pc ^bool returnPC]
+  (let [fn (findfunc pc)]
+    (when (and returnPC ^:go/paren (or (not (.valid fn)) (> pc (.entry fn))))
+      ;; TODO(austin): Don't back up if the previous frame
+      ;; was a sigpanic.
+      (dec! pc))
+
+
+    (print (conv hex pc))
+    (if (not (.valid fn))
+      (print " [unknown PC]")
+
+      (let [name (funcname fn)
+          (values file line) (funcline fn pc)]
+        ^{:go/breaks [5]} (print " [" name "+" (conv hex (- pc (.entry fn)))
+          " " file ":" line "]")))))

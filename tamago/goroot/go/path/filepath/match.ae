@@ -1,0 +1,357 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.path.filepath) (go/file "match.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [filepathlite "internal/filepathlite"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [runtime "runtime"]
+    ^{:line 12} [slices "slices"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [utf8 "unicode/utf8"]])
+
+
+
+(go/var ^{:doc "ErrBadPattern indicates a pattern was malformed.\n"} ErrBadPattern (errors/New "syntax error in pattern"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 89} (go/func Match "Match reports whether name matches the shell file name pattern.\nThe pattern syntax is:\n\n\tpattern:\n\t\t{ term }\n\tterm:\n\t\t'*'         matches any sequence of non-Separator characters\n\t\t'?'         matches any single non-Separator character\n\t\t'[' [ '^' ] { character-range } ']'\n\t\t            character class (must be non-empty)\n\t\tc           matches character c (c != '*', '?', '\\\\', '[')\n\t\t'\\\\' c      matches character c (except on Windows)\n\n\tcharacter-range:\n\t\tc           matches character c (c != '\\\\', '-', ']')\n\t\t'\\\\' c      matches character c (except on Windows)\n\t\tlo '-' hi   matches character c for lo <= c <= hi\n\nPath segments in the pattern must be separated by [Separator].\n\nMatch requires pattern to match all of name, not just a substring.\nThe only possible returned error is [ErrBadPattern], when pattern\nis malformed.\n\nOn Windows, escaping is disabled. Instead, '\\\\' is treated as\npath separator.\n" [^string pattern ^string name] :results [^bool matched ^error err]
+  (label :Pattern
+    (while (> (len pattern) 0)
+      (let [^bool star (zero bool)
+          ^{:line 50 :tag string} chunk (zero string)]
+        (set! (values star chunk pattern) (scanChunk pattern))
+        (when (and star (== chunk ""))
+          ;; Trailing * matches rest of string unless it has a /.
+          (return (not (strings/Contains name (conv string Separator))) nil))
+
+        ;; Look for match at current position.
+        (let [(values t ok err) (matchChunk chunk name)]
+          ;; if we're the last chunk, make sure we've exhausted the name
+          ;; otherwise we'll give a false result even if we could still match
+          ;; using the star
+          (when (and ok ^:go/paren (or (== (len t) 0) (> (len pattern) 0)))
+            (set! name t)
+            (continue))
+
+          (when (!= err nil)
+            (return false err))
+
+          (when star
+            ;; Look for match skipping i+1 bytes.
+            ;; Cannot skip /.
+            (for [i 0] (and (< i (len name)) (!= (aget name i) Separator)) (inc! i)
+              (let [(values t ok err) (matchChunk chunk (subslice name (+ i 1)))]
+                (when ok
+                  ;; if we're the last chunk, make sure we exhausted the name
+                  (when (and (== (len pattern) 0) (> (len t) 0))
+                    (continue))
+
+                  (set! name t)
+                  (continue :Pattern))
+
+                (when (!= err nil)
+                  (return false err)))))
+
+
+
+          (return false nil)))))
+
+  (return (== (len name) 0) nil))
+
+
+
+
+^{:go/end 117} (go/func scanChunk "scanChunk gets the next segment of pattern, which is a non-star string\npossibly preceded by a star.\n" [^string pattern] :results [^bool star ^string chunk ^string rest]
+  (while (and (> (len pattern) 0) (== (aget pattern 0) \*))
+    (set! pattern (subslice pattern 1))
+    (set! star true))
+
+  (let [inrange false]
+    (for [i 0] (< i (len pattern)) (inc! i)
+      (switch (aget pattern i)
+        (case [\\]
+          ;; error check handled in matchChunk: bad pattern.
+          (when (and (!= runtime/GOOS "windows") (< (+ i 1) (len pattern)))
+            (inc! i)))
+
+        (case [\[]
+          (set! inrange true))
+        (case [\]]
+          (set! inrange false))
+        (case [\*]
+          (when (not inrange)
+            (return star (subslice pattern _ i) (subslice pattern i))))))
+
+
+
+    (return star pattern "")))
+
+
+
+
+
+^{:go/end 197} (go/func matchChunk "matchChunk checks whether chunk matches the beginning of s.\nIf so, it returns the remainder of s (after the match).\nChunk is all single-character operators: literals, char classes, and ?.\n" [^string chunk ^string s] :results [^string rest ^bool ok ^error err]
+  ;; failed records whether the match has failed.
+  ;; After the match fails, the loop continues on processing chunk,
+  ;; checking that the pattern is well-formed but no longer reading s.
+  (let [failed false]
+    (while (> (len chunk) 0)
+      (set! failed (or failed (== (len s) 0)))
+      (switch (aget chunk 0)
+        (case [\[]
+          ;; character class
+          (let [^rune r (zero rune)]
+            (when (not failed)
+              (let [^int n (zero int)]
+                (set! (values r n) (utf8/DecodeRuneInString s))
+                (set! s (subslice s n))))
+
+            (set! chunk (subslice chunk 1))
+            ;; possibly negated
+            (let [negated false]
+              (when (and (> (len chunk) 0) (== (aget chunk 0) \^))
+                (set! negated true)
+                (set! chunk (subslice chunk 1)))
+
+              ;; parse all ranges
+              (let [match false
+                  ^{:line 147} nrange 0]
+                (while true
+                  (when (and (> (len chunk) 0) (== (aget chunk 0) \]) (> nrange 0))
+                    (set! chunk (subslice chunk 1))
+                    (break))
+
+                  (let [(values ^rune lo ^rune hi) (zero rune)]
+                    (when [(set! (values lo chunk err) (getEsc chunk))] (!= err nil)
+                      (return "" false err))
+
+                    (set! hi lo)
+                    (when (== (aget chunk 0) \-)
+                      (when [(set! (values hi chunk err) (getEsc (subslice chunk 1)))] (!= err nil)
+                        (return "" false err)))
+
+
+                    (set! match (or match (and (<= lo r) (<= r hi))))
+                    (inc! nrange)))
+
+                (set! failed (or failed (== match negated)))))))
+
+        (case [\?]
+          (when (not failed)
+            (set! failed (== (aget s 0) Separator))
+            (let [(values _ n) (utf8/DecodeRuneInString s)]
+              (set! s (subslice s n))))
+
+          (set! chunk (subslice chunk 1)))
+
+        (case [\\]
+          (when (!= runtime/GOOS "windows")
+            (set! chunk (subslice chunk 1))
+            (when (== (len chunk) 0)
+              (return "" false ErrBadPattern)))
+
+
+          (fallthrough))
+
+        (default
+          (when (not failed)
+            (set! failed (!= (aget chunk 0) (aget s 0)))
+            (set! s (subslice s 1)))
+
+          (set! chunk (subslice chunk 1)))))
+
+
+    (when failed
+      (return "" false nil))
+
+    (return s true nil)))
+
+
+
+^{:go/end 221} (go/func getEsc "getEsc gets a possibly-escaped character from chunk, for a character class.\n" [^string chunk] :results [^rune r ^string nchunk ^error err]
+  (when (or (== (len chunk) 0) (== (aget chunk 0) \-) (== (aget chunk 0) \]))
+    (set! err ErrBadPattern)
+    (return))
+
+  (when (and (== (aget chunk 0) \\) (!= runtime/GOOS "windows"))
+    (set! chunk (subslice chunk 1))
+    (when (== (len chunk) 0)
+      (set! err ErrBadPattern)
+      (return)))
+
+
+  (let [(values ^:assign r n) (utf8/DecodeRuneInString chunk)]
+    (when (and (== r utf8/RuneError) (== n 1))
+      (set! err ErrBadPattern))
+
+    (set! nchunk (subslice chunk n))
+    (when (== (len nchunk) 0)
+      (set! err ErrBadPattern))
+
+    (return)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 233} (go/func Glob "Glob returns the names of all files matching pattern or nil\nif there is no matching file. The syntax of patterns is the same\nas in [Match]. The pattern may describe hierarchical names such as\n/usr/*/bin/ed (assuming the [Separator] is '/').\n\nGlob ignores file system errors such as I/O errors reading directories.\nThe only possible returned error is [ErrBadPattern], when pattern\nis malformed.\n" [^string pattern] :results [^{:tag (slice string)} matches ^error err]
+  (globWithLimit pattern 0))
+
+
+^{:go/end 282} (go/func globWithLimit [^string pattern ^int depth] :results [^{:tag (slice string)} matches ^error err]
+  ;; This limit is used prevent stack exhaustion issues. See CVE-2022-30632.
+  (let [^:const ^{:val 10000} pathSeparatorsLimit 10000]
+    (when (== depth pathSeparatorsLimit)
+      (return nil ErrBadPattern))
+
+
+    ;; Check pattern is well-formed.
+    (when [(values _ err) (Match pattern "")] (!= err nil)
+      (return nil err))
+
+    (when (not (hasMeta pattern))
+      (when [(set! (values _ err) (os/Lstat pattern))] (!= err nil)
+        (return nil nil))
+
+      (return (lit (slice string) pattern) nil))
+
+
+    (let [(values dir file) (Split pattern)
+        ^{:line 254} volumeLen 0]
+      (if (== runtime/GOOS "windows")
+        (set! (values volumeLen dir) (cleanGlobPathWindows dir))
+
+        (set! dir (cleanGlobPath dir)))
+
+
+      (when (not (hasMeta (subslice dir volumeLen)))
+        (return (glob dir file nil)))
+
+
+      ;; Prevent infinite recursion. See issue 15879.
+      (when (== dir pattern)
+        (return nil ErrBadPattern))
+
+
+      (let [^{:tag (slice string)} m (zero (slice string))]
+        (set! (values m err) (globWithLimit dir (+ depth 1)))
+        (when (!= err nil)
+          (return))
+
+        (range [_ d m]
+          (set! (values matches err) (glob d file matches))
+          (when (!= err nil)
+            (return)))
+
+
+        (return)))))
+
+
+
+^{:go/end 295} (go/func cleanGlobPath "cleanGlobPath prepares path for glob matching.\n" ^string [^string path]
+  (switch path
+    (case [""]
+      (return "."))
+    (case [(conv string Separator)]
+      ;; do nothing to the path
+      (return path))
+    (default
+      (return (subslice path 0 (- (len path) 1)))))) ; chop off trailing separator
+
+
+
+
+^{:go/end 314} (go/func cleanGlobPathWindows "cleanGlobPathWindows is windows version of cleanGlobPath.\n" [^string path] :results [^int prefixLen ^string cleaned]
+  (let [vollen (filepathlite/VolumeNameLen path)]
+    (switch
+      (case [(== path "")]
+        (return 0 "."))
+      (case [(and (== (+ vollen 1) (len path)) (os/IsPathSeparator (aget path (- (len path) 1))))] ; /, \, C:\ and C:/
+        ;; do nothing to the path
+        (return (+ vollen 1) path))
+      (case [(and (== vollen (len path)) (== (len path) 2))] ; C:
+        (return vollen (+ path "."))) ; convert C: into C:.
+      (default
+        (when (>= vollen (len path))
+          (set! vollen (- (len path) 1)))
+
+        (return vollen (subslice path 0 (- (len path) 1))))))) ; chop off trailing separator
+
+
+
+
+
+
+
+^{:go/end 348} (go/func glob "glob searches for files matching pattern in the directory dir\nand appends them to matches. If the directory cannot be\nopened, it returns the existing matches. New matches are\nadded in lexicographical order.\n" [^string dir ^string pattern ^{:tag (slice string)} matches] :results [^{:tag (slice string)} m ^error e]
+  (set! m matches)
+  (let [(values fi err) (os/Stat dir)]
+    (when (!= err nil)
+      (return)) ; ignore I/O error
+
+    (when (not (.IsDir fi))
+      (return)) ; ignore I/O error
+
+    (let [(values d ^:assign err) (os/Open dir)]
+      (when (!= err nil)
+        (return)) ; ignore I/O error
+
+      (defer (.Close d))
+
+      (let [(values names _) (.Readdirnames d -1)]
+        (^{:inst [(slice string) string]} slices/Sort names)
+
+        (range [_ n names]
+          (let [(values matched err) (Match pattern n)]
+            (when (!= err nil)
+              (return m err))
+
+            (when matched
+              (set! m (append m (Join dir n))))))
+
+
+        (return)))))
+
+
+
+
+^{:go/end 358} (go/func hasMeta "hasMeta reports whether path contains any of the magic characters\nrecognized by Match.\n" ^bool [^string path]
+  (let [magicChars "*?["]
+    (when (!= runtime/GOOS "windows")
+      (set! magicChars "*?[\\"))
+
+    (strings/ContainsAny path magicChars)))

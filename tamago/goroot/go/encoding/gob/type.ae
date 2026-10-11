@@ -1,0 +1,942 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.encoding.gob) (go/file "type.go" :imports [
+
+
+    ^{:line 8} [encoding "encoding"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [maps "maps"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [reflect "reflect"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [atomic "sync/atomic"]
+    ^{:line 16} [unicode "unicode"]
+    ^{:line 17} [utf8 "unicode/utf8"]])
+
+
+
+
+
+(go/type userTypeInfo "userTypeInfo stores the information associated with a type the user has handed\nto the package. It's computed once and stored in a map keyed by reflection\ntype.\n" (struct
+    ^{:line 24 :tag reflect/Type} user ; the type the user handed us
+    ^{:line 25 :tag reflect/Type} base ; the base type after all indirections
+    ^{:line 26 :tag int} indir ; number of indirections to reach the base type
+    ^{:line 27 :tag int} externalEnc ; xGob, xBinary, or xText
+    ^{:line 28 :tag int} externalDec ; xGob, xBinary, or xText
+    ^{:line 29 :tag int8} encIndir ; number of indirections to reach the receiver type; may be negative
+    ^{:line 30 :tag int8} decIndir)) ; number of indirections to reach the receiver type; may be negative
+
+
+
+(go/const "externalEncoding bits\n"
+  ^{:line 35} [^{:val 1} xGob (+ 1 iota)] ; GobEncoder or GobDecoder
+  ^{:line 36} [^{:val 2} xBinary] ; encoding.BinaryMarshaler or encoding.BinaryUnmarshaler
+  ^{:line 37} [^{:val 3} xText]) ; encoding.TextMarshaler or encoding.TextUnmarshaler
+
+
+(go/var ^sync/Map userTypeCache) ; map[reflect.Type]*userTypeInfo
+
+
+
+
+^{:go/end 104} (go/func validUserType "validUserType returns, and saves, the information associated with user-provided type rt.\nIf the user type is not valid, err will be non-nil. To be used when the error handler\nis not set up.\n" [^reflect/Type rt] :results [(* userTypeInfo) error]
+  (when [(values ui ok) (.Load userTypeCache rt)] ok
+    (return (assert (* userTypeInfo) ui) nil))
+
+
+  ;; Construct a new userTypeInfo and atomically add it to the userTypeCache.
+  ;; If we lose the race, we'll waste a little CPU and create a little garbage
+  ;; but return the existing value anyway.
+
+  (let [ut (new userTypeInfo)]
+    (set! (.-base ut) rt)
+    (set! (.-user ut) rt)
+    ;; A type that is just a cycle of pointers (such as type T *T) cannot
+    ;; be represented in gobs, which need some concrete data. We use a
+    ;; cycle detection algorithm from Knuth, Vol 2, Section 3.1, Ex 6,
+    ;; pp 539-540.  As we step through indirections, run another type at
+    ;; half speed. If they meet up, there's a cycle.
+    (let [slowpoke (.-base ut)] ; walks half as fast as ut.base
+      (while true
+        (let [pt (.-base ut)]
+          (when (!= (.Kind pt) reflect/Pointer)
+            (break))
+
+          (set! (.-base ut) (.Elem pt))
+          (when (== (.-base ut) slowpoke) ; ut.base lapped slowpoke
+            ;; recursive pointer type.
+            (return nil (errors/New (+ "can't represent recursive pointer type " (.String (.-base ut))))))
+
+          (when (== (% (.-indir ut) 2) 0)
+            (set! slowpoke (.Elem slowpoke)))
+
+          (inc! (.-indir ut))))
+
+
+      (if [(values ok indir) (implementsInterface (.-user ut) gobEncoderInterfaceType)] ok
+        (set! (values (.-externalEnc ut) (.-encIndir ut)) (values xGob indir))
+        (when [(values ok indir) (implementsInterface (.-user ut) binaryMarshalerInterfaceType)] ok
+          (set! (values (.-externalEnc ut) (.-encIndir ut)) (values xBinary indir))))
+
+
+      ;; NOTE(rsc): Would like to allow MarshalText here, but results in incompatibility
+      ;; with older encodings for net.IP. See golang.org/issue/6760.
+      ;; } else if ok, indir := implementsInterface(ut.user, textMarshalerInterfaceType); ok {
+      ;; 	ut.externalEnc, ut.encIndir = xText, indir
+      ;; }
+
+      (if [(values ok indir) (implementsInterface (.-user ut) gobDecoderInterfaceType)] ok
+        (set! (values (.-externalDec ut) (.-decIndir ut)) (values xGob indir))
+        (when [(values ok indir) (implementsInterface (.-user ut) binaryUnmarshalerInterfaceType)] ok
+          (set! (values (.-externalDec ut) (.-decIndir ut)) (values xBinary indir))))
+
+
+      ;; See note above.
+      ;; } else if ok, indir := implementsInterface(ut.user, textUnmarshalerInterfaceType); ok {
+      ;; 	ut.externalDec, ut.decIndir = xText, indir
+      ;; }
+
+      (let [(values ui _) (.LoadOrStore userTypeCache rt ut)]
+        (return (assert (* userTypeInfo) ui) nil)))))
+
+
+(go/var
+  ^{:line 107} [gobEncoderInterfaceType ((inst reflect/TypeFor GobEncoder))]
+  ^{:line 108} [gobDecoderInterfaceType ((inst reflect/TypeFor GobDecoder))]
+  ^{:line 109} [binaryMarshalerInterfaceType ((inst reflect/TypeFor encoding/BinaryMarshaler))]
+  ^{:line 110} [binaryUnmarshalerInterfaceType ((inst reflect/TypeFor encoding/BinaryUnmarshaler))]
+  ^{:line 111} [textMarshalerInterfaceType ((inst reflect/TypeFor encoding/TextMarshaler))]
+  ^{:line 112} [textUnmarshalerInterfaceType ((inst reflect/TypeFor encoding/TextUnmarshaler))]
+
+  ^{:line 114} [wireTypeType ((inst reflect/TypeFor wireType))])
+
+
+
+
+
+
+^{:go/end 150} (go/func implementsInterface "implementsInterface reports whether the type implements the\ngobEncoder/gobDecoder interface.\nIt also returns the number of indirections required to get to the\nimplementation.\n" [^reflect/Type typ ^reflect/Type gobEncDecType] :results [^bool success ^int8 indir]
+  (when (== typ nil)
+    (return))
+
+  (let [rt typ]
+    ;; The type might be a pointer and we need to keep
+    ;; dereferencing to the base type until we find an implementation.
+    (while true
+      (when (.Implements rt gobEncDecType)
+        (return true indir))
+
+      (when [p rt] (== (.Kind p) reflect/Pointer)
+        (inc! indir)
+        (when (> indir 100) ; insane number of indirections
+          (return false 0))
+
+        (set! rt (.Elem p))
+        (continue))
+
+      (break))
+
+    ;; No luck yet, but if this is a base type (non-pointer), the pointer might satisfy.
+    (when (!= (.Kind typ) reflect/Pointer)
+      ;; Not a pointer, but does the pointer work?
+      (when (.Implements (reflect/PointerTo typ) gobEncDecType)
+        (return true -1)))
+
+
+    (return false 0)))
+
+
+
+
+^{:go/end 160} (go/func userType "userType returns, and saves, the information associated with user-provided type rt.\nIf the user type is not valid, it calls error.\n" ^{:tag (* userTypeInfo)} [^reflect/Type rt]
+  (let [(values ut err) (validUserType rt)]
+    (when (!= err nil)
+      (error_ err))
+
+    ^{:line 159} ut))
+
+
+
+
+(go/type typeId "A typeId represents a gob Type as an integer that can be passed on the wire.\nInternally, typeIds are used as keys to a map to recover the underlying type info.\n" int32)
+
+(go/var ^sync/Mutex typeLock) ; set while building a type
+(go/const ^{:val 64} firstUserId 64) ; lowest id number granted to user
+
+(go/type gobType (interface
+    (id ^typeId [])
+    (setId [^typeId id])
+    (name ^string [])
+    (string ^string []) ; not public; only for debugging
+    (safeString ^string [^{:tag (map typeId bool)} seen])))
+
+
+(go/var
+  ^{:line 178} [types (make (map reflect/Type gobType) 32)]
+  ^{:line 179} [idToTypeSlice (make (slice gobType) 1 firstUserId)]
+  ^{:line 180} [^{:tag (array firstUserId gobType)} builtinIdToTypeSlice]) ; set in init() after builtins are established
+
+
+^{:go/end 188} (go/func idToType ^gobType [^typeId id]
+  (when (or (< id 0) (>= (conv int id) (len idToTypeSlice)))
+    (return nil))
+
+  (aget idToTypeSlice id))
+
+
+^{:go/end 195} (go/func builtinIdToType ^gobType [^typeId id]
+  (when (or (< id 0) (>= (conv int id) (len builtinIdToTypeSlice)))
+    (return nil))
+
+  (aget builtinIdToTypeSlice id))
+
+
+^{:go/end 205} (go/func setTypeId [^gobType typ]
+  ;; When building recursive types, someone may get there before us.
+  (when (!= (.id typ) 0)
+    (return))
+
+  (let [nextId (conv typeId (len idToTypeSlice))]
+    (.setId typ nextId)
+    (set! idToTypeSlice (append idToTypeSlice typ))))
+
+
+^{:go/end 212} (go/method gobType ^gobType [^typeId t]
+  (when (== t 0)
+    (return nil))
+
+  (idToType t))
+
+
+
+^{:go/end 220} (go/method string "string returns the string representation of the type associated with the typeId.\n" ^string [^typeId t]
+  (when (== (.gobType t) nil)
+    (return "<nil>"))
+
+  (.string (.gobType t)))
+
+
+
+^{:go/end 228} (go/method name "Name returns the name of the type associated with the typeId.\n" ^string [^typeId t]
+  (when (== (.gobType t) nil)
+    (return "<nil>"))
+
+  (.name (.gobType t)))
+
+
+
+
+
+
+(go/type CommonType "CommonType holds elements of all types.\nIt is a historical artifact, kept for binary compatibility and exported\nonly for the benefit of the package's encoding of type descriptors. It is\nnot intended for direct use by clients.\n" (struct
+    ^{:line 235 :tag string} Name
+    ^{:line 236 :tag typeId} Id))
+
+
+^{:go/end 239} (go/method id ^typeId [^{:tag (* CommonType)} t] (.-Id t))
+
+^{:go/end 241} (go/method setId [^{:tag (* CommonType)} t ^typeId id] (set! (.-Id t) id))
+
+^{:go/end 243} (go/method string ^string [^{:tag (* CommonType)} t] (.-Name t))
+
+^{:go/end 247} (go/method safeString ^string [^{:tag (* CommonType)} t ^{:tag (map typeId bool)} seen]
+  (.-Name t))
+
+
+^{:go/end 249} (go/method name ^string [^{:tag (* CommonType)} t] (.-Name t))
+
+;; Create and check predefined types
+;; The string for tBytes is "bytes" not "[]byte" to signify its specialness.
+
+(go/var
+
+
+
+  ^{:line 258} [^{:doc "Primordial types, needed during initialization.\nAlways passed as pointers so the interface{} type\ngoes through without losing its interfaceness.\n"} tBool (bootstrapType "bool" (conv (* bool) nil))]
+  ^{:line 259} [tInt (bootstrapType "int" (conv (* int) nil))]
+  ^{:line 260} [tUint (bootstrapType "uint" (conv (* uint) nil))]
+  ^{:line 261} [tFloat (bootstrapType "float" (conv (* float64) nil))]
+  ^{:line 262} [tBytes (bootstrapType "bytes" (conv (* (slice byte)) nil))]
+  ^{:line 263} [tString (bootstrapType "string" (conv (* string) nil))]
+  ^{:line 264} [tComplex (bootstrapType "complex" (conv (* complex128) nil))]
+  ^{:line 265} [tInterface (bootstrapType "interface" (conv (* any) nil))]
+
+  ^{:line 267} [^{:doc "Reserve some Ids for compatible expansion\n"} tReserved7 (bootstrapType "_reserved7" (conv (* (struct ^int r7)) nil))]
+  ^{:line 268} [tReserved6 (bootstrapType "_reserved6" (conv (* (struct ^int r6)) nil))]
+  ^{:line 269} [tReserved5 (bootstrapType "_reserved5" (conv (* (struct ^int r5)) nil))]
+  ^{:line 270} [tReserved4 (bootstrapType "_reserved4" (conv (* (struct ^int r4)) nil))]
+  ^{:line 271} [tReserved3 (bootstrapType "_reserved3" (conv (* (struct ^int r3)) nil))]
+  ^{:line 272} [tReserved2 (bootstrapType "_reserved2" (conv (* (struct ^int r2)) nil))]
+  ^{:line 273} [tReserved1 (bootstrapType "_reserved1" (conv (* (struct ^int r1)) nil))])
+
+
+
+(go/var ^{:doc "Predefined because it's needed by the Decoder\n"} tWireType (.-id (mustGetTypeInfo wireTypeType)))
+(go/var ^{:tag (* userTypeInfo)} wireTypeUserInfo) ; userTypeInfo of wireType
+
+^{:go/end 300} (go/func init []
+  ;; Some magic numbers to make sure there are no surprises.
+  (checkId 16 tWireType)
+  (checkId 17 (.-id (mustGetTypeInfo ((inst reflect/TypeFor arrayType)))))
+  (checkId 18 (.-id (mustGetTypeInfo ((inst reflect/TypeFor CommonType)))))
+  (checkId 19 (.-id (mustGetTypeInfo ((inst reflect/TypeFor sliceType)))))
+  (checkId 20 (.-id (mustGetTypeInfo ((inst reflect/TypeFor structType)))))
+  (checkId 21 (.-id (mustGetTypeInfo ((inst reflect/TypeFor fieldType)))))
+  (checkId 23 (.-id (mustGetTypeInfo ((inst reflect/TypeFor mapType)))))
+
+  (copy (subslice builtinIdToTypeSlice) idToTypeSlice)
+
+  ;; Move the id space upwards to allow for growth in the predefined world
+  ;; without breaking existing files.
+  (when [nextId (len idToTypeSlice)] (> nextId firstUserId)
+    (panic (fmt/Sprintln "nextId too large:" nextId)))
+
+  (set! idToTypeSlice (subslice idToTypeSlice _ firstUserId))
+  (registerBasics)
+  (set! wireTypeUserInfo (userType wireTypeType)))
+
+
+
+(go/type arrayType "Array type\n" (struct
+    ^{:line 304} CommonType
+    ^{:line 305 :tag typeId} Elem
+    ^{:line 306 :tag int} Len))
+
+
+^{:go/end 312} (go/func newArrayType ^{:tag (* arrayType)} [^string name]
+  (let [a (addr (lit arrayType (lit CommonType :Name name) 0 0))]
+    ^{:line 311} a))
+
+
+^{:go/end 319} (go/method init [^{:tag (* arrayType)} a ^gobType elem ^int len]
+  ;; Set our type id before evaluating the element's, in case it's our own.
+  (setTypeId a)
+  (set! (.-Elem a) (.id elem))
+  (set! (.-Len a) len))
+
+
+^{:go/end 327} (go/method safeString ^string [^{:tag (* arrayType)} a ^{:tag (map typeId bool)} seen]
+  (when (aget seen ^{:go/via [CommonType]} (.-Id a))
+    (return ^{:go/via [CommonType]} (.-Name a)))
+
+  (aset seen ^{:go/via [CommonType]} (.-Id a) true)
+  (fmt/Sprintf "[%d]%s" (.-Len a) (.safeString (.gobType (.-Elem a)) seen)))
+
+
+^{:go/end 329} (go/method string ^string [^{:tag (* arrayType)} a] (.safeString a (make (map typeId bool))))
+
+
+(go/type gobEncoderType "GobEncoder type (something that implements the GobEncoder interface)\n" (struct
+    ^{:line 333} CommonType))
+
+
+^{:go/end 340} (go/func newGobEncoderType ^{:tag (* gobEncoderType)} [^string name]
+  (let [g (addr (lit gobEncoderType (lit CommonType :Name name)))]
+    (setTypeId g)
+    ^{:line 339} g))
+
+
+^{:go/end 344} (go/method safeString ^string [^{:tag (* gobEncoderType)} g ^{:tag (map typeId bool)} seen]
+  ^{:go/via [CommonType]} (.-Name g))
+
+
+^{:go/end 346} (go/method string ^string [^{:tag (* gobEncoderType)} g] ^{:go/via [CommonType]} (.-Name g))
+
+
+(go/type mapType "Map type\n" (struct
+    ^{:line 350} CommonType
+    ^{:line 351 :tag typeId} Key
+    ^{:line 352 :tag typeId} Elem))
+
+
+^{:go/end 358} (go/func newMapType ^{:tag (* mapType)} [^string name]
+  (let [m (addr (lit mapType (lit CommonType :Name name) 0 0))]
+    ^{:line 357} m))
+
+
+^{:go/end 365} (go/method init [^{:tag (* mapType)} m ^gobType key ^gobType elem]
+  ;; Set our type id before evaluating the element's, in case it's our own.
+  (setTypeId m)
+  (set! (.-Key m) (.id key))
+  (set! (.-Elem m) (.id elem)))
+
+
+^{:go/end 375} (go/method safeString ^string [^{:tag (* mapType)} m ^{:tag (map typeId bool)} seen]
+  (when (aget seen ^{:go/via [CommonType]} (.-Id m))
+    (return ^{:go/via [CommonType]} (.-Name m)))
+
+  (aset seen ^{:go/via [CommonType]} (.-Id m) true)
+  (let [key (.safeString (.gobType (.-Key m)) seen)
+      ^{:line 373} elem (.safeString (.gobType (.-Elem m)) seen)]
+    (fmt/Sprintf "map[%s]%s" key elem)))
+
+
+^{:go/end 377} (go/method string ^string [^{:tag (* mapType)} m] (.safeString m (make (map typeId bool))))
+
+
+(go/type sliceType "Slice type\n" (struct
+    ^{:line 381} CommonType
+    ^{:line 382 :tag typeId} Elem))
+
+
+^{:go/end 388} (go/func newSliceType ^{:tag (* sliceType)} [^string name]
+  (let [s (addr (lit sliceType (lit CommonType :Name name) 0))]
+    ^{:line 387} s))
+
+
+^{:go/end 399} (go/method init [^{:tag (* sliceType)} s ^gobType elem]
+  ;; Set our type id before evaluating the element's, in case it's our own.
+  (setTypeId s)
+  ;; See the comments about ids in newTypeObject. Only slices and
+  ;; structs have mutual recursion.
+  (when (== (.id elem) 0)
+    (setTypeId elem))
+
+  (set! (.-Elem s) (.id elem)))
+
+
+^{:go/end 407} (go/method safeString ^string [^{:tag (* sliceType)} s ^{:tag (map typeId bool)} seen]
+  (when (aget seen ^{:go/via [CommonType]} (.-Id s))
+    (return ^{:go/via [CommonType]} (.-Name s)))
+
+  (aset seen ^{:go/via [CommonType]} (.-Id s) true)
+  (fmt/Sprintf "[]%s" (.safeString (.gobType (.-Elem s)) seen)))
+
+
+^{:go/end 409} (go/method string ^string [^{:tag (* sliceType)} s] (.safeString s (make (map typeId bool))))
+
+
+(go/type fieldType "Struct type\n" (struct
+    ^{:line 413 :tag string} Name
+    ^{:line 414 :tag typeId} Id))
+
+
+(go/type structType (struct
+    ^{:line 418} CommonType
+    ^{:line 419 :tag (slice fieldType)} Field))
+
+
+^{:go/end 436} (go/method safeString ^string [^{:tag (* structType)} s ^{:tag (map typeId bool)} seen]
+  (when (== s nil)
+    (return "<nil>"))
+
+  (when [(values _ ok) (aget seen ^{:go/via [CommonType]} (.-Id s))] ok
+    (return ^{:go/via [CommonType]} (.-Name s)))
+
+  (aset seen ^{:go/via [CommonType]} (.-Id s) true)
+  (let [str (+ ^{:go/via [CommonType]} (.-Name s) " = struct { ")]
+    (range [_ f (.-Field s)]
+      (set! str + (fmt/Sprintf "%s %s; " (.-Name f) (.safeString (.gobType (.-Id f)) seen))))
+
+    (set! str + "}")
+    ^{:line 435} str))
+
+
+^{:go/end 438} (go/method string ^string [^{:tag (* structType)} s] (.safeString s (make (map typeId bool))))
+
+^{:go/end 446} (go/func newStructType ^{:tag (* structType)} [^string name]
+  (let [s (addr (lit structType (lit CommonType :Name name) nil))]
+    ;; For historical reasons we set the id here rather than init.
+    ;; See the comment in newTypeObject for details.
+    (setTypeId s)
+    ^{:line 445} s))
+
+
+
+
+
+
+
+^{:go/end 569} (go/func newTypeObject "newTypeObject allocates a gobType for the reflection type rt.\nUnless ut represents a GobEncoder, rt should be the base type\nof ut.\nThis is only called from the encoding side. The decoding side\nworks through typeIds and userTypeInfos alone.\n" [^string name ^{:tag (* userTypeInfo)} ut ^reflect/Type rt] :results [gobType error]
+  ;; Does this type implement GobEncoder?
+  (when (!= (.-externalEnc ut) 0)
+    (return (newGobEncoderType name) nil))
+
+  (let [^error err (zero error)
+      (values ^gobType type0 ^gobType type1) (zero gobType)]
+    (defer (^{:go/end 464} (fn []
+          (when (!= err nil)
+            (delete types rt)))))
+
+
+    ;; Install the top-level type before the subtypes (e.g. struct before
+    ;; fields) so recursive types can be constructed safely.
+    (switch [t rt] (.Kind t)
+      ;; All basic types are easy: they are predefined.
+      (case [reflect/Bool]
+        (return (.gobType tBool) nil))
+
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+        (return (.gobType tInt) nil))
+
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+        (return (.gobType tUint) nil))
+
+      (case [reflect/Float32 reflect/Float64]
+        (return (.gobType tFloat) nil))
+
+      (case [reflect/Complex64 reflect/Complex128]
+        (return (.gobType tComplex) nil))
+
+      (case [reflect/String]
+        (return (.gobType tString) nil))
+
+      (case [reflect/Interface]
+        (return (.gobType tInterface) nil))
+
+      (case [reflect/Array]
+        (let [at (newArrayType name)]
+          (aset types rt at)
+          (set! (values type0 err) (getBaseType "" (.Elem t)))
+          (when (!= err nil)
+            (return nil err))
+
+          ;; Historical aside:
+          ;; For arrays, maps, and slices, we set the type id after the elements
+          ;; are constructed. This is to retain the order of type id allocation after
+          ;; a fix made to handle recursive types, which changed the order in
+          ;; which types are built. Delaying the setting in this way preserves
+          ;; type ids while allowing recursive types to be described. Structs,
+          ;; done below, were already handling recursion correctly so they
+          ;; assign the top-level id before those of the field.
+          (.init at type0 (.Len t))
+          (return at nil)))
+
+      (case [reflect/Map]
+        (let [mt (newMapType name)]
+          (aset types rt mt)
+          (set! (values type0 err) (getBaseType "" (.Key t)))
+          (when (!= err nil)
+            (return nil err))
+
+          (set! (values type1 err) (getBaseType "" (.Elem t)))
+          (when (!= err nil)
+            (return nil err))
+
+          (.init mt type0 type1)
+          (return mt nil)))
+
+      (case [reflect/Slice]
+        ;; []byte == []uint8 is a special case
+        (when (== (.Kind (.Elem t)) reflect/Uint8)
+          (return (.gobType tBytes) nil))
+
+        (let [st (newSliceType name)]
+          (aset types rt st)
+          (set! (values type0 err) (getBaseType (.Name (.Elem t)) (.Elem t)))
+          (when (!= err nil)
+            (return nil err))
+
+          (.init st type0)
+          (return st nil)))
+
+      (case [reflect/Struct]
+        (let [st (newStructType name)]
+          (aset types rt st)
+          (aset idToTypeSlice ^{:go/via [CommonType]} (.id st) st)
+          (for [i 0] (< i (.NumField t)) (inc! i)
+            (let [f (.Field t i)]
+              (when (not (isSent (addr f)))
+                (continue))
+
+              (let [typ (.-base (userType (.-Type f)))
+                  ^{:line 546} tname (.Name typ)]
+                (when (== tname "")
+                  (let [t (.-base (userType (.-Type f)))]
+                    (set! tname (.String t))))
+
+                (let [(values gt err) (getBaseType tname (.-Type f))]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  ;; Some mutually recursive types can cause us to be here while
+                  ;; still defining the element. Fix the element type id here.
+                  ;; We could do this more neatly by setting the id at the start of
+                  ;; building every type, but that would break binary compatibility.
+                  (when (== (.id gt) 0)
+                    (setTypeId gt))
+
+                  (set! (.-Field st) (append (.-Field st) (lit fieldType (.-Name f) (.id gt))))))))
+
+          (return st nil)))
+
+      (default
+        (return nil (errors/New (+ "gob NewTypeObject can't handle type: " (.String rt))))))))
+
+
+
+
+^{:go/end 575} (go/func isExported "isExported reports whether this is an exported - upper case - name.\n" ^bool [^string name]
+  (let [(values rune _) (utf8/DecodeRuneInString name)]
+    (unicode/IsUpper rune)))
+
+
+
+
+
+^{:go/end 595} (go/func isSent "isSent reports whether this struct field is to be transmitted.\nIt will be transmitted only if it is exported and not a chan or func field\nor pointer to chan or func.\n" ^bool [^{:tag (* reflect/StructField)} field]
+  (when (not (isExported (.-Name field)))
+    (return false))
+
+  ;; If the field is a chan or func or pointer thereto, don't send it.
+  ;; That is, treat it like an unexported field.
+  ^{:go/breaks [[4 594]]} (let [typ (.-Type field)]
+    (while (== (.Kind typ) reflect/Pointer)
+      (set! typ (.Elem typ)))
+
+    (when (or (== (.Kind typ) reflect/Chan) (== (.Kind typ) reflect/Func))
+      (return false))
+
+
+    true))
+
+
+
+
+^{:go/end 602} (go/func getBaseType "getBaseType returns the Gob type describing the given reflect.Type's base type.\ntypeLock must be held.\n" [^string name ^reflect/Type rt] :results [gobType error]
+  (let [ut (userType rt)]
+    (getType name ut (.-base ut))))
+
+
+
+
+
+
+
+^{:go/end 619} (go/func getType "getType returns the Gob type describing the given reflect.Type.\nShould be called only when handling GobEncoders/Decoders,\nwhich may be pointers. All other types are handled through the\nbase type, never a pointer.\ntypeLock must be held.\n" [^string name ^{:tag (* userTypeInfo)} ut ^reflect/Type rt] :results [gobType error]
+  (let [(values typ present) (aget types rt)]
+    (when present
+      (return typ nil))
+
+    (let [(values ^:assign typ err) (newTypeObject name ut rt)]
+      (when (== err nil)
+        (aset types rt typ))
+
+      (return typ err))))
+
+
+^{:go/end 626} (go/func checkId [^typeId want ^typeId got]
+  (when (!= want got)
+    (fmt/Fprintf os/Stderr "checkId: %d should be %d\n" (conv int got) (conv int want))
+    (panic (+ "bootstrap type wrong id: " (.name got) " " (.string got) " not " (.string want)))))
+
+
+
+
+
+^{:go/end 640} (go/func bootstrapType "used for building the basic types; called only from init().  the incoming\ninterface always refers to a pointer.\n" ^typeId [^string name ^any e]
+  (let [rt (.Elem (reflect/TypeOf e))
+      (values _ present) (aget types rt)]
+    (when present
+      (panic (+ "bootstrap type already present: " name ", " (.String rt))))
+
+    (let [typ (addr (lit CommonType :Name name))]
+      (aset types rt typ)
+      (setTypeId typ)
+      (.id typ))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type wireType "Representation of the information we send and receive about this type.\nEach value we send is preceded by its type definition: an encoded int.\nHowever, the very first time we send the value, we first send the pair\n(-id, wireType).\nFor bootstrapping purposes, we assume that the recipient knows how\nto decode a wireType; it is exactly the wireType struct here, interpreted\nusing the gob rules for sending a structure, except that we assume the\nids for wireType and structType etc. are known. The relevant pieces\nare built in encode.go's init() function.\nTo maintain binary compatibility, if you extend this type, always put\nthe new fields last.\n" (struct
+    ^{:line 654 :tag (* arrayType)} ArrayT
+    ^{:line 655 :tag (* sliceType)} SliceT
+    ^{:line 656 :tag (* structType)} StructT
+    ^{:line 657 :tag (* mapType)} MapT
+    ^{:line 658 :tag (* gobEncoderType)} GobEncoderT
+    ^{:line 659 :tag (* gobEncoderType)} BinaryMarshalerT
+    ^{:line 660 :tag (* gobEncoderType)} TextMarshalerT))
+
+
+^{:go/end 685} (go/method string ^string [^{:tag (* wireType)} w]
+  (let [^:const ^{:val "unknown type"} unknown "unknown type"]
+    (when (== w nil)
+      (return unknown))
+
+    (switch
+      (case [(!= (.-ArrayT w) nil)]
+        (return ^{:go/via [CommonType]} (.-Name (.-ArrayT w))))
+      (case [(!= (.-SliceT w) nil)]
+        (return ^{:go/via [CommonType]} (.-Name (.-SliceT w))))
+      (case [(!= (.-StructT w) nil)]
+        (return ^{:go/via [CommonType]} (.-Name (.-StructT w))))
+      (case [(!= (.-MapT w) nil)]
+        (return ^{:go/via [CommonType]} (.-Name (.-MapT w))))
+      (case [(!= (.-GobEncoderT w) nil)]
+        (return ^{:go/via [CommonType]} (.-Name (.-GobEncoderT w))))
+      (case [(!= (.-BinaryMarshalerT w) nil)]
+        (return ^{:go/via [CommonType]} (.-Name (.-BinaryMarshalerT w))))
+      (case [(!= (.-TextMarshalerT w) nil)]
+        (return ^{:go/via [CommonType]} (.-Name (.-TextMarshalerT w)))))
+
+    ^{:line 684} unknown))
+
+
+(go/type typeInfo (struct
+    ^{:line 688 :tag typeId} id
+    ^{:line 689 :tag sync/Mutex} encInit ; protects creation of encoder
+    ^{:line 690 :tag (atomic/Pointer encEngine)} encoder
+    ^{:line 691 :tag wireType} wire))
+
+
+
+
+
+
+
+
+(go/var ^{:tag atomic/Value :doc "typeInfoMap is an atomic pointer to map[reflect.Type]*typeInfo.\nIt's updated copy-on-write. Readers just do an atomic load\nto get the current version of the map. Writers make a full copy of\nthe map and atomically update the pointer to point to the new map.\nUnder heavy read contention, this is significantly faster than a map\nprotected by a mutex.\n"} typeInfoMap)
+
+
+
+
+
+(go/var ^{:doc "typeInfoMapInit is used instead of typeInfoMap during init time,\nas types are registered sequentially during init and we can save\nthe overhead of making map copies.\nIt is saved to typeInfoMap and set to nil before init finishes.\n"} typeInfoMapInit (make (map reflect/Type (* typeInfo)) 16))
+
+^{:go/end 714} (go/func lookupTypeInfo ^{:tag (* typeInfo)} [^reflect/Type rt]
+  (when [m typeInfoMapInit] (!= m nil)
+    (return (aget m rt)))
+
+  (let [(values m _) (assert (map reflect/Type (* typeInfo)) (.Load typeInfoMap))]
+    (aget m rt)))
+
+
+^{:go/end 726} (go/func getTypeInfo [^{:tag (* userTypeInfo)} ut] :results [(* typeInfo) error]
+  (let [rt (.-base ut)]
+    (when (!= (.-externalEnc ut) 0)
+      ;; We want the user type, not the base type.
+      (set! rt (.-user ut)))
+
+    (when [info (lookupTypeInfo rt)] (!= info nil)
+      (return info nil))
+
+    (buildTypeInfo ut rt)))
+
+
+
+
+^{:go/end 787} (go/func buildTypeInfo "buildTypeInfo constructs the type information for the type\nand stores it in the type info map.\n" [^{:tag (* userTypeInfo)} ut ^reflect/Type rt] :results [(* typeInfo) error]
+  (.Lock typeLock)
+  (defer (.Unlock typeLock))
+
+  (when [info (lookupTypeInfo rt)] (!= info nil)
+    (return info nil))
+
+
+  (let [(values gt err) (getBaseType (.Name rt) rt)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [info (addr (lit typeInfo :id (.id gt)))]
+
+      (if (!= (.-externalEnc ut) 0)
+        (let [(values userType err) (getType (.Name rt) ut rt)]
+          (when (!= err nil)
+            (return nil err))
+
+          (let [gt (assert (* gobEncoderType) (.gobType (.id userType)))]
+            (switch (.-externalEnc ut)
+              (case [xGob]
+                (set! (.-GobEncoderT (.-wire info)) gt))
+              (case [xBinary]
+                (set! (.-BinaryMarshalerT (.-wire info)) gt))
+              (case [xText]
+                (set! (.-TextMarshalerT (.-wire info)) gt)))
+
+            (set! rt (.-user ut))))
+
+        (let [t (.gobType (.-id info))]
+          (switch [typ rt] (.Kind typ)
+            (case [reflect/Array]
+              (set! (.-ArrayT (.-wire info)) (assert (* arrayType) t)))
+            (case [reflect/Map]
+              (set! (.-MapT (.-wire info)) (assert (* mapType) t)))
+            (case [reflect/Slice]
+              ;; []byte == []uint8 is a special case handled separately
+              (when (!= (.Kind (.Elem typ)) reflect/Uint8)
+                (set! (.-SliceT (.-wire info)) (assert (* sliceType) t))))
+
+            (case [reflect/Struct]
+              (set! (.-StructT (.-wire info)) (assert (* structType) t))))))
+
+
+
+      (when [m typeInfoMapInit] (!= m nil)
+        (aset m rt info)
+        (return info nil))
+
+
+      ;; Create new map with old contents plus new entry.
+      (let [(values m _) (assert (map reflect/Type (* typeInfo)) (.Load typeInfoMap))
+          ^{:line 783} newm (^{:inst [(map reflect/Type (* typeInfo)) reflect/Type (* typeInfo)]} maps/Clone m)]
+        (aset newm rt info)
+        (.Store typeInfoMap newm)
+        (return info nil)))))
+
+
+
+^{:go/end 796} (go/func mustGetTypeInfo "Called only when a panic is acceptable and unexpected.\n" ^{:tag (* typeInfo)} [^reflect/Type rt]
+  (let [(values t err) (getTypeInfo (userType rt))]
+    (when (!= err nil)
+      (panic (+ "getTypeInfo: " (.Error err))))
+
+    ^{:line 795} t))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type GobEncoder "GobEncoder is the interface describing data that provides its own\nrepresentation for encoding values for transmission to a GobDecoder.\nA type that implements GobEncoder and GobDecoder has complete\ncontrol over the representation of its data and may therefore\ncontain things such as private fields, channels, and functions,\nwhich are not usually transmissible in gob streams.\n\nNote: Since gobs can be stored permanently, it is good design\nto guarantee the encoding used by a GobEncoder is stable as the\nsoftware evolves. For instance, it might make sense for GobEncode\nto include a version number in the encoding.\n" (interface
+
+
+
+    (^{:doc "GobEncode returns a byte slice representing the encoding of the\nreceiver for transmission to a GobDecoder, usually of the same\nconcrete type.\n"} GobEncode [] :results [(slice byte) error])))
+
+
+
+
+(go/type GobDecoder "GobDecoder is the interface describing data that provides its own\nroutine for decoding transmitted values sent by a GobEncoder.\n" (interface
+
+
+
+    (^{:doc "GobDecode overwrites the receiver, which must be a pointer,\nwith the value represented by the byte slice, which was written\nby GobEncode, usually for the same concrete type.\n"} GobDecode ^error [(slice byte)])))
+
+
+(go/var
+  ^{:line 826} [^sync/Map nameToConcreteType] ; map[string]reflect.Type
+  ^{:line 827} [^sync/Map concreteTypeToName]) ; map[reflect.Type]string
+
+
+
+
+^{:go/end 853} (go/func RegisterName "RegisterName is like [Register] but uses the provided name rather than the\ntype's default.\n" [^string name ^any value]
+  (when (== name "")
+    ;; reserved for nil
+    (panic "attempt to register empty name"))
+
+
+  (let [ut (userType (reflect/TypeOf value))]
+
+    ;; Check for incompatible duplicates. The name must refer to the
+    ;; same user type, and vice versa.
+
+    ;; Store the name and type provided by the user....
+    (when [(values t dup) (.LoadOrStore nameToConcreteType name (reflect/TypeOf value))] (and dup (!= t (.-user ut)))
+      (panic (fmt/Sprintf "gob: registering duplicate types for %q: %s != %s" name t (.-user ut))))
+
+
+    ;; but the flattened type in the type table, since that's what decode needs.
+    (when [(values n dup) (.LoadOrStore concreteTypeToName (.-base ut) name)] (and dup (!= n name))
+      (.Delete nameToConcreteType name)
+      (panic (fmt/Sprintf "gob: registering duplicate names for %s: %q != %q" (.-user ut) n name)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 900} (go/func Register "Register records a type, identified by a value for that type, under its\ninternal type name. That name will identify the concrete type of a value\nsent or received as an interface variable. Only types that will be\ntransferred as implementations of interface values need to be registered.\nExpecting to be used only during initialization, it panics if the mapping\nbetween types and names is not a bijection.\n" [^any value]
+  ;; Default to printed representation for unnamed types
+  (let [rt (reflect/TypeOf value)
+      ^{:line 864} name (.String rt)
+
+      ;; But for named types (or pointers to them), qualify with import path (but see inner comment).
+      ;; Dereference one pointer looking for a named type.
+      ^{:line 868} star ""]
+    (when (== (.Name rt) "")
+      (when [pt rt] (== (.Kind pt) reflect/Pointer)
+        (set! star "*")
+        ;; NOTE: The following line should be rt = pt.Elem() to implement
+        ;; what the comment above claims, but fixing it would break compatibility
+        ;; with existing gobs.
+        ;;
+        ;; Given package p imported as "full/p" with these definitions:
+        ;;     package p
+        ;;     type T1 struct { ... }
+        ;; this table shows the intended and actual strings used by gob to
+        ;; name the types:
+        ;;
+        ;; Type      Correct string     Actual string
+        ;;
+        ;; T1        full/p.T1          full/p.T1
+        ;; *T1       *full/p.T1         *p.T1
+        ;;
+        ;; The missing full path cannot be fixed without breaking existing gob decoders.
+        (set! rt pt)))
+
+
+    (when (!= (.Name rt) "")
+      (if (== (.PkgPath rt) "")
+        (set! name (+ star (.Name rt)))
+
+        (set! name (+ star (.PkgPath rt) "." (.Name rt)))))
+
+
+
+    (RegisterName name value)))
+
+
+^{:go/end 938} (go/func registerBasics []
+  (Register (conv int 0))
+  (Register (conv int8 0))
+  (Register (conv int16 0))
+  (Register (conv int32 0))
+  (Register (conv int64 0))
+  (Register (conv uint 0))
+  (Register (conv uint8 0))
+  (Register (conv uint16 0))
+  (Register (conv uint32 0))
+  (Register (conv uint64 0))
+  (Register (conv float32 0))
+  (Register (conv float64 0))
+  (Register (conv complex64 (imaginary 0)))
+  (Register (conv complex128 (imaginary 0)))
+  (Register (conv uintptr 0))
+  (Register false)
+  (Register "")
+  (Register (conv (slice byte) nil))
+  (Register (conv (slice int) nil))
+  (Register (conv (slice int8) nil))
+  (Register (conv (slice int16) nil))
+  (Register (conv (slice int32) nil))
+  (Register (conv (slice int64) nil))
+  (Register (conv (slice uint) nil))
+  (Register (conv (slice uint8) nil))
+  (Register (conv (slice uint16) nil))
+  (Register (conv (slice uint32) nil))
+  (Register (conv (slice uint64) nil))
+  (Register (conv (slice float32) nil))
+  (Register (conv (slice float64) nil))
+  (Register (conv (slice complex64) nil))
+  (Register (conv (slice complex128) nil))
+  (Register (conv (slice uintptr) nil))
+  (Register (conv (slice bool) nil))
+  (Register (conv (slice string) nil)))
+
+
+^{:go/end 943} (go/func init []
+  (.Store typeInfoMap typeInfoMapInit)
+  (set! typeInfoMapInit nil))

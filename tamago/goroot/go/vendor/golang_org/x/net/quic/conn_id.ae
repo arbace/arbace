@@ -1,0 +1,501 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "conn_id.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [rand "crypto/rand"]
+    ^{:line 10} [slices "slices"]])
+
+
+
+(go/type connIDState "connIDState is a conn's connection IDs.\n" (struct
+
+
+
+
+
+
+
+
+    ^{:line 23 :tag (slice connID) :doc "The destination connection IDs of packets we receive are local.\nThe destination connection IDs of packets we send are remote.\n\nLocal IDs are usually issued by us, and remote IDs by the peer.\nThe exception is the transient destination connection ID sent in\na client's Initial packets, which is chosen by the client.\n\nThese are []connID rather than []*connID to minimize allocations.\n"} local
+    ^{:line 24 :tag (slice remoteConnID)} remote
+
+    ^{:line 26 :tag int64} nextLocalSeq
+    ^{:line 27 :tag int64} peerActiveConnIDLimit ; peer's active_connection_id_limit
+
+
+
+
+
+
+    ^{:line 34 :tag int64 :doc "Handling of retirement of remote connection IDs.\nThe rangesets track ID sequence numbers.\nIDs in need of retirement are added to remoteRetiring,\nmoved to remoteRetiringSent once we send a RETIRE_CONECTION_ID frame,\nand removed from the set once retirement completes.\n"} retireRemotePriorTo ; largest Retire Prior To value sent by the peer
+    ^{:line 35 :tag (rangeset int64)} remoteRetiring ; remote IDs in need of retirement
+    ^{:line 36 :tag (rangeset int64)} remoteRetiringSent ; remote IDs waiting for ack of retirement
+
+    ^{:line 38 :tag (slice byte)} originalDstConnID ; expected original_destination_connection_id param
+    ^{:line 39 :tag (slice byte)} retrySrcConnID ; expected retry_source_connection_id param
+
+    ^{:line 41 :tag bool} needSend))
+
+
+
+(go/type connID "A connID is a connection ID and associated metadata.\n" (struct
+
+    ^{:line 47 :tag (slice byte) :doc "cid is the connection ID itself.\n"} cid
+
+
+
+
+
+    ^{:line 53 :tag int64 :doc "seq is the connection ID's sequence number:\nhttps://www.rfc-editor.org/rfc/rfc9000.html#section-5.1.1-1\n\nFor the transient destination ID in a client's Initial packet, this is -1.\n"} seq
+
+
+
+
+
+
+
+
+    ^{:line 62 :tag sentVal :doc "send is set when the connection ID's state needs to be sent to the peer.\n\nFor local IDs, this indicates a new ID that should be sent\nin a NEW_CONNECTION_ID frame.\n\nFor remote IDs, this indicates a retired ID that should be sent\nin a RETIRE_CONNECTION_ID frame.\n"} send))
+
+
+
+(go/type remoteConnID "A remoteConnID is a connection ID and stateless reset token.\n" (struct
+    ^{:line 67} connID
+    ^{:line 68 :tag statelessResetToken} resetToken))
+
+
+^{:go/end 101} (go/method initClient ^error [^{:tag (* connIDState)} s ^{:tag (* Conn)} c]
+  ;; Client chooses its initial connection ID, and sends it
+  ;; in the Source Connection ID field of the first Initial packet.
+  (let [(values locid err) (.newConnID c 0)]
+    (when (!= err nil)
+      (return err))
+
+    (set! (.-local s) (append (.-local s) ^{:go/breaks [2 4]} (lit connID
+          :seq 0
+          :cid locid)))
+
+    (set! (.-nextLocalSeq s) 1)
+    (.updateConnIDs (.-connsMap (.-endpoint c)) ^{:go/end 85} (fn [^{:tag (* connsMap)} conns]
+        (.addConnID conns c locid)))
+
+
+    ;; Client chooses an initial, transient connection ID for the server,
+    ;; and sends it in the Destination Connection ID field of the first Initial packet.
+    ^{:go/breaks [5]} (let [(values remid ^:assign err) (.newConnID c -1)]
+      (when (!= err nil)
+        (return err))
+
+      (set! (.-remote s) (append (.-remote s) ^{:go/breaks [2]} (lit remoteConnID
+            :connID ^{:go/breaks [2 4]} (lit connID
+              :seq -1
+              :cid remid))))
+
+
+      (set! (.-originalDstConnID s) remid)
+      nil)))
+
+
+^{:go/end 137} (go/method initServer ^error [^{:tag (* connIDState)} s ^{:tag (* Conn)} c ^newServerConnIDs cids]
+  (let [dstConnID (cloneBytes (.-dstConnID cids))]
+    ;; Client-chosen, transient connection ID received in the first Initial packet.
+    ;; The server will not use this as the Source Connection ID of packets it sends,
+    ;; but remembers it because it may receive packets sent to this destination.
+    (set! (.-local s) (append (.-local s) ^{:go/breaks [2 4]} (lit connID
+          :seq -1
+          :cid dstConnID)))
+
+
+    ;; Server chooses a connection ID, and sends it in the Source Connection ID of
+    ;; the response to the clent.
+    ^{:go/breaks [[7 136]]} (let [(values locid err) (.newConnID c 0)]
+      (when (!= err nil)
+        (return err))
+
+      (set! (.-local s) (append (.-local s) ^{:go/breaks [2 4]} (lit connID
+            :seq 0
+            :cid locid)))
+
+      (set! (.-nextLocalSeq s) 1)
+      (.updateConnIDs (.-connsMap (.-endpoint c)) ^{:go/end 127} (fn [^{:tag (* connsMap)} conns]
+          (.addConnID conns c dstConnID)
+          (.addConnID conns c locid)))
+
+
+      ;; Client chose its own connection ID.
+      (set! (.-remote s) (append (.-remote s) ^{:go/breaks [2]} (lit remoteConnID
+            :connID ^{:go/breaks [2 4]} (lit connID
+              :seq 0
+              :cid (cloneBytes (.-srcConnID cids))))))
+
+
+      nil)))
+
+
+
+^{:go/end 146} (go/method srcConnID "srcConnID is the Source Connection ID to use in a sent packet.\n" ^{:tag (slice byte)} [^{:tag (* connIDState)} s]
+  (when (and (== (.-seq (aget (.-local s) 0)) -1) (> (len (.-local s)) 1))
+    ;; Don't use the transient connection ID if another is available.
+    (return (.-cid (aget (.-local s) 1))))
+
+  (.-cid (aget (.-local s) 0)))
+
+
+
+^{:go/end 154} (go/method dstConnID "dstConnID is the Destination Connection ID to use in a sent packet.\n" [^{:tag (* connIDState)} s] :results [^{:tag (slice byte)} cid ^bool ok]
+  (range [i (.-remote s)]
+    (return ^{:go/via [connID]} (.-cid (aget (.-remote s) i)) true))
+
+  (return nil false))
+
+
+
+
+^{:go/end 165} (go/method isValidStatelessResetToken "isValidStatelessResetToken reports whether the given reset token is\nassociated with a non-retired connection ID which we have used.\n" ^bool [^{:tag (* connIDState)} s ^statelessResetToken resetToken]
+  (when (== (len (.-remote s)) 0)
+    (return false))
+
+  ;; We currently only use the first available remote connection ID,
+  ;; so any other reset token is not valid.
+  (== (.-resetToken (aget (.-remote s) 0)) resetToken))
+
+
+
+
+^{:go/end 172} (go/method setPeerActiveConnIDLimit "setPeerActiveConnIDLimit sets the active_connection_id_limit\ntransport parameter received from the peer.\n" ^error [^{:tag (* connIDState)} s ^{:tag (* Conn)} c ^int64 lim]
+  (set! (.-peerActiveConnIDLimit s) lim)
+  (.issueLocalIDs s c))
+
+
+^{:go/end 203} (go/method issueLocalIDs ^error [^{:tag (* connIDState)} s ^{:tag (* Conn)} c]
+  (let [toIssue (min (conv int (.-peerActiveConnIDLimit s)) maxPeerActiveConnIDLimit)]
+    (range [i (.-local s)]
+      (when (!= (.-seq (aget (.-local s) i)) -1)
+        (dec! toIssue)))
+
+
+    ^{:go/breaks [[4 202]]} (let [^{:tag (slice (slice byte))} newIDs (zero (slice (slice byte)))]
+      (while (> toIssue 0)
+        (let [(values cid err) (.newConnID c (.-nextLocalSeq s))]
+          (when (!= err nil)
+            (return err))
+
+          (set! newIDs (append newIDs cid))
+          (set! (.-local s) (append (.-local s) ^{:go/breaks [2 4]} (lit connID
+                :seq (.-nextLocalSeq s)
+                :cid cid)))
+
+          (.setUnsent (.-send (aget (.-local s) (- (len (.-local s)) 1))))
+          (inc! (.-nextLocalSeq s))
+          (set! (.-needSend s) true)
+          (dec! toIssue)))
+
+      (.updateConnIDs (.-connsMap (.-endpoint c)) ^{:go/end 201} (fn [^{:tag (* connsMap)} conns]
+          (range [_ cid newIDs]
+            (.addConnID conns c cid))))
+
+
+      nil)))
+
+
+
+
+^{:go/breaks [[11 254]] :go/end 255} (go/method validateTransportParameters "validateTransportParameters verifies the original_destination_connection_id and\ninitial_source_connection_id transport parameters match the expected values.\n" ^error [^{:tag (* connIDState)} s ^{:tag (* Conn)} c ^bool isRetry ^transportParameters p]
+  ;; TODO: Consider returning more detailed errors, for debugging.
+  ;; Verify original_destination_connection_id matches
+  ;; the transient remote connection ID we chose (client)
+  ;; or is empty (server).
+  (when (not (bytes/Equal (.-originalDstConnID s) (.-originalDstConnID p)))
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errTransportParameter
+        :reason "original_destination_connection_id mismatch")))
+
+
+  (set! (.-originalDstConnID s) nil) ; we have no further need for this
+  ;; Verify retry_source_connection_id matches the value from
+  ;; the server's Retry packet (when one was sent), or is empty.
+  (when (not (bytes/Equal (.-retrySrcConnID p) (.-retrySrcConnID s)))
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errTransportParameter
+        :reason "retry_source_connection_id mismatch")))
+
+
+  (set! (.-retrySrcConnID s) nil) ; we have no further need for this
+  ;; Verify initial_source_connection_id matches the first remote connection ID.
+  (when (or (== (len (.-remote s)) 0) (!= ^{:go/via [connID]} (.-seq (aget (.-remote s) 0)) 0))
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errInternal
+        :reason "remote connection id missing")))
+
+
+  (when (not (bytes/Equal (.-initialSrcConnID p) ^{:go/via [connID]} (.-cid (aget (.-remote s) 0))))
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errTransportParameter
+        :reason "initial_source_connection_id mismatch")))
+
+
+  (when (> (len (.-statelessResetToken p)) 0)
+    (when (== (.-side c) serverSide)
+      (return ^{:go/breaks [2 4]} (lit localTransportError
+          :code errTransportParameter
+          :reason "client sent stateless_reset_token")))
+
+
+    (let [token (conv statelessResetToken (.-statelessResetToken p))]
+      (set! (.-resetToken (aget (.-remote s) 0)) token)
+      (.updateConnIDs (.-connsMap (.-endpoint c)) ^{:go/end 252} (fn [^{:tag (* connsMap)} conns]
+          (.addResetToken conns c token)))))
+
+
+  nil)
+
+
+
+
+^{:go/end 285} (go/method handlePacket "handlePacket updates the connection ID state during the handshake\n(Initial and Handshake packets).\n" [^{:tag (* connIDState)} s ^{:tag (* Conn)} c ^packetType ptype ^{:tag (slice byte)} srcConnID]
+  (switch
+    (case [(and (== ptype packetTypeInitial) (== (.-side c) clientSide))]
+      (when (and (== (len (.-remote s)) 1) (== ^{:go/via [connID]} (.-seq (aget (.-remote s) 0)) -1))
+        ;; We're a client connection processing the first Initial packet
+        ;; from the server. Replace the transient remote connection ID
+        ;; with the Source Connection ID from the packet.
+        (aset (.-remote s) 0 ^{:go/breaks [2]} (lit remoteConnID
+            :connID ^{:go/breaks [2 4]} (lit connID
+              :seq 0
+              :cid (cloneBytes srcConnID))))))
+
+
+
+    (case [(and (== ptype packetTypeHandshake) (== (.-side c) serverSide))]
+      (when (and (> (len (.-local s)) 0) (== (.-seq (aget (.-local s) 0)) -1))
+        ;; We're a server connection processing the first Handshake packet from
+        ;; the client. Discard the transient, client-chosen connection ID used
+        ;; for Initial packets; the client will never send it again.
+        (let [cid (.-cid (aget (.-local s) 0))]
+          (.updateConnIDs (.-connsMap (.-endpoint c)) ^{:go/end 281} (fn [^{:tag (* connsMap)} conns]
+              (.retireConnID conns c cid)))
+
+          (set! (.-local s) (append (subslice (.-local s) _ 0) (spread (subslice (.-local s) 1)))))))))
+
+
+
+
+^{:go/end 293} (go/method handleRetryPacket [^{:tag (* connIDState)} s ^{:tag (slice byte)} srcConnID]
+  (when (or (!= (len (.-remote s)) 1) (!= ^{:go/via [connID]} (.-seq (aget (.-remote s) 0)) -1))
+    (panic "BUG: handling retry with non-transient remote conn id"))
+
+  (set! (.-retrySrcConnID s) (cloneBytes srcConnID))
+  (set! ^{:go/via [connID]} (.-cid (aget (.-remote s) 0)) (.-retrySrcConnID s)))
+
+
+^{:go/end 384} (go/method handleNewConnID ^error [^{:tag (* connIDState)} s ^{:tag (* Conn)} c ^int64 seq ^int64 retire ^{:tag (slice byte)} cid ^statelessResetToken resetToken]
+  (when (== (len ^{:go/via [connID]} (.-cid (aget (.-remote s) 0))) 0)
+    ;; "An endpoint that is sending packets with a zero-length
+    ;; Destination Connection ID MUST treat receipt of a NEW_CONNECTION_ID
+    ;; frame as a connection error of type PROTOCOL_VIOLATION."
+    ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15-6
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errProtocolViolation
+        :reason "NEW_CONNECTION_ID from peer with zero-length DCID")))
+
+
+
+  (when (< seq (.-retireRemotePriorTo s))
+    ;; This ID was already retired by a previous NEW_CONNECTION_ID frame.
+    ;; Nothing to do.
+    (return nil))
+
+
+  (when (> retire (.-retireRemotePriorTo s))
+    ;; Add newly-retired connection IDs to the set we need to send
+    ;; RETIRE_CONNECTION_ID frames for, and remove them from s.remote.
+    ;;
+    ;; (This might cause us to send a RETIRE_CONNECTION_ID for an ID we've
+    ;; never seen. That's fine.)
+    (.add (.-remoteRetiring s) (.-retireRemotePriorTo s) retire)
+    (set! (.-retireRemotePriorTo s) retire)
+    (set! (.-needSend s) true)
+    (set! (.-remote s) (^{:inst [(slice remoteConnID) remoteConnID]} slices/DeleteFunc (.-remote s) ^{:go/end 324} (fn ^bool [^remoteConnID rcid]
+          (< ^{:go/via [connID]} (.-seq rcid) (.-retireRemotePriorTo s))))))
+
+
+
+  ^{:go/breaks [[6 383]]} (let [have false] ; do we already have this connection ID?
+    (range [i (.-remote s)]
+      (let [rcid (addr (aget (.-remote s) i))]
+        (when (== ^{:go/via [connID]} (.-seq rcid) seq)
+          (when (not (bytes/Equal ^{:go/via [connID]} (.-cid rcid) cid))
+            (return ^{:go/breaks [2 4]} (lit localTransportError
+                :code errProtocolViolation
+                :reason "NEW_CONNECTION_ID does not match prior id")))
+
+
+          (set! have true) ; yes, we've seen this sequence number
+          (break))))
+
+
+
+    (when (not have)
+      ;; This is a new connection ID that we have not seen before.
+      ;;
+      ;; We could take steps to keep the list of remote connection IDs
+      ;; sorted by sequence number, but there's no particular need
+      ;; so we don't bother.
+      (set! (.-remote s) (append (.-remote s) ^{:go/breaks [2 [4 353]]} (lit remoteConnID
+            :connID ^{:go/breaks [2 4]} (lit connID
+              :seq seq
+              :cid (cloneBytes cid))
+
+            :resetToken resetToken)))
+
+      (.updateConnIDs (.-connsMap (.-endpoint c)) ^{:go/end 357} (fn [^{:tag (* connsMap)} conns]
+          (.addResetToken conns c resetToken))))
+
+
+
+    (when (> (len (.-remote s)) activeConnIDLimit)
+      ;; Retired connection IDs (including newly-retired ones) do not count
+      ;; against the limit.
+      ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1.1-5
+      (return ^{:go/breaks [2 4]} (lit localTransportError
+          :code errConnectionIDLimit
+          :reason "active_connection_id_limit exceeded")))
+
+
+
+    ;; "An endpoint SHOULD limit the number of connection IDs it has retired locally
+    ;; for which RETIRE_CONNECTION_ID frames have not yet been acknowledged."
+    ;; https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2-6
+    ;;
+    ;; Set a limit of three times the active_connection_id_limit for
+    ;; the total number of remote connection IDs we keep retirement state for.
+    (when (> (+ (.size (.-remoteRetiring s)) (.size (.-remoteRetiringSent s))) (* 3 activeConnIDLimit))
+      (return ^{:go/breaks [2 4]} (lit localTransportError
+          :code errConnectionIDLimit
+          :reason "too many unacknowledged retired connection ids")))
+
+
+
+    nil))
+
+
+^{:go/breaks [6] :go/end 405} (go/method handleRetireConnID ^error [^{:tag (* connIDState)} s ^{:tag (* Conn)} c ^int64 seq]
+  (when (>= seq (.-nextLocalSeq s))
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errProtocolViolation
+        :reason "RETIRE_CONNECTION_ID for unissued sequence number")))
+
+
+  (range [i (.-local s)]
+    (when (== (.-seq (aget (.-local s) i)) seq)
+      (let [cid (.-cid (aget (.-local s) i))]
+        (.updateConnIDs (.-connsMap (.-endpoint c)) ^{:go/end 398} (fn [^{:tag (* connsMap)} conns]
+            (.retireConnID conns c cid)))
+
+        (set! (.-local s) (append (subslice (.-local s) _ i) (spread (subslice (.-local s) (+ i 1)))))
+        (break))))
+
+
+  (.issueLocalIDs s c)
+  nil)
+
+
+^{:go/end 418} (go/method ackOrLossNewConnectionID [^{:tag (* connIDState)} s ^packetNumber pnum ^int64 seq ^packetFate fate]
+  (range [i (.-local s)]
+    (when (!= (.-seq (aget (.-local s) i)) seq)
+      (continue))
+
+    (.ackOrLoss (.-send (aget (.-local s) i)) pnum fate)
+    (when (!= fate packetAcked)
+      (set! (.-needSend s) true))
+
+    (return)))
+
+
+
+^{:go/end 427} (go/method ackOrLossRetireConnectionID [^{:tag (* connIDState)} s ^packetNumber pnum ^int64 seq ^packetFate fate]
+  (.sub (.-remoteRetiringSent s) seq (+ seq 1))
+  (when (== fate packetLost)
+    ;; RETIRE_CONNECTION_ID frame was lost, mark for retransmission.
+    (.add (.-remoteRetiring s) seq (+ seq 1))
+    (set! (.-needSend s) true)))
+
+
+
+
+
+
+
+
+^{:go/end 476} (go/method appendFrames "appendFrames appends NEW_CONNECTION_ID and RETIRE_CONNECTION_ID frames\nto the current packet.\n\nIt returns true if no more frames need appending,\nfalse if not everything fit in the current packet.\n" ^bool [^{:tag (* connIDState)} s ^{:tag (* Conn)} c ^packetNumber pnum ^bool pto]
+  (when (and (not (.-needSend s)) (not pto))
+    ;; Fast path: We don't need to send anything.
+    (return true))
+
+  ^{:go/breaks [7]} (let [retireBefore (conv int64 0)]
+    (when (!= (.-seq (aget (.-local s) 0)) -1)
+      (set! retireBefore (.-seq (aget (.-local s) 0))))
+
+    (range [i (.-local s)]
+      (when (not (.shouldSendPTO (.-send (aget (.-local s) i)) pto))
+        (continue))
+
+      (when (not (.appendNewConnectionIDFrame (.-w c)
+            (.-seq (aget (.-local s) i))
+            ^{:line 449} retireBefore
+            (.-cid (aget (.-local s) i))
+            (.tokenForConnID (.-resetGen (.-endpoint c)) (.-cid (aget (.-local s) i)))))
+
+        (return false))
+
+      (.setSent (.-send (aget (.-local s) i)) pnum))
+
+    (when pto
+      (range [_ r (.-remoteRetiringSent s)]
+        (for [cid (.-start r)] (< cid (.-end r)) (inc! cid)
+          (when (not (.appendRetireConnectionIDFrame (.-w c) cid))
+            (return false)))))
+
+
+
+
+    (while (> (.numRanges (.-remoteRetiring s)) 0)
+      (let [cid (.min (.-remoteRetiring s))]
+        (when (not (.appendRetireConnectionIDFrame (.-w c) cid))
+          (return false))
+
+        (.sub (.-remoteRetiring s) cid (+ cid 1))
+        (.add (.-remoteRetiringSent s) cid (+ cid 1))))
+
+    (set! (.-needSend s) false)
+    true))
+
+
+^{:go/end 482} (go/func cloneBytes ^{:tag (slice byte)} [^{:tag (slice byte)} b]
+  (let [n (make (slice byte) (len b))]
+    (copy n b)
+    ^{:line 481} n))
+
+
+^{:go/end 489} (go/method newConnID [^{:tag (* Conn)} c ^int64 seq] :results [(slice byte) error]
+  (when (!= (.-testHooks c) nil)
+    (return (.newConnID (.-testHooks c) seq)))
+
+  (newRandomConnID seq))
+
+
+^{:go/end 502} (go/func newRandomConnID [^int64 _] :results [(slice byte) error]
+  ;; It is not necessary for connection IDs to be cryptographically secure,
+  ;; but it doesn't hurt.
+  (let [id (make (slice byte) connIDLen)]
+    (when [(values _ err) (rand/Read id)] (!= err nil)
+      ;; TODO: Surface this error as a metric or log event or something.
+      ;; rand.Read really shouldn't ever fail, but if it does, we should
+      ;; have a way to inform the user.
+      (return nil err))
+
+    (return id nil)))

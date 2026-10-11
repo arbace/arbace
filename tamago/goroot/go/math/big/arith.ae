@@ -1,0 +1,338 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file provides Go implementations of elementary multi-precision
+;; arithmetic operations on word vectors. These have the suffix _g.
+;; These are needed for platforms without assembly implementations of these routines.
+;; This file also contains elementary operations that can be implemented
+;; sufficiently efficiently in Go.
+
+(in-ns 'go.math.big) (go/file "arith.go" :imports [
+
+
+    ^{:line 14} [bits "math/bits"]
+    ^{:line 15} [_ "unsafe"]]) ; for go:linkname
+
+
+
+(go/type Word "A Word represents a single digit of a multi-precision unsigned integer.\n" uint)
+
+(go/const
+  ^{:line 22} [^{:val 8} _S (/ _W 8)] ; word size in bytes
+
+  ^{:line 24} [^{:val 64} _W bits/UintSize] ; word size in bits
+  ^{:line 25} [^{:val 18446744073709551616N} _B (<< 1 _W)] ; digit base
+  ^{:line 26} [^{:val 18446744073709551615N} _M (- _B 1)]) ; digit mask
+
+
+;; In these routines, it is the caller's responsibility to arrange for
+;; x, y, and z to all have the same length. We check this and panic.
+;; The assembly versions of these routines do not include that check.
+;;
+;; The check+panic also has the effect of teaching the compiler that
+;; “i in range for z” implies “i in range for x and y”, eliminating all
+;; bounds checks in loops from 0 to len(z) and vice versa.
+
+;; ----------------------------------------------------------------------------
+;; Elementary operations on words
+;;
+;; These operations are used by the vector operations below.
+
+
+^{:go/end 46} (go/func mulWW "z1<<_W + z0 = x*y\n" [^Word x ^Word y] :results [^Word z1 ^Word z0]
+  (let [(values hi lo) (bits/Mul (conv uint x) (conv uint y))]
+    (return (conv Word hi) (conv Word lo))))
+
+
+
+^{:go/end 54} (go/func mulAddWWW_g "z1<<_W + z0 = x*y + c\n" [^Word x ^Word y ^Word c] :results [^Word z1 ^Word z0]
+  (let [(values hi lo) (bits/Mul (conv uint x) (conv uint y))
+      ^{:line 51 :tag uint} cc (zero uint)]
+    (set! (values lo cc) (bits/Add lo (conv uint c) 0))
+    (return (conv Word (+ hi cc)) (conv Word lo))))
+
+
+
+
+^{:go/end 60} (go/func nlz "nlz returns the number of leading zeros in x.\nWraps bits.LeadingZeros call for convenience.\n" ^uint [^Word x]
+  (conv uint (bits/LeadingZeros (conv uint x))))
+
+
+
+^{:go/end 74} (go/func addVV_g "The resulting carry c is either 0 or 1.\n" [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^{:tag (slice Word)} y] :results [^Word c]
+  (when (or (!= (len x) (len z)) (!= (len y) (len z)))
+    (panic "addVV len"))
+
+
+  (range [i z]
+    (let [(values zi cc) (bits/Add (conv uint (aget x i)) (conv uint (aget y i)) (conv uint c))]
+      (aset z i (conv Word zi))
+      (set! c (conv Word cc))))
+
+  (return))
+
+
+
+^{:go/end 88} (go/func subVV_g "The resulting carry c is either 0 or 1.\n" [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^{:tag (slice Word)} y] :results [^Word c]
+  (when (or (!= (len x) (len z)) (!= (len y) (len z)))
+    (panic "subVV len"))
+
+
+  (range [i z]
+    (let [(values zi cc) (bits/Sub (conv uint (aget x i)) (conv uint (aget y i)) (conv uint c))]
+      (aset z i (conv Word zi))
+      (set! c (conv Word cc))))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 131} (go/func ^{:go/linkname "addVW"} addVW "addVW sets z = x + y, returning the final carry c.\nThe behavior is undefined if len(x) != len(z).\nIf len(z) == 0, c = y; otherwise, c is 0 or 1.\n\naddVW should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/remyoudompheng/bigfft\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^Word y] :results [^Word c]
+  (when (!= (len x) (len z))
+    (panic "addVW len"))
+
+
+  (when (== (len z) 0)
+    (return y))
+
+  ^{:go/breaks [[5 130]]} (let [(values zi cc) (bits/Add (conv uint (aget x 0)) (conv uint y) 0)]
+    (aset z 0 (conv Word zi))
+    (when (== cc 0)
+      (when (!= (addr (aget z 0)) (addr (aget x 0)))
+        (copy (subslice z 1) (subslice x 1)))
+
+      (return 0))
+
+    (for [i 1] (< i (len z)) (inc! i)
+      (let [xi (aget x i)]
+        (when (!= xi (bit-not (conv Word 0)))
+          (aset z i (+ xi 1))
+          (when (!= (addr (aget z 0)) (addr (aget x 0)))
+            (copy (subslice z (+ i 1)) (subslice x (+ i 1))))
+
+          (return 0))
+
+        (aset z i 0)))
+
+    1))
+
+
+
+^{:go/end 142} (go/func addVW_ref "addVW_ref is the reference implementation for addVW, used only for testing.\n" [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^Word y] :results [^Word c]
+  (set! c y)
+  (range [i z]
+    (let [(values zi cc) (bits/Add (conv uint (aget x i)) (conv uint c) 0)]
+      (aset z i (conv Word zi))
+      (set! c (conv Word cc))))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 185} (go/func ^{:go/linkname "subVW"} subVW "subVW sets z = x - y, returning the final carry c.\nThe behavior is undefined if len(x) != len(z).\nIf len(z) == 0, c = y; otherwise, c is 0 or 1.\n\nsubVW should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/remyoudompheng/bigfft\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^Word y] :results [^Word c]
+  (when (!= (len x) (len z))
+    (panic "subVW len"))
+
+
+  (when (== (len z) 0)
+    (return y))
+
+  ^{:go/breaks [[5 184]]} (let [(values zi cc) (bits/Sub (conv uint (aget x 0)) (conv uint y) 0)]
+    (aset z 0 (conv Word zi))
+    (when (== cc 0)
+      (when (!= (addr (aget z 0)) (addr (aget x 0)))
+        (copy (subslice z 1) (subslice x 1)))
+
+      (return 0))
+
+    (for [i 1] (< i (len z)) (inc! i)
+      (let [xi (aget x i)]
+        (when (!= xi 0)
+          (aset z i (- xi 1))
+          (when (!= (addr (aget z 0)) (addr (aget x 0)))
+            (copy (subslice z (+ i 1)) (subslice x (+ i 1))))
+
+          (return 0))
+
+        (aset z i (bit-not (conv Word 0)))))
+
+    1))
+
+
+
+^{:go/end 196} (go/func subVW_ref "subVW_ref is the reference implementation for subVW, used only for testing.\n" [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^Word y] :results [^Word c]
+  (set! c y)
+  (range [i z]
+    (let [(values zi cc) (bits/Sub (conv uint (aget x i)) (conv uint c) 0)]
+      (aset z i (conv Word zi))
+      (set! c (conv Word cc))))
+
+  ^{:line 195} c)
+
+
+^{:go/end 219} (go/func lshVU_g [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^uint s] :results [^Word c]
+  (when (!= (len x) (len z))
+    (panic "lshVU len"))
+
+
+  (when (== s 0)
+    (copy z x)
+    (return))
+
+  (when (== (len z) 0)
+    (return))
+
+  (set! s bit-and (- _W 1)) ; hint to the compiler that shifts by s don't need guard code
+  (let [ŝ (- _W s)]
+    (set! ŝ bit-and (- _W 1)) ; ditto
+    (set! c (>> (aget x (- (len z) 1)) ŝ))
+    (for [i (- (len z) 1)] (> i 0) (dec! i)
+      (aset z i (bit-or (<< (aget x i) s) (>> (aget x (- i 1)) ŝ))))
+
+    (aset z 0 (<< (aget x 0) s))
+    (return)))
+
+
+^{:go/end 242} (go/func rshVU_g [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^uint s] :results [^Word c]
+  (when (!= (len x) (len z))
+    (panic "rshVU len"))
+
+
+  (when (== s 0)
+    (copy z x)
+    (return))
+
+  (when (== (len z) 0)
+    (return))
+
+  (set! s bit-and (- _W 1)) ; hint to the compiler that shifts by s don't need guard code
+  (let [ŝ (- _W s)]
+    (set! ŝ bit-and (- _W 1)) ; ditto
+    (set! c (<< (aget x 0) ŝ))
+    (for [i 1] (< i (len z)) (inc! i)
+      (aset z (- i 1) (bit-or (>> (aget x (- i 1)) s) (<< (aget x i) ŝ))))
+
+    (aset z (- (len z) 1) (>> (aget x (- (len z) 1)) s))
+    (return)))
+
+
+^{:go/end 253} (go/func mulAddVWW_g [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^Word y ^Word r] :results [^Word c]
+  (when (!= (len x) (len z))
+    (panic "mulAddVWW len"))
+
+  (set! c r)
+  (range [i z]
+    (set! (values c (aget z i)) (mulAddWWW_g (aget x i) y c)))
+
+  (return))
+
+
+^{:go/end 268} (go/func addMulVVWW_g [^{:tag (slice Word)} z ^{:tag (slice Word)} x ^{:tag (slice Word)} y ^Word m ^Word a] :results [^Word c]
+  (when (or (!= (len x) (len z)) (!= (len y) (len z)))
+    (panic "addMulVVWW len"))
+
+
+  (set! c a)
+  (range [i z]
+    (let [(values z1 z0) (mulAddWWW_g (aget y i) m (aget x i))
+        (values lo cc) (bits/Add (conv uint z0) (conv uint c) 0)]
+      (set! (values c (aget z i)) (values (conv Word cc) (conv Word lo)))
+      (set! c + z1)))
+
+  (return))
+
+
+
+
+
+^{:go/end 330} (go/func divWW "q = ( x1 << _W + x0 - r)/y. m = floor(( _B^2 - 1 ) / d - _B). Requiring x1<y.\nAn approximate reciprocal with a reference to \"Improved Division by Invariant Integers\n(IEEE Transactions on Computers, 11 Jun. 2010)\"\n" [^Word x1 ^Word x0 ^Word y ^Word m] :results [^Word q ^Word r]
+  (let [s (nlz y)]
+    (when (!= s 0)
+      (set! x1 (bit-or (<< x1 s) (>> x0 (- _W s))))
+      (set! x0 << s)
+      (set! y << s))
+
+    (let [d (conv uint y)
+        ;; We know that
+        ;;   m = ⎣(B^2-1)/d⎦-B
+        ;;   ⎣(B^2-1)/d⎦ = m+B
+        ;;   (B^2-1)/d = m+B+delta1    0 <= delta1 <= (d-1)/d
+        ;;   B^2/d = m+B+delta2        0 <= delta2 <= 1
+        ;; The quotient we're trying to compute is
+        ;;   quotient = ⎣(x1*B+x0)/d⎦
+        ;;            = ⎣(x1*B*(B^2/d)+x0*(B^2/d))/B^2⎦
+        ;;            = ⎣(x1*B*(m+B+delta2)+x0*(m+B+delta2))/B^2⎦
+        ;;            = ⎣(x1*m+x1*B+x0)/B + x0*m/B^2 + delta2*(x1*B+x0)/B^2⎦
+        ;; The latter two terms of this three-term sum are between 0 and 1.
+        ;; So we can compute just the first term, and we will be low by at most 2.
+        (values t1 t0) (bits/Mul (conv uint m) (conv uint x1))
+        (values _ c) (bits/Add t0 (conv uint x0) 0)]
+      (set! (values t1 _) (bits/Add t1 (conv uint x1) c))
+      ;; The quotient is either t1, t1+1, or t1+2.
+      ;; We'll try t1 and adjust if needed.
+      (let [qq t1
+          ;; compute remainder r=x-d*q.
+          (values dq1 dq0) (bits/Mul d qq)
+          (values r0 b) (bits/Sub (conv uint x0) dq0 0)
+          (values r1 _) (bits/Sub (conv uint x1) dq1 b)]
+        ;; The remainder we just computed is bounded above by B+d:
+        ;; r = x1*B + x0 - d*q.
+        ;;   = x1*B + x0 - d*⎣(x1*m+x1*B+x0)/B⎦
+        ;;   = x1*B + x0 - d*((x1*m+x1*B+x0)/B-alpha)                                   0 <= alpha < 1
+        ;;   = x1*B + x0 - x1*d/B*m                         - x1*d - x0*d/B + d*alpha
+        ;;   = x1*B + x0 - x1*d/B*⎣(B^2-1)/d-B⎦             - x1*d - x0*d/B + d*alpha
+        ;;   = x1*B + x0 - x1*d/B*⎣(B^2-1)/d-B⎦             - x1*d - x0*d/B + d*alpha
+        ;;   = x1*B + x0 - x1*d/B*((B^2-1)/d-B-beta)        - x1*d - x0*d/B + d*alpha   0 <= beta < 1
+        ;;   = x1*B + x0 - x1*B + x1/B + x1*d + x1*d/B*beta - x1*d - x0*d/B + d*alpha
+        ;;   =        x0        + x1/B        + x1*d/B*beta        - x0*d/B + d*alpha
+        ;;   = x0*(1-d/B) + x1*(1+d*beta)/B + d*alpha
+        ;;   <  B*(1-d/B) +  d*B/B          + d          because x0<B (and 1-d/B>0), x1<d, 1+d*beta<=B, alpha<1
+        ;;   =  B - d     +  d              + d
+        ;;   = B+d
+        ;; So r1 can only be 0 or 1. If r1 is 1, then we know q was too small.
+        ;; Add 1 to q and subtract d from r. That guarantees that r is <B, so
+        ;; we no longer need to keep track of r1.
+        (when (!= r1 0)
+          (inc! qq)
+          (set! r0 - d))
+
+        ;; If the remainder is still too large, increment q one more time.
+        (when (>= r0 d)
+          (inc! qq)
+          (set! r0 - d))
+
+        (return (conv Word qq) (conv Word (>> r0 s)))))))
+
+
+
+^{:go/end 339} (go/func reciprocalWord "reciprocalWord return the reciprocal of the divisor. rec = floor(( _B^2 - 1 ) / u - _B). u = d1 << nlz(d1).\n" ^Word [^Word d1]
+  (let [u (conv uint (<< d1 (nlz d1)))
+      ^{:line 335} x1 (bit-not u)
+      ^{:line 336} x0 (conv uint _M)
+      (values rec _) (bits/Div x1 x0 u)] ; (_B^2-1)/U-_B = (_B*(_M-C)+_M)/U
+    (conv Word rec)))

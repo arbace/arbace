@@ -1,0 +1,153 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package fmtsort provides a general stable ordering mechanism
+;; for maps, on behalf of the fmt and text/template packages.
+;; It is not guaranteed to be efficient and works only for types
+;; that are valid map keys.
+(in-ns 'go.internal.fmtsort) (go/file "sort.go" :doc "Package fmtsort provides a general stable ordering mechanism\nfor maps, on behalf of the fmt and text/template packages.\nIt is not guaranteed to be efficient and works only for types\nthat are valid map keys.\n" :imports [
+
+
+    ^{:line 12} [cmp "cmp"]
+    ^{:line 13} [reflect "reflect"]
+    ^{:line 14} [slices "slices"]])
+
+
+;; Note: Throughout this package we avoid calling reflect.Value.Interface as
+;; it is not always legal to do so and it's easier to avoid the issue than to face it.
+
+
+
+
+
+(go/type SortedMap "SortedMap is a slice of KeyValue pairs that simplifies sorting\nand iterating over map entries.\n\nEach KeyValue pair contains a map key and its corresponding value.\n" (slice KeyValue))
+
+
+(go/type KeyValue "KeyValue holds a single key and value pair found in a map.\n" (struct
+    ^{:line 28 :tag reflect/Value} Key ^reflect/Value Value))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 66} (go/func Sort "Sort accepts a map and returns a SortedMap that has the same keys and\nvalues but in a stable sorted order according to the keys, modulo issues\nraised by unorderable key values such as NaNs.\n\nThe ordering rules are more general than with Go's < operator:\n\n  - when applicable, nil compares low\n  - ints, floats, and strings order by <\n  - NaN compares less than non-NaN floats\n  - bool compares false before true\n  - complex compares real, then imag\n  - pointers compare by machine address\n  - channel values compare by machine address\n  - structs compare each field in turn\n  - arrays compare each element in turn.\n    Otherwise identical arrays compare by length.\n  - interface values compare first by reflect.Type describing the concrete type\n    and then by concrete value as described in the previous rules.\n" ^SortedMap [^reflect/Value mapValue]
+  (when (!= (.Kind (.Type mapValue)) reflect/Map)
+    (return nil))
+
+  ;; Note: this code is arranged to not panic even in the presence
+  ;; of a concurrent map update. The runtime is responsible for
+  ;; yelling loudly if that happens. See issue 33275.
+  (let [n (.Len mapValue)
+      ^{:line 57} sorted (make SortedMap 0 n)
+      ^{:line 58} iter (.MapRange mapValue)]
+    (while (.Next iter)
+      (set! sorted (append sorted (lit KeyValue (.Key iter) (.Value iter)))))
+
+    (^{:inst [SortedMap KeyValue]} slices/SortStableFunc sorted ^{:go/end 64} (fn ^int [^KeyValue a ^KeyValue b]
+        (compare (.-Key a) (.-Key b))))
+
+    ^{:line 65} sorted))
+
+
+
+
+
+
+^{:go/end 136} (go/func compare "compare compares two values of the same type. It returns -1, 0, 1\naccording to whether a > b (1), a == b (0), or a < b (-1).\nIf the types differ, it returns -1.\nSee the comment on Sort for the comparison rules.\n" ^int [^reflect/Value aVal ^reflect/Value bVal]
+  (let [(values aType bType) (values (.Type aVal) (.Type bVal))]
+    (when (!= aType bType)
+      (return -1)) ; No good answer possible, but don't return 0: they're not equal.
+
+    (switch (.Kind aVal)
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+        (return (^{:inst [int64]} cmp/Compare (.Int aVal) (.Int bVal))))
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+        (return (^{:inst [uint64]} cmp/Compare (.Uint aVal) (.Uint bVal))))
+      (case [reflect/String]
+        (return (^{:inst [string]} cmp/Compare (.String aVal) (.String bVal))))
+      (case [reflect/Float32 reflect/Float64]
+        (return (^{:inst [float64]} cmp/Compare (.Float aVal) (.Float bVal))))
+      (case [reflect/Complex64 reflect/Complex128]
+        (let [(values a b) (values (.Complex aVal) (.Complex bVal))]
+          (when [c (^{:inst [float64]} cmp/Compare (real a) (real b))] (!= c 0)
+            (return c))
+
+          (return (^{:inst [float64]} cmp/Compare (imag a) (imag b)))))
+      (case [reflect/Bool]
+        (let [(values a b) (values (.Bool aVal) (.Bool bVal))]
+          (switch
+            (case [(== a b)]
+              (return 0))
+            (case [a]
+              (return 1))
+            (default
+              (return -1)))))
+
+      (case [reflect/Pointer reflect/UnsafePointer]
+        (return (^{:inst [uintptr]} cmp/Compare (.Pointer aVal) (.Pointer bVal))))
+      (case [reflect/Chan]
+        (when [(values c ok) (nilCompare aVal bVal)] ok
+          (return c))
+
+        (return (^{:inst [uintptr]} cmp/Compare (.Pointer aVal) (.Pointer bVal))))
+      (case [reflect/Struct]
+        (for [i 0] (< i (.NumField aVal)) (inc! i)
+          (when [c (compare (.Field aVal i) (.Field bVal i))] (!= c 0)
+            (return c)))
+
+
+        (return 0))
+      (case [reflect/Array]
+        (for [i 0] (< i (.Len aVal)) (inc! i)
+          (when [c (compare (.Index aVal i) (.Index bVal i))] (!= c 0)
+            (return c)))
+
+
+        (return 0))
+      (case [reflect/Interface]
+        (when [(values c ok) (nilCompare aVal bVal)] ok
+          (return c))
+
+        (let [c (compare (reflect/ValueOf (.Type (.Elem aVal))) (reflect/ValueOf (.Type (.Elem bVal))))]
+          (when (!= c 0)
+            (return c))
+
+          (return (compare (.Elem aVal) (.Elem bVal)))))
+      (default
+        ;; Certain types cannot appear as keys (maps, funcs, slices), but be explicit.
+        (panic (+ "bad type in compare: " (.String aType)))))))
+
+
+
+
+
+
+
+
+^{:go/end 154} (go/func nilCompare "nilCompare checks whether either value is nil. If not, the boolean is false.\nIf either value is nil, the boolean is true and the integer is the comparison\nvalue. The comparison is defined to be 0 if both are nil, otherwise the one\nnil value compares low. Both arguments must represent a chan, func,\ninterface, map, pointer, or slice.\n" [^reflect/Value aVal ^reflect/Value bVal] :results [int bool]
+  (when (.IsNil aVal)
+    (when (.IsNil bVal)
+      (return 0 true))
+
+    (return -1 true))
+
+  (when (.IsNil bVal)
+    (return 1 true))
+
+  (return 0 false))

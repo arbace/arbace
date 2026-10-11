@@ -1,0 +1,300 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.sync) (go/file "poolqueue.go" :imports [
+
+
+    ^{:line 8} [atomic "sync/atomic"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+(go/type poolDequeue "poolDequeue is a lock-free fixed-size single-producer,\nmulti-consumer queue. The single producer can both push and pop\nfrom the head, and consumers can pop from the tail.\n\nIt has the added feature that it nils out unused slots to avoid\nunnecessary retention of objects. This is important for sync.Pool,\nbut not typically a property considered in the literature.\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 34 :tag atomic/Uint64 :doc "headTail packs together a 32-bit head index and a 32-bit\ntail index. Both are indexes into vals modulo len(vals)-1.\n\ntail = index of oldest data in queue\nhead = index of next slot to fill\n\nSlots in the range [tail, head) are owned by consumers.\nA consumer continues to own a slot outside this range until\nit nils the slot, at which point ownership passes to the\nproducer.\n\nThe head index is stored in the most-significant bits so\nthat we can atomically add to it and the overflow is\nharmless.\n"} headTail
+
+
+
+
+
+
+
+
+
+    ^{:line 44 :tag (slice eface) :doc "vals is a ring buffer of interface{} values stored in this\ndequeue. The size of this must be a power of 2.\n\nvals[i].typ is nil if the slot is empty and non-nil\notherwise. A slot is still in use until *both* the tail\nindex has moved beyond it and typ has been set to nil. This\nis set to nil atomically by the consumer and read\natomically by the producer.\n"} vals))
+
+
+(go/type eface (struct
+    ^{:line 48 :tag unsafe/Pointer} typ ^unsafe/Pointer val))
+
+
+(go/const ^{:val 32} dequeueBits 32)
+
+
+
+
+
+
+(go/const ^{:val 1073741824 :doc "dequeueLimit is the maximum size of a poolDequeue.\n\nThis must be at most (1<<dequeueBits)/2 because detecting fullness\ndepends on wrapping around the ring buffer without wrapping around\nthe index. We divide by 4 so this fits in an int on 32-bit.\n"} dequeueLimit (/ (<< 1 dequeueBits) 4))
+
+
+
+
+(go/type dequeueNil "dequeueNil is used in poolDequeue to represent interface{}(nil).\nSince we use nil to represent empty slots, we need a sentinel value\nto represent nil.\n" (* (struct)))
+
+^{:go/end 70} (go/method unpack [^{:tag (* poolDequeue)} d ^uint64 ptrs] :results [^uint32 head ^uint32 tail]
+  (let [^:const ^{:val 4294967295} mask (- (<< 1 dequeueBits) 1)]
+    (set! head (conv uint32 (bit-and (>> ptrs dequeueBits) mask)))
+    (set! tail (conv uint32 (bit-and ptrs mask)))
+    (return)))
+
+
+^{:go/end 76} (go/method pack ^uint64 [^{:tag (* poolDequeue)} d ^uint32 head ^uint32 tail]
+  (let [^:const ^{:val 4294967295} mask (- (<< 1 dequeueBits) 1)]
+    (bit-or (<< (conv uint64 head) dequeueBits)
+      (conv uint64 (bit-and tail mask)))))
+
+
+
+
+^{:go/end 107} (go/method pushHead "pushHead adds val at the head of the queue. It returns false if the\nqueue is full. It must only be called by a single producer.\n" ^bool [^{:tag (* poolDequeue)} d ^any val]
+  (let [ptrs (.Load (.-headTail d))
+      (values head tail) (.unpack d ptrs)]
+    (when (== (bit-and (+ tail (conv uint32 (len (.-vals d)))) (- (<< 1 dequeueBits) 1)) head)
+      ;; Queue is full.
+      (return false))
+
+    ^{:go/breaks [6]} (let [slot (addr (aget (.-vals d) (bit-and head (conv uint32 (- (len (.-vals d)) 1)))))
+
+        ;; Check if the head slot has been released by popTail.
+        ^{:line 90} typ (atomic/LoadPointer (addr (.-typ slot)))]
+      (when (!= typ nil)
+        ;; Another goroutine is still cleaning up the tail, so
+        ;; the queue is actually still full.
+        (return false))
+
+
+      ;; The head slot is free, so we own it.
+      (when (== val nil)
+        (set! val (conv dequeueNil nil)))
+
+      (set! @(conv (* any) (conv unsafe/Pointer slot)) val)
+
+      ;; Increment head. This passes ownership of slot to popTail
+      ;; and acts as a store barrier for writing the slot.
+      (.Add (.-headTail d) (<< 1 dequeueBits))
+      true)))
+
+
+
+
+
+^{:go/end 142} (go/method popHead "popHead removes and returns the element at the head of the queue.\nIt returns false if the queue is empty. It must only be called by a\nsingle producer.\n" [^{:tag (* poolDequeue)} d] :results [any bool]
+  (let [^{:tag (* eface)} slot (zero (* eface))]
+    (while true
+      (let [ptrs (.Load (.-headTail d))
+          (values head tail) (.unpack d ptrs)]
+        (when (== tail head)
+          ;; Queue is empty.
+          (return nil false))
+
+
+        ;; Confirm tail and decrement head. We do this before
+        ;; reading the value to take back ownership of this
+        ;; slot.
+        (dec! head)
+        (let [ptrs2 (.pack d head tail)]
+          (when (.CompareAndSwap (.-headTail d) ptrs ptrs2)
+            ;; We successfully took back slot.
+            (set! slot (addr (aget (.-vals d) (bit-and head (conv uint32 (- (len (.-vals d)) 1))))))
+            (break)))))
+
+
+
+    (let [val @(conv (* any) (conv unsafe/Pointer slot))]
+      (when (== val (conv dequeueNil nil))
+        (set! val nil))
+
+      ;; Zero the slot. Unlike popTail, this isn't racing with
+      ;; pushHead, so we don't need to be careful here.
+      (set! @slot (lit eface))
+      (return val true))))
+
+
+
+
+
+^{:go/end 185} (go/method popTail "popTail removes and returns the element at the tail of the queue.\nIt returns false if the queue is empty. It may be called by any\nnumber of consumers.\n" [^{:tag (* poolDequeue)} d] :results [any bool]
+  (let [^{:tag (* eface)} slot (zero (* eface))]
+    (while true
+      (let [ptrs (.Load (.-headTail d))
+          (values head tail) (.unpack d ptrs)]
+        (when (== tail head)
+          ;; Queue is empty.
+          (return nil false))
+
+
+        ;; Confirm head and tail (for our speculative check
+        ;; above) and increment tail. If this succeeds, then
+        ;; we own the slot at tail.
+        (let [ptrs2 (.pack d head (+ tail 1))]
+          (when (.CompareAndSwap (.-headTail d) ptrs ptrs2)
+            ;; Success.
+            (set! slot (addr (aget (.-vals d) (bit-and tail (conv uint32 (- (len (.-vals d)) 1))))))
+            (break)))))
+
+
+
+    ;; We now own slot.
+    (let [val @(conv (* any) (conv unsafe/Pointer slot))]
+      (when (== val (conv dequeueNil nil))
+        (set! val nil))
+
+
+      ;; Tell pushHead that we're done with this slot. Zeroing the
+      ;; slot is also important so we don't leave behind references
+      ;; that could keep this object live longer than necessary.
+      ;;
+      ;; We write to val first and then publish that we're done with
+      ;; this slot by atomically writing to typ.
+      (set! (.-val slot) nil)
+      (atomic/StorePointer (addr (.-typ slot)) nil)
+      ;; At this point pushHead owns the slot.
+
+      (return val true))))
+
+
+
+
+
+
+
+
+
+(go/type poolChain "poolChain is a dynamically-sized version of poolDequeue.\n\nThis is implemented as a doubly-linked list queue of poolDequeues\nwhere each dequeue is double the size of the previous one. Once a\ndequeue fills up, this allocates a new one and only ever pushes to\nthe latest dequeue. Pops happen from the other end of the list and\nonce a dequeue is exhausted, it gets removed from the list.\n" (struct
+
+
+    ^{:line 197 :tag (* poolChainElt) :doc "head is the poolDequeue to push to. This is only accessed\nby the producer, so doesn't need to be synchronized.\n"} head
+
+
+
+    ^{:line 201 :tag (atomic/Pointer poolChainElt) :doc "tail is the poolDequeue to popTail from. This is accessed\nby consumers, so reads and writes must be atomic.\n"} tail))
+
+
+(go/type poolChainElt (struct
+    ^{:line 205} poolDequeue
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 217 :tag (atomic/Pointer poolChainElt) :doc "next and prev link to the adjacent poolChainElts in this\npoolChain.\n\nnext is written atomically by the producer and read\natomically by the consumer. It only transitions from nil to\nnon-nil.\n\nprev is written atomically by the consumer and read\natomically by the producer. It only transitions from\nnon-nil to nil.\n"} next ^{:tag (atomic/Pointer poolChainElt) :doc "next and prev link to the adjacent poolChainElts in this\npoolChain.\n\nnext is written atomically by the producer and read\natomically by the consumer. It only transitions from nil to\nnon-nil.\n\nprev is written atomically by the consumer and read\natomically by the producer. It only transitions from\nnon-nil to nil.\n"} prev))
+
+
+^{:go/end 249} (go/method pushHead [^{:tag (* poolChain)} c ^any val]
+  (let [d (.-head c)]
+    (when (== d nil)
+      ;; Initialize the chain.
+      (let [^:const ^{:val 8} initSize 8] ; Must be a power of 2
+        (set! d (new poolChainElt))
+        (set! ^{:go/via [poolDequeue]} (.-vals d) (make (slice eface) initSize))
+        (set! (.-head c) d)
+        (.Store (.-tail c) d)))
+
+
+    (when ^{:go/via [poolDequeue]} (.pushHead d val)
+      (return))
+
+
+    ;; The current dequeue is full. Allocate a new one of twice
+    ;; the size.
+    (let [newSize (* (len ^{:go/via [poolDequeue]} (.-vals d)) 2)]
+      (when (>= newSize dequeueLimit)
+        ;; Can't make it any bigger.
+        (set! newSize dequeueLimit))
+
+
+      (let [d2 (addr (lit poolChainElt))]
+        (.Store (.-prev d2) d)
+        (set! ^{:go/via [poolDequeue]} (.-vals d2) (make (slice eface) newSize))
+        (set! (.-head c) d2)
+        (.Store (.-next d) d2)
+        ^{:go/via [poolDequeue]} (.pushHead d2 val)))))
+
+
+^{:go/end 262} (go/method popHead [^{:tag (* poolChain)} c] :results [any bool]
+  (let [d (.-head c)]
+    (while (!= d nil)
+      (when [(values val ok) ^{:go/via [poolDequeue]} (.popHead d)] ok
+        (return val ok))
+
+      ;; There may still be unconsumed elements in the
+      ;; previous dequeue, so try backing up.
+      (set! d (.Load (.-prev d))))
+
+    (return nil false)))
+
+
+^{:go/end 302} (go/method popTail [^{:tag (* poolChain)} c] :results [any bool]
+  (let [d (.Load (.-tail c))]
+    (when (== d nil)
+      (return nil false))
+
+
+    (while true
+      ;; It's important that we load the next pointer
+      ;; *before* popping the tail. In general, d may be
+      ;; transiently empty, but if next is non-nil before
+      ;; the pop and the pop fails, then d is permanently
+      ;; empty, which is the only condition under which it's
+      ;; safe to drop d from the chain.
+      (let [d2 (.Load (.-next d))]
+
+        (when [(values val ok) ^{:go/via [poolDequeue]} (.popTail d)] ok
+          (return val ok))
+
+
+        (when (== d2 nil)
+          ;; This is the only dequeue. It's empty right
+          ;; now, but could be pushed to in the future.
+          (return nil false))
+
+
+        ;; The tail of the chain has been drained, so move on
+        ;; to the next dequeue. Try to drop it from the chain
+        ;; so the next pop doesn't have to look at the empty
+        ;; dequeue again.
+        (when (.CompareAndSwap (.-tail c) d d2)
+          ;; We won the race. Clear the prev pointer so
+          ;; the garbage collector can collect the empty
+          ;; dequeue and so popHead doesn't back up
+          ;; further than necessary.
+          (.Store (.-prev d2) nil))
+
+        (set! d d2)))))

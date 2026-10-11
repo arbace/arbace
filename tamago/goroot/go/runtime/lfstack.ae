@@ -1,0 +1,83 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Lock-free stack.
+
+(in-ns 'go.runtime) (go/file "lfstack.go" :imports [
+
+
+    ^{:line 10} [atomic "internal/runtime/atomic"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+(go/type lfstack "lfstack is the head of a lock-free stack.\n\nThe zero value of lfstack is an empty list.\n\nThis stack is intrusive. Nodes must embed lfnode as the first field.\n\nThe stack does not keep GC-visible pointers to nodes, so the caller\nmust ensure the nodes are allocated outside the Go heap.\n" uint64)
+
+^{:go/end 34} (go/method push [^{:tag (* lfstack)} head ^{:tag (* lfnode)} node]
+  (inc! (.-pushcnt node))
+  (let [new (lfstackPack node (.-pushcnt node))]
+    (while true
+      (let [old (atomic/Load64 (conv (* uint64) head))]
+        (set! (.-next node) old)
+        (when (atomic/Cas64 (conv (* uint64) head) old new)
+          (break))))))
+
+
+
+
+^{:go/end 63} (go/method pop ^unsafe/Pointer [^{:tag (* lfstack)} head]
+  (let [^uint32 backoff (zero uint32)]
+    ;; TODO: tweak backoff parameters on other architectures.
+    (when (== GOARCH "arm64")
+      (set! backoff 128))
+
+    (while true
+      (let [old (atomic/Load64 (conv (* uint64) head))]
+        (when (== old 0)
+          (return nil))
+
+        (let [node (lfstackUnpack old)
+            ^{:line 48} next (atomic/Load64 (addr (.-next node)))]
+          (when (atomic/Cas64 (conv (* uint64) head) old next)
+            (return (conv unsafe/Pointer node)))
+
+
+          ;; Use a backoff approach to reduce demand to the shared memory location
+          ;; decreases memory contention and allows for other threads to make quicker
+          ;; progress.
+          ;; Read more in this Arm blog post:
+          ;; https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/multi-threaded-applications-arm
+          (procyield backoff)
+          ;; Increase backoff time.
+          (set! backoff + (/ backoff 2)))))))
+
+
+
+
+^{:go/end 67} (go/method empty ^bool [^{:tag (* lfstack)} head]
+  (== (atomic/Load64 (conv (* uint64) head)) 0))
+
+
+
+
+^{:go/end 76} (go/func lfnodeValidate "lfnodeValidate panics if node is not a valid address for use with\nlfstack.push. This only needs to be called when node is allocated.\n" [^{:tag (* lfnode)} node]
+  (when [(values base _ _) (findObject (conv uintptr (conv unsafe/Pointer node)) 0 0)] (!= base 0)
+    (throw "lfstack node allocated from the heap"))
+
+  (lfstackPack node (bit-not (conv uintptr 0))))
+
+
+^{:go/end 80} (go/func lfstackPack ^uint64 [^{:tag (* lfnode)} node ^uintptr cnt]
+  (conv uint64 (taggedPointerPack (conv unsafe/Pointer node) (bit-and cnt (- (<< 1 tagBits) 1)))))
+
+
+^{:go/end 84} (go/func lfstackUnpack ^{:tag (* lfnode)} [^uint64 val]
+  (conv (* lfnode) (.pointer (conv taggedPointer val))))

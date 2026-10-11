@@ -1,0 +1,657 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "select.go" :imports [
+
+    ;; This file contains the implementation of Go select statements.
+
+
+    ^{:line 10} [abi "internal/abi"]
+    ^{:line 11} [sys "internal/runtime/sys"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+(go/const ^{:val false} debugSelect false)
+
+
+
+
+(go/type scase "Select case descriptor.\nKnown to compiler.\nChanges here must also be made in src/cmd/compile/internal/walk/select.go's scasetype.\n" (struct
+    ^{:line 21 :tag (* hchan)} c ; chan
+    ^{:line 22 :tag unsafe/Pointer} elem)) ; data element
+
+
+(go/var
+  ^{:line 26} [chansendpc (abi/FuncPCABIInternal chansend)]
+  ^{:line 27} [chanrecvpc (abi/FuncPCABIInternal chanrecv)])
+
+
+^{:go/end 32} (go/func selectsetpc [^{:tag (* uintptr)} pc]
+  (set! @pc (sys/GetCallerPC)))
+
+
+^{:go/end 43} (go/func sellock [^{:tag (slice scase)} scases ^{:tag (slice uint16)} lockorder]
+  (let [^{:tag (* hchan)} c (zero (* hchan))]
+    (range [_ o lockorder]
+      (let [c0 (.-c (aget scases o))]
+        (when (!= c0 c)
+          (set! c c0)
+          (lock (addr (.-lock c))))))))
+
+
+
+
+^{:go/end 61} (go/func selunlock [^{:tag (slice scase)} scases ^{:tag (slice uint16)} lockorder]
+  ;; We must be very careful here to not touch sel after we have unlocked
+  ;; the last lock, because sel can be freed right after the last unlock.
+  ;; Consider the following situation.
+  ;; First M calls runtime·park() in runtime·selectgo() passing the sel.
+  ;; Once runtime·park() has unlocked the last lock, another M makes
+  ;; the G that calls select runnable again and schedules it for execution.
+  ;; When the G runs on another M, it locks all the locks and frees sel.
+  ;; Now if the first M touches sel, it will access freed memory.
+  (for [i (- (len lockorder) 1)] (>= i 0) (dec! i)
+    (let [c (.-c (aget scases (aget lockorder i)))]
+      (when (and (> i 0) (== c (.-c (aget scases (aget lockorder (- i 1))))))
+        (continue)) ; will unlock it on the next iteration
+
+      (unlock (addr (.-lock c))))))
+
+
+
+^{:go/end 101} (go/func selparkcommit ^bool [^{:tag (* g)} gp ^unsafe/Pointer _]
+  ;; There are unlocked sudogs that point into gp's stack. Stack
+  ;; copying must lock the channels of those sudogs.
+  ;; Set activeStackChans here instead of before we try parking
+  ;; because we could self-deadlock in stack growth on a
+  ;; channel lock.
+  (set! (.-activeStackChans gp) true)
+  ;; Mark that it's safe for stack shrinking to occur now,
+  ;; because any thread acquiring this G's stack for shrinking
+  ;; is guaranteed to observe activeStackChans after this store.
+  (.Store (.-parkingOnChan gp) false)
+  ;; Make sure we unlock after setting activeStackChans and
+  ;; unsetting parkingOnChan. The moment we unlock any of the
+  ;; channel locks we risk gp getting readied by a channel operation
+  ;; and so gp could continue running before everything before the
+  ;; unlock is visible (even to gp itself).
+
+  ;; This must not access gp's stack (see gopark). In
+  ;; particular, it must not access the *hselect. That's okay,
+  ;; because by the time this is called, gp.waiting has all
+  ;; channels in lock order.
+  ^{:go/breaks [[4 100]]} (let [^{:tag (* hchan)} lastc (zero (* hchan))]
+    (for [sg (.-waiting gp)] (!= sg nil) (set! sg (.-waitlink sg))
+      (when (and (!= (.get (.-c sg)) lastc) (!= lastc nil))
+        ;; As soon as we unlock the channel, fields in
+        ;; any sudog with that channel may change,
+        ;; including c and waitlink. Since multiple
+        ;; sudogs may have the same channel, we unlock
+        ;; only after we've passed the last instance
+        ;; of a channel.
+        (unlock (addr (.-lock lastc))))
+
+      (set! lastc (.get (.-c sg))))
+
+    (when (!= lastc nil)
+      (unlock (addr (.-lock lastc))))
+
+    true))
+
+
+^{:go/end 105} (go/func block []
+  (gopark nil nil waitReasonSelectNoCases traceBlockForever 1)) ; forever
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 543} (go/func selectgo "selectgo implements the select statement.\n\ncas0 points to an array of type [ncases]scase, and order0 points to\nan array of type [2*ncases]uint16 where ncases must be <= 65536.\nBoth reside on the goroutine's stack (regardless of any escaping in\nselectgo).\n\nFor race detector builds, pc0 points to an array of type\n[ncases]uintptr (also on the stack); for other builds, it's set to\nnil.\n\nselectgo returns the index of the chosen scase, which matches the\nordinal position of its respective select{recv,send,default} call.\nAlso, if the chosen scase was a receive operation, it reports whether\na value was received.\n" [^{:tag (* scase)} cas0 ^{:tag (* uint16)} order0 ^{:tag (* uintptr)} pc0 ^int nsends ^int nrecvs ^bool block] :results [int bool]
+  (let [gp (getg)]
+    (when debugSelect
+      (print "select: cas0=" cas0 "\n"))
+
+
+    ;; NOTE: In order to maintain a lean stack size, the number of scases
+    ;; is capped at 65536.
+    (let [cas1 (conv (* (array (<< 1 16) scase)) (conv unsafe/Pointer cas0))
+        ^{:line 131} order1 (conv (* (array (<< 1 17) uint16)) (conv unsafe/Pointer order0))
+
+        ^{:line 133} ncases (+ nsends nrecvs)
+        ^{:line 134} scases (subslice cas1 _ ncases ncases)
+        ^{:line 135} pollorder (subslice order1 _ ncases ncases)
+        ^{:line 136} lockorder (subslice (subslice order1 ncases) _ ncases ncases)
+        ;; NOTE: pollorder/lockorder's underlying array was not zero-initialized by compiler.
+
+        ;; Even when raceenabled is true, there might be select
+        ;; statements in packages compiled without -race (e.g.,
+        ;; ensureSigM in runtime/signal_unix.go).
+        ^{:line 142 :tag (slice uintptr)} pcs (zero (slice uintptr))]
+      (when (and raceenabled (!= pc0 nil))
+        (let [pc1 (conv (* (array (<< 1 16) uintptr)) (conv unsafe/Pointer pc0))]
+          (set! pcs (subslice pc1 _ ncases ncases))))
+
+      (let [casePC ^{:go/end 152} (fn ^uintptr [^int casi]
+            (when (== pcs nil)
+              (return 0))
+
+            (aget pcs casi))
+
+
+          ^{:line 154 :tag int64} t0 (zero int64)]
+        (when (> blockprofilerate 0)
+          (set! t0 (cputicks)))
+
+
+        ;; The compiler rewrites selects that statically have
+        ;; only 0 or 1 cases plus default into simpler constructs.
+        ;; The only way we can end up with such small sel.ncase
+        ;; values here is for a larger select in which most channels
+        ;; have been nilled out. The general code handles those
+        ;; cases correctly, and they are rare enough not to bother
+        ;; optimizing (and needing to test).
+
+        ;; generate permuted order
+        (let [norder 0
+            ^{:line 169} allSynctest true]
+          (range [i scases]
+            (let [cas (addr (aget scases i))]
+
+              ;; Omit cases without channels from the poll and lock orders.
+              (when (== (.-c cas) nil)
+                (set! (.-elem cas) nil) ; allow GC
+                (continue))
+
+
+              (if (!= (.-bubble (.-c cas)) nil)
+                (when (!= (.-bubble (getg)) (.-bubble (.-c cas)))
+                  (fatal "select on synctest channel from outside bubble"))
+
+
+                (set! allSynctest false))
+
+
+              (when (!= (.-timer (.-c cas)) nil)
+                (.maybeRunChan (.-timer (.-c cas)) (.-c cas)))
+
+
+              (let [j (cheaprandn (conv uint32 (+ norder 1)))]
+                (aset pollorder norder (aget pollorder j))
+                (aset pollorder j (conv uint16 i))
+                (inc! norder))))
+
+          (set! pollorder (subslice pollorder _ norder))
+          (set! lockorder (subslice lockorder _ norder))
+
+          (let [waitReason waitReasonSelect]
+            (when (and (!= (.-bubble gp) nil) allSynctest)
+              ;; Every channel selected on is in a synctest bubble,
+              ;; so this goroutine will count as idle while selecting.
+              (set! waitReason waitReasonSynctestSelect))
+
+
+            ;; sort the cases by Hchan address to get the locking order.
+            ;; simple heap sort, to guarantee n log n time and constant stack footprint.
+            (range [i lockorder]
+              (let [j i
+                  ;; Start with the pollorder to permute cases on the same channel.
+                  ^{:line 211} c (.-c (aget scases (aget pollorder i)))]
+                (while (and (> j 0) (< (.sortkey (.-c (aget scases (aget lockorder (/ (- j 1) 2))))) (.sortkey c)))
+                  (let [k (/ (- j 1) 2)]
+                    (aset lockorder j (aget lockorder k))
+                    (set! j k)))
+
+                (aset lockorder j (aget pollorder i))))
+
+            (for [i (- (len lockorder) 1)] (>= i 0) (dec! i)
+              (let [o (aget lockorder i)
+                  ^{:line 221} c (.-c (aget scases o))]
+                (aset lockorder i (aget lockorder 0))
+                (let [j 0]
+                  (while true
+                    (let [k (+ (* j 2) 1)]
+                      (when (>= k i)
+                        (break))
+
+                      (when (and (< (+ k 1) i) (< (.sortkey (.-c (aget scases (aget lockorder k)))) (.sortkey (.-c (aget scases (aget lockorder (+ k 1)))))))
+                        (inc! k))
+
+                      (when (< (.sortkey c) (.sortkey (.-c (aget scases (aget lockorder k)))))
+                        (aset lockorder j (aget lockorder k))
+                        (set! j k)
+                        (continue))
+
+                      (break)))
+
+                  (aset lockorder j o))))
+
+
+            (when debugSelect
+              (for [i 0] (< (+ i 1) (len lockorder)) (inc! i)
+                (when (> (.sortkey (.-c (aget scases (aget lockorder i)))) (.sortkey (.-c (aget scases (aget lockorder (+ i 1))))))
+                  (print "i=" i " x=" (aget lockorder i) " y=" (aget lockorder (+ i 1)) "\n")
+                  (throw "select: broken sort"))))
+
+
+
+
+            ;; lock all the channels involved in the select
+            (sellock scases lockorder)
+
+            (let [
+                ^{:line 255 :tag (* sudog)} sg (zero (* sudog))
+                ^{:line 256 :tag (* hchan)} c (zero (* hchan))
+                ^{:line 257 :tag (* scase)} k (zero (* scase))
+                ^{:line 258 :tag (* sudog)} sglist (zero (* sudog))
+                ^{:line 259 :tag (* sudog)} sgnext (zero (* sudog))
+                ^{:line 260 :tag unsafe/Pointer} qp (zero unsafe/Pointer)
+                ^{:line 261 :tag (* (* sudog))} nextp (zero (* (* sudog)))
+
+
+                ;; pass 1 - look for something already waiting
+                ^{:line 265 :tag int} casi (zero int)
+                ^{:line 266 :tag (* scase)} cas (zero (* scase))
+                ^{:line 267 :tag bool} caseSuccess (zero bool)
+                ^{:line 268 :tag int64} caseReleaseTime -1
+                ^{:line 269 :tag bool} recvOK (zero bool)]
+              (range [_ casei pollorder]
+                (set! casi (conv int casei))
+                (set! cas (addr (aget scases casi)))
+                (set! c (.-c cas))
+
+                (if (>= casi nsends) (do
+                    (set! sg (.dequeue (.-sendq c)))
+                    (when (!= sg nil)
+                      (goto :recv))
+
+                    (when (> (.-qcount c) 0)
+                      (goto :bufrecv))
+
+                    (when (!= (.-closed c) 0)
+                      (goto :rclose)))
+
+                  (do
+                    (when raceenabled
+                      (racereadpc (.raceaddr c) (casePC casi) chansendpc))
+
+                    (when (!= (.-closed c) 0)
+                      (goto :sclose))
+
+                    (set! sg (.dequeue (.-recvq c)))
+                    (when (!= sg nil)
+                      (goto :send))
+
+                    (when (< (.-qcount c) (.-dataqsiz c))
+                      (goto :bufsend)))))
+
+
+
+
+              (when (not block)
+                (selunlock scases lockorder)
+                (set! casi -1)
+                (goto :retc))
+
+
+              ;; pass 2 - enqueue on all chans
+              (when (!= (.-waiting gp) nil)
+                (throw "gp.waiting != nil"))
+
+              (set! nextp (addr (.-waiting gp)))
+              (range [_ casei lockorder]
+                (set! casi (conv int casei))
+                (set! cas (addr (aget scases casi)))
+                (set! c (.-c cas))
+                (let [sg (acquireSudog)]
+                  (set! (.-g sg) gp)
+                  (set! (.-isSelect sg) true)
+                  ;; No stack splits between assigning elem and enqueuing
+                  ;; sg on gp.waiting where copystack can find it.
+                  (.set (.-elem sg) (.-elem cas))
+                  (set! (.-releasetime sg) 0)
+                  (when (!= t0 0)
+                    (set! (.-releasetime sg) -1))
+
+                  (.set (.-c sg) c)
+                  ;; Construct waiting list in lock order.
+                  (set! @nextp sg)
+                  (set! nextp (addr (.-waitlink sg)))
+
+                  (if (< casi nsends)
+                    (.enqueue (.-sendq c) sg)
+
+                    (.enqueue (.-recvq c) sg))
+
+
+                  (when (!= (.-timer c) nil)
+                    (blockTimerChan c))))
+
+
+
+              ;; wait for someone to wake us up
+              (set! (.-param gp) nil)
+              ;; Signal to anyone trying to shrink our stack that we're about
+              ;; to park on a channel. The window between when this G's status
+              ;; changes and when we set gp.activeStackChans is not safe for
+              ;; stack shrinking.
+              (.Store (.-parkingOnChan gp) true)
+              (gopark selparkcommit nil waitReason traceBlockSelect 1)
+              (set! (.-activeStackChans gp) false)
+
+              (sellock scases lockorder)
+
+              (.Store (.-selectDone gp) 0)
+              (set! sg (conv (* sudog) (.-param gp)))
+              (set! (.-param gp) nil)
+
+              ;; pass 3 - dequeue from unsuccessful chans
+              ;; otherwise they stack up on quiet channels
+              ;; record the successful case, if any.
+              ;; We singly-linked up the SudoGs in lock order.
+              (set! casi -1)
+              (set! cas nil)
+              (set! caseSuccess false)
+              (set! sglist (.-waiting gp))
+              ;; Clear all elem before unlinking from gp.waiting.
+              (for [sg1 (.-waiting gp)] (!= sg1 nil) (set! sg1 (.-waitlink sg1))
+                (set! (.-isSelect sg1) false)
+                (.set (.-elem sg1) nil)
+                (.set (.-c sg1) nil))
+
+              (set! (.-waiting gp) nil)
+
+              (range [_ casei lockorder]
+                (set! k (addr (aget scases casei)))
+                (when (!= (.-timer (.-c k)) nil)
+                  (unblockTimerChan (.-c k)))
+
+                (if (== sg sglist) (do
+                    ;; sg has already been dequeued by the G that woke us up.
+                    (set! casi (conv int casei))
+                    (set! cas k)
+                    (set! caseSuccess (.-success sglist))
+                    (when (> (.-releasetime sglist) 0)
+                      (set! caseReleaseTime (.-releasetime sglist))))
+
+                  (do
+                    (set! c (.-c k))
+                    (if (< (conv int casei) nsends)
+                      (.dequeueSudoG (.-sendq c) sglist)
+
+                      (.dequeueSudoG (.-recvq c) sglist))))
+
+
+                (set! sgnext (.-waitlink sglist))
+                (set! (.-waitlink sglist) nil)
+                (releaseSudog sglist)
+                (set! sglist sgnext))
+
+
+              (when (== cas nil)
+                (throw "selectgo: bad wakeup"))
+
+
+              (set! c (.-c cas))
+
+              (when debugSelect
+                (print "wait-return: cas0=" cas0 " c=" c " cas=" cas " send=" (< casi nsends) "\n"))
+
+
+              (if (< casi nsends)
+                (when (not caseSuccess)
+                  (goto :sclose))
+
+
+                (set! recvOK caseSuccess))
+
+
+              (when raceenabled
+                (cond (< casi nsends)
+                  (raceReadObjectPC (.-elemtype c) (.-elem cas) (casePC casi) chansendpc)
+                  (!= (.-elem cas) nil)
+                  (raceWriteObjectPC (.-elemtype c) (.-elem cas) (casePC casi) chanrecvpc)))
+
+
+              (when msanenabled
+                (cond (< casi nsends)
+                  (msanread (.-elem cas) (.-Size_ (.-elemtype c)))
+                  (!= (.-elem cas) nil)
+                  (msanwrite (.-elem cas) (.-Size_ (.-elemtype c)))))
+
+
+              (when asanenabled
+                (cond (< casi nsends)
+                  (asanread (.-elem cas) (.-Size_ (.-elemtype c)))
+                  (!= (.-elem cas) nil)
+                  (asanwrite (.-elem cas) (.-Size_ (.-elemtype c)))))
+
+
+
+              (selunlock scases lockorder)
+              (goto :retc)
+
+              (label :bufrecv
+                ;; can receive from buffer
+                (when raceenabled
+                  (when (!= (.-elem cas) nil)
+                    (raceWriteObjectPC (.-elemtype c) (.-elem cas) (casePC casi) chanrecvpc))
+
+                  (racenotify c (.-recvx c) nil)))
+
+              (when (and msanenabled (!= (.-elem cas) nil))
+                (msanwrite (.-elem cas) (.-Size_ (.-elemtype c))))
+
+              (when (and asanenabled (!= (.-elem cas) nil))
+                (asanwrite (.-elem cas) (.-Size_ (.-elemtype c))))
+
+              (set! recvOK true)
+              (set! qp (chanbuf c (.-recvx c)))
+              (when (!= (.-elem cas) nil)
+                (typedmemmove (.-elemtype c) (.-elem cas) qp))
+
+              (typedmemclr (.-elemtype c) qp)
+              (inc! (.-recvx c))
+              (when (== (.-recvx c) (.-dataqsiz c))
+                (set! (.-recvx c) 0))
+
+              (dec! (.-qcount c))
+              (selunlock scases lockorder)
+              (goto :retc)
+
+              (label :bufsend
+                ;; can send to buffer
+                (when raceenabled
+                  (racenotify c (.-sendx c) nil)
+                  (raceReadObjectPC (.-elemtype c) (.-elem cas) (casePC casi) chansendpc)))
+
+              (when msanenabled
+                (msanread (.-elem cas) (.-Size_ (.-elemtype c))))
+
+              (when asanenabled
+                (asanread (.-elem cas) (.-Size_ (.-elemtype c))))
+
+              (typedmemmove (.-elemtype c) (chanbuf c (.-sendx c)) (.-elem cas))
+              (inc! (.-sendx c))
+              (when (== (.-sendx c) (.-dataqsiz c))
+                (set! (.-sendx c) 0))
+
+              (inc! (.-qcount c))
+              (selunlock scases lockorder)
+              (goto :retc)
+
+              (label :recv
+                ;; can receive from sleeping sender (sg)
+                (recv c sg (.-elem cas) ^{:go/end 497} (fn [] (selunlock scases lockorder)) 2))
+              (when debugSelect
+                (print "syncrecv: cas0=" cas0 " c=" c "\n"))
+
+              (set! recvOK true)
+              (goto :retc)
+
+              (label :rclose
+                ;; read at end of closed channel
+                (selunlock scases lockorder))
+              (set! recvOK false)
+              (when (!= (.-elem cas) nil)
+                (typedmemclr (.-elemtype c) (.-elem cas)))
+
+              (when raceenabled
+                (raceacquire (.raceaddr c)))
+
+              (goto :retc)
+
+              (label :send
+                ;; can send to a sleeping receiver (sg)
+                (when raceenabled
+                  (raceReadObjectPC (.-elemtype c) (.-elem cas) (casePC casi) chansendpc)))
+
+              (when msanenabled
+                (msanread (.-elem cas) (.-Size_ (.-elemtype c))))
+
+              (when asanenabled
+                (asanread (.-elem cas) (.-Size_ (.-elemtype c))))
+
+              (send c sg (.-elem cas) ^{:go/end 527} (fn [] (selunlock scases lockorder)) 2)
+              (when debugSelect
+                (print "syncsend: cas0=" cas0 " c=" c "\n"))
+
+              (goto :retc)
+
+              (label :retc
+                (when (> caseReleaseTime 0)
+                  (blockevent (- caseReleaseTime t0) 1)))
+
+              (return casi recvOK)
+
+              (label :sclose
+                ;; send on closed channel
+                (selunlock scases lockorder))
+              (panic (conv plainError "send on closed channel")))))))))
+
+
+^{:go/end 547} (go/method sortkey ^uintptr [^{:tag (* hchan)} c]
+  (conv uintptr (conv unsafe/Pointer c)))
+
+
+
+
+(go/type runtimeSelect "A runtimeSelect is a single case passed to rselect.\nThis must match ../reflect/value.go:/runtimeSelect\n" (struct
+    ^{:line 552 :tag selectDir} dir
+    ^{:line 553 :tag unsafe/Pointer} typ ; channel type (not used here)
+    ^{:line 554 :tag (* hchan)} ch ; channel
+    ^{:line 555 :tag unsafe/Pointer} val)) ; ptr to data (SendDir) or ptr to receive buffer (RecvDir)
+
+
+
+(go/type selectDir "These values must match ../reflect/value.go:/SelectDir.\n" int)
+
+(go/const
+  ^{:line 562} [^{:tag selectDir :val 0} _ iota]
+  ^{:line 563} [^{:val 1} selectSend] ; case Chan <- Send
+  ^{:line 564} [^{:val 2} selectRecv] ; case <-Chan:
+  ^{:line 565} [^{:val 3} selectDefault]) ; default
+
+
+
+^{:go/end 625} (go/func ^{:go/linkname "reflect_rselect reflect.rselect"} reflect_rselect [^{:tag (slice runtimeSelect)} cases] :results [int bool]
+  (when (== (len cases) 0)
+    (block))
+
+  (let [sel (make (slice scase) (len cases))
+      ^{:line 574} orig (make (slice int) (len cases))
+      (values nsends nrecvs) (values 0 0)
+      ^{:line 576} dflt -1]
+    (range [i rc cases]
+      (let [^int j (zero int)]
+        (switch (.-dir rc)
+          (case [selectDefault]
+            (set! dflt i)
+            (continue))
+          (case [selectSend]
+            (set! j nsends)
+            (inc! nsends))
+          (case [selectRecv]
+            (inc! nrecvs)
+            (set! j (- (len cases) nrecvs))))
+
+
+        (aset sel j (lit scase :c (.-ch rc) :elem (.-val rc)))
+        (aset orig j i)))
+
+
+    ;; Only a default case.
+    (when (== (+ nsends nrecvs) 0)
+      (return dflt false))
+
+
+    ;; Compact sel and orig if necessary.
+    (when (< (+ nsends nrecvs) (len cases))
+      (copy (subslice sel nsends) (subslice sel (- (len cases) nrecvs)))
+      (copy (subslice orig nsends) (subslice orig (- (len cases) nrecvs))))
+
+
+    (let [order (make (slice uint16) (* 2 (+ nsends nrecvs)))
+        ^{:line 607 :tag (* uintptr)} pc0 (zero (* uintptr))]
+      (when raceenabled
+        (let [pcs (make (slice uintptr) (+ nsends nrecvs))]
+          (range [i pcs]
+            (selectsetpc (addr (aget pcs i))))
+
+          (set! pc0 (addr (aget pcs 0)))))
+
+
+      (let [(values chosen recvOK) (selectgo (addr (aget sel 0)) (addr (aget order 0)) pc0 nsends nrecvs (== dflt -1))]
+
+        ;; Translate chosen back to caller's ordering.
+        (if (< chosen 0)
+          (set! chosen dflt)
+
+          (set! chosen (aget orig chosen)))
+
+        (return chosen recvOK)))))
+
+
+^{:go/end 659} (go/method dequeueSudoG [^{:tag (* waitq)} q ^{:tag (* sudog)} sgp]
+  (let [x (.-prev sgp)
+      ^{:line 629} y (.-next sgp)]
+    (when (!= x nil)
+      (when (!= y nil)
+        ;; middle of queue
+        (set! (.-next x) y)
+        (set! (.-prev y) x)
+        (set! (.-next sgp) nil)
+        (set! (.-prev sgp) nil)
+        (return))
+
+      ;; end of queue
+      (set! (.-next x) nil)
+      (set! (.-last q) x)
+      (set! (.-prev sgp) nil)
+      (return))
+
+    (when (!= y nil)
+      ;; start of queue
+      (set! (.-prev y) nil)
+      (set! (.-first q) y)
+      (set! (.-next sgp) nil)
+      (return))
+
+
+    ;; x==y==nil. Either sgp is the only element in the queue,
+    ;; or it has already been removed. Use q.first to disambiguate.
+    (when (== (.-first q) sgp)
+      (set! (.-first q) nil)
+      (set! (.-last q) nil))))

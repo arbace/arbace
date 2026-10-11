@@ -1,0 +1,257 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "iprawsock.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [netip "net/netip"]
+    ^{:line 10} [syscall "syscall"]])
+
+
+;; BUG(mikio): On every POSIX platform, reads from the "ip4" network
+;; using the ReadFrom or ReadFromIP method might not return a complete
+;; IPv4 packet, including its header, even if there is space
+;; available. This can occur even in cases where Read or ReadMsgIP
+;; could return a complete packet. For this reason, it is recommended
+;; that you do not use these methods if it is important to receive a
+;; full packet.
+;;
+;; The Go 1 compatibility guidelines make it impossible for us to
+;; change the behavior of these methods; use Read or ReadMsgIP
+;; instead.
+
+;; BUG(mikio): On JS and Plan 9, methods and functions related
+;; to IPConn are not implemented.
+
+;; BUG: On Windows, raw IP sockets are restricted by the operating system.
+;; Sending TCP data, sending UDP data with invalid source addresses,
+;; and calling bind with TCP protocol don't work.
+;;
+;; See Winsock reference for details.
+
+^{:go/end 39} (go/func ipAddrFromAddr ^{:tag (* IPAddr)} [^netip/Addr addr]
+  (addr ^{:go/breaks [2 4]} (lit IPAddr
+      :IP (.AsSlice addr)
+      :Zone (.Zone addr))))
+
+
+
+
+(go/type IPAddr "IPAddr represents the address of an IP end point.\n" (struct
+    ^{:line 43 :tag IP} IP
+    ^{:line 44 :tag string} Zone)) ; IPv6 scoped addressing zone
+
+
+
+^{:go/end 48} (go/method Network "Network returns the address's network name, \"ip\".\n" ^string [^{:tag (* IPAddr)} a] "ip")
+
+^{:go/end 59} (go/method String ^string [^{:tag (* IPAddr)} a]
+  (when (== a nil)
+    (return "<nil>"))
+
+  (let [ip (ipEmptyString (.-IP a))]
+    (when (!= (.-Zone a) "")
+      (return (+ ip "%" (.-Zone a))))
+
+    ^{:line 58} ip))
+
+
+^{:go/end 66} (go/method isWildcard ^bool [^{:tag (* IPAddr)} a]
+  (when (or (== a nil) (== (.-IP a) nil))
+    (return true))
+
+  (.IsUnspecified (.-IP a)))
+
+
+^{:go/end 73} (go/method opAddr ^Addr [^{:tag (* IPAddr)} a]
+  (when (== a nil)
+    (return nil))
+
+  ^{:line 72} a)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 106} (go/func ResolveIPAddr "ResolveIPAddr returns an address of IP end point.\n\nThe network must be an IP network name.\n\nIf the host in the address parameter is not a literal IP address,\nResolveIPAddr resolves the address to an address of IP end point.\nOtherwise, it parses the address as a literal IP address.\nThe address parameter can use a host name, but this is not\nrecommended, because it will return at most one of the host name's\nIP addresses.\n\nSee func [Dial] for a description of the network and address\nparameters.\n" [^string network ^string address] :results [(* IPAddr) error]
+  (when (== network "") ; a hint wildcard for Go 1.0 undocumented behavior
+    (set! network "ip"))
+
+  (let [(values afnet _ err) (parseNetwork (context/Background) network false)]
+    (when (!= err nil)
+      (return nil err))
+
+    (switch afnet
+      (case ["ip" "ip4" "ip6"])
+      (default
+        (return nil (conv UnknownNetworkError network))))
+
+    (let [(values addrs ^:assign err) (.internetAddrList DefaultResolver (context/Background) afnet address)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (assert (* IPAddr) (.forResolve addrs network address)) nil))))
+
+
+
+
+(go/type IPConn "IPConn is the implementation of the [Conn] and [PacketConn] interfaces\nfor IP network connections.\n" (struct
+    ^{:line 111} conn))
+
+
+
+
+^{:go/end 121} (go/method SyscallConn "SyscallConn returns a raw network connection.\nThis implements the [syscall.Conn] interface.\n" [^{:tag (* IPConn)} c] :results [syscall/RawConn error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return nil syscall/EINVAL))
+
+  (return (newRawConn ^{:go/via [conn]} (.-fd c)) nil))
+
+
+
+^{:go/end 133} (go/method ReadFromIP "ReadFromIP acts like ReadFrom but returns an IPAddr.\n" [^{:tag (* IPConn)} c ^{:tag (slice byte)} b] :results [int (* IPAddr) error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 nil syscall/EINVAL))
+
+  (let [(values n addr err) (.readFrom c b)]
+    (when (!= err nil)
+      (set! err (addr (lit OpError :Op "read" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+    (return n addr err)))
+
+
+
+^{:go/end 148} (go/method ReadFrom "ReadFrom implements the [PacketConn] ReadFrom method.\n" [^{:tag (* IPConn)} c ^{:tag (slice byte)} b] :results [int Addr error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 nil syscall/EINVAL))
+
+  (let [(values n addr err) (.readFrom c b)]
+    (when (!= err nil)
+      (set! err (addr (lit OpError :Op "read" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+    (when (== addr nil)
+      (return n nil err))
+
+    (return n addr err)))
+
+
+
+
+
+
+
+
+
+^{:go/end 166} (go/method ReadMsgIP "ReadMsgIP reads a message from c, copying the payload into b and\nthe associated out-of-band data into oob. It returns the number of\nbytes copied into b, the number of bytes copied into oob, the flags\nthat were set on the message and the source address of the message.\n\nThe packages golang.org/x/net/ipv4 and golang.org/x/net/ipv6 can be\nused to manipulate IP-level socket options in oob.\n" [^{:tag (* IPConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob] :results [^int n ^int oobn ^int flags ^{:tag (* IPAddr)} addr ^error err]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 0 0 nil syscall/EINVAL))
+
+  (set! (values n oobn flags addr err) (.readMsg c b oob))
+  (when (!= err nil)
+    (set! err (addr (lit OpError :Op "read" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+  (return))
+
+
+
+^{:go/end 178} (go/method WriteToIP "WriteToIP acts like [IPConn.WriteTo] but takes an [IPAddr].\n" [^{:tag (* IPConn)} c ^{:tag (slice byte)} b ^{:tag (* IPAddr)} addr] :results [int error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 syscall/EINVAL))
+
+  (let [(values n err) (.writeTo c b addr)]
+    (when (!= err nil)
+      (set! err (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.opAddr addr) :Err err))))
+
+    (return n err)))
+
+
+
+^{:go/end 194} (go/method WriteTo "WriteTo implements the [PacketConn] WriteTo method.\n" [^{:tag (* IPConn)} c ^{:tag (slice byte)} b ^Addr addr] :results [int error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 syscall/EINVAL))
+
+  (let [(values a ok) (assert (* IPAddr) addr)]
+    (when (not ok)
+      (return 0 (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr addr :Err syscall/EINVAL))))
+
+    (let [(values n err) (.writeTo c b a)]
+      (when (!= err nil)
+        (set! err (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.opAddr a) :Err err))))
+
+      (return n err))))
+
+
+
+
+
+
+
+
+^{:go/end 211} (go/method WriteMsgIP "WriteMsgIP writes a message to addr via c, copying the payload from\nb and the associated out-of-band data from oob. It returns the\nnumber of payload and out-of-band bytes written.\n\nThe packages golang.org/x/net/ipv4 and golang.org/x/net/ipv6 can be\nused to manipulate IP-level socket options in oob.\n" [^{:tag (* IPConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob ^{:tag (* IPAddr)} addr] :results [^int n ^int oobn ^error err]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 0 syscall/EINVAL))
+
+  (set! (values n oobn err) (.writeMsg c b oob addr))
+  (when (!= err nil)
+    (set! err (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.opAddr addr) :Err err))))
+
+  (return))
+
+
+^{:go/end 213} (go/func newIPConn ^{:tag (* IPConn)} [^{:tag (* netFD)} fd] (addr (lit IPConn (lit conn fd))))
+
+
+
+
+
+
+
+
+^{:go/end 224} (go/func DialIP "DialIP acts like [Dial] for IP networks.\n\nThe network must be an IP network name; see func Dial for details.\n\nIf laddr is nil, a local address is automatically chosen.\nIf the IP field of raddr is nil or an unspecified IP address, the\nlocal system is assumed.\n" [^string network ^{:tag (* IPAddr)} laddr ^{:tag (* IPAddr)} raddr] :results [(* IPConn) error]
+  (dialIP (context/Background) nil network laddr raddr))
+
+
+^{:go/end 239} (go/func dialIP [^context/Context ctx ^{:tag (* Dialer)} dialer ^string network ^{:tag (* IPAddr)} laddr ^{:tag (* IPAddr)} raddr] :results [(* IPConn) error]
+  (when (== raddr nil)
+    (return nil (addr (lit OpError :Op "dial" :Net network :Source (.opAddr laddr) :Addr nil :Err errMissingAddress))))
+
+  (let [sd (addr (lit sysDialer :network network :address (.String raddr)))]
+    (when (!= dialer nil)
+      (set! (.-Dialer sd) @dialer))
+
+    (let [(values c err) (.dialIP sd ctx laddr raddr)]
+      (when (!= err nil)
+        (return nil (addr (lit OpError :Op "dial" :Net network :Source (.opAddr laddr) :Addr (.opAddr raddr) :Err err))))
+
+      (return c nil))))
+
+
+
+
+
+
+
+
+
+^{:go/end 258} (go/func ListenIP "ListenIP acts like [ListenPacket] for IP networks.\n\nThe network must be an IP network name; see func Dial for details.\n\nIf the IP field of laddr is nil or an unspecified IP address,\nListenIP listens on all available IP addresses of the local system\nexcept multicast IP addresses.\n" [^string network ^{:tag (* IPAddr)} laddr] :results [(* IPConn) error]
+  (when (== laddr nil)
+    (set! laddr (addr (lit IPAddr))))
+
+  (let [sl (addr (lit sysListener :network network :address (.String laddr)))
+      (values c err) (.listenIP sl (context/Background) laddr)]
+    (when (!= err nil)
+      (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr (.opAddr laddr) :Err err))))
+
+    (return c nil)))

@@ -1,0 +1,89 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.pprof) (go/file "map.go" :imports [
+
+    ^{:line 7} [unsafe "unsafe"]])
+
+
+
+(go/type profMap "A profMap is a map from (stack, tag) to mapEntry.\nIt grows without bound, but that's assumed to be OK.\n" (struct
+    ^{:line 12 :tag (map uintptr (* profMapEntry))} hash
+    ^{:line 13 :tag (* profMapEntry)} all
+    ^{:line 14 :tag (* profMapEntry)} last
+    ^{:line 15 :tag (slice profMapEntry)} free
+    ^{:line 16 :tag (slice uintptr)} freeStk))
+
+
+
+(go/type profMapEntry "A profMapEntry is a single entry in the profMap.\n" (struct
+    ^{:line 21 :tag (* profMapEntry)} nextHash ; next in hash list
+    ^{:line 22 :tag (* profMapEntry)} nextAll ; next in list of all entries
+    ^{:line 23 :tag (slice uintptr)} stk
+    ^{:line 24 :tag unsafe/Pointer} tag
+    ^{:line 25 :tag int64} count))
+
+
+^{:go/end 90} (go/method lookup ^{:tag (* profMapEntry)} [^{:tag (* profMap)} m ^{:tag (slice uint64)} stk ^unsafe/Pointer tag]
+  ;; Compute hash of (stk, tag).
+  (let [h (conv uintptr 0)]
+    (range [_ x stk]
+      (set! h (bit-or (<< h 8) (>> h (* 8 (- (unsafe/Sizeof h) 1)))))
+      (set! h + (* (conv uintptr x) 41)))
+
+    (set! h (bit-or (<< h 8) (>> h (* 8 (- (unsafe/Sizeof h) 1)))))
+    (set! h + (* (conv uintptr tag) 41))
+
+    ;; Find entry if present.
+    (let [^{:tag (* profMapEntry)} last (zero (* profMapEntry))]
+      (label :Search
+        (for [e (aget (.-hash m) h)] (!= e nil) (set! (values last e) (values e (.-nextHash e)))
+          (when (or (!= (len (.-stk e)) (len stk)) (!= (.-tag e) tag))
+            (continue))
+
+          (range [j stk]
+            (when (!= (aget (.-stk e) j) (conv uintptr (aget stk j)))
+              (continue :Search)))
+
+
+          ;; Move to front.
+          (when (!= last nil)
+            (set! (.-nextHash last) (.-nextHash e))
+            (set! (.-nextHash e) (aget (.-hash m) h))
+            (aset (.-hash m) h e))
+
+          (return e)))
+
+
+      ;; Add new entry.
+      (when (< (len (.-free m)) 1)
+        (set! (.-free m) (make (slice profMapEntry) 128)))
+
+      (let [e (addr (aget (.-free m) 0))]
+        (set! (.-free m) (subslice (.-free m) 1))
+        (set! (.-nextHash e) (aget (.-hash m) h))
+        (set! (.-tag e) tag)
+
+        (when (< (len (.-freeStk m)) (len stk))
+          (set! (.-freeStk m) (make (slice uintptr) 1024)))
+
+        ;; Limit cap to prevent append from clobbering freeStk.
+        (set! (.-stk e) (subslice (.-freeStk m) _ (len stk) (len stk)))
+        (set! (.-freeStk m) (subslice (.-freeStk m) (len stk)))
+
+        (range [j stk]
+          (aset (.-stk e) j (conv uintptr (aget stk j))))
+
+        (when (== (.-hash m) nil)
+          (set! (.-hash m) (make (map uintptr (* profMapEntry)))))
+
+        (aset (.-hash m) h e)
+        (if (== (.-all m) nil) (do
+            (set! (.-all m) e)
+            (set! (.-last m) e))
+          (do
+            (set! (.-nextAll (.-last m)) e)
+            (set! (.-last m) e)))
+
+        ^{:line 89} e))))

@@ -1,0 +1,98 @@
+;; NS16550-compatible UART driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package uart implements a driver for NS16550-compatible UART controllers,
+;; such as the legacy console found on Loongson LS7A based platforms and the
+;; QEMU LoongArch `virt` machine.
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=loong64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.loongson.uart) (go/file "uart.go" :doc "Package uart implements a driver for NS16550-compatible UART controllers,\nsuch as the legacy console found on Loongson LS7A based platforms and the\nQEMU LoongArch `virt` machine.\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=loong64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 19} [runtime "runtime"]
+
+    ^{:line 21} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "NS16550 register offsets (register shift 0, byte access).\n"
+  ^{:line 26} [^{:val 0} RBR 0x00] ; Receiver Buffer Register (read, DLAB=0)
+  ^{:line 27} [^{:val 0} THR 0x00] ; Transmitter Holding Register (write, DLAB=0)
+  ^{:line 28} [^{:val 1} IER 0x01] ; Interrupt Enable Register
+  ^{:line 29} [^{:val 2} FCR 0x02] ; FIFO Control Register
+  ^{:line 30} [^{:val 3} LCR 0x03] ; Line Control Register
+
+  ^{:line 32} [^{:val 5} LSR 0x05] ; Line Status Register
+  ^{:line 33} [^{:val 5} LSR_THRE 5] ; Transmitter Holding Register Empty
+  ^{:line 34} [^{:val 0} LSR_DR 0]) ; Data Ready
+
+
+
+(go/type UART "UART represents a serial port instance.\n" (struct
+
+    ^{:line 40 :tag uint32 :doc "Base register address\n"} Base))
+
+
+
+
+^{:go/end 49} (go/method Init "Init initializes the UART for 8N1 operation with FIFOs enabled. The baud\nrate divisor is left untouched as it is irrelevant under emulation.\n" [^{:tag (* UART)} hw]
+  (reg/Write8 (+ (.-Base hw) IER) 0x00) ; disable interrupts
+  (reg/Write8 (+ (.-Base hw) FCR) 0xc7) ; enable and clear RX/TX FIFOs, 14-byte trigger
+  (reg/Write8 (+ (.-Base hw) LCR) 0x03)) ; 8 bits, no parity, 1 stop bit
+
+
+
+^{:go/end 58} (go/method Tx "Tx transmits a single character to the serial port.\n" [^{:tag (* UART)} hw ^byte c]
+  (while (== (bit-and (reg/Read8 (+ (.-Base hw) LSR)) (<< 1 LSR_THRE)) 0))
+  ;; wait for the transmitter holding register to drain
+
+
+  (reg/Write8 (+ (.-Base hw) THR) c))
+
+
+
+
+^{:go/end 68} (go/method Rx "Rx receives a single character from the serial port, the second return value\nindicates whether a character was available.\n" [^{:tag (* UART)} hw] :results [^byte c ^bool valid]
+  (when (== (bit-and (reg/Read8 (+ (.-Base hw) LSR)) (<< 1 LSR_DR)) 0)
+    (return))
+
+
+  (return (reg/Read8 (+ (.-Base hw) RBR)) true))
+
+
+
+^{:go/end 77} (go/method Write "Write transmits the argument buffer to the serial port.\n" [^{:tag (* UART)} hw ^{:tag (slice byte)} buf] :results [^int n ^error _]
+  (range [_ c buf]
+    (.Tx hw c))
+
+
+  (return (len buf) nil))
+
+
+
+
+^{:go/end 99} (go/method Read "Read receives the available bytes from the serial port into the argument\nbuffer.\n" [^{:tag (* UART)} hw ^{:tag (slice byte)} buf] :results [^int n ^error _]
+  (let [^bool valid (zero bool)]
+
+    (while (< n (len buf))
+      (set! (values (aget buf n) valid) (.Rx hw))
+
+      (when (not valid)
+        (when (== n 0)
+          (runtime/Gosched))
+
+
+        (break))
+
+
+      (inc! n))
+
+
+    (return)))

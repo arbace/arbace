@@ -1,0 +1,605 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.internal.jsonwire) (go/file "decode.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [io "io"]
+    ^{:line 11} [math "math"]
+    ^{:line 12} [slices "slices"]
+    ^{:line 13} [strconv "strconv"]
+    ^{:line 14} [utf16 "unicode/utf16"]
+    ^{:line 15} [utf8 "unicode/utf8"]])
+
+
+(go/type ValueFlags uint)
+
+(go/const
+  ^{:line 21} [^{:tag ValueFlags :val 0} _ (/ (<< 1 iota) 2)] ; powers of two starting with zero
+
+  ^{:line 23} [^{:val 1} stringNonVerbatim] ; string cannot be naively treated as valid UTF-8
+  ^{:line 24} [^{:val 2} stringNonCanonical]) ; string not formatted according to RFC 8785, section 3.2.2.2.
+;; TODO: Track whether a number is a non-integer?
+
+
+^{:go/end 28} (go/method Join [^{:tag (* ValueFlags)} f ^ValueFlags f2] (set! @f bit-or f2))
+^{:go/end 29} (go/method IsVerbatim ^bool [^ValueFlags f] (== (bit-and f stringNonVerbatim) 0))
+^{:go/end 30} (go/method IsCanonical ^bool [^ValueFlags f] (== (bit-and f stringNonCanonical) 0))
+
+
+^{:go/end 39} (go/func ConsumeWhitespace "ConsumeWhitespace consumes leading JSON whitespace per RFC 7159, section 2.\n" [^{:tag (slice byte)} b] :results [^int n]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  (while (and (> (len b) n) ^:go/paren (or (== (aget b n) \space) (== (aget b n) \tab) (== (aget b n) \return) (== (aget b n) \newline)))
+    (inc! n))
+
+  ^{:line 38} n)
+
+
+
+
+^{:go/end 50} (go/func ConsumeNull "ConsumeNull consumes the next JSON null literal per RFC 7159, section 3.\nIt returns 0 if it is invalid, in which case ConsumeLiteral should be used.\n" ^int [^{:tag (slice byte)} b]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  ^{:go/breaks [[3 49]]} (let [^:const ^{:val "null"} literal "null"]
+    (when (and (>= (len b) (len literal)) (== (conv string (subslice b _ (len literal))) literal))
+      (return (len literal)))
+
+    0))
+
+
+
+
+^{:go/end 61} (go/func ConsumeFalse "ConsumeFalse consumes the next JSON false literal per RFC 7159, section 3.\nIt returns 0 if it is invalid, in which case ConsumeLiteral should be used.\n" ^int [^{:tag (slice byte)} b]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  ^{:go/breaks [[3 60]]} (let [^:const ^{:val "false"} literal "false"]
+    (when (and (>= (len b) (len literal)) (== (conv string (subslice b _ (len literal))) literal))
+      (return (len literal)))
+
+    0))
+
+
+
+
+^{:go/end 72} (go/func ConsumeTrue "ConsumeTrue consumes the next JSON true literal per RFC 7159, section 3.\nIt returns 0 if it is invalid, in which case ConsumeLiteral should be used.\n" ^int [^{:tag (slice byte)} b]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  ^{:go/breaks [[3 71]]} (let [^:const ^{:val "true"} literal "true"]
+    (when (and (>= (len b) (len literal)) (== (conv string (subslice b _ (len literal))) literal))
+      (return (len literal)))
+
+    0))
+
+
+
+
+^{:go/end 86} (go/func ConsumeLiteral "ConsumeLiteral consumes the next JSON literal per RFC 7159, section 3.\nIf the input appears truncated, it returns io.ErrUnexpectedEOF.\n" [^{:tag (slice byte)} b ^string lit] :results [^int n ^error err]
+  (for [i 0] (and (< i (len b)) (< i (len lit))) (inc! i)
+    (when (!= (aget b i) (aget lit i))
+      (return i (^{:inst [(slice byte)]} NewInvalidCharacterError (subslice b i) (+ "in literal " lit " (expecting " (strconv/QuoteRune (conv rune (aget lit i))) ")")))))
+
+
+  (when (< (len b) (len lit))
+    (return (len b) io/ErrUnexpectedEOF))
+
+  (return (len lit) nil))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 109]] :go/end 110} (go/func ConsumeSimpleString "ConsumeSimpleString consumes the next JSON string per RFC 7159, section 7\nbut is limited to the grammar for an ASCII string without escape sequences.\nIt returns 0 if it is invalid or more complicated than a simple string,\nin which case [ConsumeString] should be called.\n\nIt rejects '<', '>', and '&' for compatibility reasons since these were\nalways escaped in the v1 implementation. Thus, if this function reports\nnon-zero then we know that the string would be encoded the same way\nunder both v1 or v2 escape semantics.\n" [^{:tag (slice byte)} b] :results [^int n]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  (when (and (> (len b) 0) (== (aget b 0) \"))
+    (inc! n)
+    (while (and (> (len b) n) (< (aget b n) utf8/RuneSelf) (== (aget escapeASCII (aget b n)) 0))
+      (inc! n))
+
+    (when (and (> (conv uint (len b)) (conv uint n)) (== (aget b n) \"))
+      (inc! n)
+      (return n)))
+
+
+  0)
+
+
+
+
+
+
+
+^{:go/end 119} (go/func ConsumeString "ConsumeString consumes the next JSON string per RFC 7159, section 7.\nIf validateUTF8 is false, then this allows the presence of invalid UTF-8\ncharacters within the string itself.\nIt reports the number of bytes consumed and whether an error was encountered.\nIf the input appears truncated, it returns io.ErrUnexpectedEOF.\n" [^{:tag (* ValueFlags)} flags ^{:tag (slice byte)} b ^bool validateUTF8] :results [^int n ^error err]
+  (ConsumeStringResumable flags b 0 validateUTF8))
+
+
+
+
+^{:go/end 251} (go/func ConsumeStringResumable "ConsumeStringResumable is identical to [ConsumeString] but supports resuming\nfrom a previous call that returned io.ErrUnexpectedEOF.\n" [^{:tag (* ValueFlags)} flags ^{:tag (slice byte)} b ^int resumeOffset ^bool validateUTF8] :results [^int n ^error err]
+  ;; Consume the leading double quote.
+  (switch
+    (case [(> resumeOffset 0)]
+      (set! n resumeOffset)) ; already handled the leading quote
+    (case [(== (conv uint (len b)) 0)]
+      (return n io/ErrUnexpectedEOF))
+    (case [(== (aget b 0) \")]
+      (inc! n))
+    (default
+      (return n (^{:inst [(slice byte)]} NewInvalidCharacterError (subslice b n) "at start of string (expecting '\"')"))))
+
+
+  ;; Consume every character in the string.
+  (while (> (conv uint (len b)) (conv uint n))
+    ;; Optimize for long sequences of unescaped characters.
+    (let [noEscape ^{:go/end 141} (fn ^bool [^byte c]
+          (and (< c utf8/RuneSelf) (<= \space c) (!= c \\) (!= c \")))]
+
+      (while (and (> (conv uint (len b)) (conv uint n)) (noEscape (aget b n)))
+        (inc! n))
+
+      (when (<= (conv uint (len b)) (conv uint n))
+        (return n io/ErrUnexpectedEOF))
+
+
+      ;; Check for terminating double quote.
+      (when (== (aget b n) \")
+        (inc! n)
+        (return n nil))
+
+
+      (switch [(values r rn) (utf8/DecodeRune (subslice b n))]
+        ;; Handle UTF-8 encoded byte sequence.
+        ;; Due to specialized handling of ASCII above, we know that
+        ;; all normal sequences at this point must be 2 bytes or larger.
+        (case [(> rn 1)]
+          (set! n + rn))
+        ;; Handle escape sequence.
+        (case [(== r \\)]
+          (.Join flags stringNonVerbatim)
+          (set! resumeOffset n)
+          (when (< (conv uint (len b)) (conv uint (+ n 2)))
+            (return resumeOffset io/ErrUnexpectedEOF))
+
+          (switch [r (aget b (+ n 1))] r
+            (case [\/]
+              ;; Forward slash is the only character with 3 representations.
+              ;; Per RFC 8785, section 3.2.2.2., this must not be escaped.
+              (.Join flags stringNonCanonical)
+              (set! n + 2))
+            (case [\" \\ \b \f \n \r \t]
+              (set! n + 2))
+            (case [\u]
+              (when (< (conv uint (len b)) (conv uint (+ n 6)))
+                (when (hasEscapedUTF16Prefix (subslice b n) false)
+                  (return resumeOffset io/ErrUnexpectedEOF))
+
+                (.Join flags stringNonCanonical)
+                (return n (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice b n))))
+
+              (let [(values v1 ok) (parseHexUint16 (subslice b (+ n 2) (+ n 6)))]
+                (when (not ok)
+                  (.Join flags stringNonCanonical)
+                  (return n (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice b n (+ n 6)))))
+
+                ;; Only certain control characters can use the \uFFFF notation
+                ;; for canonical formatting (per RFC 8785, section 3.2.2.2.).
+                (switch v1
+                  ;; \uFFFF notation not permitted for these characters.
+                  (case [\backspace \formfeed \newline \return \tab]
+                    (.Join flags stringNonCanonical))
+                  (default
+                    ;; \uFFFF notation only permitted for control characters.
+                    (if (>= v1 \space)
+                      (.Join flags stringNonCanonical)
+
+                      ;; \uFFFF notation must be lower case.
+                      (range [_ c (subslice b (+ n 2) (+ n 6))]
+                        (when (and (<= \A c) (<= c \F))
+                          (.Join flags stringNonCanonical))))))
+
+
+
+
+                (set! n + 6)
+
+                (let [r (conv rune v1)]
+                  (when (and validateUTF8 (utf16/IsSurrogate r))
+                    (if (< (conv uint (len b)) (conv uint (+ n 6))) (do
+                        (when (hasEscapedUTF16Prefix (subslice b n) true)
+                          (return resumeOffset io/ErrUnexpectedEOF))
+
+                        (.Join flags stringNonCanonical)
+                        (return (- n 6) (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice b (- n 6)))))
+                      (if [(values v2 ok) (parseHexUint16 (subslice b (+ n 2) (+ n 6)))] (or (!= (aget b n) \\) (!= (aget b (+ n 1)) \u) (not ok)) (do
+                          (.Join flags stringNonCanonical)
+                          (return (- n 6) (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice b (- n 6) (+ n 6)))))
+                        (if [(set! r (utf16/DecodeRune (conv rune v1) (conv rune v2)))] (== r utf8/RuneError) (do
+                            (.Join flags stringNonCanonical)
+                            (return (- n 6) (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice b (- n 6) (+ n 6)))))
+
+                          (set! n + 6))))))))
+
+
+            (default
+              (.Join flags stringNonCanonical)
+              (return n (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice b n (+ n 2)))))))
+
+        ;; Handle invalid UTF-8.
+        (case [(== r utf8/RuneError)]
+          (when (not (utf8/FullRune (subslice b n)))
+            (return n io/ErrUnexpectedEOF))
+
+          (.Join flags (bit-or stringNonVerbatim stringNonCanonical))
+          (when validateUTF8
+            (return n ErrInvalidUTF8))
+
+          (inc! n))
+        ;; Handle invalid control characters.
+        (case [(< r \space)]
+          (.Join flags (bit-or stringNonVerbatim stringNonCanonical))
+          (return n (^{:inst [(slice byte)]} NewInvalidCharacterError (subslice b n) "in string (expecting non-control character)")))
+        (default
+          (panic (+ "BUG: unhandled character " (QuoteRune (subslice b n))))))))
+
+
+  (return n io/ErrUnexpectedEOF))
+
+
+
+
+
+
+^{:go/end 386} (go/func AppendUnquote "AppendUnquote appends the unescaped form of a JSON string in src to dst.\nAny invalid UTF-8 within the string will be replaced with utf8.RuneError,\nbut the error will be specified as having encountered such an error.\nThe input must be an entire JSON string with no surrounding whitespace.\n" [^{:tag (slice byte)} dst ^{:tag (slice byte)} src] :results [^{:tag (slice byte)} v ^error err]
+  (set! dst (^{:inst [(slice byte) byte]} slices/Grow dst (len src)))
+
+  ;; Consume the leading double quote.
+  (let [(values ^int i ^int n) (zero int)]
+    (switch
+      (case [(== (conv uint (len src)) 0)]
+        (return dst io/ErrUnexpectedEOF))
+      (case [(== (aget src 0) \")]
+        (set! (values i n) (values 1 1)))
+      (default
+        (return dst (^{:inst [(slice byte)]} NewInvalidCharacterError src "at start of string (expecting '\"')"))))
+
+
+    ;; Consume every character in the string.
+    (while (> (conv uint (len src)) (conv uint n))
+      ;; Optimize for long sequences of unescaped characters.
+      (let [noEscape ^{:go/end 276} (fn ^bool [^byte c]
+            (and (< c utf8/RuneSelf) (<= \space c) (!= c \\) (!= c \")))]
+
+        (while (and (> (conv uint (len src)) (conv uint n)) (noEscape (aget src n)))
+          (inc! n))
+
+        (when (<= (conv uint (len src)) (conv uint n))
+          (set! dst (append dst (spread (subslice src i n))))
+          (return dst io/ErrUnexpectedEOF))
+
+
+        ;; Check for terminating double quote.
+        (when (== (aget src n) \")
+          (set! dst (append dst (spread (subslice src i n))))
+          (inc! n)
+          (when (< n (len src))
+            (set! err (^{:inst [(slice byte)]} NewInvalidCharacterError (subslice src n) "after string value")))
+
+          (return dst err))
+
+
+        (switch [(values r rn) (utf8/DecodeRune (subslice src n))]
+          ;; Handle UTF-8 encoded byte sequence.
+          ;; Due to specialized handling of ASCII above, we know that
+          ;; all normal sequences at this point must be 2 bytes or larger.
+          (case [(> rn 1)]
+            (set! n + rn))
+          ;; Handle escape sequence.
+          (case [(== r \\)]
+            (set! dst (append dst (spread (subslice src i n))))
+
+            ;; Handle escape sequence.
+            (when (< (conv uint (len src)) (conv uint (+ n 2)))
+              (return dst io/ErrUnexpectedEOF))
+
+            (switch [r (aget src (+ n 1))] r
+              (case [\" \\ \/]
+                (set! dst (append dst r))
+                (set! n + 2))
+              (case [\b]
+                (set! dst (append dst \backspace))
+                (set! n + 2))
+              (case [\f]
+                (set! dst (append dst \formfeed))
+                (set! n + 2))
+              (case [\n]
+                (set! dst (append dst \newline))
+                (set! n + 2))
+              (case [\r]
+                (set! dst (append dst \return))
+                (set! n + 2))
+              (case [\t]
+                (set! dst (append dst \tab))
+                (set! n + 2))
+              (case [\u]
+                (when (< (conv uint (len src)) (conv uint (+ n 6)))
+                  (when (hasEscapedUTF16Prefix (subslice src n) false)
+                    (return dst io/ErrUnexpectedEOF))
+
+                  (return dst (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice src n))))
+
+                (let [(values v1 ok) (parseHexUint16 (subslice src (+ n 2) (+ n 6)))]
+                  (when (not ok)
+                    (return dst (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice src n (+ n 6)))))
+
+                  (set! n + 6)
+
+                  ;; Check whether this is a surrogate half.
+                  (let [r (conv rune v1)]
+                    (when (utf16/IsSurrogate r)
+                      (set! r utf8/RuneError) ; assume failure unless the following succeeds
+                      (if (< (conv uint (len src)) (conv uint (+ n 6))) (do
+                          (when (hasEscapedUTF16Prefix (subslice src n) true)
+                            (return (utf8/AppendRune dst r) io/ErrUnexpectedEOF))
+
+                          (set! err (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice src (- n 6)))))
+                        (if [(values v2 ok) (parseHexUint16 (subslice src (+ n 2) (+ n 6)))] (or (!= (aget src n) \\) (!= (aget src (+ n 1)) \u) (not ok))
+                          (set! err (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice src (- n 6) (+ n 6))))
+                          (if [(set! r (utf16/DecodeRune (conv rune v1) (conv rune v2)))] (== r utf8/RuneError)
+                            (set! err (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice src (- n 6) (+ n 6))))
+
+                            (set! n + 6)))))
+
+
+
+                    (set! dst (utf8/AppendRune dst r)))))
+              (default
+                (return dst (^{:inst [(slice byte)]} NewInvalidEscapeSequenceError (subslice src n (+ n 2))))))
+
+            (set! i n))
+          ;; Handle invalid UTF-8.
+          (case [(== r utf8/RuneError)]
+            (set! dst (append dst (spread (subslice src i n))))
+            (when (not (utf8/FullRune (subslice src n)))
+              (return dst io/ErrUnexpectedEOF))
+
+            ;; NOTE: An unescaped string may be longer than the escaped string
+            ;; because invalid UTF-8 bytes are being replaced.
+            (set! dst (append dst (spread "\ufffd")))
+            (set! n + rn)
+            (set! i n)
+            (set! err ErrInvalidUTF8))
+          ;; Handle invalid control characters.
+          (case [(< r \space)]
+            (set! dst (append dst (spread (subslice src i n))))
+            (return dst (^{:inst [(slice byte)]} NewInvalidCharacterError (subslice src n) "in string (expecting non-control character)")))
+          (default
+            (panic (+ "BUG: unhandled character " (QuoteRune (subslice src n))))))))
+
+
+    (set! dst (append dst (spread (subslice src i n))))
+    (return dst io/ErrUnexpectedEOF)))
+
+
+
+
+^{:go/breaks [[5 405]] :go/end 406} (go/func hasEscapedUTF16Prefix "hasEscapedUTF16Prefix reports whether b is possibly\nthe truncated prefix of a \\uFFFF escape sequence.\n" ^bool [^{:tag (slice byte)} b ^bool lowerSurrogateHalf]
+  (range [i (len b)]
+    (switch [c (aget b i)]
+      (case [(and (== i 0) (!= c \\))]
+        (return false))
+      (case [(and (== i 1) (!= c \u))]
+        (return false))
+      (case [(and (== i 2) lowerSurrogateHalf (!= c \d) (!= c \D))]
+        (return false)) ; not within ['\uDC00':'\uDFFF']
+      (case [(and (== i 3) lowerSurrogateHalf (not (and (<= \c c) (<= c \f))) (not (and (<= \C c) (<= c \F))))]
+        (return false)) ; not within ['\uDC00':'\uDFFF']
+      (case [(and (>= i 2) (< i 6) (not (and (<= \0 c) (<= c \9))) (not (and (<= \a c) (<= c \f))) (not (and (<= \A c) (<= c \F))))]
+        (return false))))
+
+
+  true)
+
+
+
+
+
+
+
+^{:go/end 420} (go/func UnquoteMayCopy "UnquoteMayCopy returns the unescaped form of b.\nIf there are no escaped characters, the output is simply a subslice of\nthe input with the surrounding quotes removed.\nOtherwise, a new buffer is allocated for the output.\nIt assumes the input is valid.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^bool isVerbatim]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  (when isVerbatim
+    (return (subslice b (len "\"") (- (len b) (len "\"")))))
+
+  (set! (values b _) (AppendUnquote nil b))
+  ^{:line 419} b)
+
+
+
+
+
+
+^{:go/breaks [[7 443]] :go/end 444} (go/func ConsumeSimpleNumber "ConsumeSimpleNumber consumes the next JSON number per RFC 7159, section 6\nbut is limited to the grammar for a non-negative integer.\nIt returns 0 if it is invalid or more complicated than a simple integer,\nin which case ConsumeNumber should be called.\n" [^{:tag (slice byte)} b] :results [^int n]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  (when (> (len b) 0)
+    (cond (== (aget b 0) \0)
+      (inc! n)
+      (and (<= \1 (aget b 0)) (<= (aget b 0) \9)) (do
+        (inc! n)
+        (while (and (> (len b) n) ^:go/paren (and (<= \0 (aget b n)) (<= (aget b n) \9)))
+          (inc! n))) :else
+
+
+      (return 0))
+
+    (when (or (<= (conv uint (len b)) (conv uint n)) ^:go/paren (and (!= (aget b n) \.) (!= (aget b n) \e) (!= (aget b n) \E)))
+      (return n)))
+
+
+  0)
+
+
+(go/type ConsumeNumberState uint)
+
+(go/const
+  ^{:line 449} [^{:tag ConsumeNumberState :val 0} consumeNumberInit iota]
+  ^{:line 450} [^{:val 1} beforeIntegerDigits]
+  ^{:line 451} [^{:val 2} withinIntegerDigits]
+  ^{:line 452} [^{:val 3} beforeFractionalDigits]
+  ^{:line 453} [^{:val 4} withinFractionalDigits]
+  ^{:line 454} [^{:val 5} beforeExponentDigits]
+  ^{:line 455} [^{:val 6} withinExponentDigits])
+
+
+
+
+
+
+
+
+
+^{:go/end 468} (go/func ConsumeNumber "ConsumeNumber consumes the next JSON number per RFC 7159, section 6.\nIt reports the number of bytes consumed and whether an error was encountered.\nIf the input appears truncated, it returns io.ErrUnexpectedEOF.\n\nNote that JSON numbers are not self-terminating.\nIf the entire input is consumed, then the caller needs to consider whether\nthere may be subsequent unread data that may still be part of this number.\n" [^{:tag (slice byte)} b] :results [^int n ^error err]
+  (set! (values n _ err) (ConsumeNumberResumable b 0 consumeNumberInit))
+  (return n err))
+
+
+
+
+^{:go/end 563} (go/func ConsumeNumberResumable "ConsumeNumberResumable is identical to ConsumeNumber but supports resuming\nfrom a previous call that returned io.ErrUnexpectedEOF.\n" [^{:tag (slice byte)} b ^int resumeOffset ^ConsumeNumberState state] :results [^int n ^ConsumeNumberState _ ^error err]
+  ;; Jump to the right state when resuming from a partial consumption.
+  (set! n resumeOffset)
+  (when (> state consumeNumberInit)
+    (switch state
+      (case [withinIntegerDigits withinFractionalDigits withinExponentDigits]
+        ;; Consume leading digits.
+        (while (and (> (conv uint (len b)) (conv uint n)) ^:go/paren (and (<= \0 (aget b n)) (<= (aget b n) \9)))
+          (inc! n))
+
+        (when (<= (conv uint (len b)) (conv uint n))
+          (return n state nil)) ; still within the same state
+
+        (inc! state))) ; switches "withinX" to "beforeY" where Y is the state after X
+
+    (switch state
+      (case [beforeIntegerDigits]
+        (goto :beforeInteger))
+      (case [beforeFractionalDigits]
+        (goto :beforeFractional))
+      (case [beforeExponentDigits]
+        (goto :beforeExponent))
+      (default
+        (return n state nil))))
+
+
+
+  ;; Consume required integer component (with optional minus sign).
+  (label :beforeInteger
+    (set! resumeOffset n))
+  (when (and (> (conv uint (len b)) 0) (== (aget b 0) \-))
+    (inc! n))
+
+  (switch
+    (case [(<= (conv uint (len b)) (conv uint n))]
+      (return resumeOffset beforeIntegerDigits io/ErrUnexpectedEOF))
+    (case [(== (aget b n) \0)]
+      (inc! n)
+      (set! state beforeFractionalDigits))
+    (case [(and (<= \1 (aget b n)) (<= (aget b n) \9))]
+      (inc! n)
+      (while (and (> (conv uint (len b)) (conv uint n)) ^:go/paren (and (<= \0 (aget b n)) (<= (aget b n) \9)))
+        (inc! n))
+
+      (set! state withinIntegerDigits))
+    (default
+      (return n state (^{:inst [(slice byte)]} NewInvalidCharacterError (subslice b n) "in number (expecting digit)"))))
+
+
+  ;; Consume optional fractional component.
+  (label :beforeFractional
+    (when (and (> (conv uint (len b)) (conv uint n)) (== (aget b n) \.))
+      (set! resumeOffset n)
+      (inc! n)
+      (switch
+        (case [(<= (conv uint (len b)) (conv uint n))]
+          (return resumeOffset beforeFractionalDigits io/ErrUnexpectedEOF))
+        (case [(and (<= \0 (aget b n)) (<= (aget b n) \9))]
+          (inc! n))
+        (default
+          (return n state (^{:inst [(slice byte)]} NewInvalidCharacterError (subslice b n) "in number (expecting digit)"))))
+
+      (while (and (> (conv uint (len b)) (conv uint n)) ^:go/paren (and (<= \0 (aget b n)) (<= (aget b n) \9)))
+        (inc! n))
+
+      (set! state withinFractionalDigits)))
+
+
+  ;; Consume optional exponent component.
+  (label :beforeExponent
+    (when (and (> (conv uint (len b)) (conv uint n)) ^:go/paren (or (== (aget b n) \e) (== (aget b n) \E)))
+      (set! resumeOffset n)
+      (inc! n)
+      (when (and (> (conv uint (len b)) (conv uint n)) ^:go/paren (or (== (aget b n) \-) (== (aget b n) \+)))
+        (inc! n))
+
+      (switch
+        (case [(<= (conv uint (len b)) (conv uint n))]
+          (return resumeOffset beforeExponentDigits io/ErrUnexpectedEOF))
+        (case [(and (<= \0 (aget b n)) (<= (aget b n) \9))]
+          (inc! n))
+        (default
+          (return n state (^{:inst [(slice byte)]} NewInvalidCharacterError (subslice b n) "in number (expecting digit)"))))
+
+      (while (and (> (conv uint (len b)) (conv uint n)) ^:go/paren (and (<= \0 (aget b n)) (<= (aget b n) \9)))
+        (inc! n))
+
+      (set! state withinExponentDigits)))
+
+
+  (return n state nil))
+
+
+
+
+
+^{:go/end 587} (go/func parseHexUint16 "parseHexUint16 is similar to strconv.ParseUint,\nbut operates directly on []byte and is optimized for base-16.\nSee https://go.dev/issue/42429.\n" [^{:tag (slice byte)} b] :results [^uint16 v ^bool ok]
+  (when (!= (len b) 4)
+    (return 0 false))
+
+  (range [i 4]
+    (let [c (aget b i)]
+      (switch
+        (case [(and (<= \0 c) (<= c \9))]
+          (set! c (- c \0)))
+        (case [(and (<= \a c) (<= c \f))]
+          (set! c (- (+ 10 c) \a)))
+        (case [(and (<= \A c) (<= c \F))]
+          (set! c (- (+ 10 c) \A)))
+        (default
+          (return 0 false)))
+
+      (set! v (+ (* v 16) (conv uint16 c)))))
+
+  (return v true))
+
+
+
+
+
+
+^{:go/end 606} (go/func ParseUint "ParseUint parses b as a decimal unsigned integer according to\na strict subset of the JSON number grammar, returning the value if valid.\nIt returns (0, false) if there is a syntax error and\nreturns (math.MaxUint64, false) if there is an overflow.\n" [^{:tag (slice byte)} b] :results [^uint64 v ^bool ok]
+  (let [^:const ^{:val 20} unsafeWidth 20 ; len(fmt.Sprint(uint64(math.MaxUint64)))
+      ^{:line 595 :tag int} n (zero int)]
+    (for [] (and (> (len b) n) ^:go/paren (and (<= \0 (aget b n)) (<= (aget b n) \9))) (inc! n)
+      (set! v (+ (* 10 v) (conv uint64 (- (aget b n) \0)))))
+
+    (switch
+      (case [(or (== n 0) (!= (len b) n) ^:go/paren (and (== (aget b 0) \0) (!= (conv string b) "0")))]
+        (return 0 false))
+      (case [(and (>= n unsafeWidth) ^:go/paren (or (!= (aget b 0) \1) (< v 1.0E19) (> n unsafeWidth)))]
+        (return math/MaxUint64 false)))
+
+    (return v true)))

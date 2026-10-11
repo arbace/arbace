@@ -1,0 +1,129 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "sec1.go" :imports [
+
+
+    ^{:line 8} [ecdh "crypto/ecdh"]
+    ^{:line 9} [ecdsa "crypto/ecdsa"]
+    ^{:line 10} [elliptic "crypto/elliptic"]
+    ^{:line 11} [asn1 "encoding/asn1"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]])
+
+
+(go/const ^{:val 1} ecPrivKeyVersion 1)
+
+
+
+
+
+
+
+
+
+(go/type ecPrivateKey "ecPrivateKey reflects an ASN.1 Elliptic Curve Private Key Structure.\nReferences:\n\n\tRFC 5915\n\tSEC1 - http://www.secg.org/sec1-v2.pdf\n\nPer RFC 5915 the NamedCurveOID is marked as ASN.1 OPTIONAL, however in\nmost cases it is not.\n" (struct
+    ^{:line 27 :tag int} Version
+    ^{:line 28 :tag (slice byte)} PrivateKey
+    ^{:line 29 :tag asn1/ObjectIdentifier :go/tag "asn1:\"optional,explicit,tag:0\""} NamedCurveOID
+    ^{:line 30 :tag asn1/BitString :go/tag "asn1:\"optional,explicit,tag:1\""} PublicKey))
+
+
+
+
+
+^{:go/end 38} (go/func ParseECPrivateKey "ParseECPrivateKey parses an EC private key in SEC 1, ASN.1 DER form.\n\nThis kind of key is commonly encoded in PEM blocks of type \"EC PRIVATE KEY\".\n" [^{:tag (slice byte)} der] :results [(* ecdsa/PrivateKey) error]
+  (parseECPrivateKey nil der))
+
+
+
+
+
+
+
+^{:go/end 52} (go/func MarshalECPrivateKey "MarshalECPrivateKey converts an EC private key to SEC 1, ASN.1 DER form.\n\nThis kind of key is commonly encoded in PEM blocks of type \"EC PRIVATE KEY\".\nFor a more flexible key format which is not EC specific, use\n[MarshalPKCS8PrivateKey].\n" [^{:tag (* ecdsa/PrivateKey)} key] :results [(slice byte) error]
+  (let [(values oid ok) (oidFromNamedCurve ^{:go/via [PublicKey]} (.-Curve key))]
+    (when (not ok)
+      (return nil (errors/New "x509: unknown elliptic curve")))
+
+
+    (marshalECPrivateKeyWithOID key oid)))
+
+
+
+
+^{:go/end 71} (go/func marshalECPrivateKeyWithOID "marshalECPrivateKeyWithOID marshals an EC private key into ASN.1, DER format and\nsets the curve ID to the given OID, or omits it if OID is nil.\n" [^{:tag (* ecdsa/PrivateKey)} key ^asn1/ObjectIdentifier oid] :results [(slice byte) error]
+  (let [(values privateKey err) (.Bytes key)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values publicKey ^:assign err) (.Bytes (.-PublicKey key))]
+      (when (!= err nil)
+        (return nil err))
+
+      (asn1/Marshal ^{:go/breaks [2 4 6 8]} (lit ecPrivateKey
+          :Version 1
+          :PrivateKey privateKey
+          :NamedCurveOID oid
+          :PublicKey (lit asn1/BitString :Bytes publicKey))))))
+
+
+
+
+
+^{:go/end 81} (go/func marshalECDHPrivateKey "marshalECDHPrivateKey marshals an EC private key into ASN.1, DER format\nsuitable for NIST curves.\n" [^{:tag (* ecdh/PrivateKey)} key] :results [(slice byte) error]
+  (asn1/Marshal ^{:go/breaks [2 4 6]} (lit ecPrivateKey
+      :Version 1
+      :PrivateKey (.Bytes key)
+      :PublicKey (lit asn1/BitString :Bytes (.Bytes (.PublicKey key))))))
+
+
+
+
+
+
+
+^{:go/end 130} (go/func parseECPrivateKey "parseECPrivateKey parses an ASN.1 Elliptic Curve Private Key Structure.\nThe OID for the named curve may be provided from another source (such as\nthe PKCS8 container) - if it is provided then use this instead of the OID\nthat may exist in the EC private key structure.\n" [^{:tag (* asn1/ObjectIdentifier)} namedCurveOID ^{:tag (slice byte)} der] :results [^{:tag (* ecdsa/PrivateKey)} key ^error err]
+  (let [^ecPrivateKey privKey (zero ecPrivateKey)]
+    (when [(values _ err) (asn1/Unmarshal der (addr privKey))] (!= err nil)
+      (when [(values _ err) (asn1/Unmarshal der (addr (lit pkcs8)))] (== err nil)
+        (return nil (errors/New "x509: failed to parse private key (use ParsePKCS8PrivateKey instead for this key format)")))
+
+      (when [(values _ err) (asn1/Unmarshal der (addr (lit pkcs1PrivateKey)))] (== err nil)
+        (return nil (errors/New "x509: failed to parse private key (use ParsePKCS1PrivateKey instead for this key format)")))
+
+      (return nil (errors/New (+ "x509: failed to parse EC private key: " (.Error err)))))
+
+    (when (!= (.-Version privKey) ecPrivKeyVersion)
+      (return nil (fmt/Errorf "x509: unknown EC private key version %d" (.-Version privKey))))
+
+
+    (let [^elliptic/Curve curve (zero elliptic/Curve)]
+      (if (!= namedCurveOID nil)
+        (set! curve (namedCurveFromOID @namedCurveOID))
+
+        (set! curve (namedCurveFromOID (.-NamedCurveOID privKey))))
+
+      (when (== curve nil)
+        (return nil (errors/New "x509: unknown elliptic curve")))
+
+
+      (let [size (/ (+ (.BitLen (.-N (.Params curve))) 7) 8)
+          ^{:line 113} privateKey (make (slice byte) size)]
+
+        ;; Some private keys have leading zero padding. This is invalid
+        ;; according to [SEC1], but this code will ignore it.
+        (while (> (len (.-PrivateKey privKey)) (len privateKey))
+          (when (!= (aget (.-PrivateKey privKey) 0) 0)
+            (return nil (errors/New "x509: invalid private key length")))
+
+          (set! (.-PrivateKey privKey) (subslice (.-PrivateKey privKey) 1)))
+
+
+        ;; Some private keys remove all leading zeros, this is also invalid
+        ;; according to [SEC1] but since OpenSSL used to do this, we ignore
+        ;; this too.
+        (copy (subslice privateKey (- (len privateKey) (len (.-PrivateKey privKey)))) (.-PrivateKey privKey))
+
+        (ecdsa/ParseRawPrivateKey curve privateKey)))))

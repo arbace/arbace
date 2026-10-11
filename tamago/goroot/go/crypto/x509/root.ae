@@ -1,0 +1,229 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "root.go" :imports [
+
+
+    ^{:line 8} [godebug "internal/godebug"]
+    ^{:line 9} [fs "io/fs"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [filepath "path/filepath"]
+    ^{:line 12} [runtime "runtime"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [_ "unsafe"]]) ; for linkname
+
+
+
+
+
+
+
+
+
+
+(go/directive "//go:linkname systemRoots")
+(go/var "systemRoots should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/breml/rootcerts\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n"
+  ^{:line 28} [^sync/Once once]
+  ^{:line 29} [^sync/RWMutex systemRootsMu]
+  ^{:line 30} [^{:tag (* CertPool)} systemRoots]
+  ^{:line 31} [^error systemRootsErr]
+  ^{:line 32} [^bool fallbacksSet]
+  ^{:line 33} [^bool useFallbackRoots])
+
+
+^{:go/end 41} (go/func systemRootsPool ^{:tag (* CertPool)} []
+  (.Do once initSystemRoots)
+  (.RLock systemRootsMu)
+  (defer (.RUnlock systemRootsMu))
+  ^{:line 40} systemRoots)
+
+
+^{:go/end 68} (go/func initSystemRoots []
+  (.Lock systemRootsMu)
+  (defer (.Unlock systemRootsMu))
+
+  (let [fallbackRoots systemRoots]
+    (set! (values systemRoots systemRootsErr) (loadSystemRoots))
+    (when (!= systemRootsErr nil)
+      (set! systemRoots nil))
+
+
+    (when (== fallbackRoots nil)
+      (return)) ; no fallbacks to try
+
+
+    (let [systemCertsAvail (and (!= systemRoots nil) ^:go/paren (or (> (.len systemRoots) 0) (.-systemPool systemRoots)))]
+
+      (when (and (not useFallbackRoots) systemCertsAvail)
+        (return))
+
+
+      (when (and useFallbackRoots systemCertsAvail)
+        (.IncNonDefault x509usefallbackroots)) ; overriding system certs with fallback certs.
+
+
+      (set! (values systemRoots systemRootsErr) (values fallbackRoots nil)))))
+
+
+(go/var x509usefallbackroots (godebug/New "x509usefallbackroots"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 122} (go/func SetFallbackRoots "SetFallbackRoots sets the roots to use during certificate verification, if no\ncustom roots are specified and a platform verifier or a system certificate\npool is not available (for instance in a container which does not have a root\ncertificate bundle). SetFallbackRoots will panic if roots is nil.\n\nSetFallbackRoots may only be called once, if called multiple times it will\npanic.\n\nThe fallback behavior can be forced on all platforms, even when there is a\nsystem certificate pool, by setting GODEBUG=x509usefallbackroots=1 (note that\non Windows and macOS this will disable usage of the platform verification\nAPIs and cause the pure Go verifier to be used). Setting\nx509usefallbackroots=1 without calling SetFallbackRoots has no effect.\n" [^{:tag (* CertPool)} roots]
+  (when (== roots nil)
+    (panic "roots must be non-nil"))
+
+
+  (.Lock systemRootsMu)
+  (defer (.Unlock systemRootsMu))
+
+  (when fallbacksSet
+    (panic "SetFallbackRoots has already been called"))
+
+  (set! fallbacksSet true)
+
+  ;; Handle case when initSystemRoots was not yet executed.
+  ;; We handle that specially instead of calling loadSystemRoots, to avoid
+  ;; spending excessive amount of cpu here, since the SetFallbackRoots in most cases
+  ;; is going to be called at program startup.
+  (when (and (== systemRoots nil) (== systemRootsErr nil))
+    (set! systemRoots roots)
+    (set! useFallbackRoots (== (.Value x509usefallbackroots) "1"))
+    (return))
+
+
+  (.Do once ^{:go/end 108} (fn [] (panic "unreachable"))) ; asserts that system roots were indeed loaded before.
+
+  (let [forceFallbackRoots (== (.Value x509usefallbackroots) "1")
+      ^{:line 111} systemCertsAvail (and (!= systemRoots nil) ^:go/paren (or (> (.len systemRoots) 0) (.-systemPool systemRoots)))]
+
+    (when (and (not forceFallbackRoots) systemCertsAvail)
+      (return))
+
+
+    (when (and forceFallbackRoots systemCertsAvail)
+      (.IncNonDefault x509usefallbackroots)) ; overriding system certs with fallback certs.
+
+
+    (set! (values systemRoots systemRootsErr) (values roots nil))))
+
+
+(go/const
+
+
+  ^{:line 127} [^{:val "SSL_CERT_FILE" :doc "certFileEnv is the environment variable which identifies where to locate\nthe SSL certificate file. If set this overrides the system default.\n"} certFileEnv "SSL_CERT_FILE"]
+
+
+
+
+  ^{:line 132} [^{:val "SSL_CERT_DIR" :doc "certDirEnv is the environment variable which identifies which directory\nto check for SSL certificate files. If set this overrides the system default.\nSee https://docs.openssl.org/4.0/man1/openssl-rehash/#environment.\n"} certDirEnv "SSL_CERT_DIR"])
+
+
+(go/var x509sslcertoverrideplatform (godebug/New "x509sslcertoverrideplatform"))
+
+^{:go/end 151} (go/func loadSystemRoots [] :results [(* CertPool) error]
+  (let [(values certFilePath certDirPath) (values (os/Getenv certFileEnv) (os/Getenv certDirEnv))]
+
+    (when (or (== runtime/GOOS "windows") (== runtime/GOOS "darwin") (== runtime/GOOS "ios"))
+      (when (and (== certFilePath "") (== certDirPath ""))
+        (return (addr (lit CertPool :systemPool true)) nil))
+
+      (when (== (.Value x509sslcertoverrideplatform) "0")
+        (.IncNonDefault x509sslcertoverrideplatform)
+        (return (addr (lit CertPool :systemPool true)) nil)))
+
+
+
+    (loadOnDiskRoots certFilePath certDirPath)))
+
+
+^{:go/end 204} (go/func loadOnDiskRoots [^string certFilePath ^string certDirPath] :results [(* CertPool) error]
+  (let [roots (NewCertPool)
+
+      ^{:line 156} files certFiles]
+    (when (!= certFilePath "")
+      (set! files (lit (slice string) certFilePath)))
+
+
+    (let [^error firstErr (zero error)]
+      (range [_ file files]
+        (let [(values data err) (os/ReadFile file)]
+          (when (== err nil)
+            (.AppendCertsFromPEM roots data)
+            (break))
+
+          (when (and (== firstErr nil) (not (os/IsNotExist err)))
+            (set! firstErr err))))
+
+
+
+      (let [dirs certDirectories]
+        (when (!= certDirPath "")
+          ;; OpenSSL and BoringSSL both use ":" as the SSL_CERT_DIR separator on
+          ;; Unix-like systems, and ";" on Windows.
+          ;; See:
+          ;;  * https://golang.org/issue/35325
+          ;;  * https://docs.openssl.org/4.0/man1/openssl-rehash/#environment
+          (set! dirs (filepath/SplitList certDirPath)))
+
+
+        (range [_ directory dirs]
+          (let [(values fis err) (readUniqueDirectoryEntries directory)]
+            (when (!= err nil)
+              (when (and (== firstErr nil) (not (os/IsNotExist err)))
+                (set! firstErr err))
+
+              (continue))
+
+            (range [_ fi fis]
+              (let [(values data err) (os/ReadFile (filepath/Join directory (.Name fi)))]
+                (when (== err nil)
+                  (.AppendCertsFromPEM roots data))))))
+
+
+
+
+        (when (or (> (.len roots) 0) (== firstErr nil))
+          (return roots nil))
+
+
+        (return nil firstErr)))))
+
+
+
+
+^{:go/end 220} (go/func readUniqueDirectoryEntries "readUniqueDirectoryEntries is like os.ReadDir but omits\nsymlinks that point within the directory.\n" [^string dir] :results [(slice fs/DirEntry) error]
+  (let [(values files err) (os/ReadDir dir)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [uniq (subslice files _ 0)]
+      (range [_ f files]
+        (when (not (isSameDirSymlink f dir))
+          (set! uniq (append uniq f))))
+
+
+      (return uniq nil))))
+
+
+
+
+^{:go/end 230} (go/func isSameDirSymlink "isSameDirSymlink reports whether f in dir is a symlink with a\ntarget not containing a slash.\n" ^bool [^fs/DirEntry f ^string dir]
+  (when (== (bit-and (.Type f) fs/ModeSymlink) 0)
+    (return false))
+
+  (let [(values target err) (os/Readlink (filepath/Join dir (.Name f)))]
+    (and (== err nil) (not (strings/ContainsRune target filepath/Separator)))))

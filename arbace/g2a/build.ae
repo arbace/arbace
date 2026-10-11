@@ -3,7 +3,8 @@
   executable (doc/go/BUILD.md).
 
   bin/g2a build [--arch amd64|arm64] [--goos linux|tamago] [-o OUT] [--layout gofmt|lines]
-                [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--root ROOT]... DIR
+                [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--root ROOT]...
+                [--goos-dir DIR] DIR
   bin/g2a build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
                 [--line-file] SRC
   runs -m arbace.g2a.build with the same arguments. DIR holds the program's packages as forms
@@ -42,7 +43,11 @@
                   package required (a library such as jrt, built and tested by bin/jrt)
     --tests       also print the packages' :test-files (SPEC §4.2), for go test
     --module PATH the module path when SRC has no program.edn (a library has no main
-                  package to take it from)"
+                  package to take it from); std prints the standard library's packages at
+                  their import paths, as GOROOT/src holds them, without go.mod
+    --goos-dir DIR  with --goos tamago: TamaGo's goos module is DIR (go.mod replaces it by
+                  DIR), not Go's module cache: the module printed from its Go forms
+                  (bin/tamago-vendor print)"
   (:require [arbace.g2a.print :as p]
             [arbace.string :as str])
   (:import [java.io File]
@@ -242,6 +247,9 @@
         pkgs (vec (for [pkg pkgs]
                     (let [path (:path pkg)]
                       (cond
+                        ;; the standard library (GOROOT/src's module std): each package at its
+                        ;; import path, as GOROOT/src lays it out (bin/tamago-vendor)
+                        (= module "std") (assoc pkg :dir path)
                         (= path module) (assoc pkg :dir "")
                         (str/starts-with? path (str module "/"))
                         (assoc pkg :dir (subs path (inc (count module))))
@@ -280,18 +288,27 @@
 
 (defn print-module
   "Prints the program into the module directory out: go.mod, and per package its Go files
-  and the other and embedded files it names. Returns the printed files, relative to out."
-  [{:keys [module packages] golang :go} ^File dir ^File out {:keys [layout line-file tests goos goroot]}]
+  and the other and embedded files it names. Returns the printed files, relative to out.
+  The module std (the standard library, GOROOT/src) gets no go.mod: GOROOT/src's go.mod,
+  go.sum and vendor/modules.txt are files of the tree it is printed into (bin/tamago-vendor).
+  With goos-dir (GOOS=tamago), TamaGo's goos module is that directory (a replace), not Go's
+  module cache. Packages are printed in parallel."
+  [{:keys [module packages] golang :go} ^File dir ^File out {:keys [layout line-file tests goos goroot goos-dir]}]
   (.mkdirs out)
-  (spit (File. out "go.mod") (str "module " module "\n\ngo " golang "\n"
-                                  (when (= goos "tamago")
-                                    (str "\n// GOOSPKG, the runtime's goos (TamaGo's): imported by no package\nrequire "
-                                         (:path tamago-goos) " " (:version tamago-goos) "\n"))))
-  (when (= goos "tamago")
+  (when-not (= module "std")
+    (spit (File. out "go.mod") (str "module " module "\n\ngo " golang "\n"
+                                    (when (= goos "tamago")
+                                      (str "\n// GOOSPKG, the runtime's goos (TamaGo's): imported by no package\nrequire "
+                                           (:path tamago-goos) " " (:version tamago-goos) "\n"
+                                           (when goos-dir
+                                             (str "\n// from its Go forms printed (bin/tamago-vendor), not Go's module cache\nreplace "
+                                                  (:path tamago-goos) " " (:version tamago-goos) " => "
+                                                  (.getPath (.getAbsoluteFile (File. (str goos-dir)))) "\n")))))))
+  (when (and (= goos "tamago") (not goos-dir))
     (spit (File. out "go.sum") (tamago-go-sum goroot)))
   (vec
-    (cons "go.mod"
-          (mapcat
+    (concat (when-not (= module "std") ["go.mod"])
+          (apply concat (pmap
             (fn [pkg]
               (let [pdir (if (= "" (:dir pkg)) out (File. out ^String (:dir pkg)))
                     opts (cond-> {:layout (or layout (if line-file :lines :gofmt))}
@@ -323,7 +340,7 @@
                     (copy-file from (File. pdir (str f)))))
                 (map rel (concat (keys texts) (map str (:other-files (:package pkg)))
                                  (map (comp str first) (:embed-files (:package pkg)))))))
-            packages))))
+            packages)))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; The build
@@ -367,7 +384,7 @@
 
 (defn -main [& argv]
   (let [goroot (or (System/getenv "G2A_GOROOT") "/root/tamago-go")
-        usage (str "usage: bin/g2a build [--arch amd64|arm64] [--goos linux|tamago] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--root ROOT]... DIR\n"
+        usage (str "usage: bin/g2a build [--arch amd64|arm64] [--goos linux|tamago] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--root ROOT]... [--goos-dir DIR] DIR\n"
                    "       bin/g2a build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines] [--line-file] SRC")]
     (loop [as argv opts {:arch "amd64" :goroot goroot}]
       (case (first as)
@@ -383,6 +400,7 @@
         "--print-only" (recur (next as) (assoc opts :print-only true))
         "--tests" (recur (next as) (assoc opts :tests true))
         "--module" (recur (nnext as) (assoc opts :module (second as)))
+        "--goos-dir" (recur (nnext as) (assoc opts :goos-dir (second as)))
         (do
           (when-not (and (= 1 (count as)) (not (str/starts-with? (first as) "-"))
                          (#{"amd64" "arm64"} (:arch opts))

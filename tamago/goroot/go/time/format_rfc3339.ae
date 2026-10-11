@@ -1,0 +1,187 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.time) (go/file "format_rfc3339.go" :imports [
+
+    ^{:line 7} [errors "errors"]])
+
+;; RFC 3339 is the most commonly used format.
+;;
+;; It is implicitly used by the Time.(Marshal|Unmarshal)(Text|JSON) methods.
+;; Also, according to analysis on https://go.dev/issue/52746,
+;; RFC 3339 accounts for 57% of all explicitly specified time formats,
+;; with the second most popular format only being used 8% of the time.
+;; The overwhelming use of RFC 3339 compared to all other formats justifies
+;; the addition of logic to optimize formatting and parsing.
+
+^{:go/end 60} (go/method appendFormatRFC3339 ^{:tag (slice byte)} [^Time t ^{:tag (slice byte)} b ^bool nanos]
+  (let [(values _ offset abs) (.locabs t)
+
+      ;; Format date.
+      (values year month day) (.date (.days abs))]
+    (set! b (appendInt b year 4))
+    (set! b (append b \-))
+    (set! b (appendInt b (conv int month) 2))
+    (set! b (append b \-))
+    (set! b (appendInt b day 2))
+
+    (set! b (append b \T))
+
+    ;; Format time.
+    (let [(values hour min sec) (.clock abs)]
+      (set! b (appendInt b hour 2))
+      (set! b (append b \:))
+      (set! b (appendInt b min 2))
+      (set! b (append b \:))
+      (set! b (appendInt b sec 2))
+
+      (when nanos
+        (let [std (stdFracSecond stdFracSecond9 9 \.)]
+          (set! b (appendNano b (.Nanosecond t) std))))
+
+
+      (when (== offset 0)
+        (return (append b \Z)))
+
+
+      ;; Format zone.
+      (let [zone (/ offset 60)] ; convert to minutes
+        (if (< zone 0) (do
+            (set! b (append b \-))
+            (set! zone (- zone)))
+
+          (set! b (append b \+)))
+
+        (set! b (appendInt b (/ zone 60) 2))
+        (set! b (append b \:))
+        (set! b (appendInt b (% zone 60) 2))
+        ^{:line 59} b))))
+
+
+^{:go/end 80} (go/method appendStrictRFC3339 [^Time t ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (let [n0 (len b)]
+    (set! b (.appendFormatRFC3339 t b true))
+
+    ;; Not all valid Go timestamps can be serialized as valid RFC 3339.
+    ;; Explicitly check for these edge cases.
+    ;; See https://go.dev/issue/4556 and https://go.dev/issue/54580.
+    (let [num2 ^{:go/end 69} (fn ^byte [^{:tag (slice byte)} b] (+ (* 10 (- (aget b 0) \0)) (- (aget b 1) \0)))]
+      (switch
+        (case [(!= (aget b (+ n0 (len "9999"))) \-)] ; year must be exactly 4 digits wide
+          (return b (errors/New "year outside of range [0,9999]")))
+        (case [(!= (aget b (- (len b) 1)) \Z)]
+          (let [c (aget b (- (len b) (len "Z07:00")))]
+            (when (or ^:go/paren (and (<= \0 c) (<= c \9)) (>= (num2 (subslice b (- (len b) (len "07:00")))) 24))
+              (return b (errors/New "timezone hour outside of range [0,23]"))))))
+
+
+      (return b nil))))
+
+
+^{:go/end 153} (go/func parseRFC3339 :type-params [^{:tag (| (slice byte) string)} bytes] [^bytes s ^{:tag (* Location)} local] :results [Time bool]
+  ;; parseUint parses s as an unsigned decimal integer and
+  ;; verifies that it is within some range.
+  ;; If it is invalid or out-of-range,
+  ;; it sets ok to false and returns the min value.
+  (let [ok true
+      ^{:line 88} parseUint ^{:go/end 101} (fn [^bytes s ^int min ^:go/grouped ^int max] :results [^int x]
+        (range [_ c (conv (slice byte) s)]
+          (when (or (< c \0) (< \9 c))
+            (set! ok false)
+            (return min))
+
+          (set! x (- (+ (* x 10) (conv int c)) \0)))
+
+        (when (or (< x min) (< max x))
+          (set! ok false)
+          (return min))
+
+        ^{:line 100} x)]
+
+
+    ;; Parse the date and time.
+    (when (< (len s) (len "2006-01-02T15:04:05"))
+      (return (lit Time) false))
+
+    (let [year (parseUint (subslice s 0 4) 0 9999) ; e.g., 2006
+        ^{:line 108} month (parseUint (subslice s 5 7) 1 12) ; e.g., 01
+        ^{:line 109} day (parseUint (subslice s 8 10) 1 (daysIn (conv Month month) year)) ; e.g., 02
+        ^{:line 110} hour (parseUint (subslice s 11 13) 0 23) ; e.g., 15
+        ^{:line 111} min (parseUint (subslice s 14 16) 0 59) ; e.g., 04
+        ^{:line 112} sec (parseUint (subslice s 17 19) 0 59)] ; e.g., 05
+      (when (or (not ok) (not (and (== (aget s 4) \-) (== (aget s 7) \-) (== (aget s 10) \T) (== (aget s 13) \:) (== (aget s 16) \:))))
+        (return (lit Time) false))
+
+      (set! s (subslice s 19))
+
+      ;; Parse the fractional second.
+      (let [^int nsec (zero int)]
+        (when (and (>= (len s) 2) (== (aget s 0) \.) (^{:inst [bytes]} isDigit s 1))
+          (let [n 2]
+            (for [] (and (< n (len s)) (^{:inst [bytes]} isDigit s n)) (inc! n))
+
+            (set! (values nsec _ _) (^{:inst [bytes]} parseNanoseconds s n))
+            (set! s (subslice s n))))
+
+
+        ;; Parse the time zone.
+        (let [t (Date year (conv Month month) day hour min sec nsec UTC)]
+          (when (or (!= (len s) 1) (!= (aget s 0) \Z))
+            (when (!= (len s) (len "-07:00"))
+              (return (lit Time) false))
+
+            (let [hr (parseUint (subslice s 1 3) 0 23) ; e.g., 07
+                ^{:line 135} mm (parseUint (subslice s 4 6) 0 59)] ; e.g., 00
+              (when (or (not ok) (not (and ^:go/paren (or (== (aget s 0) \-) (== (aget s 0) \+)) (== (aget s 3) \:))))
+                (return (lit Time) false))
+
+              (let [zoneOffset (* (+ (* hr 60) mm) 60)]
+                (when (== (aget s 0) \-)
+                  (set! zoneOffset * -1))
+
+                (.addSec t (- (conv int64 zoneOffset)))
+
+                ;; Use local zone with the given offset if possible.
+                (if [(values _ offset _ _ _) (.lookup local (.unixSec t))] (== offset zoneOffset)
+                  (.setLoc t local)
+
+                  (.setLoc t (FixedZone "" zoneOffset))))))
+
+
+          (return t true))))))
+
+
+^{:go/end 188} (go/func parseStrictRFC3339 [^{:tag (slice byte)} b] :results [Time error]
+  (let [(values t ok) (^{:inst [(slice byte)]} parseRFC3339 b Local)]
+    (when (not ok)
+      (let [(values t err) (Parse RFC3339 (conv string b))]
+        (when (!= err nil)
+          (return (lit Time) err))
+
+
+        ;; The parse template syntax cannot correctly validate RFC 3339.
+        ;; Explicitly check for cases that Parse is unable to validate for.
+        ;; See https://go.dev/issue/54580.
+        (let [num2 ^{:go/end 166} (fn ^byte [^{:tag (slice byte)} b] (+ (* 10 (- (aget b 0) \0)) (- (aget b 1) \0)))]
+          (switch
+            ;; TODO(https://go.dev/issue/54580): Strict parsing is disabled for now.
+            ;; Enable this again with a GODEBUG opt-out.
+            (case [true]
+              (return t nil))
+            (case [(== (aget b (+ (len "2006-01-02T") 1)) \:)] ; hour must be two digits
+              (return (lit Time) (addr (lit ParseError RFC3339 (conv string b) "15" (conv string (subslice (subslice b (len "2006-01-02T")) _ 1)) ""))))
+            (case [(== (aget b (len "2006-01-02T15:04:05")) \,)] ; sub-second separator must be a period
+              (return (lit Time) (addr (lit ParseError RFC3339 (conv string b) "." "," ""))))
+            (case [(!= (aget b (- (len b) 1)) \Z)]
+              (switch
+                (case [(>= (num2 (subslice b (- (len b) (len "07:00")))) 24)] ; timezone hour must be in range
+                  (return (lit Time) (addr (lit ParseError RFC3339 (conv string b) "Z07:00" (conv string (subslice b (- (len b) (len "Z07:00")))) ": timezone hour out of range"))))
+                (case [(>= (num2 (subslice b (- (len b) (len "00")))) 60)] ; timezone minute must be in range
+                  (return (lit Time) (addr (lit ParseError RFC3339 (conv string b) "Z07:00" (conv string (subslice b (- (len b) (len "Z07:00")))) ": timezone minute out of range"))))))
+
+            (default ; unknown error; should not occur
+              (return (lit Time) (addr (lit ParseError RFC3339 (conv string b) RFC3339 (conv string b) ""))))))))
+
+
+    (return t nil)))

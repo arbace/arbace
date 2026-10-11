@@ -1,0 +1,249 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.nettest) (go/file "packetconn.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [gate "internal/gate"]
+    ^{:line 11} [net "net"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [slices "slices"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [time "time"]])
+
+
+
+(go/type PacketNet "A PacketNet is a group of communicating [PacketConn]s.\n" (struct
+    ^{:line 20 :tag sync/Mutex} mu
+    ^{:line 21 :tag (map netAddr (* PacketConn))} conns))
+
+
+(go/type netAddr (struct
+    ^{:line 25 :tag string} network
+    ^{:line 26 :tag string} addr))
+
+
+
+^{:go/end 34} (go/func NewPacketNet "NewPacketNet returns a new PacketNet.\n" ^{:tag (* PacketNet)} []
+  (addr ^{:go/breaks [2]} (lit PacketNet
+      :conns (make (map netAddr (* PacketConn))))))
+
+
+
+
+
+^{:go/end 57} (go/method NewConn "NewConn returns a new [PacketConn] listening on the given address.\nIt returns an error if there is an existing listener on this address.\n" [^{:tag (* PacketNet)} n ^net/Addr a] :results [(* PacketConn) error]
+  (.Lock (.-mu n))
+  (defer (.Unlock (.-mu n)))
+  (let [addrKey (lit netAddr (.Network a) (.String a))]
+    (when [(values _ ok) (aget (.-conns n) addrKey)] ok
+      (return nil (addr ^{:go/breaks [2 4 6 8]} (lit net/OpError
+            :Op "listen"
+            :Net "udp"
+            :Addr a
+            :Err (errors/New "address is in use")))))
+
+
+    (let [p (addr ^{:go/breaks [2 4 6]} (lit PacketConn
+            :gate (gate/New false)
+            :addr a
+            :net n))]
+
+      (aset (.-conns n) addrKey p)
+      (return p nil))))
+
+
+(go/type PacketConn (struct
+    ^{:line 60 :tag gate/Gate} gate
+    ^{:line 61 :tag (queue (* packet))} queue
+    ^{:line 62 :tag bool} closed
+    ^{:line 63 :tag error} readErr
+    ^{:line 64 :tag error} writeErr
+    ^{:line 65 :tag error} closeErr
+    ^{:line 66 :tag connDeadline} readDeadline
+
+    ^{:line 68 :tag (* PacketNet)} net
+    ^{:line 69 :tag net/Addr} addr))
+
+
+(go/type packet (struct
+    ^{:line 73 :tag (slice byte)} b
+    ^{:line 74 :tag net/Addr} src))
+
+
+
+^{:go/end 101} (go/method ReadFrom "ReadFrom reads a packet from the connection, copying the payload into b.\n" [^{:tag (* PacketConn)} p ^{:tag (slice byte)} b] :results [^int n ^net/Addr addr ^error err]
+  (.WaitAndLock (.-gate p) (context/Background))
+  (defer (.unlock p))
+
+  (switch
+    (case [(.-closed p)]
+      (set! err net/ErrClosed))
+    (case [(.-expired (.-readDeadline p))]
+      (set! err os/ErrDeadlineExceeded))
+    (case [(and (== (.len (.-queue p)) 0) (!= (.-readErr p) nil))]
+      (set! err (.-readErr p))))
+
+  (when (!= err nil)
+    (return 0 nil (addr ^{:go/breaks [2 4 6 8]} (lit net/OpError
+          :Op "read"
+          :Net "udp"
+          :Addr (.-addr p)
+          :Err err))))
+
+
+  (let [pkt (.pop (.-queue p))]
+    (set! n (copy b (.-b pkt)))
+    (return n (.-src pkt) nil)))
+
+
+
+
+
+
+
+
+^{:go/end 144} (go/method WriteTo "WriteTo writes a packet with payload b to addr.\naddr must be a [*net.UDPAddr].\n\nWriteTo appends the packet to the recipient's receive buffer.\nIf no recipient is listening on addr or if the recipient's\nreceive buffer is full, the packet is silently discarded.\n" [^{:tag (* PacketConn)} p ^{:tag (slice byte)} b ^net/Addr addr] :results [^int n ^error err]
+  (.Lock (.-gate p))
+  (switch
+    (case [(.-closed p)]
+      (set! err net/ErrClosed))
+    (case [(!= (.-writeErr p) nil)]
+      (set! err (.-writeErr p))))
+
+  (.unlock p)
+  (when (!= err nil)
+    (return 0 (addr ^{:go/breaks [2 4 6 8 10]} (lit net/OpError
+          :Op "write"
+          :Net "udp"
+          :Source (.-addr p)
+          :Addr addr
+          :Err err))))
+
+
+
+  (.Lock (.-mu (.-net p)))
+  (let [dst (aget (.-conns (.-net p)) (lit netAddr (.Network addr) (.String addr)))]
+    (.Unlock (.-mu (.-net p)))
+
+    (when (== dst nil)
+      ;; There is no PacketConn listening on the destination address,
+      ;; and the packet falls silently into the void.
+      (return (len b) nil))
+
+
+    (.lock dst)
+    (when (not (.-closed dst))
+      (.push (.-queue dst) (addr (lit packet :b (^{:inst [(slice byte) byte]} slices/Clone b) :src (.-addr p)))))
+
+    (.unlock dst)
+    (return (len b) nil)))
+
+
+
+^{:go/end 168} (go/method Close "Close closes the connection.\n" ^error [^{:tag (* PacketConn)} p]
+  (.Lock (.-mu (.-net p)))
+  (delete (.-conns (.-net p)) (lit netAddr (.Network (.-addr p)) (.String (.-addr p))))
+  (.Unlock (.-mu (.-net p)))
+
+  (.lock p)
+  (defer (.unlock p))
+  (let [err (.-closeErr p)]
+    (set! (.-closed p) true)
+    (set! (.-readErr p) net/ErrClosed)
+    (set! (.-writeErr p) net/ErrClosed)
+    (set! (.-closeErr p) net/ErrClosed)
+    (when (!= err nil)
+      (return (addr ^{:go/breaks [2 4 6 8]} (lit net/OpError
+            :Op "close"
+            :Net "udp"
+            :Addr (.-addr p)
+            :Err err))))
+
+
+    ^{:line 167} err))
+
+
+
+^{:go/end 175} (go/method LocalAddr "LocalAddr returns the (fake) local network address.\n" ^net/Addr [^{:tag (* PacketConn)} p]
+  (.lock p)
+  (defer (.unlock p))
+  (.-addr p))
+
+
+
+
+^{:go/end 181} (go/method SetDeadline "SetReadDeadline sets the read deadline for the connection.\nPacketConns have no write deadline.\n" ^error [^{:tag (* PacketConn)} p ^time/Time t]
+  (.SetReadDeadline p t))
+
+
+
+^{:go/breaks [5] :go/end 187} (go/method SetReadDeadline "SetReadDeadline sets the read deadline for the connection.\n" ^error [^{:tag (* PacketConn)} p ^time/Time t]
+  (.setDeadline (.-readDeadline p) p t)
+  nil)
+
+
+
+
+^{:go/breaks [4] :go/end 193} (go/method SetWriteDeadline "SetWriteDeadline has no effect.\nWrites to PacketConns never block.\n" ^error [^{:tag (* PacketConn)} p ^time/Time t]
+  nil)
+
+
+
+
+
+
+
+^{:go/end 204} (go/method SetReadError "SetReadError causes any currently blocked and future ReadFrom calls to return\na net.OpError wrapping err. It does not affect the other half of the connection.\nReads will return any buffered data before returning the error,\nincluding data written after the error is set.\nA nil error restores the usual behavior.\n" [^{:tag (* PacketConn)} c ^error err]
+  (.lock c)
+  (defer (.unlock c))
+  (set! (.-readErr c) err))
+
+
+
+
+
+
+^{:go/end 214} (go/method SetWriteError "SetWriteError causes any currently blocked and future WriteTo calls to return\na net.OpError wrapping err. It does not affect the other half of the connection.\nWrites will not write data while an error is set.\nA nil error restores the usual behavior.\n" [^{:tag (* PacketConn)} c ^error err]
+  (.lock c)
+  (defer (.unlock c))
+  (set! (.-writeErr c) err))
+
+
+
+
+
+^{:go/end 223} (go/method SetCloseError "SetCloseError sets the error returned by Close.\nClose still closes the connection.\nA nil error restores the usual behavior.\n" [^{:tag (* PacketConn)} c ^error err]
+  (.lock c)
+  (defer (.unlock c))
+  (set! (.-closeErr c) err))
+
+
+
+
+^{:go/end 231} (go/method CanRead "CanRead reports whether [ReadFrom] can return at least one byte or an error.\nIf [ReadFrom] would block, CanRead returns false.\n" ^bool [^{:tag (* PacketConn)} p]
+  (.lock p)
+  (defer (.unlock p))
+  (.canReadLocked p))
+
+
+^{:go/end 235} (go/method canReadLocked ^bool [^{:tag (* PacketConn)} p]
+  (or (> (.len (.-queue p)) 0) (.-expired (.-readDeadline p)) (.-closed p) (!= (.-readErr p) nil)))
+
+
+
+^{:go/end 242} (go/method IsClosed "IsClosed reports whether the connection has been closed.\n" ^bool [^{:tag (* PacketConn)} p]
+  (.lock p)
+  (defer (.unlock p))
+  (.-closed p))
+
+
+^{:go/end 246} (go/method lock [^{:tag (* PacketConn)} p]
+  (.Lock (.-gate p)))
+
+
+^{:go/end 250} (go/method unlock [^{:tag (* PacketConn)} p]
+  (.Unlock (.-gate p) (.canReadLocked p)))

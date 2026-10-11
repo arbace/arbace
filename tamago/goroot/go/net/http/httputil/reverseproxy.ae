@@ -1,0 +1,956 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; HTTP reverse proxy handler
+
+(in-ns 'go.net.http.httputil) (go/file "reverseproxy.go" :imports [
+
+
+    ^{:line 10} [context "context"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [godebug "internal/godebug"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [log "log"]
+    ^{:line 16} [mime "mime"]
+    ^{:line 17} [net "net"]
+    ^{:line 18} [http "net/http"]
+    ^{:line 19} [httptrace "net/http/httptrace"]
+    ^{:line 20} [ascii "net/http/internal/ascii"]
+    ^{:line 21} [textproto "net/textproto"]
+    ^{:line 22} [url "net/url"]
+    ^{:line 23} [strings "strings"]
+    ^{:line 24} [sync "sync"]
+    ^{:line 25} [time "time"]
+
+    ^{:line 27} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+
+(go/type ProxyRequest "A ProxyRequest contains a request to be rewritten by a [ReverseProxy].\n" (struct
+
+
+    ^{:line 34 :tag (* http/Request) :doc "In is the request received by the proxy.\nThe Rewrite function must not modify In.\n"} In
+
+
+
+
+
+    ^{:line 40 :tag (* http/Request) :doc "Out is the request which will be sent by the proxy.\nThe Rewrite function may modify or replace this request.\nHop-by-hop headers are removed from this request\nbefore Rewrite is called.\n"} Out))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 60} (go/method SetURL "SetURL routes the outbound request to the scheme, host, and base path\nprovided in target. If the target's path is \"/base\" and the incoming\nrequest was for \"/dir\", the target request will be for \"/base/dir\".\nTo route requests without joining the incoming path,\nset r.Out.URL directly.\n\nSetURL rewrites the outbound Host header to match the target's host.\nTo preserve the inbound request's Host header (the default behavior\nof [NewSingleHostReverseProxy]):\n\n\trewriteFunc := func(r *httputil.ProxyRequest) {\n\t\tr.SetURL(url)\n\t\tr.Out.Host = r.In.Host\n\t}\n" [^{:tag (* ProxyRequest)} r ^{:tag (* url/URL)} target]
+  (rewriteRequestURL (.-Out r) target)
+  (set! (.-Host (.-Out r)) ""))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 98} (go/method SetXForwarded "SetXForwarded sets the X-Forwarded-For, X-Forwarded-Host, and\nX-Forwarded-Proto headers of the outbound request.\n\n  - The X-Forwarded-For header is set to the client IP address.\n  - The X-Forwarded-Host header is set to the host name requested\n    by the client.\n  - The X-Forwarded-Proto header is set to \"http\" or \"https\", depending\n    on whether the inbound request was made on a TLS-enabled connection.\n\nIf the outbound request contains an existing X-Forwarded-For header,\nSetXForwarded appends the client IP address to it. To append to the\ninbound request's X-Forwarded-For header (the default behavior of\n[ReverseProxy] when using a Director function), copy the header\nfrom the inbound request before calling SetXForwarded:\n\n\trewriteFunc := func(r *httputil.ProxyRequest) {\n\t\tr.Out.Header[\"X-Forwarded-For\"] = r.In.Header[\"X-Forwarded-For\"]\n\t\tr.SetXForwarded()\n\t}\n" [^{:tag (* ProxyRequest)} r]
+  (let [(values clientIP _ err) (net/SplitHostPort (.-RemoteAddr (.-In r)))]
+    (if (== err nil)
+      (let [prior (aget (.-Header (.-Out r)) "X-Forwarded-For")]
+        (when (> (len prior) 0)
+          (set! clientIP (+ (strings/Join prior ", ") ", " clientIP)))
+
+        (.Set (.-Header (.-Out r)) "X-Forwarded-For" clientIP))
+
+      (.Del (.-Header (.-Out r)) "X-Forwarded-For"))
+
+    (.Set (.-Header (.-Out r)) "X-Forwarded-Host" (.-Host (.-In r)))
+    (if (== (.-TLS (.-In r)) nil)
+      (.Set (.-Header (.-Out r)) "X-Forwarded-Proto" "http")
+
+      (.Set (.-Header (.-Out r)) "X-Forwarded-Proto" "https"))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type ReverseProxy "ReverseProxy is an HTTP Handler that takes an incoming request and\nsends it to another server, proxying the response back to the\nclient.\n\n1xx responses are forwarded to the client if the underlying\ntransport supports ClientTrace.Got1xxResponse.\n\nHop-by-hop headers (see RFC 9110, section 7.6.1), including\nConnection, Proxy-Connection, Keep-Alive, Proxy-Authenticate,\nProxy-Authorization, TE, Trailer, Transfer-Encoding, and Upgrade,\nare removed from client requests and backend responses.\nThe Rewrite function may be used to add hop-by-hop headers to the request,\nand the ModifyResponse function may be used to remove them from the response.\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 135 :tag (func [(* ProxyRequest)]) :doc "Rewrite must be a function which modifies\nthe request into a new request to be sent\nusing Transport. Its response is then copied\nback to the original client unmodified.\nRewrite must not access the provided ProxyRequest\nor its contents after returning.\n\nThe Forwarded, X-Forwarded, X-Forwarded-Host,\nand X-Forwarded-Proto headers are removed from the\noutbound request before Rewrite is called. See also\nthe ProxyRequest.SetXForwarded method.\n\nUnparsable query parameters are removed from the\noutbound request before Rewrite is called.\nThe Rewrite function may copy the inbound URL's\nRawQuery to the outbound URL to preserve the original\nparameter string. Note that this can lead to security\nissues if the proxy's interpretation of query parameters\ndoes not match that of the downstream server.\n\nAt most one of Rewrite or Director may be set.\n"} Rewrite
+
+
+
+    ^{:line 139 :tag http/RoundTripper :doc "The transport used to perform proxy requests.\nIf nil, http.DefaultTransport is used.\n"} Transport
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 151 :tag time/Duration :doc "FlushInterval specifies the flush interval\nto flush to the client while copying the\nresponse body.\nIf zero, no periodic flushing is done.\nA negative value means to flush immediately\nafter each write to the client.\nThe FlushInterval is ignored when ReverseProxy\nrecognizes a response as a streaming response, or\nif its ContentLength is -1; for such responses, writes\nare flushed to the client immediately.\n"} FlushInterval
+
+
+
+
+    ^{:line 156 :tag (* log/Logger) :doc "ErrorLog specifies an optional logger for errors\nthat occur when attempting to proxy the request.\nIf nil, logging is done via the log package's standard logger.\n"} ErrorLog
+
+
+
+
+    ^{:line 161 :tag BufferPool :doc "BufferPool optionally specifies a buffer pool to\nget byte slices for use by io.CopyBuffer when\ncopying HTTP response bodies.\n"} BufferPool
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 176 :tag (func [(* http/Response)] [error]) :doc "ModifyResponse is an optional function that modifies the\nResponse from the backend. It is called if the backend\nreturns a response at all, with any HTTP status code.\nIf the backend is unreachable, the optional ErrorHandler is\ncalled without any call to ModifyResponse.\n\nHop-by-hop headers are removed from the response before\ncalling ModifyResponse. ModifyResponse may need to remove\nadditional headers to fit its deployment model, such as Alt-Svc.\n\nIf ModifyResponse returns an error, ErrorHandler is called\nwith its error value. If ErrorHandler is nil, its default\nimplementation is used.\n"} ModifyResponse
+
+
+
+
+
+
+    ^{:line 183 :tag (func [http/ResponseWriter (* http/Request) error]) :doc "ErrorHandler is an optional function that handles errors\nreaching the backend or errors from ModifyResponse.\n\nIf nil, the default is to log the provided error and return\na 502 Status Bad Gateway response.\n"} ErrorHandler
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 265 :tag (func [(* http/Request)]) :doc "Director is deprecated. Use Rewrite instead.\n\nThis function is insecure:\n\n  - Hop-by-hop headers are removed from the request after Director\n    returns, which can remove headers added by Director.\n    A client can designate headers as hop-by-hop by listing them\n    in the Connection header, so this permits a malicious client\n    to remove any headers that may be added by Director.\n\n  - X-Forwarded-For, X-Forwarded-Host, and X-Forwarded-Proto\n    headers in inbound requests are preserved by default,\n    which can permit IP spoofing if the Director function is\n    not careful to remove these headers.\n\nRewrite addresses these issues.\n\nAs an example of converting a Director function to Rewrite:\n\n\t// ReverseProxy with a Director function.\n\tproxy := &httputil.ReverseProxy{\n\t\tDirector: func(req *http.Request) {\n\t\t\treq.URL.Scheme = \"https\"\n\t\t\treq.URL.Host = proxyHost\n\n\t\t\t// A malicious client can remove this header.\n\t\t\treq.Header.Set(\"Some-Header\", \"some-header-value\")\n\n\t\t\t// X-Forwarded-* headers sent by the client are preserved,\n\t\t\t// since Director did not remove them.\n\t\t},\n\t}\n\n\t// ReverseProxy with a Rewrite function.\n\tproxy := &httputil.ReverseProxy{\n\t\tRewrite: func(preq *httputil.ProxyRequest) {\n\t\t\t// See also ProxyRequest.SetURL.\n\t\t\tpreq.Out.URL.Scheme = \"https\"\n\t\t\tpreq.Out.URL.Host = proxyHost\n\n\t\t\t// This header cannot be affected by a malicious client.\n\t\t\tpreq.Out.Header.Set(\"Some-Header\", \"some-header-value\")\n\n\t\t\t// X-Forwarded- headers sent by the client have been\n\t\t\t// removed from preq.Out.\n\t\t\t// ProxyRequest.SetXForwarded optionally adds new ones.\n\t\t\tpreq.SetXForwarded()\n\t\t},\n\t}\n\nDirector is a function which modifies\nthe request into a new request to be sent\nusing Transport. Its response is then copied\nback to the original client unmodified.\nDirector must not access the provided Request\nafter returning.\n\nBy default, the X-Forwarded-For header is set to the\nvalue of the client IP address. If an X-Forwarded-For\nheader already exists, the client IP is appended to the\nexisting values. As a special case, if the header\nexists in the Request.Header map but has a nil value\n(such as when set by the Director func), the X-Forwarded-For\nheader is not modified.\n\nTo prevent IP spoofing, be sure to delete any pre-existing\nX-Forwarded-For header coming from the client or\nan untrusted proxy.\n\nHop-by-hop headers are removed from the request after\nDirector returns, which can remove headers added by\nDirector. Use a Rewrite function instead to ensure\nmodifications to the request are preserved.\n\nUnparsable query parameters are removed from the outbound\nrequest if Request.Form is set after Director returns.\n\nAt most one of Rewrite or Director may be set.\n\nDeprecated: Use Rewrite instead.\n"} Director))
+
+
+
+
+(go/type BufferPool "A BufferPool is an interface for getting and returning temporary\nbyte slices for use by [io.CopyBuffer].\n" (interface
+    (Get ^{:tag (slice byte)} [])
+    (Put [(slice byte)])))
+
+
+^{:go/end 285} (go/func singleJoiningSlash ^string [^string a ^string b]
+  (let [aslash (strings/HasSuffix a "/")
+      ^{:line 277} bslash (strings/HasPrefix b "/")]
+    (switch
+      (case [(and aslash bslash)]
+        (return (+ a (subslice b 1))))
+      (case [(and (not aslash) (not bslash))]
+        (return (+ a "/" b))))
+
+    (+ a b)))
+
+
+^{:go/end 306} (go/func joinURLPath [^{:tag (* url/URL)} a ^{:tag (* url/URL)} b] :results [^string path ^string rawpath]
+  (when (and (== (.-RawPath a) "") (== (.-RawPath b) ""))
+    (return (singleJoiningSlash (.-Path a) (.-Path b)) ""))
+
+  ;; Same as singleJoiningSlash, but uses EscapedPath to determine
+  ;; whether a slash should be added
+  (let [apath (.EscapedPath a)
+      ^{:line 294} bpath (.EscapedPath b)
+
+      ^{:line 296} aslash (strings/HasSuffix apath "/")
+      ^{:line 297} bslash (strings/HasPrefix bpath "/")]
+
+    (switch
+      (case [(and aslash bslash)]
+        (return (+ (.-Path a) (subslice (.-Path b) 1)) (+ apath (subslice bpath 1))))
+      (case [(and (not aslash) (not bslash))]
+        (return (+ (.-Path a) "/" (.-Path b)) (+ apath "/" bpath))))
+
+    (return (+ (.-Path a) (.-Path b)) (+ apath bpath))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 337} (go/func NewSingleHostReverseProxy "NewSingleHostReverseProxy returns a new [ReverseProxy] that routes\nURLs to the scheme, host, and base path provided in target. If the\ntarget's path is \"/base\" and the incoming request was for \"/dir\",\nthe target request will be for /base/dir.\n\nNewSingleHostReverseProxy does not rewrite the Host header.\n\nFor backwards compatibility reasons, NewSingleHostReverseProxy\nreturns a ReverseProxy using the deprecated Director function.\nThis proxy preserves X-Forwarded-* headers sent by the client.\n\nTo customize the ReverseProxy behavior beyond what\nNewSingleHostReverseProxy provides, use ReverseProxy directly\nwith a Rewrite function. The ProxyRequest SetURL method\nmay be used to route the outbound request. (Note that SetURL,\nunlike NewSingleHostReverseProxy, rewrites the Host header\nof the outbound request by default.)\n\n\tproxy := &ReverseProxy{\n\t\tRewrite: func(r *ProxyRequest) {\n\t\t\tr.SetURL(target)\n\t\t\tr.Out.Host = r.In.Host // if desired\n\t\t},\n\t}\n" ^{:tag (* ReverseProxy)} [^{:tag (* url/URL)} target]
+  (let [director ^{:go/end 335} (fn [^{:tag (* http/Request)} req]
+        (rewriteRequestURL req target))]
+
+    (addr (lit ReverseProxy :Director director))))
+
+
+^{:go/end 349} (go/func rewriteRequestURL [^{:tag (* http/Request)} req ^{:tag (* url/URL)} target]
+  (let [targetQuery (.-RawQuery target)]
+    (set! (.-Scheme (.-URL req)) (.-Scheme target))
+    (set! (.-Host (.-URL req)) (.-Host target))
+    (set! (values (.-Path (.-URL req)) (.-RawPath (.-URL req))) (joinURLPath target (.-URL req)))
+    (if (or (== targetQuery "") (== (.-RawQuery (.-URL req)) ""))
+      (set! (.-RawQuery (.-URL req)) (+ targetQuery (.-RawQuery (.-URL req))))
+
+      (set! (.-RawQuery (.-URL req)) (+ targetQuery "&" (.-RawQuery (.-URL req)))))))
+
+
+
+^{:go/end 357} (go/func copyHeader [^http/Header dst ^http/Header src]
+  (range [k vv src]
+    (range [_ v vv]
+      (.Add dst k v))))
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "Hop-by-hop headers. These are removed when sent to the backend.\nAs of RFC 7230, hop-by-hop headers are required to appear in the\nConnection header field. These are the headers defined by the\nobsoleted RFC 2616 (section 13.5.1) and are used for backward\ncompatibility.\n"} hopHeaders ^{:go/breaks [2 3 4 5 6 7 8 9 10]} (lit (slice string)
+    "Connection"
+    "Proxy-Connection" ; non-standard but still sent by libcurl and rejected by e.g. google
+    "Keep-Alive"
+    "Proxy-Authenticate"
+    "Proxy-Authorization"
+    "Te" ; canonicalized version of "TE"
+    "Trailer" ; not Trailers per URL above; https://www.rfc-editor.org/errata_search.php?eid=4522
+    "Transfer-Encoding"
+    "Upgrade"))
+
+
+^{:go/end 379} (go/method defaultErrorHandler [^{:tag (* ReverseProxy)} p ^http/ResponseWriter rw ^{:tag (* http/Request)} req ^error err]
+  (.logf p "http: proxy error: %v" err)
+  (.WriteHeader rw http/StatusBadGateway))
+
+
+^{:go/end 386} (go/method getErrorHandler ^{:tag (func [http/ResponseWriter (* http/Request) error])} [^{:tag (* ReverseProxy)} p]
+  (when (!= (.-ErrorHandler p) nil)
+    (return (.-ErrorHandler p)))
+
+  (.-defaultErrorHandler p))
+
+
+
+
+^{:go/breaks [[6 399]] :go/end 400} (go/method modifyResponse "modifyResponse conditionally runs the optional ModifyResponse hook\nand reports whether the request should proceed.\n" ^bool [^{:tag (* ReverseProxy)} p ^http/ResponseWriter rw ^{:tag (* http/Response)} res ^{:tag (* http/Request)} req]
+  (when (== (.-ModifyResponse p) nil)
+    (return true))
+
+  (when [err ((.-ModifyResponse p) res)] (!= err nil)
+    (.Close (.-Body res))
+    ((.getErrorHandler p) rw req err)
+    (return false))
+
+  true)
+
+
+^{:go/end 622} (go/method ServeHTTP [^{:tag (* ReverseProxy)} p ^http/ResponseWriter rw ^{:tag (* http/Request)} req]
+  (let [transport (.-Transport p)]
+    (when (== transport nil)
+      (set! transport http/DefaultTransport))
+
+
+    (let [ctx (.Context req)]
+      (if (!= (.Done ctx) nil) (do)
+        ;; CloseNotifier predates context.Context, and has been
+        ;; entirely superseded by it. If the request contains
+        ;; a Context that carries a cancellation signal, don't
+        ;; bother spinning up a goroutine to watch the CloseNotify
+        ;; channel (if any).
+        ;;
+        ;; If the request Context has a nil Done channel (which
+        ;; means it is either context.Background, or a custom
+        ;; Context implementation with no cancellation signal),
+        ;; then consult the CloseNotifier if available.
+        (when [(values cn ok) (assert http/CloseNotifier rw)] ok
+          (let [^context/CancelFunc cancel (zero context/CancelFunc)]
+            (set! (values ctx cancel) (context/WithCancel ctx))
+            (defer (cancel))
+            (let [notifyChan (.CloseNotify cn)]
+              (go (^{:go/end 431} (fn []
+                    (select
+                      (case (<! notifyChan)
+                        (cancel))
+                      (case (<! (.Done ctx)))))))))))
+
+
+
+
+      (let [outreq (.Clone req ctx)]
+        (when (== (.-ContentLength req) 0)
+          (set! (.-Body outreq) nil)) ; Issue 16036: nil Body for http.Transport retries
+
+        (when (!= (.-Body outreq) nil)
+          ;; Reading from the request body after returning from a handler is not
+          ;; allowed, and the RoundTrip goroutine that reads the Body can outlive
+          ;; this handler. This can lead to a crash if the handler panics (see
+          ;; Issue 46866). Although calling Close doesn't guarantee there isn't
+          ;; any Read in flight after the handle returns, in practice it's safe to
+          ;; read after closing it.
+          (defer (.Close (.-Body outreq))))
+
+        (when (== (.-Header outreq) nil)
+          (set! (.-Header outreq) (make http/Header))) ; Issue 33142: historical behavior was to always allocate
+
+
+        (when (== (!= (.-Director p) nil) (!= (.-Rewrite p) nil))
+          ((.getErrorHandler p) rw req (errors/New "ReverseProxy must have exactly one of Director or Rewrite set"))
+          (return))
+
+
+        (when (!= (.-Director p) nil)
+          ((.-Director p) outreq)
+          (when (!= (.-Form outreq) nil)
+            (set! (.-RawQuery (.-URL outreq)) (cleanQueryParams (.-RawQuery (.-URL outreq))))))
+
+
+        (set! (.-Close outreq) false)
+
+        (let [reqUpType (upgradeType (.-Header outreq))]
+          (when (not (ascii/IsPrint reqUpType))
+            ((.getErrorHandler p) rw req (fmt/Errorf "client tried to switch to invalid protocol %q" reqUpType))
+            (return))
+
+          (removeHopByHopHeaders (.-Header outreq))
+
+          ;; Issue 21096: tell backend applications that care about trailer support
+          ;; that we support trailers. (We do, but we don't go out of our way to
+          ;; advertise that unless the incoming client request thought it was worth
+          ;; mentioning.) Note that we look at req.Header, not outreq.Header, since
+          ;; the latter has passed through removeHopByHopHeaders.
+          (when (httpguts/HeaderValuesContainsToken (aget (.-Header req) "Te") "trailers")
+            (.Set (.-Header outreq) "Te" "trailers"))
+
+
+          ;; After stripping all the hop-by-hop connection headers above, add back any
+          ;; necessary for protocol upgrades, such as for websockets.
+          (when (!= reqUpType "")
+            (.Set (.-Header outreq) "Connection" "Upgrade")
+            (.Set (.-Header outreq) "Upgrade" reqUpType))
+
+
+          (if (!= (.-Rewrite p) nil) (do
+              ;; Strip client-provided forwarding headers.
+              ;; The Rewrite func may use SetXForwarded to set new values
+              ;; for these or copy the previous values from the inbound request.
+              (.Del (.-Header outreq) "Forwarded")
+              (.Del (.-Header outreq) "X-Forwarded-For")
+              (.Del (.-Header outreq) "X-Forwarded-Host")
+              (.Del (.-Header outreq) "X-Forwarded-Proto")
+
+              ;; Remove unparsable query parameters from the outbound request.
+              (set! (.-RawQuery (.-URL outreq)) (cleanQueryParams (.-RawQuery (.-URL outreq))))
+
+              (let [pr (addr ^{:go/breaks [2 4]} (lit ProxyRequest
+                      :In req
+                      :Out outreq))]
+
+                ((.-Rewrite p) pr)
+                (set! outreq (.-Out pr))))
+            (do
+              (when [(values clientIP _ err) (net/SplitHostPort (.-RemoteAddr req))] (== err nil)
+                ;; If we aren't the first proxy retain prior
+                ;; X-Forwarded-For information as a comma+space
+                ;; separated list and fold multiple headers into one.
+                (let [(values prior ok) (aget (.-Header outreq) "X-Forwarded-For")
+                    ^{:line 511} omit (and ok (== prior nil))] ; Issue 38079: nil now means don't populate the header
+                  (when (> (len prior) 0)
+                    (set! clientIP (+ (strings/Join prior ", ") ", " clientIP)))
+
+                  (when (not omit)
+                    (.Set (.-Header outreq) "X-Forwarded-For" clientIP))))))
+
+
+
+
+          (when [(values _ ok) (aget (.-Header outreq) "User-Agent")] (not ok)
+            ;; If the outbound request doesn't have a User-Agent header set,
+            ;; don't send the default Go HTTP client User-Agent.
+            (.Set (.-Header outreq) "User-Agent" ""))
+
+
+          (let [
+              ^{:line 528 :tag sync/Mutex} roundTripMutex (zero sync/Mutex)
+              ^{:line 529 :tag bool} roundTripDone (zero bool)
+
+              ^{:line 531} trace (addr ^{:go/breaks [2]} (lit httptrace/ClientTrace
+                  :Got1xxResponse ^{:go/end 547} (fn ^error [^int code ^textproto/MIMEHeader header]
+                    (.Lock roundTripMutex)
+                    (defer (.Unlock roundTripMutex))
+                    (when roundTripDone
+                      ;; If RoundTrip has returned, don't try to further modify
+                      ;; the ResponseWriter's header map.
+                      (return nil))
+
+                    ^{:go/breaks [5]} (let [h (.Header rw)]
+                      (copyHeader h (conv http/Header header))
+                      (.WriteHeader rw code)
+
+                      ;; Clear headers, it's not automatically done by ResponseWriter.WriteHeader() for 1xx responses
+                      (clear h)
+                      nil))))]
+
+
+            (set! outreq (.WithContext outreq (httptrace/WithClientTrace (.Context outreq) trace)))
+
+            (let [(values res err) (.RoundTrip transport outreq)]
+              (.Lock roundTripMutex)
+              (set! roundTripDone true)
+              (.Unlock roundTripMutex)
+              (when (!= err nil)
+                ((.getErrorHandler p) rw outreq err)
+                (return))
+
+
+              ;; Deal with 101 Switching Protocols responses: (WebSocket, h2c, etc)
+              (when (== (.-StatusCode res) http/StatusSwitchingProtocols)
+                (when (not (.modifyResponse p rw res outreq))
+                  (return))
+
+                (.handleUpgradeResponse p rw outreq res)
+                (return))
+
+
+              (removeHopByHopHeaders (.-Header res))
+
+              (when (not (.modifyResponse p rw res outreq))
+                (return))
+
+
+              (copyHeader (.Header rw) (.-Header res))
+
+              ;; The "Trailer" header isn't included in the Transport's response,
+              ;; at least for *http.Transport. Build it up from Trailer.
+              (let [announcedTrailers (len (.-Trailer res))]
+                (when (> announcedTrailers 0)
+                  (let [trailerKeys (make (slice string) 0 (len (.-Trailer res)))]
+                    (range [k (.-Trailer res)]
+                      (set! trailerKeys (append trailerKeys k)))
+
+                    (.Add (.Header rw) "Trailer" (strings/Join trailerKeys ", "))))
+
+
+                (.WriteHeader rw (.-StatusCode res))
+
+                (set! err (.copyResponse p rw (.-Body res) (.flushInterval p res)))
+                (when (!= err nil)
+                  (defer (.Close (.-Body res)))
+                  ;; Since we're streaming the response, if we run into an error all we can do
+                  ;; is abort the request. Issue 23643: ReverseProxy should use ErrAbortHandler
+                  ;; on read error while copying body.
+                  (when (not (shouldPanicOnCopyError req))
+                    (.logf p "suppressing panic for copyResponse error in test; copy error: %v" err)
+                    (return))
+
+                  (panic http/ErrAbortHandler))
+
+                (.Close (.-Body res)) ; close now, instead of defer, to populate res.Trailer
+
+                (when (> (len (.-Trailer res)) 0)
+                  ;; Force chunking if we saw a response trailer.
+                  ;; This prevents net/http from calculating the length for short
+                  ;; bodies and adding a Content-Length.
+                  (.Flush (http/NewResponseController rw)))
+
+
+                (when (== (len (.-Trailer res)) announcedTrailers)
+                  (copyHeader (.Header rw) (.-Trailer res))
+                  (return))
+
+
+                (range [k vv (.-Trailer res)]
+                  (set! k (+ http/TrailerPrefix k))
+                  (range [_ v vv]
+                    (.Add (.Header rw) k v)))))))))))
+
+
+
+
+(go/var ^bool inOurTests) ; whether we're in our own tests
+
+
+
+
+
+
+^{:go/breaks [[6 643]] :go/end 644} (go/func shouldPanicOnCopyError "shouldPanicOnCopyError reports whether the reverse proxy should\npanic with http.ErrAbortHandler. This is the right thing to do by\ndefault, but Go 1.10 and earlier did not, so existing unit tests\nweren't expecting panics. Only panic in our own tests, or when\nrunning under the HTTP server.\n" ^bool [^{:tag (* http/Request)} req]
+  (when inOurTests
+    ;; Our tests know to handle this panic.
+    (return true))
+
+  (when (!= (.Value (.Context req) http/ServerContextKey) nil)
+    ;; We seem to be running under an HTTP server, so
+    ;; it'll recover the panic.
+    (return true))
+
+  ;; Otherwise act like Go 1.10 and earlier to not break
+  ;; existing tests.
+  false)
+
+
+
+^{:go/end 662} (go/func removeHopByHopHeaders "removeHopByHopHeaders removes hop-by-hop headers.\n" [^http/Header h]
+  ;; RFC 7230, section 6.1: Remove headers listed in the "Connection" header.
+  (range [_ f (aget h "Connection")]
+    (range [sf (strings/SplitSeq f ",")]
+      (when [(set! sf (textproto/TrimString sf))] (!= sf "")
+        (.Del h sf))))
+
+
+
+  ;; RFC 2616, section 13.5.1: Remove a set of known hop-by-hop headers.
+  ;; This behavior is superseded by the RFC 7230 Connection header, but
+  ;; preserve it for backwards compatibility.
+  (range [_ f hopHeaders]
+    (.Del h f)))
+
+
+
+
+
+^{:go/end 681} (go/method flushInterval "flushInterval returns the p.FlushInterval value, conditionally\noverriding its value for a specific request/response.\n" ^time/Duration [^{:tag (* ReverseProxy)} p ^{:tag (* http/Response)} res]
+  (let [resCT (.Get (.-Header res) "Content-Type")]
+
+    ;; For Server-Sent Events responses, flush immediately.
+    ;; The MIME type is defined in https://www.w3.org/TR/eventsource/#text-event-stream
+    (when [(values baseCT _ _) (mime/ParseMediaType resCT)] (== baseCT "text/event-stream")
+      (return -1)) ; negative means immediately
+
+
+    ;; We might have the case of streaming for which Content-Length might be unset.
+    (when (== (.-ContentLength res) -1)
+      (return -1))
+
+
+    (.-FlushInterval p)))
+
+
+^{:go/end 708} (go/method copyResponse ^error [^{:tag (* ReverseProxy)} p ^http/ResponseWriter dst ^io/Reader src ^time/Duration flushInterval]
+  (let [^io/Writer w dst]
+
+    (when (!= flushInterval 0)
+      (let [mlw (addr ^{:go/breaks [2 4 6]} (lit maxLatencyWriter
+              :dst dst
+              :flush (.-Flush (http/NewResponseController dst))
+              :latency flushInterval))]
+
+        (defer (.stop mlw))
+
+        ;; set up initial timer so headers get flushed even if body writes are delayed
+        (set! (.-flushPending mlw) true)
+        (set! (.-t mlw) (time/AfterFunc flushInterval (.-delayedFlush mlw)))
+
+        (set! w mlw)))
+
+
+    (let [^{:tag (slice byte)} buf (zero (slice byte))]
+      (when (!= (.-BufferPool p) nil)
+        (set! buf (.Get (.-BufferPool p)))
+        (defer (.Put (.-BufferPool p) buf)))
+
+      (let [(values _ err) (.copyBuffer p w src buf)]
+        ^{:line 707} err))))
+
+
+
+
+^{:go/end 741} (go/method copyBuffer "copyBuffer returns any write errors or non-EOF read errors, and the amount\nof bytes written.\n" [^{:tag (* ReverseProxy)} p ^io/Writer dst ^io/Reader src ^{:tag (slice byte)} buf] :results [int64 error]
+  (when (== (len buf) 0)
+    (set! buf (make (slice byte) (* 32 1024))))
+
+  (let [^int64 written (zero int64)]
+    (while true
+      (let [(values nr rerr) (.Read src buf)]
+        (when (and (!= rerr nil) (!= rerr io/EOF) (!= rerr context/Canceled))
+          (.logf p "httputil: ReverseProxy read error during body copy: %v" rerr))
+
+        (when (> nr 0)
+          (let [(values nw werr) (.Write dst (subslice buf _ nr))]
+            (when (> nw 0)
+              (set! written + (conv int64 nw)))
+
+            (when (!= werr nil)
+              (return written werr))
+
+            (when (!= nr nw)
+              (return written io/ErrShortWrite))))
+
+
+        (when (!= rerr nil)
+          (when (== rerr io/EOF)
+            (set! rerr nil))
+
+          (return written rerr))))))
+
+
+
+
+^{:go/end 749} (go/method logf [^{:tag (* ReverseProxy)} p ^string format & ^{:tag (slice any)} args]
+  (if (!= (.-ErrorLog p) nil)
+    (.Printf (.-ErrorLog p) format (spread args))
+
+    (log/Printf format (spread args))))
+
+
+
+(go/type maxLatencyWriter (struct
+    ^{:line 752 :tag io/Writer} dst
+    ^{:line 753 :tag (func [] [error])} flush
+    ^{:line 754 :tag time/Duration} latency ; non-zero; negative means to flush immediately
+
+    ^{:line 756 :tag sync/Mutex} mu ; protects t, flushPending, and dst.Flush
+    ^{:line 757 :tag (* time/Timer)} t
+    ^{:line 758 :tag bool} flushPending))
+
+
+^{:go/end 779} (go/method Write [^{:tag (* maxLatencyWriter)} m ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (.Lock (.-mu m))
+  (defer (.Unlock (.-mu m)))
+  (set! (values n err) (.Write (.-dst m) p))
+  (when (< (.-latency m) 0)
+    ((.-flush m))
+    (return))
+
+  (when (.-flushPending m)
+    (return))
+
+  (if (== (.-t m) nil)
+    (set! (.-t m) (time/AfterFunc (.-latency m) (.-delayedFlush m)))
+
+    (.Reset (.-t m) (.-latency m)))
+
+  (set! (.-flushPending m) true)
+  (return))
+
+
+^{:go/end 789} (go/method delayedFlush [^{:tag (* maxLatencyWriter)} m]
+  (.Lock (.-mu m))
+  (defer (.Unlock (.-mu m)))
+  (when (not (.-flushPending m)) ; if stop was called but AfterFunc already started this goroutine
+    (return))
+
+  ((.-flush m))
+  (set! (.-flushPending m) false))
+
+
+^{:go/end 798} (go/method stop [^{:tag (* maxLatencyWriter)} m]
+  (.Lock (.-mu m))
+  (defer (.Unlock (.-mu m)))
+  (set! (.-flushPending m) false)
+  (when (!= (.-t m) nil)
+    (.Stop (.-t m))))
+
+
+
+^{:go/end 805} (go/func upgradeType ^string [^http/Header h]
+  (when (not (httpguts/HeaderValuesContainsToken (aget h "Connection") "Upgrade"))
+    (return ""))
+
+  (.Get h "Upgrade"))
+
+
+^{:go/end 873} (go/method handleUpgradeResponse [^{:tag (* ReverseProxy)} p ^http/ResponseWriter rw ^{:tag (* http/Request)} req ^{:tag (* http/Response)} res]
+  (let [reqUpType (upgradeType (.-Header req))
+      ^{:line 809} resUpType (upgradeType (.-Header res))]
+    (when (not (ascii/IsPrint resUpType)) ; We know reqUpType is ASCII, it's checked by the caller.
+      ((.getErrorHandler p) rw req (fmt/Errorf "backend tried to switch to invalid protocol %q" resUpType))
+      (return))
+
+    (when (not (ascii/EqualFold reqUpType resUpType))
+      ((.getErrorHandler p) rw req (fmt/Errorf "backend tried to switch protocol %q when %q was requested" resUpType reqUpType))
+      (return))
+
+
+    (let [(values backConn ok) (assert io/ReadWriteCloser (.-Body res))]
+      (when (not ok)
+        ((.getErrorHandler p) rw req (fmt/Errorf "internal error: 101 switching protocols response with non-writable body"))
+        (return))
+
+
+      (let [rc (http/NewResponseController rw)
+          (values conn brw hijackErr) (.Hijack rc)]
+        (when (errors/Is hijackErr http/ErrNotSupported)
+          ((.getErrorHandler p) rw req (fmt/Errorf "can't switch protocols using non-Hijacker ResponseWriter type %T" rw))
+          (return))
+
+
+        (let [backConnCloseCh (make (chan bool))]
+          (go (^{:go/end 841} (fn []
+                ;; Ensure that the cancellation of a request closes the backend.
+                ;; See issue https://golang.org/issue/35559.
+                (select
+                  (case (<! (.Done (.Context req))))
+                  (case (<! backConnCloseCh)))
+
+                (.Close backConn))))
+
+          (defer (close backConnCloseCh))
+
+          (when (!= hijackErr nil)
+            ((.getErrorHandler p) rw req (fmt/Errorf "Hijack failed on protocol switch: %v" hijackErr))
+            (return))
+
+          (defer (.Close conn))
+
+          (copyHeader (.Header rw) (.-Header res))
+
+          (set! (.-Header res) (.Header rw))
+          (set! (.-Body res) nil) ; so res.Write only writes the headers; we have res.Body in backConn above
+          (when [err (.Write res brw)] (!= err nil)
+            ((.getErrorHandler p) rw req (fmt/Errorf "response write: %v" err))
+            (return))
+
+          (when [err ^{:go/via [Writer]} (.Flush brw)] (!= err nil)
+            ((.getErrorHandler p) rw req (fmt/Errorf "response flush: %v" err))
+            (return))
+
+          (let [errc (make (chan error) 1)
+              ^{:line 863} spc (lit switchProtocolCopier :user conn :backend backConn)]
+            (go (.copyToBackend spc errc))
+            (go (.copyFromBackend spc errc))
+
+            ;; Wait until both copy functions have sent on the error channel,
+            ;; or until one fails.
+            (let [err (<! errc)]
+              (when (== err nil)
+                (set! err (<! errc))))))))))
+
+
+
+(go/var errCopyDone (errors/New "hijacked connection copy complete"))
+
+
+
+(go/type switchProtocolCopier "switchProtocolCopier exists so goroutines proxying data back and\nforth have nice names in stacks.\n" (struct
+    ^{:line 880 :tag io/ReadWriter} user ^io/ReadWriter backend))
+
+
+^{:go/end 896} (go/method copyFromBackend [^switchProtocolCopier c ^{:tag (chan :send error)} errc]
+  (when [(values _ err) (io/Copy (.-user c) (.-backend c))] (!= err nil)
+    (>! errc err)
+    (return))
+
+
+  ;; backend conn has reached EOF so propogate close write to user conn
+  (when [(values wc ok) (assert (interface (CloseWrite ^error [])) (.-user c))] ok
+    (>! errc (.CloseWrite wc))
+    (return))
+
+
+  (>! errc errCopyDone))
+
+
+^{:go/end 911} (go/method copyToBackend [^switchProtocolCopier c ^{:tag (chan :send error)} errc]
+  (when [(values _ err) (io/Copy (.-backend c) (.-user c))] (!= err nil)
+    (>! errc err)
+    (return))
+
+
+  ;; user conn has reached EOF so propogate close write to backend conn
+  (when [(values wc ok) (assert (interface (CloseWrite ^error [])) (.-backend c))] ok
+    (>! errc (.CloseWrite wc))
+    (return))
+
+
+  (>! errc errCopyDone))
+
+
+(go/var urlmaxqueryparams (godebug/New "urlmaxqueryparams"))
+
+
+(go/const ^{:val 10000 :doc "Keep this in sync with net/url.\n"} defaultMaxParams 10000)
+
+^{:go/end 945} (go/func cleanQueryParams ^string [^string s]
+  (let [reencode ^{:go/end 922} (fn ^string [^string s]
+        (let [(values v _) (url/ParseQuery s)]
+          (.Encode v)))]
+
+    (when (!= (.Value urlmaxqueryparams) "")
+      ;; Always reencode when a non-default urlmaxqueryparams is set.
+      (return (reencode s)))
+
+    (when [numParams (+ (strings/Count s "&") 1)] (> numParams defaultMaxParams)
+      ;; Too many query parameters.
+      (return (reencode s)))
+
+    (for [i 0] (< i (len s)) _
+      (switch (aget s i)
+        (case [\;]
+          (return (reencode s)))
+        (case [\%]
+          (when (or (>= (+ i 2) (len s)) (not (ishex (aget s (+ i 1)))) (not (ishex (aget s (+ i 2)))))
+            (return (reencode s)))
+
+          (set! i + 3))
+        (default
+          (inc! i))))
+
+
+    ^{:line 944} s))
+
+
+^{:go/breaks [[4 956]] :go/end 957} (go/func ishex ^bool [^byte c]
+  (switch
+    (case [(and (<= \0 c) (<= c \9))]
+      (return true))
+    (case [(and (<= \a c) (<= c \f))]
+      (return true))
+    (case [(and (<= \A c) (<= c \F))]
+      (return true)))
+
+  false)

@@ -1,0 +1,928 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace) (go/file "gc.go" :imports [
+
+
+    ^{:line 8} [heap "container/heap"]
+    ^{:line 9} [math "math"]
+    ^{:line 10} [sort "sort"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [time "time"]])
+
+
+
+
+
+(go/type MutatorUtil "MutatorUtil is a change in mutator utilization at a particular\ntime. Mutator utilization functions are represented as a\ntime-ordered []MutatorUtil.\n" (struct
+    ^{:line 19 :tag int64} Time
+
+
+    ^{:line 22 :tag float64 :doc "Util is the mean mutator utilization starting at Time. This\nis in the range [0, 1].\n"} Util))
+
+
+
+(go/type UtilFlags "UtilFlags controls the behavior of MutatorUtilization.\n" int)
+
+(go/const
+
+
+  ^{:line 31} [^{:tag UtilFlags :val 1 :doc "UtilSTW means utilization should account for STW events.\nThis includes non-GC STW events, which are typically user-requested.\n"} UtilSTW (<< 1 iota)]
+
+
+  ^{:line 34} [^{:val 2 :doc "UtilBackground means utilization should account for\nbackground mark workers.\n"} UtilBackground]
+
+
+  ^{:line 37} [^{:val 4 :doc "UtilAssist means utilization should account for mark\nassists.\n"} UtilAssist]
+
+  ^{:line 39} [^{:val 8 :doc "UtilSweep means utilization should account for sweeping.\n"} UtilSweep]
+
+
+
+
+  ^{:line 44} [^{:val 16 :doc "UtilPerProc means each P should be given a separate\nutilization function. Otherwise, there is a single function\nand each P is given a fraction of the utilization.\n"} UtilPerProc])
+
+
+
+
+
+
+
+
+
+
+^{:go/end 294} (go/func MutatorUtilizationV2 "MutatorUtilizationV2 returns a set of mutator utilization functions\nfor the given v2 trace, passed as an io.Reader. Each function will\nalways end with 0 utilization. The bounds of each function are implicit\nin the first and last event; outside of these bounds each function is\nundefined.\n\nIf the UtilPerProc flag is not given, this always returns a single\nutilization function. Otherwise, it returns one function per P.\n" ^{:tag (slice (slice MutatorUtil))} [^{:tag (slice Event)} events ^UtilFlags flags]
+  ;; Set up a bunch of analysis state.
+  (let-type [perP (struct
+
+        ^{:line 59 :tag int :doc "gc > 0 indicates that GC is active on this P.\n"} gc
+
+
+
+        ^{:line 63 :tag int :doc "series the logical series number for this P. This\nis necessary because Ps may be removed and then\nre-added, and then the new P needs a new series.\n"} series)
+
+      ^{:line 65} procsCount (struct
+
+        ^{:line 67 :tag int64 :doc "time at which procs changed.\n"} time
+
+        ^{:line 69 :tag int :doc "n is the number of procs at that point.\n"} n)]
+
+    (let [out (lit (slice (slice MutatorUtil)))
+        ^{:line 72} stw 0
+        ^{:line 73} ps (lit (slice perP))
+        ^{:line 74} inGC (make (map GoID bool))
+        ^{:line 75} states (make (map GoID GoState))
+        ^{:line 76} bgMark (make (map GoID bool))
+        ^{:line 77} procs (lit (slice procsCount))
+        ^{:line 78} nSync 0
+
+        ;; Helpers.
+        ^{:line 81} handleSTW ^{:go/end 83} (fn ^bool [^Range r]
+          (and (!= (bit-and flags UtilSTW) 0) (isGCSTW r)))
+
+        ^{:line 84} handleMarkAssist ^{:go/end 86} (fn ^bool [^Range r]
+          (and (!= (bit-and flags UtilAssist) 0) (isGCMarkAssist r)))
+
+        ^{:line 87} handleSweep ^{:go/end 89} (fn ^bool [^Range r]
+          (and (!= (bit-and flags UtilSweep) 0) (isGCSweep r)))
+
+
+        ;; Iterate through the trace, tracking mutator utilization.
+        ^{:line 92 :tag (* Event)} lastEv (zero (* Event))]
+      (range [i events]
+        (let [ev (addr (aget events i))]
+          (set! lastEv ev)
+
+          ;; Process the event.
+          (switch (.Kind ev)
+            (case [EventSync]
+              (set! nSync (.-N (.Sync ev))))
+            (case [EventMetric]
+              (let [m (.Metric ev)]
+                (when (!= (.-Name m) "/sched/gomaxprocs:threads")
+                  (break))
+
+                (let [gomaxprocs (conv int (.Uint64 (.-Value m)))]
+                  (when (> (len ps) gomaxprocs)
+                    (when (!= (bit-and flags UtilPerProc) 0)
+                      ;; End each P's series.
+                      (range [_ p (subslice ps gomaxprocs)]
+                        (aset out (.-series p) (addUtil (aget out (.-series p)) (lit MutatorUtil (conv int64 (.Time ev)) 0)))))
+
+
+                    (set! ps (subslice ps _ gomaxprocs)))
+
+                  (while (< (len ps) gomaxprocs)
+                    ;; Start new P's series.
+                    (let [series 0]
+                      (when (or (!= (bit-and flags UtilPerProc) 0) (== (len out) 0))
+                        (set! series (len out))
+                        (set! out (append out (lit (slice MutatorUtil) (lit _ (conv int64 (.Time ev)) 1)))))
+
+                      (set! ps (append ps (lit perP :series series)))))
+
+                  (when (or (== (len procs) 0) (!= gomaxprocs (.-n (aget procs (- (len procs) 1)))))
+                    (set! procs (append procs (lit procsCount :time (conv int64 (.Time ev)) :n gomaxprocs))))))))
+
+
+          (when (== (len ps) 0)
+            ;; We can't start doing any analysis until we see what GOMAXPROCS is.
+            ;; It will show up very early in the trace, but we need to be robust to
+            ;; something else being emitted beforehand.
+            (continue))
+
+
+          (switch (.Kind ev)
+            (case [EventRangeActive]
+              (when (> nSync 1)
+                ;; If we've seen a full generation, then we can be sure we're not finding out
+                ;; about something late; we have complete information after that point, and these
+                ;; active events will just be redundant.
+                (break))
+
+              ;; This range is active back to the start of the trace. We're failing to account
+              ;; for this since we just found out about it now. Fix up the mutator utilization.
+              ;;
+              ;; N.B. A trace can't start during a STW, so we don't handle it here.
+              (let [r (.Range ev)]
+                (switch
+                  (case [(handleMarkAssist r)]
+                    (when (not (.Executing (aget states (.Goroutine ev))))
+                      ;; If the goroutine isn't executing, then the fact that it was in mark
+                      ;; assist doesn't actually count.
+                      (break))
+
+                    ;; This G has been in a mark assist *and running on its P* since the start
+                    ;; of the trace.
+                    (fallthrough))
+                  (case [(handleSweep r)]
+                    ;; This P has been in sweep (or mark assist, from above) in the start of the trace.
+                    ;;
+                    ;; We don't need to do anything if UtilPerProc is set. If we get an event like
+                    ;; this for a running P, it must show up the first time a P is mentioned. Therefore,
+                    ;; this P won't actually have any MutatorUtils on its list yet.
+                    ;;
+                    ;; However, if UtilPerProc isn't set, then we probably have data from other procs
+                    ;; and from previous events. We need to fix that up.
+                    (when (!= (bit-and flags UtilPerProc) 0)
+                      (break))
+
+                    ;; Subtract out 1/gomaxprocs mutator utilization for all time periods
+                    ;; from the beginning of the trace until now.
+                    (let [(values mi pi) (values 0 0)]
+                      (while (< mi (len (aget out 0)))
+                        (when (and (< pi (- (len procs) 1)) (< (.-time (aget procs (+ pi 1))) (.-Time (aget (aget out 0) mi))))
+                          (inc! pi)
+                          (continue))
+
+                        (set! (.-Util (aget (aget out 0) mi)) - (/ (conv float64 1) (conv float64 (.-n (aget procs pi)))))
+                        (when (< (.-Util (aget (aget out 0) mi)) 0)
+                          (set! (.-Util (aget (aget out 0) mi)) 0))
+
+                        (inc! mi)))))
+
+
+                ;; After accounting for the portion we missed, this just acts like the
+                ;; beginning of a new range.
+                (fallthrough)))
+            (case [EventRangeBegin]
+              (let [r (.Range ev)]
+                (cond (handleSTW r)
+                  (inc! stw)
+                  (handleSweep r)
+                  (inc! (.-gc (aget ps (.Proc ev))))
+                  (handleMarkAssist r) (do
+                    (inc! (.-gc (aget ps (.Proc ev))))
+                    (when [g (.Goroutine (.-Scope r))] (!= g NoGoroutine)
+                      (aset inGC g true))))))
+
+
+            (case [EventRangeEnd]
+              (let [r (.Range ev)]
+                (cond (handleSTW r)
+                  (dec! stw)
+                  (handleSweep r)
+                  (dec! (.-gc (aget ps (.Proc ev))))
+                  (handleMarkAssist r) (do
+                    (dec! (.-gc (aget ps (.Proc ev))))
+                    (when [g (.Goroutine (.-Scope r))] (!= g NoGoroutine)
+                      (delete inGC g))))))
+
+
+            (case [EventStateTransition]
+              (let [st (.StateTransition ev)]
+                (when (!= (.-Kind (.-Resource st)) ResourceGoroutine)
+                  (break))
+
+                (let [(values old new) (.Goroutine st)
+                    ^{:line 219} g (.Goroutine (.-Resource st))]
+                  (when (or (aget inGC g) (aget bgMark g))
+                    (cond (and (not (.Executing old)) (.Executing new))
+                      ;; Started running while doing GC things.
+                      (inc! (.-gc (aget ps (.Proc ev))))
+                      (and (.Executing old) (not (.Executing new)))
+                      ;; Stopped running while doing GC things.
+                      (dec! (.-gc (aget ps (.Proc ev))))))
+
+
+                  (aset states g new))))
+            (case [EventLabel]
+              (let [l (.Label ev)]
+                (when (and (!= (bit-and flags UtilBackground) 0) (strings/HasPrefix (.-Label l) "GC ") (!= (.-Label l) "GC (idle)"))
+                  ;; Background mark worker.
+                  ;;
+                  ;; If we're in per-proc mode, we don't
+                  ;; count dedicated workers because
+                  ;; they kick all of the goroutines off
+                  ;; that P, so don't directly
+                  ;; contribute to goroutine latency.
+                  (when (not (and (!= (bit-and flags UtilPerProc) 0) (== (.-Label l) "GC (dedicated)")))
+                    (aset bgMark (.Goroutine ev) true)
+                    (inc! (.-gc (aget ps (.Proc ev)))))))))
+
+
+
+
+          (if (== (bit-and flags UtilPerProc) 0) (do
+              ;; Compute the current average utilization.
+              (when (== (len ps) 0)
+                (continue))
+
+              (let [gcPs 0]
+                (if (> stw 0)
+                  (set! gcPs (len ps))
+
+                  (range [i ps]
+                    (when (> (.-gc (aget ps i)) 0)
+                      (inc! gcPs))))
+
+
+
+                (let [mu (lit MutatorUtil (conv int64 (.Time ev)) (- 1 (/ (conv float64 gcPs) (conv float64 (len ps)))))]
+
+                  ;; Record the utilization change. (Since
+                  ;; len(ps) == len(out), we know len(out) > 0.)
+                  (aset out 0 (addUtil (aget out 0) mu)))))
+
+            ;; Check for per-P utilization changes.
+            (range [i ps]
+              (let [p (addr (aget ps i))
+                  ^{:line 271} util 1.0]
+                (when (or (> stw 0) (> (.-gc p) 0))
+                  (set! util 0.0))
+
+                (aset out (.-series p) (addUtil (aget out (.-series p)) (lit MutatorUtil (conv int64 (.Time ev)) util))))))))
+
+
+
+
+      ;; No events in the stream.
+      (when (== lastEv nil)
+        (return nil))
+
+
+      ;; Add final 0 utilization event to any remaining series. This
+      ;; is important to mark the end of the trace. The exact value
+      ;; shouldn't matter since no window should extend beyond this,
+      ;; but using 0 is symmetric with the start of the trace.
+      (let [mu (lit MutatorUtil (conv int64 (.Time lastEv)) 0)]
+        (range [i ps]
+          (aset out (.-series (aget ps i)) (addUtil (aget out (.-series (aget ps i))) mu)))
+
+        ^{:line 293} out))))
+
+
+^{:go/end 311} (go/func addUtil ^{:tag (slice MutatorUtil)} [^{:tag (slice MutatorUtil)} util ^MutatorUtil mu]
+  (when (> (len util) 0)
+    (when (== (.-Util mu) (.-Util (aget util (- (len util) 1))))
+      ;; No change.
+      (return util))
+
+    (when (== (.-Time mu) (.-Time (aget util (- (len util) 1))))
+      ;; Take the lowest utilization at a time stamp.
+      (when (< (.-Util mu) (.-Util (aget util (- (len util) 1))))
+        (aset util (- (len util) 1) mu))
+
+      (return util)))
+
+
+  (append util mu))
+
+
+
+
+
+(go/type totalUtil "totalUtil is total utilization, measured in nanoseconds. This is a\nseparate type primarily to distinguish it from mean utilization,\nwhich is also a float64.\n" float64)
+
+^{:go/end 320} (go/func totalUtilOf ^totalUtil [^float64 meanUtil ^int64 dur]
+  (conv totalUtil (* meanUtil (conv float64 dur))))
+
+
+
+^{:go/end 325} (go/method mean "mean returns the mean utilization over dur.\n" ^float64 [^totalUtil u ^time/Duration dur]
+  (/ (conv float64 u) (conv float64 dur)))
+
+
+
+
+(go/type MMUCurve "An MMUCurve is the minimum mutator utilization curve across\nmultiple window sizes.\n" (struct
+    ^{:line 330 :tag (slice mmuSeries)} series))
+
+
+(go/type mmuSeries (struct
+    ^{:line 334 :tag (slice MutatorUtil)} util
+
+    ^{:line 336 :tag (slice totalUtil) :doc "sums[j] is the cumulative sum of util[:j].\n"} sums
+
+
+    ^{:line 339 :tag (slice mmuBand) :doc "bands summarizes util in non-overlapping bands of duration\nbandDur.\n"} bands
+
+    ^{:line 341 :tag int64 :doc "bandDur is the duration of each band.\n"} bandDur))
+
+
+(go/type mmuBand (struct
+
+
+    ^{:line 347 :tag float64 :doc "minUtil is the minimum instantaneous mutator utilization in\nthis band.\n"} minUtil
+
+
+    ^{:line 350 :tag totalUtil :doc "cumUtil is the cumulative total mutator utilization between\ntime 0 and the left edge of this band.\n"} cumUtil
+
+
+
+    ^{:line 354 :tag integrator :doc "integrator is the integrator for the left edge of this\nband.\n"} integrator))
+
+
+
+
+^{:go/end 365} (go/func NewMMUCurve "NewMMUCurve returns an MMU curve for the given mutator utilization\nfunction.\n" ^{:tag (* MMUCurve)} [^{:tag (slice (slice MutatorUtil))} utils]
+  (let [series (make (slice mmuSeries) (len utils))]
+    (range [i util utils]
+      (aset series i (newMMUSeries util)))
+
+    (addr (lit MMUCurve series))))
+
+
+
+
+(go/var ^{:doc "bandsPerSeries is the number of bands to divide each series into.\nThis is only changed by tests.\n"} bandsPerSeries 1000)
+
+^{:go/end 415} (go/func newMMUSeries ^mmuSeries [^{:tag (slice MutatorUtil)} util]
+  ;; Compute cumulative sum.
+  (let [sums (make (slice totalUtil) (len util))
+      ^{:line 374 :tag MutatorUtil} prev (zero MutatorUtil)
+      ^{:line 375 :tag totalUtil} sum (zero totalUtil)]
+    (range [j u util]
+      (set! sum + (totalUtilOf (.-Util prev) (- (.-Time u) (.-Time prev))))
+      (aset sums j sum)
+      (set! prev u))
+
+
+    ;; Divide the utilization curve up into equal size
+    ;; non-overlapping "bands" and compute a summary for each of
+    ;; these bands.
+    ;;
+    ;; Compute the duration of each band.
+    (let [numBands bandsPerSeries]
+      (when (> numBands (len util))
+        ;; There's no point in having lots of bands if there
+        ;; aren't many events.
+        (set! numBands (len util)))
+
+      (let [dur (- (.-Time (aget util (- (len util) 1))) (.-Time (aget util 0)))
+          ^{:line 394} bandDur (/ (- (+ dur (conv int64 numBands)) 1) (conv int64 numBands))]
+        (when (< bandDur 1)
+          (set! bandDur 1))
+
+        ;; Compute the bands. There are numBands+1 bands in order to
+        ;; record the final cumulative sum.
+        (let [bands (make (slice mmuBand) (+ numBands 1))
+            ^{:line 401} s (lit mmuSeries util sums bands bandDur)
+            ^{:line 402} leftSum (lit integrator (addr s) 0)]
+          (range [i bands]
+            (let [(values startTime endTime) (.bandTime s i)
+                ^{:line 405} cumUtil (.advance leftSum startTime)
+                ^{:line 406} predIdx (.-pos leftSum)
+                ^{:line 407} minUtil 1.0]
+              (for [i predIdx] (and (< i (len util)) (< (.-Time (aget util i)) endTime)) (inc! i)
+                (set! minUtil (math/Min minUtil (.-Util (aget util i)))))
+
+              (aset bands i (lit mmuBand minUtil cumUtil leftSum))))
+
+
+          ^{:line 414} s)))))
+
+
+^{:go/end 421} (go/method bandTime [^{:tag (* mmuSeries)} s ^int i] :results [^int64 start ^int64 end]
+  (set! start (+ (* (conv int64 i) (.-bandDur s)) (.-Time (aget (.-util s) 0))))
+  (set! end (+ start (.-bandDur s)))
+  (return))
+
+
+(go/type bandUtil (struct
+
+    ^{:line 425 :tag int :doc "Utilization series index\n"} series
+
+    ^{:line 427 :tag int :doc "Band index\n"} i
+
+
+    ^{:line 430 :tag float64 :doc "Lower bound of mutator utilization for all windows\nwith a left edge in this band.\n"} utilBound))
+
+
+(go/type bandUtilHeap (slice bandUtil))
+
+^{:go/end 437} (go/method Len ^int [^bandUtilHeap h]
+  (len h))
+
+
+^{:go/end 441} (go/method Less ^bool [^bandUtilHeap h ^int i ^int j]
+  (< (.-utilBound (aget h i)) (.-utilBound (aget h j))))
+
+
+^{:go/end 445} (go/method Swap [^bandUtilHeap h ^int i ^int j]
+  (set! (values (aget h i) (aget h j)) (values (aget h j) (aget h i))))
+
+
+^{:go/end 449} (go/method Push [^{:tag (* bandUtilHeap)} h ^any x]
+  (set! @h (append @h (assert bandUtil x))))
+
+
+^{:go/end 455} (go/method Pop ^any [^{:tag (* bandUtilHeap)} h]
+  (let [x (aget @h (- (len @h) 1))]
+    (set! @h (subslice @h _ (- (len @h) 1)))
+    ^{:line 454} x))
+
+
+
+(go/type UtilWindow "UtilWindow is a specific window at Time.\n" (struct
+    ^{:line 459 :tag int64} Time
+
+    ^{:line 461 :tag float64 :doc "MutatorUtil is the mean mutator utilization in this window.\n"} MutatorUtil))
+
+
+(go/type utilHeap (slice UtilWindow))
+
+^{:go/end 468} (go/method Len ^int [^utilHeap h]
+  (len h))
+
+
+^{:go/end 475} (go/method Less ^bool [^utilHeap h ^int i ^int j]
+  (when (!= (.-MutatorUtil (aget h i)) (.-MutatorUtil (aget h j)))
+    (return (> (.-MutatorUtil (aget h i)) (.-MutatorUtil (aget h j)))))
+
+  (> (.-Time (aget h i)) (.-Time (aget h j))))
+
+
+^{:go/end 479} (go/method Swap [^utilHeap h ^int i ^int j]
+  (set! (values (aget h i) (aget h j)) (values (aget h j) (aget h i))))
+
+
+^{:go/end 483} (go/method Push [^{:tag (* utilHeap)} h ^any x]
+  (set! @h (append @h (assert UtilWindow x))))
+
+
+^{:go/end 489} (go/method Pop ^any [^{:tag (* utilHeap)} h]
+  (let [x (aget @h (- (len @h) 1))]
+    (set! @h (subslice @h _ (- (len @h) 1)))
+    ^{:line 488} x))
+
+
+
+
+(go/type accumulator "An accumulator takes a windowed mutator utilization function and\ntracks various statistics for that function.\n" (struct
+    ^{:line 494 :tag float64} mmu
+
+
+
+
+    ^{:line 499 :tag float64 :doc "bound is the mutator utilization bound where adding any\nmutator utilization above this bound cannot affect the\naccumulated statistics.\n"} bound
+
+
+    ^{:line 502 :tag int :doc "Worst N window tracking\n"} nWorst
+    ^{:line 503 :tag utilHeap} wHeap
+
+
+    ^{:line 506 :tag (* mud) :doc "Mutator utilization distribution tracking\n"} mud
+
+
+    ^{:line 509 :tag float64 :doc "preciseMass is the distribution mass that must be precise\nbefore accumulation is stopped.\n"} preciseMass
+
+
+    ^{:line 512 :tag int64 :doc "lastTime and lastMU are the previous point added to the\nwindowed mutator utilization function.\n"} lastTime
+    ^{:line 513 :tag float64} lastMU))
+
+
+
+
+^{:go/end 523} (go/method resetTime "resetTime declares a discontinuity in the windowed mutator\nutilization function by resetting the current time.\n" [^{:tag (* accumulator)} acc]
+  ;; This only matters for distribution collection, since that's
+  ;; the only thing that depends on the progression of the
+  ;; windowed mutator utilization function.
+  (set! (.-lastTime acc) math/MaxInt64))
+
+
+
+
+
+
+
+^{:go/end 598} (go/method addMU "addMU adds a point to the windowed mutator utilization function at\n(time, mu). This must be called for monotonically increasing values\nof time.\n\nIt returns true if further calls to addMU would be pointless.\n" ^bool [^{:tag (* accumulator)} acc ^int64 time ^float64 mu ^time/Duration window]
+  (when (< mu (.-mmu acc))
+    (set! (.-mmu acc) mu))
+
+  (set! (.-bound acc) (.-mmu acc))
+
+  (when (== (.-nWorst acc) 0)
+    ;; If the minimum has reached zero, it can't go any
+    ;; lower, so we can stop early.
+    (return (== mu 0)))
+
+
+  ;; Consider adding this window to the n worst.
+  (when (or (< (len (.-wHeap acc)) (.-nWorst acc)) (< mu (.-MutatorUtil (aget (.-wHeap acc) 0))))
+    ;; This window is lower than the K'th worst window.
+    ;;
+    ;; Check if there's any overlapping window
+    ;; already in the heap and keep whichever is
+    ;; worse.
+    (range [i ui (.-wHeap acc)]
+      (when (and (> (+ time (conv int64 window)) (.-Time ui)) (> (+ (.-Time ui) (conv int64 window)) time))
+        (if (<= (.-MutatorUtil ui) mu)
+          ;; Keep the first window.
+          (goto :keep)
+          (do
+            ;; Replace it with this window.
+            (heap/Remove (addr (.-wHeap acc)) i)
+            (break)))))
+
+
+
+
+    (heap/Push (addr (.-wHeap acc)) (lit UtilWindow time mu))
+    (when (> (len (.-wHeap acc)) (.-nWorst acc))
+      (heap/Pop (addr (.-wHeap acc))))
+
+    (label :keep))
+
+
+  (if (< (len (.-wHeap acc)) (.-nWorst acc))
+    ;; We don't have N windows yet, so keep accumulating.
+    (set! (.-bound acc) 1.0)
+
+    ;; Anything above the least worst window has no effect.
+    (set! (.-bound acc) (math/Max (.-bound acc) (.-MutatorUtil (aget (.-wHeap acc) 0)))))
+
+
+  (when (!= (.-mud acc) nil)
+    (when (!= (.-lastTime acc) math/MaxInt64)
+      ;; Update distribution.
+      (.add (.-mud acc) (.-lastMU acc) mu (conv float64 (- time (.-lastTime acc)))))
+
+    (set! (values (.-lastTime acc) (.-lastMU acc)) (values time mu))
+    (if [(values _ mudBound ok) (.approxInvCumulativeSum (.-mud acc))] ok
+      (set! (.-bound acc) (math/Max (.-bound acc) mudBound))
+
+      ;; We haven't accumulated enough total precise
+      ;; mass yet to even reach our goal, so keep
+      ;; accumulating.
+      (set! (.-bound acc) 1))
+
+    ;; It's not worth checking percentiles every time, so
+    ;; just keep accumulating this band.
+    (return false))
+
+
+  ;; If we've found enough 0 utilizations, we can stop immediately.
+  (and (== (len (.-wHeap acc)) (.-nWorst acc)) (== (.-MutatorUtil (aget (.-wHeap acc) 0)) 0)))
+
+
+
+
+
+
+^{:go/end 608} (go/method MMU "MMU returns the minimum mutator utilization for the given time\nwindow. This is the minimum utilization for all windows of this\nduration across the execution. The returned value is in the range\n[0, 1].\n" [^{:tag (* MMUCurve)} c ^time/Duration window] :results [^float64 mmu]
+  (let [acc (lit accumulator :mmu 1.0 :bound 1.0)]
+    (.mmu c window (addr acc))
+    (.-mmu acc)))
+
+
+
+
+
+
+
+^{:go/end 620} (go/method Examples "Examples returns n specific examples of the lowest mutator\nutilization for the given window size. The returned windows will be\ndisjoint (otherwise there would be a huge number of\nmostly-overlapping windows at the single lowest point). There are\nno guarantees on which set of disjoint windows this returns.\n" [^{:tag (* MMUCurve)} c ^time/Duration window ^int n] :results [^{:tag (slice UtilWindow)} worst]
+  (let [acc (lit accumulator :mmu 1.0 :bound 1.0 :nWorst n)]
+    (.mmu c window (addr acc))
+    (sort/Sort (sort/Reverse (.-wHeap acc)))
+    (conv (slice UtilWindow) (.-wHeap acc))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 699} (go/method MUD "MUD returns mutator utilization distribution quantiles for the\ngiven window size.\n\nThe mutator utilization distribution is the distribution of mean\nmutator utilization across all windows of the given window size in\nthe trace.\n\nThe minimum mutator utilization is the minimum (0th percentile) of\nthis distribution. (However, if only the minimum is desired, it's\nmore efficient to use the MMU method.)\n" ^{:tag (slice float64)} [^{:tag (* MMUCurve)} c ^time/Duration window ^{:tag (slice float64)} quantiles]
+  (when (== (len quantiles) 0)
+    (return (lit (slice float64))))
+
+
+  ;; Each unrefined band contributes a known total mass to the
+  ;; distribution (bandDur except at the end), but in an unknown
+  ;; way. However, we know that all the mass it contributes must
+  ;; be at or above its worst-case mean mutator utilization.
+  ;;
+  ;; Hence, we refine bands until the highest desired
+  ;; distribution quantile is less than the next worst-case mean
+  ;; mutator utilization. At this point, all further
+  ;; contributions to the distribution must be beyond the
+  ;; desired quantile and hence cannot affect it.
+  ;;
+  ;; First, find the highest desired distribution quantile.
+  (let [maxQ (aget quantiles 0)]
+    (range [_ q quantiles]
+      (when (> q maxQ)
+        (set! maxQ q)))
+
+
+    ;; The distribution's mass is in units of time (it's not
+    ;; normalized because this would make it more annoying to
+    ;; account for future contributions of unrefined bands). The
+    ;; total final mass will be the duration of the trace itself
+    ;; minus the window size. Using this, we can compute the mass
+    ;; corresponding to quantile maxQ.
+    (let [^int64 duration (zero int64)]
+      (range [_ s (.-series c)]
+        (let [duration1 (- (.-Time (aget (.-util s) (- (len (.-util s)) 1))) (.-Time (aget (.-util s) 0)))]
+          (when (>= duration1 (conv int64 window))
+            (set! duration + (- duration1 (conv int64 window))))))
+
+
+      (let [qMass (* (conv float64 duration) maxQ)
+
+          ;; Accumulate the MUD until we have precise information for
+          ;; everything to the left of qMass.
+          ^{:line 672} acc (lit accumulator :mmu 1.0 :bound 1.0 :preciseMass qMass :mud (new mud))]
+        (.setTrackMass (.-mud acc) qMass)
+        (.mmu c window (addr acc))
+
+        ;; Evaluate the quantiles on the accumulated MUD.
+        (let [out (make (slice float64) (len quantiles))]
+          (range [i out]
+            (let [(values mu _) (.invCumulativeSum (.-mud acc) (* (conv float64 duration) (aget quantiles i)))]
+              (when (math/IsNaN mu)
+                ;; There are a few legitimate ways this can
+                ;; happen:
+                ;;
+                ;; 1. If the window is the full trace
+                ;; duration, then the windowed MU function is
+                ;; only defined at a single point, so the MU
+                ;; distribution is not well-defined.
+                ;;
+                ;; 2. If there are no events, then the MU
+                ;; distribution has no mass.
+                ;;
+                ;; Either way, all of the quantiles will have
+                ;; converged toward the MMU at this point.
+                (set! mu (.-mmu acc)))
+
+              (aset out i mu)))
+
+          ^{:line 698} out)))))
+
+
+^{:go/end 734} (go/method mmu [^{:tag (* MMUCurve)} c ^time/Duration window ^{:tag (* accumulator)} acc]
+  (when (<= window 0)
+    (set! (.-mmu acc) 0)
+    (return))
+
+
+  (let [^bandUtilHeap bandU (zero bandUtilHeap)
+      ^{:line 708} windows (make (slice time/Duration) (len (.-series c)))]
+    (range [i s (.-series c)]
+      (aset windows i window)
+      (when [max (conv time/Duration (- (.-Time (aget (.-util s) (- (len (.-util s)) 1))) (.-Time (aget (.-util s) 0))))] (> window max)
+        (aset windows i max))
+
+
+      (let [bandU1 (conv bandUtilHeap (.mkBandUtil s i (aget windows i)))]
+        (if (== bandU nil)
+          (set! bandU bandU1)
+
+          (set! bandU (append bandU (spread bandU1))))))
+
+
+
+    ;; Process bands from lowest utilization bound to highest.
+    (heap/Init (addr bandU))
+
+    ;; Refine each band into a precise window and MMU until
+    ;; refining the next lowest band can no longer affect the MMU
+    ;; or windows.
+    (while (and (> (len bandU) 0) (< (.-utilBound (aget bandU 0)) (.-bound acc)))
+      (let [i (.-series (aget bandU 0))]
+        (.bandMMU (aget (.-series c) i) (.-i (aget bandU 0)) (aget windows i) acc)
+        (heap/Pop (addr bandU))))))
+
+
+
+^{:go/end 796} (go/method mkBandUtil ^{:tag (slice bandUtil)} [^{:tag (* mmuSeries)} c ^int series ^time/Duration window]
+  ;; For each band, compute the worst-possible total mutator
+  ;; utilization for all windows that start in that band.
+
+  ;; minBands is the minimum number of bands a window can span
+  ;; and maxBands is the maximum number of bands a window can
+  ;; span in any alignment.
+  (let [minBands (conv int (/ (- (+ (conv int64 window) (.-bandDur c)) 1) (.-bandDur c)))
+      ^{:line 744} maxBands (conv int (/ (+ (conv int64 window) (* 2 (- (.-bandDur c) 1))) (.-bandDur c)))]
+    (when (and (> window 1) (< maxBands 2))
+      (panic "maxBands < 2"))
+
+    (let [tailDur (% (conv int64 window) (.-bandDur c))
+        ^{:line 749} nUtil (+ (- (len (.-bands c)) maxBands) 1)]
+      (when (< nUtil 0)
+        (set! nUtil 0))
+
+      (let [bandU (make (slice bandUtil) nUtil)]
+        (range [i bandU]
+          ;; To compute the worst-case MU, we assume the minimum
+          ;; for any bands that are only partially overlapped by
+          ;; some window and the mean for any bands that are
+          ;; completely covered by all windows.
+          (let [^totalUtil util (zero totalUtil)
+
+              ;; Find the lowest and second lowest of the partial
+              ;; bands.
+              ^{:line 763} l (.-minUtil (aget (.-bands c) i))
+              ^{:line 764} r1 (.-minUtil (aget (.-bands c) (- (+ i minBands) 1)))
+              ^{:line 765} r2 (.-minUtil (aget (.-bands c) (- (+ i maxBands) 1)))
+              ^{:line 766} minBand (math/Min l (math/Min r1 r2))]
+            ;; Assume the worst window maximally overlaps the
+            ;; worst minimum and then the rest overlaps the second
+            ;; worst minimum.
+            (if (== minBands 1)
+              (set! util + (totalUtilOf minBand (conv int64 window)))
+              (do
+                (set! util + (totalUtilOf minBand (.-bandDur c)))
+                (let [midBand 0.0]
+                  (switch
+                    (case [(== minBand l)]
+                      (set! midBand (math/Min r1 r2)))
+                    (case [(== minBand r1)]
+                      (set! midBand (math/Min l r2)))
+                    (case [(== minBand r2)]
+                      (set! midBand (math/Min l r1))))
+
+                  (set! util + (totalUtilOf midBand tailDur)))))
+
+
+            ;; Add the total mean MU of bands that are completely
+            ;; overlapped by all windows.
+            (when (> minBands 2)
+              (set! util + (- (.-cumUtil (aget (.-bands c) (- (+ i minBands) 1))) (.-cumUtil (aget (.-bands c) (+ i 1))))))
+
+
+            (aset bandU i (lit bandUtil series i (.mean util window)))))
+
+
+        ^{:line 795} bandU))))
+
+
+
+
+^{:go/end 859} (go/method bandMMU "bandMMU computes the precise minimum mutator utilization for\nwindows with a left edge in band bandIdx.\n" [^{:tag (* mmuSeries)} c ^int bandIdx ^time/Duration window ^{:tag (* accumulator)} acc]
+  (let [util (.-util c)
+
+      ;; We think of the mutator utilization over time as the
+      ;; box-filtered utilization function, which we call the
+      ;; "windowed mutator utilization function". The resulting
+      ;; function is continuous and piecewise linear (unless
+      ;; window==0, which we handle elsewhere), where the boundaries
+      ;; between segments occur when either edge of the window
+      ;; encounters a change in the instantaneous mutator
+      ;; utilization function. Hence, the minimum of this function
+      ;; will always occur when one of the edges of the window
+      ;; aligns with a utilization change, so these are the only
+      ;; points we need to consider.
+      ;;
+      ;; We compute the mutator utilization function incrementally
+      ;; by tracking the integral from t=0 to the left edge of the
+      ;; window and to the right edge of the window.
+      ^{:line 818} left (.-integrator (aget (.-bands c) bandIdx))
+      ^{:line 819} right left
+      (values time endTime) (.bandTime c bandIdx)]
+    (when [utilEnd (- (.-Time (aget util (- (len util) 1))) (conv int64 window))] (< utilEnd endTime)
+      (set! endTime utilEnd))
+
+    (.resetTime acc)
+    (while true
+      ;; Advance edges to time and time+window.
+      (let [mu (.mean (- (.advance right (+ time (conv int64 window))) (.advance left time)) window)]
+        (when (.addMU acc time mu window)
+          (break))
+
+        (when (== time endTime)
+          (break))
+
+
+        ;; The maximum slope of the windowed mutator
+        ;; utilization function is 1/window, so we can always
+        ;; advance the time by at least (mu - mmu) * window
+        ;; without dropping below mmu.
+        (let [minTime (+ time (conv int64 (* (- mu (.-bound acc)) (conv float64 window))))]
+
+          ;; Advance the window to the next time where either
+          ;; the left or right edge of the window encounters a
+          ;; change in the utilization curve.
+          (if [(values t1 t2) (values (.next left time) (- (.next right (+ time (conv int64 window))) (conv int64 window)))] (< t1 t2)
+            (set! time t1)
+
+            (set! time t2))
+
+          (when (< time minTime)
+            (set! time minTime))
+
+          (when (>= time endTime)
+            ;; For MMUs we could stop here, but for MUDs
+            ;; it's important that we span the entire
+            ;; band.
+            (set! time endTime)))))))
+
+
+
+
+
+
+(go/type integrator "An integrator tracks a position in a utilization function and\nintegrates it.\n" (struct
+    ^{:line 864 :tag (* mmuSeries)} u
+
+
+    ^{:line 867 :tag int :doc "pos is the index in u.util of the current time's non-strict\npredecessor.\n"} pos))
+
+
+
+
+
+^{:go/end 906} (go/method advance "advance returns the integral of the utilization function from 0 to\ntime. advance must be called on monotonically increasing values of\ntimes.\n" ^totalUtil [^{:tag (* integrator)} in ^int64 time]
+  (let [(values util pos) (values (.-util (.-u in)) (.-pos in))
+      ;; Advance pos until pos+1 is time's strict successor (making
+      ;; pos time's non-strict predecessor).
+      ;;
+      ;; Very often, this will be nearby, so we optimize that case,
+      ;; but it may be arbitrarily far away, so we handled that
+      ;; efficiently, too.
+      ^:const ^{:line 881 :val 8} maxSeq 8]
+    (if (and (< (+ pos maxSeq) (len util)) (> (.-Time (aget util (+ pos maxSeq))) time))
+      ;; Nearby. Use a linear scan.
+      (while (and (< (+ pos 1) (len util)) (<= (.-Time (aget util (+ pos 1))) time))
+        (inc! pos))
+
+
+      ;; Far. Binary search for time's strict successor.
+      (let [(values l r) (values pos (len util))]
+        (while (< l r)
+          (let [h (conv int (>> (conv uint (+ l r)) 1))]
+            (if (<= (.-Time (aget util h)) time)
+              (set! l (+ h 1))
+
+              (set! r h))))
+
+
+        (set! pos (- l 1)))) ; Non-strict predecessor.
+
+    (set! (.-pos in) pos)
+    (let [^totalUtil partial (zero totalUtil)]
+      (when (!= time (.-Time (aget util pos)))
+        (set! partial (totalUtilOf (.-Util (aget util pos)) (- time (.-Time (aget util pos))))))
+
+      (+ (aget (.-sums (.-u in)) pos) partial))))
+
+
+
+
+^{:go/end 917} (go/method next "next returns the smallest time t' > time of a change in the\nutilization function.\n" ^int64 [^{:tag (* integrator)} in ^int64 time]
+  (range [_ u (subslice (.-util (.-u in)) (.-pos in))]
+    (when (> (.-Time u) time)
+      (return (.-Time u))))
+
+
+  (- (<< 1 63) 1))
+
+
+^{:go/end 921} (go/func isGCSTW ^bool [^Range r]
+  (and (strings/HasPrefix (.-Name r) "stop-the-world") (strings/Contains (.-Name r) "GC")))
+
+
+^{:go/end 925} (go/func isGCMarkAssist ^bool [^Range r]
+  (== (.-Name r) "GC mark assist"))
+
+
+^{:go/end 929} (go/func isGCSweep ^bool [^Range r]
+  (== (.-Name r) "GC incremental sweep"))

@@ -1,0 +1,220 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.types) (go/file "struct.go" :imports [
+
+
+    ^{:line 8} [ast "go/ast"]
+    ^{:line 9} [token "go/token"]
+    ^{:line 10} [. "internal/types/errors"]
+    ^{:line 11} [strconv "strconv"]])
+
+
+;; ----------------------------------------------------------------------------
+;; API
+
+
+(go/type Struct "A Struct represents a struct type.\n" (struct
+    ^{:line 19 :tag (slice (* Var))} fields ; fields != nil indicates the struct is set up (possibly with len(fields) == 0)
+    ^{:line 20 :tag (slice string)} tags)) ; field tags; nil if there are no tags
+
+
+
+
+
+
+^{:go/end 40} (go/func NewStruct "NewStruct returns a new struct with the given fields and corresponding field tags.\nIf a field with index i has a tag, tags[i] must be that tag, but len(tags) may be\nonly as long as required to hold the tag with the largest index i. Consequently,\nif no field has a tag, tags may be nil.\n" ^{:tag (* Struct)} [^{:tag (slice (* Var))} fields ^{:tag (slice string)} tags]
+  (let [^objset fset (zero objset)]
+    (range [_ f fields]
+      (when (and (!= ^{:go/via [object]} (.-name f) "_") (!= (.insert fset f) nil))
+        (panic "multiple fields with the same name")))
+
+
+    (when (> (len tags) (len fields))
+      (panic "more tags than fields"))
+
+    (let [s (addr (lit Struct :fields fields :tags tags))]
+      (.markComplete s)
+      ^{:line 39} s)))
+
+
+
+^{:go/end 43} (go/method NumFields "NumFields returns the number of fields in the struct (including blank and embedded fields).\n" ^int [^{:tag (* Struct)} s] (len (.-fields s)))
+
+
+^{:go/end 46} (go/method Field "Field returns the i'th field for 0 <= i < NumFields().\n" ^{:tag (* Var)} [^{:tag (* Struct)} s ^int i] (aget (.-fields s) i))
+
+
+^{:go/breaks [[5 53]] :go/end 54} (go/method Tag "Tag returns the i'th field tag for 0 <= i < NumFields().\n" ^string [^{:tag (* Struct)} s ^int i]
+  (when (< i (len (.-tags s)))
+    (return (aget (.-tags s) i)))
+
+  "")
+
+
+^{:go/end 56} (go/method Underlying ^Type [^{:tag (* Struct)} t] t)
+^{:go/end 57} (go/method String ^string [^{:tag (* Struct)} t] (TypeString t nil))
+
+;; ----------------------------------------------------------------------------
+;; Implementation
+
+^{:go/end 66} (go/method markComplete [^{:tag (* Struct)} s]
+  (when (== (.-fields s) nil)
+    (set! (.-fields s) (make (slice (* Var)) 0))))
+
+
+
+^{:go/end 179} (go/method structType [^{:tag (* Checker)} check ^{:tag (* Struct)} styp ^{:tag (* ast/StructType)} e]
+  (let [list (.-Fields e)]
+    (when (== list nil)
+      (.markComplete styp)
+      (return))
+
+
+    ;; struct fields and tags
+    (let [^{:tag (slice (* Var))} fields (zero (slice (* Var)))
+        ^{:line 77 :tag (slice string)} tags (zero (slice string))
+
+        ;; for double-declaration checks
+        ^{:line 80 :tag objset} fset (zero objset)
+
+        ;; current field typ and tag
+        ^{:line 83 :tag Type} typ (zero Type)
+        ^{:line 84 :tag string} tag (zero string)
+        ^{:line 85} add ^{:go/end 101} (fn [^{:tag (* ast/Ident)} ident ^bool embedded]
+          (when (and (!= tag "") (== tags nil))
+            (set! tags (make (slice string) (len fields))))
+
+          (when (!= tags nil)
+            (set! tags (append tags tag)))
+
+
+          (let [pos (.Pos ident)
+              ^{:line 94} name (.-Name ident)
+              ^{:line 95} fld (NewField pos (.-pkg check) name typ embedded)]
+            ;; spec: "Within a struct, non-blank field names must be unique."
+            (when (or (== name "_") (.declareInSet check (addr fset) pos fld))
+              (set! fields (append fields fld))
+              (.recordDef check ident fld))))
+
+
+
+        ;; addInvalid adds an embedded field of invalid type to the struct for
+        ;; fields with errors; this keeps the number of struct fields in sync
+        ;; with the source as long as the fields are _ or have different names
+        ;; (go.dev/issue/25627).
+        ^{:line 107} addInvalid ^{:go/end 111} (fn [^{:tag (* ast/Ident)} ident]
+          (set! typ (aget Typ Invalid))
+          (set! tag "")
+          (add ident true))]
+
+
+      (range [_ f (.-List list)]
+        (set! typ (.varType check (.-Type f)))
+        (set! tag (.tag check (.-Tag f)))
+        (if (> (len (.-Names f)) 0)
+          ;; named fields
+          (range [_ name (.-Names f)]
+            (add name false))
+
+
+          ;; embedded field
+          ;; spec: "An embedded type must be specified as a type name T or as a
+          ;; pointer to a non-interface type name *T, and T itself may not be a
+          ;; pointer type."
+          (let [pos (.Pos (.-Type f)) ; position of type, for errors
+              ^{:line 127} name (embeddedFieldIdent (.-Type f))]
+            (when (== name nil)
+              (.errorf check (.-Type f) InvalidSyntaxTree "embedded field type %s has no name" (.-Type f))
+              (set! name (ast/NewIdent "_"))
+              (set! (.-NamePos name) pos)
+              (addInvalid name)
+              (continue))
+
+            (add name true) ; struct{p.T} field has position of T
+
+            ;; Because we have a name, typ must be of the form T or *T, where T is the name
+            ;; of a (named or alias) type, and t (= deref(typ)) must be the type of T.
+            ;; We must delay this check to the end because we don't want to instantiate
+            ;; (via t.Underlying()) a possibly incomplete type.
+
+            ;; for use in the closure below
+            (let [embeddedTyp typ
+                ^{:line 144} embeddedPos (.-Type f)]
+
+              (.describef (.later check ^{:go/end 172} (fn []
+                    (let [(values t isPtr) (go/call deref embeddedTyp)]
+                      (type-switch [u (.Underlying t)]
+                        (case [(* Basic)]
+                          (when (not (isValid t))
+                            ;; error was reported before
+                            (return))
+
+                          ;; unsafe.Pointer is treated like a regular pointer
+                          (when (== (.-kind u) UnsafePointer)
+                            (.error check embeddedPos InvalidPtrEmbed "embedded field type cannot be unsafe.Pointer")))
+
+                        (case [(* Pointer)]
+                          (.error check embeddedPos InvalidPtrEmbed "embedded field type cannot be a pointer"))
+                        (case [(* Interface)]
+                          (when (isTypeParam t)
+                            ;; The error code here is inconsistent with other error codes for
+                            ;; invalid embedding, because this restriction may be relaxed in the
+                            ;; future, and so it did not warrant a new error code.
+                            (.error check embeddedPos MisplacedTypeParam "embedded field type cannot be a (pointer to a) type parameter")
+                            (break))
+
+                          (when isPtr
+                            (.error check embeddedPos InvalidPtrEmbed "embedded field type cannot be a pointer to an interface")))))))
+
+
+                ^{:line 172} embeddedPos "check embedded type %s" embeddedTyp)))))
+
+
+
+      (set! (.-fields styp) fields)
+      (set! (.-tags styp) tags)
+      (.markComplete styp))))
+
+
+^{:go/breaks [[4 197]] :go/end 198} (go/func embeddedFieldIdent ^{:tag (* ast/Ident)} [^ast/Expr e]
+  (type-switch [e e]
+    (case [(* ast/Ident)]
+      (return e))
+    (case [(* ast/StarExpr)]
+      ;; *T is valid, but **T is not
+      (when [(values _ ok) (assert (* ast/StarExpr) (.-X e))] (not ok)
+        (return (embeddedFieldIdent (.-X e)))))
+
+    (case [(* ast/SelectorExpr)]
+      (return (.-Sel e)))
+    (case [(* ast/IndexExpr)]
+      (return (embeddedFieldIdent (.-X e))))
+    (case [(* ast/IndexListExpr)]
+      (return (embeddedFieldIdent (.-X e)))))
+
+  nil) ; invalid embedded field
+
+
+^{:go/breaks [[4 208]] :go/end 209} (go/method declareInSet ^bool [^{:tag (* Checker)} check ^{:tag (* objset)} oset ^token/Pos pos ^Object obj]
+  (when [alt (.insert oset obj)] (!= alt nil)
+    (let [err (.newError check DuplicateDecl)]
+      (.addf err (conv atPos pos) "%s redeclared" (.Name obj))
+      (.addAltDecl err alt)
+      (.report err)
+      (return false)))
+
+  true)
+
+
+^{:go/breaks [[4 220]] :go/end 221} (go/method tag ^string [^{:tag (* Checker)} check ^{:tag (* ast/BasicLit)} t]
+  (when (!= t nil)
+    (when (== (.-Kind t) token/STRING)
+      (when [(values val err) (strconv/Unquote (.-Value t))] (== err nil)
+        (return val)))
+
+
+    (.errorf check t InvalidSyntaxTree "incorrect tag syntax: %q" (.-Value t)))
+
+  "")

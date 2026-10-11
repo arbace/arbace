@@ -1,0 +1,992 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.jsontext) (go/file "encode.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [bits "math/bits"]
+
+    ^{:line 14} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 15} [jsonopts "encoding/json/internal/jsonopts"]
+    ^{:line 16} [jsonwire "encoding/json/internal/jsonwire"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Encoder "Encoder is a streaming encoder to raw JSON tokens and values.\nIt is used to write a stream of top-level JSON values,\neach terminated with a newline character.\n\n[Encoder.WriteToken] and [Encoder.WriteValue] calls may be interleaved.\nFor example, the following JSON value:\n\n\t{\"name\":\"value\",\"array\":[null,false,true,3.14159],\"object\":{\"k\":\"v\"}}\n\ncan be composed with the following calls (ignoring errors for brevity):\n\n\te.WriteToken(BeginObject)        // {\n\te.WriteToken(String(\"name\"))     // \"name\"\n\te.WriteToken(String(\"value\"))    // \"value\"\n\te.WriteValue(Value(`\"array\"`))   // \"array\"\n\te.WriteToken(BeginArray)         // [\n\te.WriteToken(Null)               // null\n\te.WriteToken(False)              // false\n\te.WriteValue(Value(\"true\"))      // true\n\te.WriteToken(Float(3.14159))     // 3.14159\n\te.WriteToken(EndArray)           // ]\n\te.WriteValue(Value(`\"object\"`))  // \"object\"\n\te.WriteValue(Value(`{\"k\":\"v\"}`)) // {\"k\":\"v\"}\n\te.WriteToken(EndObject)          // }\n\nThe above is one of many possible sequences of calls and\nmay not represent the most sensible method to call for any given token/value.\nFor example, it is probably more common to call [Encoder.WriteToken] with a string\nfor object names.\n" (struct
+    ^{:line 49 :tag encoderState} s))
+
+
+
+
+(go/type encoderState "encoderState is the low-level state of Encoder.\nIt has exported fields and methods for use by the \"json\" package.\n" (struct
+    ^{:line 55} state
+    ^{:line 56} encodeBuffer
+    ^{:line 57} jsonopts/Struct
+
+    ^{:line 59 :tag (map any (struct))} SeenPointers)) ; only used when marshaling; identical to json.seenPointers
+
+
+
+
+
+
+(go/type encodeBuffer "encodeBuffer is a buffer split into 2 segments:\n\n  - buf[0:len(buf)]        // written (but unflushed) portion of the buffer\n  - buf[len(buf):cap(buf)] // unused portion of the buffer\n" (struct
+    ^{:line 67 :tag (slice byte)} Buf ; may alias wr if it is a bytes.Buffer
+
+
+
+    ^{:line 71 :tag int64 :doc "baseOffset is added to len(buf) to obtain the absolute offset\nrelative to the start of io.Writer stream.\n"} baseOffset
+
+    ^{:line 73 :tag io/Writer} wr
+
+
+    ^{:line 76 :tag int :doc "maxValue is the approximate maximum Value size passed to WriteValue.\n"} maxValue
+
+    ^{:line 78 :tag (slice byte) :doc "availBuffer is the buffer returned by the AvailableBuffer method.\n"} availBuffer ; always has zero length
+
+
+    ^{:line 81 :tag bufferStatistics :doc "bufStats is statistics about buffer utilization.\nIt is only used with pooled encoders in pools.go.\n"} bufStats))
+
+
+
+
+
+
+
+
+
+^{:go/end 95} (go/func NewEncoder "NewEncoder constructs a new streaming encoder writing to w\nconfigured with the provided options.\nIt flushes the internal buffer when the buffer is sufficiently full or\nwhen a top-level value has been written.\n\nIf w is a [bytes.Buffer], then the encoder appends directly into the buffer\nwithout copying the contents from an intermediate buffer.\n" ^{:tag (* Encoder)} [^io/Writer w & ^{:tag (slice Options)} opts]
+  (let [e (new Encoder)]
+    (.Reset e w (spread opts))
+    ^{:line 94} e))
+
+
+
+
+
+
+^{:go/end 116} (go/method Reset "Reset resets an encoder such that it is writing afresh to w and\nconfigured with the provided options. Reset must not be called on\nan Encoder passed to the [encoding/json/v2.MarshalerTo.MarshalJSONTo] method\nor the [encoding/json/v2.MarshalToFunc] function.\n" [^{:tag (* Encoder)} e ^io/Writer w & ^{:tag (slice Options)} opts]
+  (switch
+    (case [(== e nil)]
+      (panic "jsontext: invalid nil Encoder"))
+    (case [(== w nil)]
+      (panic "jsontext: invalid nil io.Writer"))
+    (case [(.Get ^{:go/via [Struct]} (.-Flags (.-s e)) jsonflags/WithinArshalCall)]
+      (panic "jsontext: cannot reset Encoder passed to json.MarshalerTo")))
+
+  ;; Reuse the buffer if it does not alias a previous [bytes.Buffer].
+  (let [b (subslice ^{:go/via [encodeBuffer]} (.-Buf (.-s e)) _ 0)]
+    (when [(values _ ok) (assert (* bytes/Buffer) ^{:go/via [encodeBuffer]} (.-wr (.-s e)))] ok
+      (set! b nil))
+
+    (.reset (.-s e) b w (spread opts))))
+
+
+^{:go/end 130} (go/method reset [^{:tag (* encoderState)} e ^{:tag (slice byte)} b ^io/Writer w & ^{:tag (slice Options)} opts]
+  (.reset (.-state e))
+  (set! (.-encodeBuffer e) (lit encodeBuffer :Buf b :wr w :availBuffer ^{:go/via [encodeBuffer]} (.-availBuffer e) :bufStats ^{:go/via [encodeBuffer]} (.-bufStats e)))
+  (when [(values bb ok) (assert (* bytes/Buffer) w)] (and ok (!= bb nil))
+    (set! ^{:go/via [encodeBuffer]} (.-Buf e) (.AvailableBuffer bb))) ; alias the unused buffer of bb
+
+  (let [opts2 (lit jsonopts/Struct)] ; avoid mutating e.Struct in case it is part of opts
+    (.Join opts2 (spread opts))
+    (set! (.-Struct e) opts2)
+    (when (.Get (.-Flags (.-Struct e)) jsonflags/Multiline)
+      (.InitializeMultiline (.-Struct e)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 142} (go/method Options "Options returns the options used to construct the encoder and\nmay additionally contain semantic options passed to a\n[encoding/json/v2.MarshalEncode] call.\n\nIf operating within\na [encoding/json/v2.MarshalerTo.MarshalJSONTo] method call or\na [encoding/json/v2.MarshalToFunc] function call,\nthen the returned options are only valid within the call.\n" ^Options [^{:tag (* Encoder)} e]
+  (addr (.-Struct (.-s e))))
+
+
+^{:go/end 144} (go/method options ^{:tag (* jsonopts/Struct)} [^{:tag (* encoderState)} e] (addr (.-Struct e)))
+
+
+^{:go/end 155} (go/method NeedFlush "NeedFlush determines whether to flush at this point.\n" ^bool [^{:tag (* encoderState)} e]
+  ;; NOTE: This function is carefully written to be inlinable.
+
+  ;; Avoid flushing if e.wr is nil since there is no underlying writer.
+  ;; Flush if less than 25% of the capacity remains.
+  ;; Flushing at some constant fraction ensures that the buffer stops growing
+  ;; so long as the largest Token or Value fits within that unused capacity.
+  (and (!= ^{:go/via [encodeBuffer]} (.-wr e) nil) ^:go/paren (or (== (.Depth ^{:go/via [state]} (.-Tokens e)) 1) (> (len ^{:go/via [encodeBuffer]} (.-Buf e)) (/ (* 3 (cap ^{:go/via [encodeBuffer]} (.-Buf e))) 4)))))
+
+
+
+
+^{:go/end 224} (go/method Flush "Flush flushes the buffer to the underlying io.Writer.\nIt may append a trailing newline after the top-level value.\n" ^error [^{:tag (* encoderState)} e]
+  (when (or (== ^{:go/via [encodeBuffer]} (.-wr e) nil) (.avoidFlush e))
+    (return nil))
+
+
+  ;; In streaming mode, always emit a newline after the top-level value.
+  (when (and (== (.Depth ^{:go/via [state]} (.-Tokens e)) 1) (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/OmitTopLevelNewline)))
+    (set! ^{:go/via [encodeBuffer]} (.-Buf e) (append ^{:go/via [encodeBuffer]} (.-Buf e) \newline)))
+
+
+  ;; Inform objectNameStack that we are about to flush the buffer content.
+  (.copyQuotedBuffer ^{:go/via [state]} (.-Names e) ^{:go/via [encodeBuffer]} (.-Buf e))
+
+  ;; Specialize bytes.Buffer for better performance.
+  (when [(values bb ok) (assert (* bytes/Buffer) ^{:go/via [encodeBuffer]} (.-wr e))] ok
+    ;; If e.Buf already aliases the internal buffer of bb,
+    ;; then the Write call simply increments the internal offset,
+    ;; otherwise Write operates as expected.
+    ;; See https://go.dev/issue/42986.
+    (let [(values n _) (.Write bb ^{:go/via [encodeBuffer]} (.-Buf e))] ; never fails unless bb is nil
+      (set! ^{:go/via [encodeBuffer]} (.-baseOffset e) + (conv int64 n))
+
+      ;; If the internal buffer of bytes.Buffer is too small,
+      ;; append operations elsewhere in the Encoder may grow the buffer.
+      ;; This would be semantically correct, but hurts performance.
+      ;; As such, ensure 25% of the current length is always available
+      ;; to reduce the probability that other appends must allocate.
+      (when [avail (.Available bb)] (< avail (/ (.Len bb) 4))
+        (.Grow bb (+ avail 1)))
+
+
+      (set! ^{:go/via [encodeBuffer]} (.-Buf e) (.AvailableBuffer bb))
+      (return nil)))
+
+
+  ;; Flush the internal buffer to the underlying io.Writer.
+  (let [(values n err) (.Write ^{:go/via [encodeBuffer]} (.-wr e) ^{:go/via [encodeBuffer]} (.-Buf e))]
+    (set! ^{:go/via [encodeBuffer]} (.-baseOffset e) + (conv int64 n))
+    (when (!= err nil)
+      ;; In the event of an error, preserve the unflushed portion.
+      ;; Thus, write errors aren't fatal so long as the io.Writer
+      ;; maintains consistent state after errors.
+      (when (> n 0)
+        (set! ^{:go/via [encodeBuffer]} (.-Buf e) (subslice ^{:go/via [encodeBuffer]} (.-Buf e) _ (copy ^{:go/via [encodeBuffer]} (.-Buf e) (subslice ^{:go/via [encodeBuffer]} (.-Buf e) n)))))
+
+      (return (addr (lit ioError :action "write" :err err))))
+
+    (set! ^{:go/via [encodeBuffer]} (.-Buf e) (subslice ^{:go/via [encodeBuffer]} (.-Buf e) _ 0))
+
+    ;; Check whether to grow the buffer.
+    ;; Note that cap(e.Buf) may already exceed maxBufferSize since
+    ;; an append elsewhere already grew it to store a large token.
+    ^{:go/breaks [[4 223]]} (let [^:const ^{:val 4096} maxBufferSize (<< 4 10)
+        ^:const ^{:line 212 :val 2} growthSizeFactor 2 ; higher value is faster
+        ^:const ^{:line 213 :val 2} growthRateFactor 2 ; higher value is slower
+        ;; By default, grow if below the maximum buffer size.
+        ^{:line 215} grow (<= (cap ^{:go/via [encodeBuffer]} (.-Buf e)) (/ maxBufferSize growthSizeFactor))]
+      ;; Growing can be expensive, so only grow
+      ;; if a sufficient number of bytes have been processed.
+      (set! grow (and grow (< (conv int64 (cap ^{:go/via [encodeBuffer]} (.-Buf e))) (/ ^{:go/via [encodeBuffer]} (.previousOffsetEnd e) growthRateFactor))))
+      (when grow
+        (set! ^{:go/via [encodeBuffer]} (.-Buf e) (make (slice byte) 0 (* (cap ^{:go/via [encodeBuffer]} (.-Buf e)) growthSizeFactor))))
+
+
+      nil)))
+
+^{:go/end 225} (go/method offsetAt ^int64 [^{:tag (* encodeBuffer)} e ^int pos] (+ (.-baseOffset e) (conv int64 pos)))
+^{:go/end 226} (go/method previousOffsetEnd ^int64 [^{:tag (* encodeBuffer)} e] (+ (.-baseOffset e) (conv int64 (len (.-Buf e)))))
+^{:go/end 227} (go/method unflushedBuffer ^{:tag (slice byte)} [^{:tag (* encodeBuffer)} e] (.-Buf e))
+
+
+
+^{:go/breaks [[5 248]] :go/end 249} (go/method avoidFlush "avoidFlush indicates whether to avoid flushing to ensure there is always\nenough in the buffer to unwrite the last object member if it were empty.\n" ^bool [^{:tag (* encoderState)} e]
+  (switch
+    (case [(== (.Length (.-Last ^{:go/via [state]} (.-Tokens e))) 0)]
+      ;; Never flush after BeginObject or BeginArray since we don't know yet
+      ;; if the object or array will end up being empty.
+      (return true))
+    (case [(.needObjectValue (.-Last ^{:go/via [state]} (.-Tokens e)))]
+      ;; Never flush before the object value since we don't know yet
+      ;; if the object value will end up being empty.
+      (return true))
+    (case [(and (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens e))) (>= (len ^{:go/via [encodeBuffer]} (.-Buf e)) 2))]
+      ;; Never flush after the object value if it does turn out to be empty.
+      (switch (conv string (subslice ^{:go/via [encodeBuffer]} (.-Buf e) (- (len ^{:go/via [encodeBuffer]} (.-Buf e)) 2)))
+        (case ["ll" "\"\"" "{}" "[]"] ; last two bytes of every empty value
+          (return true)))))
+
+
+  false)
+
+
+
+
+^{:go/end 308} (go/method UnwriteEmptyObjectMember "UnwriteEmptyObjectMember unwrites the last object member if it is empty\nand reports whether it performed an unwrite operation.\n" ^bool [^{:tag (* encoderState)} e ^{:tag (* string)} prevName]
+  (when [last (.-Last ^{:go/via [state]} (.-Tokens e))] (or (not (.isObject last)) (not (.NeedObjectName last)) (== (.Length last) 0))
+    (panic "BUG: must be called on an object after writing a value"))
+
+
+  ;; The flushing logic is modified to never flush a trailing empty value.
+  ;; The encoder never writes trailing whitespace eagerly.
+  ^{:go/breaks [[16 307]]} (let [b ^{:go/via [encodeBuffer]} (.unflushedBuffer e)
+
+      ;; Detect whether the last value was empty.
+      ^{:line 263 :tag int} n (zero int)]
+    (when (>= (len b) 3)
+      (switch (conv string (subslice b (- (len b) 2)))
+        (case ["ll"] ; last two bytes of `null`
+          (set! n (len "null")))
+        (case ["\"\""]
+          ;; It is possible for a non-empty string to have `""` as a suffix
+          ;; if the second to the last quote was escaped.
+          (when (== (aget b (- (len b) 3)) \\)
+            (return false)) ; e.g., `"\""` is not empty
+
+          (set! n (len "\"\"")))
+        (case ["{}"]
+          (set! n (len "{}")))
+        (case ["[]"]
+          (set! n (len "[]")))))
+
+
+    (when (== n 0)
+      (return false))
+
+
+    ;; Unwrite the value, whitespace, colon, name, whitespace, and comma.
+    (set! b (subslice b _ (- (len b) n)))
+    (set! b (jsonwire/TrimSuffixWhitespace b))
+    (set! b (jsonwire/TrimSuffixByte b \:))
+    (set! b (jsonwire/TrimSuffixString b))
+    (set! b (jsonwire/TrimSuffixWhitespace b))
+    (set! b (jsonwire/TrimSuffixByte b \,))
+    (set! ^{:go/via [encodeBuffer]} (.-Buf e) b) ; store back truncated unflushed buffer
+
+    ;; Undo state changes.
+    (.decrement (.-Last ^{:go/via [state]} (.-Tokens e))) ; for object member value
+    (.decrement (.-Last ^{:go/via [state]} (.-Tokens e))) ; for object member name
+    (when (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AllowDuplicateNames))
+      (when (.isActiveNamespace (.-Last ^{:go/via [state]} (.-Tokens e)))
+        (.removeLast (.Last ^{:go/via [state]} (.-Namespaces e)))))
+
+
+    (.clearLast ^{:go/via [state]} (.-Names e))
+    (when (!= prevName nil)
+      (.copyQuotedBuffer ^{:go/via [state]} (.-Names e) ^{:go/via [encodeBuffer]} (.-Buf e)) ; required by objectNameStack.replaceLastUnquotedName
+      (.replaceLastUnquotedName ^{:go/via [state]} (.-Names e) @prevName))
+
+    true))
+
+
+
+
+^{:go/end 332} (go/method UnwriteOnlyObjectMemberName "UnwriteOnlyObjectMemberName unwrites the only object member name\nand returns the unquoted name.\n" ^string [^{:tag (* encoderState)} e]
+  (when [last (.-Last ^{:go/via [state]} (.-Tokens e))] (or (not (.isObject last)) (!= (.Length last) 1))
+    (panic "BUG: must be called on an object after writing first name"))
+
+
+  ;; Unwrite the name and whitespace.
+  (let [b (jsonwire/TrimSuffixString ^{:go/via [encodeBuffer]} (.-Buf e))
+      ^{:line 319} isVerbatim (< (bytes/IndexByte (subslice ^{:go/via [encodeBuffer]} (.-Buf e) (len b)) \\) 0)
+      ^{:line 320} name (conv string (jsonwire/UnquoteMayCopy (subslice ^{:go/via [encodeBuffer]} (.-Buf e) (len b)) isVerbatim))]
+    (set! ^{:go/via [encodeBuffer]} (.-Buf e) (jsonwire/TrimSuffixWhitespace b))
+
+    ;; Undo state changes.
+    (.decrement (.-Last ^{:go/via [state]} (.-Tokens e)))
+    (when (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AllowDuplicateNames))
+      (when (.isActiveNamespace (.-Last ^{:go/via [state]} (.-Tokens e)))
+        (.removeLast (.Last ^{:go/via [state]} (.-Namespaces e)))))
+
+
+    (.clearLast ^{:go/via [state]} (.-Names e))
+    ^{:line 331} name))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 346} (go/method WriteToken "WriteToken writes the next token and advances the internal write offset.\n\nThe provided token kind must be consistent with the JSON grammar.\nFor example, it is an error to provide a number when the encoder\nis expecting an object name (which is always a string), or\nto provide an end object delimiter when the encoder is finishing an array.\nIf the provided token is invalid, then WriteToken reports a [SyntacticError] and\nthe internal state remains unchanged. The offset reported\nin [SyntacticError] will be the [Encoder.OutputOffset] plus any delimiter\nor whitespace characters that would have preceded the provided token.\n" ^error [^{:tag (* Encoder)} e ^Token t]
+  (.WriteToken (.-s e) t))
+
+^{:go/end 432} (go/method WriteToken ^error [^{:tag (* encoderState)} e ^Token t]
+  (let [k (.Kind t)
+      ^{:line 349} b ^{:go/via [encodeBuffer]} (.-Buf e)] ; use local variable to avoid mutating e in case of error
+
+    ;; Append any delimiters or optional whitespace.
+    (set! b (.MayAppendDelim ^{:go/via [state]} (.-Tokens e) b k))
+    (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AnyWhitespace)
+      (set! b (.appendWhitespace e b k)))
+
+    ^{:go/breaks [[6 431]]} (let [pos (len b) ; offset before the token
+
+        ;; Append the token to the output and to the state machine.
+        ^{:line 359 :tag error} err (zero error)]
+      (switch k
+        (case [\n]
+          (set! b (append b (spread "null")))
+          (set! err (.appendLiteral ^{:go/via [state]} (.-Tokens e))))
+        (case [\f]
+          (set! b (append b (spread "false")))
+          (set! err (.appendLiteral ^{:go/via [state]} (.-Tokens e))))
+        (case [\t]
+          (set! b (append b (spread "true")))
+          (set! err (.appendLiteral ^{:go/via [state]} (.-Tokens e))))
+        (case [\"]
+          (when [(set! (values b err) (.appendString t b (addr ^{:go/via [Struct]} (.-Flags e))))] (!= err nil)
+            (break))
+
+          (when (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens e)))
+            (when (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AllowDuplicateNames))
+              (when (not (.isValidNamespace (.-Last ^{:go/via [state]} (.-Tokens e))))
+                (set! err errInvalidNamespace)
+                (break))
+
+              (when (and (.isActiveNamespace (.-Last ^{:go/via [state]} (.-Tokens e))) (not (.insertQuoted (.Last ^{:go/via [state]} (.-Namespaces e)) (subslice b pos) false)))
+                (set! err (wrapWithObjectName ErrDuplicateName (subslice b pos)))
+                (break)))
+
+
+            (.ReplaceLastQuotedOffset ^{:go/via [state]} (.-Names e) pos)) ; only replace if insertQuoted succeeds
+
+          (set! err (.appendString ^{:go/via [state]} (.-Tokens e))))
+        (case [\0]
+          (when [(set! (values b err) (.appendNumber t b (addr ^{:go/via [Struct]} (.-Flags e))))] (!= err nil)
+            (break))
+
+          (set! err (.appendNumber ^{:go/via [state]} (.-Tokens e))))
+        (case [\{]
+          (set! b (append b \{))
+          (when [(set! err (.pushObject ^{:go/via [state]} (.-Tokens e)))] (!= err nil)
+            (break))
+
+          (.push ^{:go/via [state]} (.-Names e))
+          (when (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AllowDuplicateNames))
+            (.push ^{:go/via [state]} (.-Namespaces e)))
+
+          (.Clear ^{:go/via [Struct]} (.-Flags e) jsonflags/TagFlags)) ; tags only apply to current depth
+        (case [\}]
+          (set! b (append b \}))
+          (when [(set! err (.popObject ^{:go/via [state]} (.-Tokens e)))] (!= err nil)
+            (break))
+
+          (.pop ^{:go/via [state]} (.-Names e))
+          (when (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AllowDuplicateNames))
+            (.pop ^{:go/via [state]} (.-Namespaces e))))
+
+        (case [\[]
+          (set! b (append b \[))
+          (set! err (.pushArray ^{:go/via [state]} (.-Tokens e)))
+          (.Clear ^{:go/via [Struct]} (.-Flags e) jsonflags/TagFlags)) ; tags only apply to current depth
+        (case [\]]
+          (set! b (append b \]))
+          (set! err (.popArray ^{:go/via [state]} (.-Tokens e))))
+        (default
+          (set! err errInvalidToken)))
+
+      (when (!= err nil)
+        (return (wrapSyntacticError e err pos (+ 1))))
+
+
+      ;; Finish off the buffer and store it back into e.
+      (set! ^{:go/via [encodeBuffer]} (.-Buf e) b)
+      (when (.NeedFlush e)
+        (return (.Flush e)))
+
+      nil)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 510} (go/method AppendRaw "AppendRaw appends either a raw string (without double quotes) or number.\nSpecify safeASCII if the string output is guaranteed to be ASCII\nwithout any characters (including '<', '>', and '&') that need escaping,\notherwise this will validate whether the string needs escaping.\nThe appended bytes for a JSON number must be valid.\n\nThis is a specialized implementation of Encoder.WriteValue\nthat allows appending directly into the buffer.\nIt is only called from marshal logic in the \"json\" package.\n" ^error [^{:tag (* encoderState)} e ^Kind k ^bool safeASCII ^{:tag (func [(slice byte)] [(slice byte) error])} appendFn]
+  (let [b ^{:go/via [encodeBuffer]} (.-Buf e)] ; use local variable to avoid mutating e in case of error
+
+    ;; Append any delimiters or optional whitespace.
+    (set! b (.MayAppendDelim ^{:go/via [state]} (.-Tokens e) b k))
+    (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AnyWhitespace)
+      (set! b (.appendWhitespace e b k)))
+
+    ^{:go/breaks [[5 509]]} (let [pos (len b) ; offset before the token
+
+        ^{:line 453 :tag error} err (zero error)]
+      (switch k
+        (case [\"]
+          ;; Append directly into the encoder buffer by assuming that
+          ;; most of the time none of the characters need escaping.
+          (set! b (append b \"))
+          (when [(set! (values b err) (appendFn b))] (!= err nil)
+            (return err))
+
+          (set! b (append b \"))
+
+          ;; Check whether we need to escape the string and if necessary
+          ;; copy it to a scratch buffer and then escape it back.
+          (let [isVerbatim (or safeASCII (not (jsonwire/NeedEscape (subslice b (+ pos (len "\"")) (- (len b) (len "\""))))))]
+            (when (not isVerbatim)
+              (let [^error err (zero error)
+                  ^{:line 469} b2 (append ^{:go/via [encodeBuffer]} (.-availBuffer e) (spread (subslice b (+ pos (len "\"")) (- (len b) (len "\"")))))]
+                (set! (values b err) (jsonwire/AppendQuote (subslice b _ pos) b2 (addr ^{:go/via [Struct]} (.-Flags e))))
+                (set! ^{:go/via [encodeBuffer]} (.-availBuffer e) (subslice b2 _ 0))
+                (when (!= err nil)
+                  (return (wrapSyntacticError e err pos (+ 1))))))
+
+
+
+            ;; Update the state machine.
+            (when (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens e)))
+              (when (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AllowDuplicateNames))
+                (when (not (.isValidNamespace (.-Last ^{:go/via [state]} (.-Tokens e))))
+                  (return (wrapSyntacticError e errInvalidNamespace pos (+ 1))))
+
+                (when (and (.isActiveNamespace (.-Last ^{:go/via [state]} (.-Tokens e))) (not (.insertQuoted (.Last ^{:go/via [state]} (.-Namespaces e)) (subslice b pos) isVerbatim)))
+                  (set! err (wrapWithObjectName ErrDuplicateName (subslice b pos)))
+                  (return (wrapSyntacticError e err pos (+ 1)))))
+
+
+              (.ReplaceLastQuotedOffset ^{:go/via [state]} (.-Names e) pos)) ; only replace if insertQuoted succeeds
+
+            (when [err (.appendString ^{:go/via [state]} (.-Tokens e))] (!= err nil)
+              (return (wrapSyntacticError e err pos (+ 1))))))
+
+        (case [\0]
+          (when [(set! (values b err) (appendFn b))] (!= err nil)
+            (return err))
+
+          (when [err (.appendNumber ^{:go/via [state]} (.-Tokens e))] (!= err nil)
+            (return (wrapSyntacticError e err pos (+ 1)))))
+
+        (default
+          (panic "BUG: invalid kind")))
+
+
+      ;; Finish off the buffer and store it back into e.
+      (set! ^{:go/via [encodeBuffer]} (.-Buf e) b)
+      (when (.NeedFlush e)
+        (return (.Flush e)))
+
+      nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 526} (go/method WriteValue "WriteValue writes the next raw value and advances the internal write offset.\nThe Encoder does not simply copy the provided value verbatim, but\nparses it to ensure that it is syntactically valid and reformats it\naccording to how the Encoder is configured to format whitespace and strings.\nIf [AllowInvalidUTF8] is specified, then any invalid UTF-8 is mangled\nas the Unicode replacement character, U+FFFD.\n\nThe provided value kind must be consistent with the JSON grammar\n(see examples on [Encoder.WriteToken]). If the provided value is invalid,\nthen WriteValue reports a [SyntacticError] and the internal state remains unchanged.\nThe offset reported in [SyntacticError] will be the [Encoder.OutputOffset]\nplus the offset into v of any encountered syntax error.\n" ^error [^{:tag (* Encoder)} e ^Value v]
+  (.WriteValue (.-s e) v))
+
+^{:go/end 606} (go/method WriteValue ^error [^{:tag (* encoderState)} e ^Value v]
+  (set! ^{:go/via [encodeBuffer]} (.-maxValue e) bit-or (len v)) ; bitwise OR is a fast approximation of max
+
+  (let [k (.Kind v)
+      ^{:line 531} b ^{:go/via [encodeBuffer]} (.-Buf e)] ; use local variable to avoid mutating e in case of error
+
+    ;; Append any delimiters or optional whitespace.
+    (set! b (.MayAppendDelim ^{:go/via [state]} (.-Tokens e) b k))
+    (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AnyWhitespace)
+      (set! b (.appendWhitespace e b k)))
+
+    (let [pos (len b) ; offset before the value
+
+        ;; Append the value to the output.
+        ^{:line 541 :tag int} n (zero int)]
+      (set! n + (jsonwire/ConsumeWhitespace (subslice v n)))
+      ^{:go/breaks [[10 605]]} (let [(values ^:assign b m err) (.reformatValue e b (subslice v n) (.Depth ^{:go/via [state]} (.-Tokens e)))]
+        (when (!= err nil)
+          (return (wrapSyntacticError e err (+ pos n m) (+ 1))))
+
+        (set! n + m)
+        (set! n + (jsonwire/ConsumeWhitespace (subslice v n)))
+        (when (> (len v) n)
+          (set! err (^{:inst [Value]} jsonwire/NewInvalidCharacterError (subslice v n) "after top-level value"))
+          (return (wrapSyntacticError e err (+ pos n) 0)))
+
+
+        ;; Append the kind to the state machine.
+        (switch k
+          (case [\n \f \t]
+            (set! err (.appendLiteral ^{:go/via [state]} (.-Tokens e))))
+          (case [\"]
+            (when (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens e)))
+              (when (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AllowDuplicateNames))
+                (when (not (.isValidNamespace (.-Last ^{:go/via [state]} (.-Tokens e))))
+                  (set! err errInvalidNamespace)
+                  (break))
+
+                (when (and (.isActiveNamespace (.-Last ^{:go/via [state]} (.-Tokens e))) (not (.insertQuoted (.Last ^{:go/via [state]} (.-Namespaces e)) (subslice b pos) false)))
+                  (set! err (wrapWithObjectName ErrDuplicateName (subslice b pos)))
+                  (break)))
+
+
+              (.ReplaceLastQuotedOffset ^{:go/via [state]} (.-Names e) pos)) ; only replace if insertQuoted succeeds
+
+            (set! err (.appendString ^{:go/via [state]} (.-Tokens e))))
+          (case [\0]
+            (set! err (.appendNumber ^{:go/via [state]} (.-Tokens e))))
+          (case [\{]
+            (when [(set! err (.pushObject ^{:go/via [state]} (.-Tokens e)))] (!= err nil)
+              (break))
+
+            (when [(set! err (.popObject ^{:go/via [state]} (.-Tokens e)))] (!= err nil)
+              (panic (+ "BUG: popObject should never fail immediately after pushObject: " (.Error err))))
+
+            (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/ReorderRawObjects)
+              (mustReorderObjects (subslice b pos))))
+
+          (case [\[]
+            (when [(set! err (.pushArray ^{:go/via [state]} (.-Tokens e)))] (!= err nil)
+              (break))
+
+            (when [(set! err (.popArray ^{:go/via [state]} (.-Tokens e)))] (!= err nil)
+              (panic (+ "BUG: popArray should never fail immediately after pushArray: " (.Error err))))
+
+            (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/ReorderRawObjects)
+              (mustReorderObjects (subslice b pos)))))
+
+
+        (when (!= err nil)
+          (return (wrapSyntacticError e err pos (+ 1))))
+
+
+        ;; Finish off the buffer and store it back into e.
+        (set! ^{:go/via [encodeBuffer]} (.-Buf e) b)
+        (when (.NeedFlush e)
+          (return (.Flush e)))
+
+        nil))))
+
+
+
+
+
+^{:go/end 632} (go/method CountNextDelimWhitespace "CountNextDelimWhitespace counts the number of bytes of delimiter and\nwhitespace bytes assuming the upcoming token is a JSON value.\nThis method is used for error reporting at the semantic layer.\n" [^{:tag (* encoderState)} e] :results [^int n]
+  (let [^:const ^{:val 34} next (conv Kind \") ; arbitrary kind as next JSON value
+      ^{:line 613} delim (.needDelim ^{:go/via [state]} (.-Tokens e) next)]
+    (when (> delim 0)
+      (set! n + (bit-or (len ",") (len ":"))))
+
+    (if (== delim \:)
+      (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/SpaceAfterColon)
+        (set! n + (len " ")))
+
+      (do
+        (when (and (== delim \,) (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/SpaceAfterComma))
+          (set! n + (len " ")))
+
+        (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/Multiline)
+          (when [m (.NeedIndent ^{:go/via [state]} (.-Tokens e) next)] (> m 0)
+            (set! n + (+ (len "\n") (len ^{:go/via [Struct CoderValues]} (.-IndentPrefix e)) (* (- m 1) (len ^{:go/via [Struct CoderValues]} (.-Indent e)))))))))
+
+
+
+    ^{:line 631} n))
+
+
+
+^{:go/end 649} (go/method appendWhitespace "appendWhitespace appends whitespace that immediately precedes the next token.\n" ^{:tag (slice byte)} [^{:tag (* encoderState)} e ^{:tag (slice byte)} b ^Kind next]
+  (if [delim (.needDelim ^{:go/via [state]} (.-Tokens e) next)] (== delim \:)
+    (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/SpaceAfterColon)
+      (set! b (append b \space)))
+
+    (do
+      (when (and (== delim \,) (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/SpaceAfterComma))
+        (set! b (append b \space)))
+
+      (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/Multiline)
+        (set! b (.AppendIndent e b (.NeedIndent ^{:go/via [state]} (.-Tokens e) next))))))
+
+
+  ^{:line 648} b)
+
+
+
+
+^{:go/end 663} (go/method AppendIndent "AppendIndent appends the appropriate number of indentation characters\nfor the current nested level, n.\n" ^{:tag (slice byte)} [^{:tag (* encoderState)} e ^{:tag (slice byte)} b ^int n]
+  (when (== n 0)
+    (return b))
+
+  (set! b (append b \newline))
+  (set! b (append b (spread ^{:go/via [Struct CoderValues]} (.-IndentPrefix e))))
+  (for [] (> n 1) (dec! n)
+    (set! b (append b (spread ^{:go/via [Struct CoderValues]} (.-Indent e)))))
+
+  ^{:line 662} b)
+
+
+
+
+
+^{:go/end 711} (go/method reformatValue "reformatValue parses a JSON value from the start of src and\nappends it to the end of dst, reformatting whitespace and strings as needed.\nIt returns the extended dst buffer and the number of consumed input bytes.\n" [^{:tag (* encoderState)} e ^{:tag (slice byte)} dst ^Value src ^int depth] :results [(slice byte) int error]
+  ;; TODO: Should this update ValueFlags as input?
+  (when (== (len src) 0)
+    (return dst 0 io/ErrUnexpectedEOF))
+
+  (switch [k (.normalize (conv Kind (aget src 0)))] k
+    (case [\n]
+      (when (== (jsonwire/ConsumeNull src) 0)
+        (let [(values n err) (jsonwire/ConsumeLiteral src "null")]
+          (return dst n err)))
+
+      (return (append dst (spread "null")) (len "null") nil))
+    (case [\f]
+      (when (== (jsonwire/ConsumeFalse src) 0)
+        (let [(values n err) (jsonwire/ConsumeLiteral src "false")]
+          (return dst n err)))
+
+      (return (append dst (spread "false")) (len "false") nil))
+    (case [\t]
+      (when (== (jsonwire/ConsumeTrue src) 0)
+        (let [(values n err) (jsonwire/ConsumeLiteral src "true")]
+          (return dst n err)))
+
+      (return (append dst (spread "true")) (len "true") nil))
+    (case [\"]
+      (when [n (jsonwire/ConsumeSimpleString src)] (> n 0)
+        (set! dst (append dst (spread (subslice src _ n)))) ; copy simple strings verbatim
+        (return dst n nil))
+
+      (return (jsonwire/ReformatString dst src (addr ^{:go/via [Struct]} (.-Flags e)))))
+    (case [\0]
+      (when [n (jsonwire/ConsumeSimpleNumber src)] (and (> n 0) (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/CanonicalizeNumbers)))
+        (set! dst (append dst (spread (subslice src _ n)))) ; copy simple numbers verbatim
+        (return dst n nil))
+
+      (return (jsonwire/ReformatNumber dst src (addr ^{:go/via [Struct]} (.-Flags e)))))
+    (case [\{]
+      (return (.reformatObject e dst src depth)))
+    (case [\[]
+      (return (.reformatArray e dst src depth)))
+    (default
+      (return dst 0 (^{:inst [Value]} jsonwire/NewInvalidCharacterError src "at start of value")))))
+
+
+
+
+
+
+^{:go/end 822} (go/method reformatObject "reformatObject parses a JSON object from the start of src and\nappends it to the end of dst, reformatting whitespace and strings as needed.\nIt returns the extended dst buffer and the number of consumed input bytes.\n" [^{:tag (* encoderState)} e ^{:tag (slice byte)} dst ^Value src ^int depth] :results [(slice byte) int error]
+  ;; Append object begin.
+  (cond (or (== (len src) 0) (!= (aget src 0) \{))
+    (panic "BUG: reformatObject must be called with a buffer that starts with '{'")
+    (== depth (+ maxNestingDepth 1))
+    (return dst 0 errMaxDepth))
+
+  (set! dst (append dst \{))
+  (let [n (len "{")]
+
+    ;; Append (possible) object end.
+    (set! n + (jsonwire/ConsumeWhitespace (subslice src n)))
+    (when (<= (conv uint (len src)) (conv uint n))
+      (return dst n io/ErrUnexpectedEOF))
+
+    (when (== (aget src n) \})
+      (set! dst (append dst \}))
+      (set! n + (len "}"))
+      (return dst n nil))
+
+
+    (let [^error err (zero error)
+        ^{:line 738 :tag (* objectNamespace)} names (zero (* objectNamespace))]
+      (when (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AllowDuplicateNames))
+        (.push ^{:go/via [state]} (.-Namespaces e))
+        (defer (.pop ^{:go/via [state]} (.-Namespaces e)))
+        (set! names (.Last ^{:go/via [state]} (.-Namespaces e))))
+
+      (inc! depth)
+      (while true
+        ;; Append optional newline and indentation.
+        (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/Multiline)
+          (set! dst (.AppendIndent e dst depth)))
+
+
+        ;; Append object name.
+        (set! n + (jsonwire/ConsumeWhitespace (subslice src n)))
+        (when (<= (conv uint (len src)) (conv uint n))
+          (return dst n io/ErrUnexpectedEOF))
+
+        (let [m (jsonwire/ConsumeSimpleString (subslice src n))
+            ^{:line 757} isVerbatim (> m 0)]
+          (if isVerbatim
+            (set! dst (append dst (spread (subslice src n (+ n m)))))
+            (do
+              (set! (values dst m err) (jsonwire/ReformatString dst (subslice src n) (addr ^{:go/via [Struct]} (.-Flags e))))
+              (when (!= err nil)
+                (return dst (+ n m) err))))
+
+
+          (let [quotedName (subslice src n (+ n m))]
+            (when (and (not (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/AllowDuplicateNames)) (not (.insertQuoted names quotedName isVerbatim)))
+              (return dst n (wrapWithObjectName ErrDuplicateName quotedName)))
+
+            (set! n + m)
+
+            ;; Append colon.
+            (set! n + (jsonwire/ConsumeWhitespace (subslice src n)))
+            (when (<= (conv uint (len src)) (conv uint n))
+              (return dst n (wrapWithObjectName io/ErrUnexpectedEOF quotedName)))
+
+            (when (!= (aget src n) \:)
+              (set! err (^{:inst [Value]} jsonwire/NewInvalidCharacterError (subslice src n) "after object name (expecting ':')"))
+              (return dst n (wrapWithObjectName err quotedName)))
+
+            (set! dst (append dst \:))
+            (set! n + (len ":"))
+            (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/SpaceAfterColon)
+              (set! dst (append dst \space)))
+
+
+            ;; Append object value.
+            (set! n + (jsonwire/ConsumeWhitespace (subslice src n)))
+            (when (<= (conv uint (len src)) (conv uint n))
+              (return dst n (wrapWithObjectName io/ErrUnexpectedEOF quotedName)))
+
+            (set! (values dst m err) (.reformatValue e dst (subslice src n) depth))
+            (when (!= err nil)
+              (return dst (+ n m) (wrapWithObjectName err quotedName)))
+
+            (set! n + m)
+
+            ;; Append comma or object end.
+            (set! n + (jsonwire/ConsumeWhitespace (subslice src n)))
+            (when (<= (conv uint (len src)) (conv uint n))
+              (return dst n io/ErrUnexpectedEOF))
+
+            (switch (aget src n)
+              (case [\,]
+                (set! dst (append dst \,))
+                (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/SpaceAfterComma)
+                  (set! dst (append dst \space)))
+
+                (set! n + (len ","))
+                (continue))
+              (case [\}]
+                (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/Multiline)
+                  (set! dst (.AppendIndent e dst (- depth 1))))
+
+                (set! dst (append dst \}))
+                (set! n + (len "}"))
+                (return dst n nil))
+              (default
+                (return dst n (^{:inst [Value]} jsonwire/NewInvalidCharacterError (subslice src n) "after object value (expecting ',' or '}')"))))))))))
+
+
+
+
+
+
+
+^{:go/end 894} (go/method reformatArray "reformatArray parses a JSON array from the start of src and\nappends it to the end of dst, reformatting whitespace and strings as needed.\nIt returns the extended dst buffer and the number of consumed input bytes.\n" [^{:tag (* encoderState)} e ^{:tag (slice byte)} dst ^Value src ^int depth] :results [(slice byte) int error]
+  ;; Append array begin.
+  (cond (or (== (len src) 0) (!= (aget src 0) \[))
+    (panic "BUG: reformatArray must be called with a buffer that starts with '['")
+    (== depth (+ maxNestingDepth 1))
+    (return dst 0 errMaxDepth))
+
+  (set! dst (append dst \[))
+  (let [n (len "[")]
+
+    ;; Append (possible) array end.
+    (set! n + (jsonwire/ConsumeWhitespace (subslice src n)))
+    (when (<= (conv uint (len src)) (conv uint n))
+      (return dst n io/ErrUnexpectedEOF))
+
+    (when (== (aget src n) \])
+      (set! dst (append dst \]))
+      (set! n + (len "]"))
+      (return dst n nil))
+
+
+    (let [^int64 idx (zero int64)
+        ^{:line 849 :tag error} err (zero error)]
+      (inc! depth)
+      (while true
+        ;; Append optional newline and indentation.
+        (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/Multiline)
+          (set! dst (.AppendIndent e dst depth)))
+
+
+        ;; Append array value.
+        (set! n + (jsonwire/ConsumeWhitespace (subslice src n)))
+        (when (<= (conv uint (len src)) (conv uint n))
+          (return dst n io/ErrUnexpectedEOF))
+
+        (let [^int m (zero int)]
+          (set! (values dst m err) (.reformatValue e dst (subslice src n) depth))
+          (when (!= err nil)
+            (return dst (+ n m) (wrapWithArrayIndex err idx)))
+
+          (set! n + m)
+
+          ;; Append comma or array end.
+          (set! n + (jsonwire/ConsumeWhitespace (subslice src n)))
+          (when (<= (conv uint (len src)) (conv uint n))
+            (return dst n io/ErrUnexpectedEOF))
+
+          (switch (aget src n)
+            (case [\,]
+              (set! dst (append dst \,))
+              (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/SpaceAfterComma)
+                (set! dst (append dst \space)))
+
+              (set! n + (len ","))
+              (inc! idx)
+              (continue))
+            (case [\]]
+              (when (.Get ^{:go/via [Struct]} (.-Flags e) jsonflags/Multiline)
+                (set! dst (.AppendIndent e dst (- depth 1))))
+
+              (set! dst (append dst \]))
+              (set! n + (len "]"))
+              (return dst n nil))
+            (default
+              (return dst n (^{:inst [Value]} jsonwire/NewInvalidCharacterError (subslice src n) "after array value (expecting ',' or ']')")))))))))
+
+
+
+
+
+
+
+
+^{:go/end 902} (go/method OutputOffset "OutputOffset returns the current output byte offset. It gives the location\nof the next byte immediately after the most recently written token or value.\nThe number of bytes actually written to the underlying [io.Writer] may be less\nthan this offset due to internal buffering.\n" ^int64 [^{:tag (* Encoder)} e]
+  ^{:go/via [encodeBuffer]} (.previousOffsetEnd (.-s e)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 931} (go/method AvailableBuffer "AvailableBuffer returns a zero-length buffer with a possible non-zero capacity.\nThis buffer is intended to be used to populate a [Value]\nbeing passed to an immediately succeeding [Encoder.WriteValue] call.\n\nExample usage:\n\n\tb := e.AvailableBuffer()\n\tb = append(b, '\"')\n\tb = appendString(b, v) // append the string formatting of v\n\tb = append(b, '\"')\n\t... := e.WriteValue(b)\n\nNote that WriteValue expects a valid JSON value. Constructing a value in a\nraw []byte requires more care than using constructor functions like\n[String], which always return valid [Token]s or [Value]s.\n" ^{:tag (slice byte)} [^{:tag (* Encoder)} e]
+  ;; NOTE: We don't return e.Buf[len(e.Buf):cap(e.Buf)] since WriteValue would
+  ;; need to take special care to avoid mangling the data while reformatting.
+  ;; WriteValue can't easily identify whether the input Value aliases e.Buf
+  ;; without using unsafe.Pointer. Thus, we just return a different buffer.
+  ;; Should this ever alias e.Buf, we need to consider how it operates with
+  ;; the specialized performance optimization for bytes.Buffer.
+  (let [n ^int (<< 1 (bits/Len (conv uint (bit-or ^{:go/via [encodeBuffer]} (.-maxValue (.-s e)) 63))))] ; fast approximation for max length
+    (when (< (cap ^{:go/via [encodeBuffer]} (.-availBuffer (.-s e))) n)
+      (set! ^{:go/via [encodeBuffer]} (.-availBuffer (.-s e)) (make (slice byte) 0 n)))
+
+    ^{:go/via [encodeBuffer]} (.-availBuffer (.-s e))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 959} (go/method StackDepth "StackDepth returns the depth of the state machine for written JSON data.\nEach level on the stack represents a nested JSON object or array.\nIt is incremented whenever a [BeginObject] or [BeginArray] token is encountered\nand decremented whenever an [EndObject] or [EndArray] token is encountered.\n\nStackDepth returns 0 when not inside any object or array.\nIn particular, it returns 0 before any tokens have been written,\nafter any top-level value has been written, and between values\nwhen encoding a stream of top-level values (e.g., NDJSON).\nStackDepth returns 1 inside a top-level object or array,\n2 inside a nested object or array, and so on.\n\nFor example, consider encoding the following JSON:\n\n\t{\"a\": [1, 2], \"b\": {\"c\": 3}}\n\nWhile encoding, StackDepth would report the following:\n\n  - At the start, StackDepth reports 0.\n  - After encoding the outer '{', StackDepth reports 1.\n  - After encoding the inner '[', StackDepth reports 2.\n  - After encoding the inner ']', StackDepth reports 1.\n  - After encoding the outer '}', StackDepth reports 0.\n" ^int [^{:tag (* Encoder)} e]
+  ;; NOTE: Keep in sync with Decoder.StackDepth.
+  (- (.Depth ^{:go/via [state]} (.-Tokens (.-s e))) 1))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 983} (go/method StackIndex "StackIndex returns information about the specified stack level.\nIt must be a number between 0 and [Encoder.StackDepth], inclusive.\nFor each level, it reports the kind:\n\n  - [KindInvalid] for a level of zero,\n  - [KindBeginObject] for a level representing a JSON object, and\n  - [KindBeginArray] for a level representing a JSON array.\n\nIt also reports the length of that JSON object or array encoded so far.\nEach name and value in a JSON object is counted separately,\nso the effective number of members is half the length.\nA complete JSON object must have an even length.\n" [^{:tag (* Encoder)} e ^int i] :results [Kind int64]
+  ;; NOTE: Keep in sync with Decoder.StackIndex.
+  (switch [s (.index ^{:go/via [state]} (.-Tokens (.-s e)) i)]
+    (case [(and (> i 0) (.isObject s))]
+      (return \{ (.Length s)))
+    (case [(and (> i 0) (.isArray s))]
+      (return \[ (.Length s)))
+    (default
+      (return 0 (.Length s)))))
+
+
+
+
+^{:go/end 988} (go/method StackPointer "StackPointer returns a JSON Pointer (RFC 6901) to the most recently written value.\n" ^Pointer [^{:tag (* Encoder)} e]
+  (conv Pointer (.AppendStackPointer (.-s e) nil -1)))
+
+
+^{:go/end 993} (go/method AppendStackPointer ^{:tag (slice byte)} [^{:tag (* encoderState)} e ^{:tag (slice byte)} b ^int where]
+  (.copyQuotedBuffer ^{:go/via [state]} (.-Names e) ^{:go/via [encodeBuffer]} (.-Buf e))
+  (.appendStackPointer (.-state e) b where))

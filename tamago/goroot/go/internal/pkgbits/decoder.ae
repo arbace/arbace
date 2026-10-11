@@ -1,0 +1,519 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.pkgbits) (go/file "decoder.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [constant "go/constant"]
+    ^{:line 12} [token "go/token"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [big "math/big"]
+    ^{:line 15} [os "os"]
+    ^{:line 16} [runtime "runtime"]
+    ^{:line 17} [strings "strings"]])
+
+
+
+
+(go/type PkgDecoder "A PkgDecoder provides methods for decoding a package's Unified IR\nexport data.\n" (struct
+
+    ^{:line 24 :tag Version :doc "version is the file format version.\n"} version
+
+
+    ^{:line 27 :tag bool :doc "sync indicates whether the file uses sync markers.\n"} sync
+
+
+
+
+    ^{:line 32 :tag string :doc "pkgPath is the package path for the package to be decoded.\n\nTODO(mdempsky): Remove; unneeded since CL 391014.\n"} pkgPath
+
+
+
+
+
+    ^{:line 38 :tag string :doc "elemData is the full data payload of the encoded package.\nElements are densely and contiguously packed together.\n\nThe last 8 bytes of elemData are the package fingerprint.\n"} elemData
+
+
+
+
+
+
+
+
+
+    ^{:line 48 :tag (slice uint32) :doc "elemEnds stores the byte-offset end positions of element\nbitstreams within elemData.\n\nFor example, element I's bitstream data starts at elemEnds[I-1]\n(or 0, if I==0) and ends at elemEnds[I].\n\nNote: elemEnds is indexed by absolute indices, not\nsection-relative indices.\n"} elemEnds
+
+
+
+
+
+
+    ^{:line 55 :tag (array numRelocs uint32) :doc "elemEndsEnds stores the index-offset end positions of relocation\nsections within elemEnds.\n\nFor example, section K's end positions start at elemEndsEnds[K-1]\n(or 0, if K==0) and end at elemEndsEnds[K].\n"} elemEndsEnds
+
+    ^{:line 57 :tag (slice RefTableEntry)} scratchRelocEnt))
+
+
+
+
+
+^{:go/end 63} (go/method PkgPath "PkgPath returns the package path for the package\n\nTODO(mdempsky): Remove; unneeded since CL 391014.\n" ^string [^{:tag (* PkgDecoder)} pr] (.-pkgPath pr))
+
+
+^{:go/end 66} (go/method SyncMarkers "SyncMarkers reports whether pr uses sync markers.\n" ^bool [^{:tag (* PkgDecoder)} pr] (.-sync pr))
+
+
+
+
+^{:go/end 109} (go/func NewPkgDecoder "NewPkgDecoder returns a PkgDecoder initialized to read the Unified\nIR export data from input. pkgPath is the package path for the\ncompilation unit that produced the export data.\n" ^PkgDecoder [^string pkgPath ^string input]
+  (let [pr ^{:go/breaks [2]} (lit PkgDecoder
+        :pkgPath pkgPath)
+
+
+      ;; TODO(mdempsky): Implement direct indexing of input string to
+      ;; avoid copying the position information.
+
+      ^{:line 79} r (strings/NewReader input)
+
+      ^{:line 81 :tag uint32} ver (zero uint32)]
+    (go/call assert (== (binary/Read r binary/LittleEndian (addr ver)) nil))
+    (set! (.-version pr) (conv Version ver))
+
+    (when (>= (.-version pr) numVersions)
+      (panic (fmt/Errorf "cannot decode %q, export data version %d is greater than maximum supported version %d" pkgPath (.-version pr) (- numVersions 1))))
+
+
+    (when (.Has (.-version pr) Flags)
+      (let [^uint32 flags (zero uint32)]
+        (go/call assert (== (binary/Read r binary/LittleEndian (addr flags)) nil))
+        (set! (.-sync pr) (!= (bit-and flags flagSyncMarkers) 0))))
+
+
+    (go/call assert (== (binary/Read r binary/LittleEndian (subslice (.-elemEndsEnds pr))) nil))
+
+    (set! (.-elemEnds pr) (make (slice uint32) (aget (.-elemEndsEnds pr) (- (len (.-elemEndsEnds pr)) 1))))
+    (go/call assert (== (binary/Read r binary/LittleEndian (subslice (.-elemEnds pr))) nil))
+
+    (let [(values pos err) (.Seek r 0 io/SeekCurrent)]
+      (go/call assert (== err nil))
+
+      (set! (.-elemData pr) (subslice input pos))
+
+      (let [^:const ^{:val 8} fingerprintSize 8]
+        (go/call assert (== (- (len (.-elemData pr)) fingerprintSize) (conv int (aget (.-elemEnds pr) (- (len (.-elemEnds pr)) 1)))))
+
+        ^{:line 108} pr))))
+
+
+
+^{:go/end 118} (go/method NumElems "NumElems returns the number of elements in section k.\n" ^int [^{:tag (* PkgDecoder)} pr ^SectionKind k]
+  (let [count (conv int (aget (.-elemEndsEnds pr) k))]
+    (when (> k 0)
+      (set! count - (conv int (aget (.-elemEndsEnds pr) (- k 1)))))
+
+    ^{:line 117} count))
+
+
+
+^{:go/end 123} (go/method TotalElems "TotalElems returns the total number of elements across all sections.\n" ^int [^{:tag (* PkgDecoder)} pr]
+  (len (.-elemEnds pr)))
+
+
+
+^{:go/end 130} (go/method Fingerprint "Fingerprint returns the package fingerprint.\n" ^{:tag (array 8 byte)} [^{:tag (* PkgDecoder)} pr]
+  (let [^{:tag (array 8 byte)} fp (zero (array 8 byte))]
+    (copy (subslice fp) (subslice (.-elemData pr) (- (len (.-elemData pr)) 8)))
+    ^{:line 129} fp))
+
+
+
+
+^{:go/end 143} (go/method AbsIdx "AbsIdx returns the absolute index for the given (section, index)\npair.\n" ^int [^{:tag (* PkgDecoder)} pr ^SectionKind k ^RelElemIdx idx]
+  (let [absIdx (conv int idx)]
+    (when (> k 0)
+      (set! absIdx + (conv int (aget (.-elemEndsEnds pr) (- k 1)))))
+
+    (when (>= absIdx (conv int (aget (.-elemEndsEnds pr) k)))
+      (panicf "%v:%v is out of bounds; %v" k idx (.-elemEndsEnds pr)))
+
+    ^{:line 142} absIdx))
+
+
+
+
+^{:go/end 157} (go/method DataIdx "DataIdx returns the raw element bitstream for the given (section,\nindex) pair.\n" ^string [^{:tag (* PkgDecoder)} pr ^SectionKind k ^RelElemIdx idx]
+  (let [absIdx (.AbsIdx pr k idx)
+
+      ^{:line 150 :tag uint32} start (zero uint32)]
+    (when (> absIdx 0)
+      (set! start (aget (.-elemEnds pr) (- absIdx 1))))
+
+    (let [end (aget (.-elemEnds pr) absIdx)]
+
+      (subslice (.-elemData pr) start end))))
+
+
+
+^{:go/end 162} (go/method StringIdx "StringIdx returns the string value for the given string index.\n" ^string [^{:tag (* PkgDecoder)} pr ^RelElemIdx idx]
+  (.DataIdx pr SectionString idx))
+
+
+
+
+^{:go/end 170} (go/method NewDecoder "NewDecoder returns a Decoder for the given (section, index) pair,\nand decodes the given SyncMarker from the element bitstream.\n" ^Decoder [^{:tag (* PkgDecoder)} pr ^SectionKind k ^RelElemIdx idx ^SyncMarker marker]
+  (let [r (.NewDecoderRaw pr k idx)]
+    (.Sync r marker)
+    ^{:line 169} r))
+
+
+
+
+
+
+^{:go/end 180} (go/method TempDecoder "TempDecoder returns a Decoder for the given (section, index) pair,\nand decodes the given SyncMarker from the element bitstream.\nIf possible the Decoder should be RetireDecoder'd when it is no longer\nneeded, this will avoid heap allocations.\n" ^Decoder [^{:tag (* PkgDecoder)} pr ^SectionKind k ^RelElemIdx idx ^SyncMarker marker]
+  (let [r (.TempDecoderRaw pr k idx)]
+    (.Sync r marker)
+    ^{:line 179} r))
+
+
+^{:go/end 185} (go/method RetireDecoder [^{:tag (* PkgDecoder)} pr ^{:tag (* Decoder)} d]
+  (set! (.-scratchRelocEnt pr) (.-Relocs d))
+  (set! (.-Relocs d) nil))
+
+
+
+
+
+^{:go/end 206} (go/method NewDecoderRaw "NewDecoderRaw returns a Decoder for the given (section, index) pair.\n\nMost callers should use NewDecoder instead.\n" ^Decoder [^{:tag (* PkgDecoder)} pr ^SectionKind k ^RelElemIdx idx]
+  (let [r ^{:go/breaks [2 4 6]} (lit Decoder
+        :common pr
+        :k k
+        :Idx idx)]
+
+
+    (.Reset (.-Data r) (.DataIdx pr k idx))
+    (.Sync r SyncRelocs)
+    (set! (.-Relocs r) (make (slice RefTableEntry) (.Len r)))
+    (range [i (.-Relocs r)]
+      (.Sync r SyncReloc)
+      (aset (.-Relocs r) i (lit RefTableEntry (conv SectionKind (.Len r)) (conv RelElemIdx (.Len r)))))
+
+
+    ^{:line 205} r))
+
+
+^{:go/end 230} (go/method TempDecoderRaw ^Decoder [^{:tag (* PkgDecoder)} pr ^SectionKind k ^RelElemIdx idx]
+  (let [r ^{:go/breaks [2 4 6]} (lit Decoder
+        :common pr
+        :k k
+        :Idx idx)]
+
+
+    (.Reset (.-Data r) (.DataIdx pr k idx))
+    (.Sync r SyncRelocs)
+    (let [l (.Len r)]
+      (if (>= (cap (.-scratchRelocEnt pr)) l) (do
+          (set! (.-Relocs r) (subslice (.-scratchRelocEnt pr) _ l))
+          (set! (.-scratchRelocEnt pr) nil))
+
+        (set! (.-Relocs r) (make (slice RefTableEntry) l)))
+
+      (range [i (.-Relocs r)]
+        (.Sync r SyncReloc)
+        (aset (.-Relocs r) i (lit RefTableEntry (conv SectionKind (.Len r)) (conv RelElemIdx (.Len r)))))
+
+
+      ^{:line 229} r)))
+
+
+
+
+(go/type Decoder "A Decoder provides methods for decoding an individual element's\nbitstream data.\n" (struct
+    ^{:line 235 :tag (* PkgDecoder)} common
+
+    ^{:line 237 :tag (slice RefTableEntry)} Relocs
+    ^{:line 238 :tag strings/Reader} Data
+
+    ^{:line 240 :tag SectionKind} k
+    ^{:line 241 :tag RelElemIdx} Idx))
+
+
+^{:go/end 248} (go/method checkErr [^{:tag (* Decoder)} r ^error err]
+  (when (!= err nil)
+    (panicf "unexpected decoding error: %w" err)))
+
+
+
+^{:go/end 254} (go/method rawUvarint ^uint64 [^{:tag (* Decoder)} r]
+  (let [(values x err) (readUvarint (addr (.-Data r)))]
+    (.checkErr r err)
+    ^{:line 253} x))
+
+
+
+
+
+^{:go/end 280} (go/func readUvarint "readUvarint is a type-specialized copy of encoding/binary.ReadUvarint.\nThis avoids the interface conversion and thus has better escape properties,\nwhich flows up the stack.\n" [^{:tag (* strings/Reader)} r] :results [uint64 error]
+  (let [^uint64 x (zero uint64)
+      ^{:line 261 :tag uint} s (zero uint)]
+    (for [i 0] (< i binary/MaxVarintLen64) (inc! i)
+      (let [(values b err) (.ReadByte r)]
+        (when (!= err nil)
+          (when (and (> i 0) (== err io/EOF))
+            (set! err io/ErrUnexpectedEOF))
+
+          (return x err))
+
+        (when (< b 0x80)
+          (when (and (== i (- binary/MaxVarintLen64 1)) (> b 1))
+            (return x overflow))
+
+          (return (bit-or x (<< (conv uint64 b) s)) nil))
+
+        (set! x bit-or (<< (conv uint64 (bit-and b 0x7f)) s))
+        (set! s + 7)))
+
+    (return x overflow)))
+
+
+(go/var overflow (errors/New "pkgbits: readUvarint overflows a 64-bit integer"))
+
+^{:go/end 293} (go/method rawVarint ^int64 [^{:tag (* Decoder)} r]
+  (let [ux (.rawUvarint r)
+
+      ;; Zig-zag decode.
+      ^{:line 288} x (conv int64 (>> ux 1))]
+    (when (!= (bit-and ux 1) 0)
+      (set! x (bit-not x)))
+
+    ^{:line 292} x))
+
+
+^{:go/end 299} (go/method rawReloc ^RelElemIdx [^{:tag (* Decoder)} r ^SectionKind k ^int idx]
+  (let [e (aget (.-Relocs r) idx)]
+    (go/call assert (== (.-Kind e) k))
+    (.-Idx e)))
+
+
+
+
+
+
+^{:go/end 358} (go/method Sync "Sync decodes a sync marker from the element bitstream and asserts\nthat it matches the expected marker.\n\nIf EnableSync is false, then Sync is a no-op.\n" [^{:tag (* Decoder)} r ^SyncMarker mWant]
+  (when (not (.-sync (.-common r)))
+    (return))
+
+
+  (let [(values pos _) (.Seek (.-Data r) 0 io/SeekCurrent)
+      ^{:line 311} mHave (conv SyncMarker (.rawUvarint r))
+      ^{:line 312} writerPCs (make (slice int) (.rawUvarint r))]
+    (range [i writerPCs]
+      (aset writerPCs i (conv int (.rawUvarint r))))
+
+
+    (when (== mHave mWant)
+      (return))
+
+
+    ;; There's some tension here between printing:
+    ;;
+    ;; (1) full file paths that tools can recognize (e.g., so emacs
+    ;;     hyperlinks the "file:line" text for easy navigation), or
+    ;;
+    ;; (2) short file paths that are easier for humans to read (e.g., by
+    ;;     omitting redundant or irrelevant details, so it's easier to
+    ;;     focus on the useful bits that remain).
+    ;;
+    ;; The current formatting favors the former, as it seems more
+    ;; helpful in practice. But perhaps the formatting could be improved
+    ;; to better address both concerns. For example, use relative file
+    ;; paths if they would be shorter, or rewrite file paths to contain
+    ;; "$GOROOT" (like objabi.AbsFile does) if tools can be taught how
+    ;; to reliably expand that again.
+
+    (fmt/Printf "export data desync: package %q, section %v, index %v, offset %v\n" (.-pkgPath (.-common r)) (.-k r) (.-Idx r) pos)
+
+    (fmt/Printf "\nfound %v, written at:\n" mHave)
+    (when (== (len writerPCs) 0)
+      (fmt/Printf "\t[stack trace unavailable; recompile package %q with -d=syncframes]\n" (.-pkgPath (.-common r))))
+
+    (range [_ pc writerPCs]
+      (fmt/Printf "\t%s\n" (.StringIdx (.-common r) (.rawReloc r SectionString pc))))
+
+
+    (fmt/Printf "\nexpected %v, reading at:\n" mWant)
+    (let [^{:tag (array 32 uintptr)} readerPCs (zero (array 32 uintptr)) ; TODO(mdempsky): Dynamically size?
+        ^{:line 349} n (runtime/Callers 2 (subslice readerPCs))]
+      (range [_ pc (fmtFrames (spread (subslice readerPCs _ n)))]
+        (fmt/Printf "\t%s\n" pc))
+
+
+      ;; We already printed a stack trace for the reader, so now we can
+      ;; simply exit. Printing a second one with panic or base.Fatalf
+      ;; would just be noise.
+      (os/Exit 1))))
+
+
+
+^{:go/end 367} (go/method Bool "Bool decodes and returns a bool value from the element bitstream.\n" ^bool [^{:tag (* Decoder)} r]
+  (.Sync r SyncBool)
+  (let [(values x err) (.ReadByte (.-Data r))]
+    (.checkErr r err)
+    (go/call assert (< x 2))
+    (!= x 0)))
+
+
+
+^{:go/end 373} (go/method Int64 "Int64 decodes and returns an int64 value from the element bitstream.\n" ^int64 [^{:tag (* Decoder)} r]
+  (.Sync r SyncInt64)
+  (.rawVarint r))
+
+
+
+^{:go/end 379} (go/method Uint64 "Uint64 decodes and returns a uint64 value from the element bitstream.\n" ^uint64 [^{:tag (* Decoder)} r]
+  (.Sync r SyncUint64)
+  (.rawUvarint r))
+
+
+
+^{:go/end 382} (go/method Len "Len decodes and returns a non-negative int value from the element bitstream.\n" ^int [^{:tag (* Decoder)} r] (let [x (.Uint64 r) v (conv int x)] (go/call assert (== (conv uint64 v) x)) v))
+
+
+^{:go/end 385} (go/method Int "Int decodes and returns an int value from the element bitstream.\n" ^int [^{:tag (* Decoder)} r] (let [x (.Int64 r) v (conv int x)] (go/call assert (== (conv int64 v) x)) v))
+
+
+^{:go/end 388} (go/method Uint "Uint decodes and returns a uint value from the element bitstream.\n" ^uint [^{:tag (* Decoder)} r] (let [x (.Uint64 r) v (conv uint x)] (go/call assert (== (conv uint64 v) x)) v))
+
+
+
+
+
+
+
+
+^{:go/end 400} (go/method Code "Code decodes a Code value from the element bitstream and returns\nits ordinal value. It's the caller's responsibility to convert the\nresult to an appropriate Code type.\n\nTODO(mdempsky): Ideally this method would have signature \"Code[T\nCode] T\" instead, but we don't allow generic methods and the\ncompiler can't depend on generics yet anyway.\n" ^int [^{:tag (* Decoder)} r ^SyncMarker mark]
+  (.Sync r mark)
+  (.Len r))
+
+
+
+
+^{:go/end 407} (go/method Reloc "Reloc decodes a relocation of expected section k from the element\nbitstream and returns an index to the referenced element.\n" ^RelElemIdx [^{:tag (* Decoder)} r ^SectionKind k]
+  (.Sync r SyncUseReloc)
+  (.rawReloc r k (.Len r)))
+
+
+
+
+^{:go/end 414} (go/method String "String decodes and returns a string value from the element\nbitstream.\n" ^string [^{:tag (* Decoder)} r]
+  (.Sync r SyncString)
+  (.StringIdx (.-common r) (.Reloc r SectionString)))
+
+
+
+
+^{:go/end 424} (go/method Strings "Strings decodes and returns a variable-length slice of strings from\nthe element bitstream.\n" ^{:tag (slice string)} [^{:tag (* Decoder)} r]
+  (let [res (make (slice string) (.Len r))]
+    (range [i res]
+      (aset res i (.String r)))
+
+    ^{:line 423} res))
+
+
+
+
+^{:go/end 436} (go/method Value "Value decodes and returns a constant.Value from the element\nbitstream.\n" ^constant/Value [^{:tag (* Decoder)} r]
+  (.Sync r SyncValue)
+  (let [isComplex (.Bool r)
+      ^{:line 431} val (.scalar r)]
+    (when isComplex
+      (set! val (constant/BinaryOp val token/ADD (constant/MakeImag (.scalar r)))))
+
+    ^{:line 435} val))
+
+
+^{:go/end 458} (go/method scalar ^constant/Value [^{:tag (* Decoder)} r]
+  (switch [tag (conv CodeVal (.Code r SyncVal))] tag
+    (default
+      (panic (fmt/Errorf "unexpected scalar tag: %v" tag)))
+
+    (case [ValBool]
+      (return (constant/MakeBool (.Bool r))))
+    (case [ValString]
+      (return (constant/MakeString (.String r))))
+    (case [ValInt64]
+      (return (constant/MakeInt64 (.Int64 r))))
+    (case [ValBigInt]
+      (return (constant/Make (.bigInt r))))
+    (case [ValBigRat]
+      (let [num (.bigInt r)
+          ^{:line 453} denom (.bigInt r)]
+        (return (constant/Make (.SetFrac (new big/Rat) num denom)))))
+    (case [ValBigFloat]
+      (return (constant/Make (.bigFloat r))))))
+
+
+
+^{:go/end 466} (go/method bigInt ^{:tag (* big/Int)} [^{:tag (* Decoder)} r]
+  (let [v (.SetBytes (new big/Int) (conv (slice byte) (.String r)))]
+    (when (.Bool r)
+      (.Neg v v))
+
+    ^{:line 465} v))
+
+
+^{:go/end 472} (go/method bigFloat ^{:tag (* big/Float)} [^{:tag (* Decoder)} r]
+  (let [v (.SetPrec (new big/Float) 512)]
+    (go/call assert (== (.UnmarshalText v (conv (slice byte) (.String r))) nil))
+    ^{:line 471} v))
+
+
+;; @@@ Helpers
+
+;; TODO(mdempsky): These should probably be removed. I think they're a
+;; smell that the export data format is not yet quite right.
+
+
+
+^{:go/end 492} (go/method PeekPkgPath "PeekPkgPath returns the package path for the specified package\nindex.\n" ^string [^{:tag (* PkgDecoder)} pr ^RelElemIdx idx]
+  (let [^string path (zero string)]
+    (do
+      (let [r (.TempDecoder pr SectionPkg idx SyncPkgDef)]
+        (set! path (.String r))
+        (.RetireDecoder pr (addr r))))
+
+    (when (== path "")
+      (set! path (.-pkgPath pr)))
+
+    ^{:line 491} path))
+
+
+
+
+^{:go/end 516} (go/method PeekObj "PeekObj returns the package path, object name, and CodeObj for the\nspecified object index.\n" [^{:tag (* PkgDecoder)} pr ^RelElemIdx idx] :results [string string CodeObj]
+  (let [^RelElemIdx ridx (zero RelElemIdx)
+      ^{:line 498 :tag string} name (zero string)
+      ^{:line 499 :tag int} rcode (zero int)]
+    (do
+      (let [r (.TempDecoder pr SectionName idx SyncObject1)]
+        (.Sync r SyncSym)
+        (.Sync r SyncPkg)
+        (set! ridx (.Reloc r SectionPkg))
+        (set! name (.String r))
+        (set! rcode (.Code r SyncCodeObj))
+        (.RetireDecoder pr (addr r))))
+
+
+    (let [path (.PeekPkgPath pr ridx)]
+      (go/call assert (!= name ""))
+
+      (let [tag (conv CodeObj rcode)]
+
+        (return path name tag)))))
+
+
+
+^{:go/end 519} (go/method Version "Version reports the version of the bitstream.\n" ^Version [^{:tag (* Decoder)} w] (.-version (.-common w)))

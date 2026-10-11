@@ -1,0 +1,124 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.mime) (go/file "type_unix.go" :build ["//go:build unix || (js && wasm) || wasip1 || tamago"] :imports [
+
+
+    ^{:line 10} [bufio "bufio"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [strings "strings"]])
+
+
+^{:go/end 17} (go/func init []
+  (set! osInitMime initMimeUnix))
+
+
+
+
+(go/var ^{:doc "See https://specifications.freedesktop.org/shared-mime-info-spec/shared-mime-info-spec-0.21.html\nfor the FreeDesktop Shared MIME-info Database specification.\n"} mimeGlobs ^{:go/breaks [2 3]} (lit (slice string)
+    "/usr/local/share/mime/globs2"
+    "/usr/share/mime/globs2"))
+
+
+
+(go/var ^{:doc "Common locations for mime.types files on unix.\n"} typeFiles ^{:go/breaks [2 3 4 5]} (lit (slice string)
+    "/etc/mime.types"
+    "/etc/apache2/mime.types"
+    "/etc/apache/mime.types"
+    "/etc/httpd/conf/mime.types"))
+
+
+^{:go/end 77} (go/func loadMimeGlobsFile ^error [^string filename]
+  (let [(values f err) (os/Open filename)]
+    (when (!= err nil)
+      (return err))
+
+    (defer (.Close f))
+
+    ^{:go/breaks [[4 76]]} (let [scanner (bufio/NewScanner f)]
+      (while (.Scan scanner)
+        ;; Each line should be of format: weight:mimetype:glob[:morefields...]
+        (let [fields (strings/Split (.Text scanner) ":")]
+          (cond (or (< (len fields) 3) (< (len (aget fields 0)) 1) (< (len (aget fields 2)) 3))
+            (continue)
+            (or (== (aget (aget fields 0) 0) \#) (!= (aget (aget fields 2) 0) \*) (!= (aget (aget fields 2) 1) \.))
+            (continue))
+
+
+          (let [extension (subslice (aget fields 2) 1)]
+            (when (strings/ContainsAny extension "?*[")
+              ;; Not a bare extension, but a glob. Ignore for now:
+              ;; - we do not have an implementation for this glob
+              ;;   syntax (translation to path/filepath.Match could
+              ;;   be possible)
+              ;; - support for globs with weight ordering would have
+              ;;   performance impact to all lookups to support the
+              ;;   rarely seen glob entries
+              ;; - trying to match glob metacharacters literally is
+              ;;   not useful
+              (continue))
+
+            (when [(values _ ok) (.Load mimeTypes extension)] ok
+              ;; We've already seen this extension.
+              ;; The file is in weight order, so we keep
+              ;; the first entry that we see.
+              (continue))
+
+
+            (setExtensionType extension (aget fields 1)))))
+
+      (when [err (.Err scanner)] (!= err nil)
+        (panic err))
+
+      nil)))
+
+
+^{:go/end 103} (go/func loadMimeFile [^string filename]
+  (let [(values f err) (os/Open filename)]
+    (when (!= err nil)
+      (return))
+
+    (defer (.Close f))
+
+    (let [scanner (bufio/NewScanner f)]
+      (while (.Scan scanner)
+        (let [fields (strings/Fields (.Text scanner))]
+          (when (or (<= (len fields) 1) (== (aget (aget fields 0) 0) \#))
+            (continue))
+
+          (let [mimeType (aget fields 0)]
+            (range [_ ext (subslice fields 1)]
+              (when (== (aget ext 0) \#)
+                (break))
+
+              (setExtensionType (+ "." ext) mimeType)))))
+
+
+      (when [err (.Err scanner)] (!= err nil)
+        (panic err)))))
+
+
+
+^{:go/end 116} (go/func initMimeUnix []
+  (range [_ filename mimeGlobs]
+    (when [err (loadMimeGlobsFile filename)] (== err nil)
+      (return))) ; Stop checking more files if mimetype database is found.
+
+
+
+  ;; Fallback if no system-generated mimetype database exists.
+  (range [_ filename typeFiles]
+    (loadMimeFile filename)))
+
+
+
+^{:go/end 126} (go/func initMimeForTests ^{:tag (map string string)} []
+  (set! mimeGlobs (lit (slice string) ""))
+  (set! typeFiles (lit (slice string) "testdata/test.types"))
+  (lit (map string string)
+    ^{:line 122} [".T1" "application/test"]
+    ^{:line 123} [".t2" "text/test; charset=utf-8"]
+    ^{:line 124} [".png" "image/png"]))

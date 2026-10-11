@@ -1,0 +1,1704 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; TLS low level connection and record layer
+
+(in-ns 'go.crypto.tls) (go/file "conn.go" :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [context "context"]
+    ^{:line 12} [cipher "crypto/cipher"]
+    ^{:line 13} [subtle "crypto/subtle"]
+    ^{:line 14} [x509 "crypto/x509"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [hash "hash"]
+    ^{:line 18} [io "io"]
+    ^{:line 19} [net "net"]
+    ^{:line 20} [sync "sync"]
+    ^{:line 21} [atomic "sync/atomic"]
+    ^{:line 22} [time "time"]])
+
+
+
+
+(go/type Conn "A Conn represents a secured connection.\nIt implements the net.Conn interface.\n" (struct
+
+    ^{:line 29 :tag net/Conn :doc "constant\n"} conn
+    ^{:line 30 :tag bool} isClient
+    ^{:line 31 :tag (func [context/Context] [error])} handshakeFn ; (*Conn).clientHandshake or serverHandshake
+    ^{:line 32 :tag (* quicState)} quic ; nil for non-QUIC connections
+
+
+
+
+    ^{:line 37 :tag atomic/Bool :doc "isHandshakeComplete is true if the connection is currently transferring\napplication data (i.e. is not currently processing a handshake).\nisHandshakeComplete is true implies handshakeErr == nil.\n"} isHandshakeComplete
+
+    ^{:line 39 :tag sync/Mutex :doc "constant after handshake; protected by handshakeMutex\n"} handshakeMutex
+    ^{:line 40 :tag error} handshakeErr ; error resulting from handshake
+    ^{:line 41 :tag uint16} vers ; TLS version
+    ^{:line 42 :tag bool} haveVers ; version has been negotiated
+    ^{:line 43 :tag (* Config)} config ; configuration passed to constructor
+
+
+
+    ^{:line 47 :tag int :doc "handshakes counts the number of handshakes performed on the\nconnection so far. If renegotiation is disabled then this is either\nzero or one.\n"} handshakes
+    ^{:line 48 :tag bool} extMasterSecret
+    ^{:line 49 :tag bool} didResume ; whether this connection was a session resumption
+    ^{:line 50 :tag bool} didHRR ; whether a HelloRetryRequest was sent/received
+    ^{:line 51 :tag uint16} cipherSuite
+    ^{:line 52 :tag CurveID} curveID
+    ^{:line 53 :tag SignatureScheme} peerSigAlg
+    ^{:line 54 :tag (slice byte)} ocspResponse ; stapled OCSP response
+    ^{:line 55 :tag (slice (slice byte))} scts ; signed certificate timestamps from server
+    ^{:line 56 :tag (slice (* x509/Certificate))} peerCertificates
+    ^{:line 57 :tag (slice (slice byte))} localCertificate
+
+
+    ^{:line 60 :tag (slice (slice (* x509/Certificate))) :doc "verifiedChains contains the certificate chains that we built, as\nopposed to the ones presented by the server.\n"} verifiedChains
+
+    ^{:line 62 :tag string :doc "serverName contains the server name indicated by the client, if any.\n"} serverName
+
+
+
+    ^{:line 66 :tag bool :doc "secureRenegotiation is true if the server echoed the secure\nrenegotiation extension. (This is meaningless as a server because\nrenegotiation is not supported in that case.)\n"} secureRenegotiation
+
+    ^{:line 68 :tag (func [^string label ^{:tag (slice byte)} context ^int length] [(slice byte) error]) :doc "ekm is a closure for exporting keying material.\n"} ekm
+
+
+    ^{:line 71 :tag (slice byte) :doc "resumptionSecret is the resumption_master_secret for handling\nor sending NewSessionTicket messages.\n"} resumptionSecret
+    ^{:line 72 :tag bool} echAccepted
+
+
+
+
+    ^{:line 77 :tag (slice ticketKey) :doc "ticketKeys is the set of active session ticket keys for this\nconnection. The first one is used to encrypt new tickets and\nall are tried to decrypt tickets.\n"} ticketKeys
+
+
+
+
+
+    ^{:line 83 :tag bool :doc "clientFinishedIsFirst is true if the client sent the first Finished\nmessage during the most recent handshake. This is recorded because\nthe first transmitted Finished message is the tls-unique\nchannel-binding value.\n"} clientFinishedIsFirst
+
+
+    ^{:line 86 :tag error :doc "closeNotifyErr is any error from sending the alertCloseNotify record.\n"} closeNotifyErr
+
+
+    ^{:line 89 :tag bool :doc "closeNotifySent is true if the Conn attempted to send an\nalertCloseNotify record.\n"} closeNotifySent
+
+
+
+
+
+    ^{:line 95 :tag (array 12 byte) :doc "clientFinished and serverFinished contain the Finished message sent\nby the client or server in the most recent handshake. This is\nretained to support the renegotiation extension and tls-unique\nchannel-binding.\n"} clientFinished
+    ^{:line 96 :tag (array 12 byte)} serverFinished
+
+
+    ^{:line 99 :tag string :doc "clientProtocol is the negotiated ALPN protocol.\n"} clientProtocol
+
+
+    ^{:line 102 :tag halfConn :doc "input/output\n"} in ^{:tag halfConn :doc "input/output\n"} out
+    ^{:line 103 :tag bytes/Buffer} rawInput ; raw input, starting with a record header
+    ^{:line 104 :tag bytes/Reader} input ; application data waiting to be read, from rawInput.Next
+    ^{:line 105 :tag bytes/Buffer} hand ; handshake data waiting to be read
+    ^{:line 106 :tag bool} buffering ; whether records are buffered in sendBuf
+    ^{:line 107 :tag (slice byte)} sendBuf ; a buffer of records waiting to be sent
+
+
+
+    ^{:line 111 :tag int64 :doc "bytesSent counts the bytes of application data sent.\npacketsSent counts packets.\n"} bytesSent
+    ^{:line 112 :tag int64} packetsSent
+
+
+
+
+    ^{:line 117 :tag int :doc "retryCount counts the number of consecutive non-advancing records\nreceived by Conn.readRecord. That is, records that neither advance the\nhandshake, nor deliver application data. Protected by in.Mutex.\n"} retryCount
+
+
+
+    ^{:line 121 :tag atomic/Int32 :doc "activeCall indicates whether Close has been call in the low bit.\nthe rest of the bits are the number of goroutines in Conn.Write.\n"} activeCall
+
+    ^{:line 123 :tag (array 16 byte)} tmp))
+
+
+;; Access to net.Conn methods.
+;; Cannot just embed net.Conn because that would
+;; export the struct field too.
+
+
+^{:go/end 133} (go/method LocalAddr "LocalAddr returns the local network address.\n" ^net/Addr [^{:tag (* Conn)} c]
+  (.LocalAddr (.-conn c)))
+
+
+
+^{:go/end 138} (go/method RemoteAddr "RemoteAddr returns the remote network address.\n" ^net/Addr [^{:tag (* Conn)} c]
+  (.RemoteAddr (.-conn c)))
+
+
+
+
+
+^{:go/end 145} (go/method SetDeadline "SetDeadline sets the read and write deadlines associated with the connection.\nA zero value for t means [Conn.Read] and [Conn.Write] will not time out.\nAfter a Write has timed out, the TLS state is corrupt and all future writes will return the same error.\n" ^error [^{:tag (* Conn)} c ^time/Time t]
+  (.SetDeadline (.-conn c) t))
+
+
+
+
+^{:go/end 151} (go/method SetReadDeadline "SetReadDeadline sets the read deadline on the underlying connection.\nA zero value for t means [Conn.Read] will not time out.\n" ^error [^{:tag (* Conn)} c ^time/Time t]
+  (.SetReadDeadline (.-conn c) t))
+
+
+
+
+
+^{:go/end 158} (go/method SetWriteDeadline "SetWriteDeadline sets the write deadline on the underlying connection.\nA zero value for t means [Conn.Write] will not time out.\nAfter a [Conn.Write] has timed out, the TLS state is corrupt and all future writes will return the same error.\n" ^error [^{:tag (* Conn)} c ^time/Time t]
+  (.SetWriteDeadline (.-conn c) t))
+
+
+
+
+
+^{:go/end 165} (go/method NetConn "NetConn returns the underlying connection that is wrapped by c.\nNote that writing to or reading from this connection directly will corrupt the\nTLS session.\n" ^net/Conn [^{:tag (* Conn)} c]
+  (.-conn c))
+
+
+
+
+(go/type halfConn "A halfConn represents one direction of the record layer\nconnection, either sending or receiving.\n" (struct
+    ^{:line 170} sync/Mutex
+
+    ^{:line 172 :tag error} err ; first permanent error
+    ^{:line 173 :tag uint16} version ; protocol version
+    ^{:line 174 :tag any} cipher ; cipher algorithm
+    ^{:line 175 :tag hash/Hash} mac
+    ^{:line 176 :tag (array 8 byte)} seq ; 64-bit sequence number
+
+    ^{:line 178 :tag (array 13 byte)} scratchBuf ; to avoid allocs; interface method args escape
+
+    ^{:line 180 :tag any} nextCipher ; next encryption state
+    ^{:line 181 :tag hash/Hash} nextMac ; next MAC algorithm
+
+    ^{:line 183 :tag QUICEncryptionLevel} level ; current QUIC encryption level
+    ^{:line 184 :tag (slice byte)} trafficSecret)) ; current TLS 1.3 traffic secret
+
+
+(go/type permanentError (struct
+    ^{:line 188 :tag net/Error} err))
+
+
+^{:go/end 191} (go/method Error ^string [^{:tag (* permanentError)} e] (.Error (.-err e)))
+^{:go/end 192} (go/method Unwrap ^error [^{:tag (* permanentError)} e] (.-err e))
+^{:go/end 193} (go/method Timeout ^bool [^{:tag (* permanentError)} e] (.Timeout (.-err e)))
+^{:go/end 194} (go/method Temporary ^bool [^{:tag (* permanentError)} e] false)
+
+^{:go/end 203} (go/method setErrorLocked ^error [^{:tag (* halfConn)} hc ^error err]
+  (if [(values e ok) (assert net/Error err)] ok
+    (set! (.-err hc) (addr (lit permanentError :err e)))
+
+    (set! (.-err hc) err))
+
+  (.-err hc))
+
+
+
+
+^{:go/end 211} (go/method prepareCipherSpec "prepareCipherSpec sets the encryption and MAC states\nthat a subsequent changeCipherSpec will use.\n" [^{:tag (* halfConn)} hc ^uint16 version ^any cipher ^hash/Hash mac]
+  (set! (.-version hc) version)
+  (set! (.-nextCipher hc) cipher)
+  (set! (.-nextMac hc) mac))
+
+
+
+
+^{:go/breaks [10] :go/end 225} (go/method changeCipherSpec "changeCipherSpec changes the encryption and MAC states\nto the ones previously passed to prepareCipherSpec.\n" ^error [^{:tag (* halfConn)} hc]
+  (when (or (== (.-nextCipher hc) nil) (== (.-version hc) VersionTLS13))
+    (return alertInternalError))
+
+  (set! (.-cipher hc) (.-nextCipher hc))
+  (set! (.-mac hc) (.-nextMac hc))
+  (set! (.-nextCipher hc) nil)
+  (set! (.-nextMac hc) nil)
+  (clear (subslice (.-seq hc)))
+  nil)
+
+
+
+
+
+^{:go/end 236} (go/method setTrafficSecret "setTrafficSecret sets the traffic secret for the given encryption level. setTrafficSecret\nshould not be called directly, but rather through the Conn setWriteTrafficSecret and\nsetReadTrafficSecret wrapper methods.\n" [^{:tag (* halfConn)} hc ^{:tag (* cipherSuiteTLS13)} suite ^QUICEncryptionLevel level ^{:tag (slice byte)} secret]
+  (set! (.-trafficSecret hc) secret)
+  (set! (.-level hc) level)
+  (let [(values key iv) (.trafficKey suite secret)]
+    (set! (.-cipher hc) ((.-aead suite) key iv))
+    (clear (subslice (.-seq hc)))))
+
+
+
+^{:go/end 251} (go/method incSeq "incSeq increments the sequence number.\n" [^{:tag (* halfConn)} hc]
+  (for [i 7] (>= i 0) (dec! i)
+    (inc! (aget (.-seq hc) i))
+    (when (!= (aget (.-seq hc) i) 0)
+      (return)))
+
+
+
+  ;; Not allowed to let sequence number wrap.
+  ;; Instead, must renegotiate before it does.
+  ;; Not likely enough to bother.
+  (panic "TLS: sequence number wraparound"))
+
+
+
+
+
+^{:go/end 275} (go/method explicitNonceLen "explicitNonceLen returns the number of bytes of explicit nonce or IV included\nin each record. Explicit nonces are present only in CBC modes after TLS 1.0\nand in certain AEAD modes in TLS 1.2.\n" ^int [^{:tag (* halfConn)} hc]
+  (when (== (.-cipher hc) nil)
+    (return 0))
+
+
+  (type-switch [c (.-cipher hc)]
+    (case [cipher/Stream]
+      (return 0))
+    (case [aead]
+      (return (.explicitNonceLen c)))
+    (case [cbcMode]
+      ;; TLS 1.1 introduced a per-record explicit IV to fix the BEAST attack.
+      (when (>= (.-version hc) VersionTLS11)
+        (return (.BlockSize c)))
+
+      (return 0))
+    (default
+      (panic "unknown cipher type"))))
+
+
+
+
+
+
+^{:go/end 325} (go/func extractPadding "extractPadding returns, in constant time, the length of the padding to remove\nfrom the end of payload. It also returns a byte which is equal to 255 if the\npadding was valid and 0 otherwise. See RFC 2246, Section 6.2.3.2.\n" [^{:tag (slice byte)} payload] :results [^int toRemove ^byte good]
+  (when (< (len payload) 1)
+    (return 0 0))
+
+
+  (let [paddingLen (aget payload (- (len payload) 1))
+      ^{:line 286} t (- (conv uint (- (len payload) 1)) (conv uint paddingLen))]
+    ;; if len(payload) >= (paddingLen - 1) then the MSB of t is zero
+    (set! good (conv byte (>> (conv int32 (bit-not t)) 31)))
+
+    ;; The maximum possible padding length plus the actual length field
+    (let [toCheck 256]
+      ;; The length of the padded data is public, so we can use an if here
+      (when (> toCheck (len payload))
+        (set! toCheck (len payload)))
+
+
+      (for [i 0] (< i toCheck) (inc! i)
+        (let [t (- (conv uint paddingLen) (conv uint i))
+            ;; if i <= paddingLen then the MSB of t is zero
+            ^{:line 300} mask (conv byte (>> (conv int32 (bit-not t)) 31))
+            ^{:line 301} b (aget payload (- (len payload) 1 i))]
+          (set! good bit-and-not (bit-xor (bit-and mask paddingLen) (bit-and mask b)))))
+
+
+      ;; We AND together the bits of good and replicate the result across
+      ;; all the bits.
+      (set! good bit-and (<< good 4))
+      (set! good bit-and (<< good 2))
+      (set! good bit-and (<< good 1))
+      (set! good (conv uint8 (>> (conv int8 good) 7)))
+
+      ;; Zero the padding length on error. This ensures any unchecked bytes
+      ;; are included in the MAC. Otherwise, an attacker that could
+      ;; distinguish MAC failures from padding failures could mount an attack
+      ;; similar to POODLE in SSL 3.0: given a good ciphertext that uses a
+      ;; full block's worth of padding, replace the final block with another
+      ;; block. If the MAC check passed but the padding check failed, the
+      ;; last byte of that block decrypted to the block size.
+      ;;
+      ;; See also macAndPaddingGood logic below.
+      (set! paddingLen bit-and good)
+
+      (set! toRemove (+ (conv int paddingLen) 1))
+      (return))))
+
+
+^{:go/end 329} (go/func roundUp ^int [^int a ^int b]
+  (+ a (% (- b (% a b)) b)))
+
+
+
+(go/type cbcMode "cbcMode is an interface for block ciphers using cipher block chaining.\n" (interface
+    ^{:line 333} cipher/BlockMode
+    (SetIV [(slice byte)])))
+
+
+
+
+^{:go/end 461} (go/method decrypt "decrypt authenticates and decrypts the record if protection is active at\nthis stage. The returned plaintext might overlap with the input.\n" [^{:tag (* halfConn)} hc ^{:tag (slice byte)} record] :results [(slice byte) recordType error]
+  (let [^{:tag (slice byte)} plaintext (zero (slice byte))
+      ^{:line 341} typ (conv recordType (aget record 0))
+      ^{:line 342} payload (subslice record recordHeaderLen)]
+
+    ;; In TLS 1.3, change_cipher_spec messages are to be ignored without being
+    ;; decrypted. See RFC 8446, Appendix D.4.
+    (when (and (== (.-version hc) VersionTLS13) (== typ recordTypeChangeCipherSpec))
+      (return payload typ nil))
+
+
+    (let [paddingGood (conv byte 255)
+        ^{:line 351} paddingLen 0
+
+        ^{:line 353} explicitNonceLen (.explicitNonceLen hc)]
+
+      (if (!= (.-cipher hc) nil) (do
+          (type-switch [c (.-cipher hc)]
+            (case [cipher/Stream]
+              (.XORKeyStream c payload payload))
+            (case [aead]
+              (when (< (len payload) explicitNonceLen)
+                (return nil 0 alertBadRecordMAC))
+
+              (let [nonce (subslice payload _ explicitNonceLen)]
+                (when (== (len nonce) 0)
+                  (set! nonce (subslice (.-seq hc))))
+
+                (set! payload (subslice payload explicitNonceLen))
+
+                (let [^{:tag (slice byte)} additionalData (zero (slice byte))]
+                  (if (== (.-version hc) VersionTLS13)
+                    (set! additionalData (subslice record _ recordHeaderLen))
+                    (do
+                      (set! additionalData (append (subslice (.-scratchBuf hc) _ 0) (spread (subslice (.-seq hc)))))
+                      (set! additionalData (append additionalData (spread (subslice record _ 3))))
+                      (let [n (- (len payload) (.Overhead c))]
+                        (set! additionalData (append additionalData (conv byte (>> n 8)) (conv byte n))))))
+
+
+                  (let [^error err (zero error)]
+                    (set! (values plaintext err) (.Open c (subslice payload _ 0) nonce payload additionalData))
+                    (when (!= err nil)
+                      (return nil 0 alertBadRecordMAC))))))
+
+            (case [cbcMode]
+              (let [blockSize (.BlockSize c)
+                  ^{:line 386} minPayload (+ explicitNonceLen (roundUp (+ (.Size (.-mac hc)) 1) blockSize))]
+                (when (or (!= (% (len payload) blockSize) 0) (< (len payload) minPayload))
+                  (return nil 0 alertBadRecordMAC))
+
+
+                (when (> explicitNonceLen 0)
+                  (.SetIV c (subslice payload _ explicitNonceLen))
+                  (set! payload (subslice payload explicitNonceLen)))
+
+                (.CryptBlocks c payload payload)
+
+                ;; In a limited attempt to protect against CBC padding oracles like
+                ;; Lucky13, the data past paddingLen (which is secret) is passed to
+                ;; the MAC function as extra data, to be fed into the HMAC after
+                ;; computing the digest. This makes the MAC roughly constant time as
+                ;; long as the digest computation is constant time and does not
+                ;; affect the subsequent write, modulo cache effects.
+                (set! (values paddingLen paddingGood) (extractPadding payload))))
+            (default
+              (panic "unknown cipher type")))
+
+
+          (when (== (.-version hc) VersionTLS13)
+            (when (!= typ recordTypeApplicationData)
+              (return nil 0 alertUnexpectedMessage))
+
+            (when (> (len plaintext) (+ maxPlaintext 1))
+              (return nil 0 alertRecordOverflow))
+
+            ;; Remove padding and find the ContentType scanning from the end.
+            (for [i (- (len plaintext) 1)] (>= i 0) (dec! i)
+              (when (!= (aget plaintext i) 0)
+                (set! typ (conv recordType (aget plaintext i)))
+                (set! plaintext (subslice plaintext _ i))
+                (break))
+
+              (when (== i 0)
+                (return nil 0 alertUnexpectedMessage)))))
+
+
+
+
+        (set! plaintext payload))
+
+
+      (when (!= (.-mac hc) nil)
+        (let [macSize (.Size (.-mac hc))]
+          (when (< (len payload) macSize)
+            (return nil 0 alertBadRecordMAC))
+
+
+          (let [n (- (len payload) macSize paddingLen)]
+            (set! n (subtle/ConstantTimeSelect (conv int (>> (conv uint32 n) 31)) 0 n)) ; if n < 0 { n = 0 }
+            (aset record 3 (conv byte (>> n 8)))
+            (aset record 4 (conv byte n))
+            (let [remoteMAC (subslice payload n (+ n macSize))
+                ^{:line 442} localMAC (tls10MAC (.-mac hc) (subslice (.-scratchBuf hc) _ 0) (subslice (.-seq hc)) (subslice record _ recordHeaderLen) (subslice payload _ n) (subslice payload (+ n macSize)))
+
+                ;; This is equivalent to checking the MACs and paddingGood
+                ;; separately, but in constant-time to prevent distinguishing
+                ;; padding failures from MAC failures. Depending on what value
+                ;; of paddingLen was returned on bad padding, distinguishing
+                ;; bad MAC from bad padding can lead to an attack.
+                ;;
+                ;; See also the logic at the end of extractPadding.
+                ^{:line 451} macAndPaddingGood (bit-and (subtle/ConstantTimeCompare localMAC remoteMAC) (conv int paddingGood))]
+              (when (!= macAndPaddingGood 1)
+                (return nil 0 alertBadRecordMAC))
+
+
+              (set! plaintext (subslice payload _ n))))))
+
+
+      (.incSeq hc)
+      (return plaintext typ nil))))
+
+
+
+
+
+^{:go/end 475} (go/func sliceForAppend "sliceForAppend extends the input slice by n bytes. head is the full extended\nslice, while tail is the appended part. If the original slice has sufficient\ncapacity no allocation is performed.\n" [^{:tag (slice byte)} in ^int n] :results [^{:tag (slice byte)} head ^{:tag (slice byte)} tail]
+  (if [total (+ (len in) n)] (>= (cap in) total)
+    (set! head (subslice in _ total))
+    (do
+      (set! head (make (slice byte) total))
+      (copy head in)))
+
+  (set! tail (subslice head (len in)))
+  (return))
+
+
+
+
+^{:go/end 562} (go/method encrypt "encrypt encrypts payload, adding the appropriate nonce and/or MAC, and\nappends it to record, which must already contain the record header.\n" [^{:tag (* halfConn)} hc ^{:tag (slice byte)} record ^{:tag (slice byte)} payload ^io/Reader rand] :results [(slice byte) error]
+  (when (== (.-cipher hc) nil)
+    (return (append record (spread payload)) nil))
+
+
+  (let [^{:tag (slice byte)} explicitNonce (zero (slice byte))]
+    (when [explicitNonceLen (.explicitNonceLen hc)] (> explicitNonceLen 0)
+      (set! (values record explicitNonce) (sliceForAppend record explicitNonceLen))
+      (if [(values _ isCBC) (assert cbcMode (.-cipher hc))] (and (not isCBC) (< explicitNonceLen 16))
+        ;; The AES-GCM construction in TLS has an explicit nonce so that the
+        ;; nonce can be random. However, the nonce is only 8 bytes which is
+        ;; too small for a secure, random nonce. Therefore we use the
+        ;; sequence number as the nonce. The 3DES-CBC construction also has
+        ;; an 8 bytes nonce but its nonces must be unpredictable (see RFC
+        ;; 5246, Appendix F.3), forcing us to use randomness. That's not
+        ;; 3DES' biggest problem anyway because the birthday bound on block
+        ;; collision is reached first due to its similarly small block size
+        ;; (see the Sweet32 attack).
+        (copy explicitNonce (subslice (.-seq hc)))
+        (do
+          (when [(values _ err) (io/ReadFull rand explicitNonce)] (!= err nil)
+            (return nil err)))))
+
+
+
+
+    (let [^{:tag (slice byte)} dst (zero (slice byte))]
+      (type-switch [c (.-cipher hc)]
+        (case [cipher/Stream]
+          (let [mac (tls10MAC (.-mac hc) (subslice (.-scratchBuf hc) _ 0) (subslice (.-seq hc)) (subslice record _ recordHeaderLen) payload nil)]
+            (set! (values record dst) (sliceForAppend record (+ (len payload) (len mac))))
+            (.XORKeyStream c (subslice dst _ (len payload)) payload)
+            (.XORKeyStream c (subslice dst (len payload)) mac)))
+        (case [aead]
+          (let [nonce explicitNonce]
+            (when (== (len nonce) 0)
+              (set! nonce (subslice (.-seq hc))))
+
+
+            (if (== (.-version hc) VersionTLS13) (do
+                (set! record (append record (spread payload)))
+
+                ;; Encrypt the actual ContentType and replace the plaintext one.
+                (set! record (append record (aget record 0)))
+                (aset record 0 (conv byte recordTypeApplicationData))
+
+                (let [n (+ (len payload) 1 (.Overhead c))]
+                  (aset record 3 (conv byte (>> n 8)))
+                  (aset record 4 (conv byte n))
+
+                  (set! record (.Seal c (subslice record _ recordHeaderLen)
+                      ^{:line 530} nonce (subslice record recordHeaderLen) (subslice record _ recordHeaderLen)))))
+
+              (let [additionalData (append (subslice (.-scratchBuf hc) _ 0) (spread (subslice (.-seq hc))))]
+                (set! additionalData (append additionalData (spread (subslice record _ recordHeaderLen))))
+                (set! record (.Seal c record nonce payload additionalData))))))
+
+        (case [cbcMode]
+          (let [mac (tls10MAC (.-mac hc) (subslice (.-scratchBuf hc) _ 0) (subslice (.-seq hc)) (subslice record _ recordHeaderLen) payload nil)
+              ^{:line 538} blockSize (.BlockSize c)
+              ^{:line 539} plaintextLen (+ (len payload) (len mac))
+              ^{:line 540} paddingLen (- blockSize (% plaintextLen blockSize))]
+            (set! (values record dst) (sliceForAppend record (+ plaintextLen paddingLen)))
+            (copy dst payload)
+            (copy (subslice dst (len payload)) mac)
+            (for [i plaintextLen] (< i (len dst)) (inc! i)
+              (aset dst i (conv byte (- paddingLen 1))))
+
+            (when (> (len explicitNonce) 0)
+              (.SetIV c explicitNonce))
+
+            (.CryptBlocks c dst dst)))
+        (default
+          (panic "unknown cipher type")))
+
+
+      ;; Update length to include nonce, MAC and any block padding needed.
+      (let [n (- (len record) recordHeaderLen)]
+        (aset record 3 (conv byte (>> n 8)))
+        (aset record 4 (conv byte n))
+        (.incSeq hc)
+
+        (return record nil)))))
+
+
+
+(go/type RecordHeaderError "RecordHeaderError is returned when a TLS record header is invalid.\n" (struct
+
+    ^{:line 567 :tag string :doc "Msg contains a human readable string that describes the error.\n"} Msg
+
+
+    ^{:line 570 :tag (array 5 byte) :doc "RecordHeader contains the five bytes of TLS record header that\ntriggered the error.\n"} RecordHeader
+
+
+
+
+    ^{:line 575 :tag net/Conn :doc "Conn provides the underlying net.Conn in the case that a client\nsent an initial handshake that didn't look like TLS.\nIt is nil if there's already been a handshake or a TLS alert has\nbeen written to the connection.\n"} Conn))
+
+
+^{:go/end 578} (go/method Error ^string [^RecordHeaderError e] (+ "tls: " (.-Msg e)))
+
+^{:go/end 585} (go/method newRecordHeaderError [^{:tag (* Conn)} c ^net/Conn conn ^string msg] :results [^RecordHeaderError err]
+  (set! (.-Msg err) msg)
+  (set! (.-Conn err) conn)
+  (copy (subslice (.-RecordHeader err)) (.Bytes (.-rawInput c)))
+  ^{:line 584} err)
+
+
+^{:go/end 589} (go/method readRecord ^error [^{:tag (* Conn)} c]
+  (.readRecordOrCCS c false))
+
+
+^{:go/end 593} (go/method readChangeCipherSpec ^error [^{:tag (* Conn)} c]
+  (.readRecordOrCCS c true))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 790} (go/method readRecordOrCCS "readRecordOrCCS reads one or more TLS records from the connection and\nupdates the record layer state. Some invariants:\n  - c.in must be locked\n  - c.input must be empty\n\nDuring the handshake one and only one of the following will happen:\n  - c.hand grows\n  - c.in.changeCipherSpec is called\n  - an error is returned\n\nAfter the handshake one and only one of the following will happen:\n  - c.hand grows\n  - c.input is set\n  - an error is returned\n" ^error [^{:tag (* Conn)} c ^bool expectChangeCipherSpec]
+  (when (!= (.-err (.-in c)) nil)
+    (return (.-err (.-in c))))
+
+  (let [handshakeComplete (.Load (.-isHandshakeComplete c))]
+
+    ;; This function modifies c.rawInput, which owns the c.input memory.
+    (when (!= (.Len (.-input c)) 0)
+      (return (.setErrorLocked (.-in c) (errors/New "tls: internal error: attempted to read record with pending application data"))))
+
+    (.Reset (.-input c) nil)
+
+    (when (!= (.-quic c) nil)
+      (return (.setErrorLocked (.-in c) (errors/New "tls: internal error: attempted to read record with QUIC transport"))))
+
+
+    ;; Read header, payload.
+    (when [err (.readFromUntil c (.-conn c) recordHeaderLen)] (!= err nil)
+      ;; RFC 8446, Section 6.1 suggests that EOF without an alertCloseNotify
+      ;; is an error, but popular web sites seem to do this, so we accept it
+      ;; if and only if at the record boundary.
+      (when (and (== err io/ErrUnexpectedEOF) (== (.Len (.-rawInput c)) 0))
+        (set! err io/EOF))
+
+      (when [(values e ok) (assert net/Error err)] (or (not ok) (not (.Temporary e)))
+        (.setErrorLocked (.-in c) err))
+
+      (return err))
+
+    (let [hdr (subslice (.Bytes (.-rawInput c)) _ recordHeaderLen)
+        ^{:line 639} typ (conv recordType (aget hdr 0))]
+
+      ;; No valid TLS record has a type of 0x80, however SSLv2 handshakes
+      ;; start with a uint16 length where the MSB is set and the first record
+      ;; is always < 256 bytes long. Therefore typ == 0x80 strongly suggests
+      ;; an SSLv2 client.
+      (when (and (not handshakeComplete) (== typ 0x80))
+        (.sendAlert c alertProtocolVersion)
+        (return (.setErrorLocked (.-in c) (.newRecordHeaderError c nil "unsupported SSLv2 handshake received"))))
+
+
+      (let [vers (bit-or (<< (conv uint16 (aget hdr 1)) 8) (conv uint16 (aget hdr 2)))
+          ^{:line 651} expectedVers (.-vers c)]
+        (when (== expectedVers VersionTLS13)
+          ;; All TLS 1.3 records are expected to have 0x0303 (1.2) after
+          ;; the initial hello (RFC 8446 Section 5.1).
+          (set! expectedVers VersionTLS12))
+
+        (let [n (bit-or (<< (conv int (aget hdr 3)) 8) (conv int (aget hdr 4)))]
+          (when (and (.-haveVers c) (!= vers expectedVers))
+            (.sendAlert c alertProtocolVersion)
+            (let [msg (fmt/Sprintf "received record with version %x when expecting version %x" vers expectedVers)]
+              (return (.setErrorLocked (.-in c) (.newRecordHeaderError c nil msg)))))
+
+          (when (not (.-haveVers c))
+            ;; First message, be extra suspicious: this might not be a TLS
+            ;; client. Bail out before reading a full 'body', if possible.
+            ;; The current max version is 3.3 so if the version is >= 16.0,
+            ;; it's probably not real.
+            (when (or ^:go/paren (and (!= typ recordTypeAlert) (!= typ recordTypeHandshake)) (>= vers 0x1000))
+              (return (.setErrorLocked (.-in c) (.newRecordHeaderError c (.-conn c) "first record does not look like a TLS handshake")))))
+
+
+          (when (or (and (== (.-vers c) VersionTLS13) (> n maxCiphertextTLS13)) (> n maxCiphertext))
+            (.sendAlert c alertRecordOverflow)
+            (let [msg (fmt/Sprintf "oversized record received with length %d" n)]
+              (return (.setErrorLocked (.-in c) (.newRecordHeaderError c nil msg)))))
+
+          (when [err (.readFromUntil c (.-conn c) (+ recordHeaderLen n))] (!= err nil)
+            (when [(values e ok) (assert net/Error err)] (or (not ok) (not (.Temporary e)))
+              (.setErrorLocked (.-in c) err))
+
+            (return err))
+
+
+          ;; Process message.
+          ^{:go/breaks [[8 789]]} (let [record (.Next (.-rawInput c) (+ recordHeaderLen n))
+              (values data ^:assign typ err) (.decrypt (.-in c) record)]
+            (when (!= err nil)
+              (return (.setErrorLocked (.-in c) (.sendAlert c (assert alert err)))))
+
+            (when (> (len data) maxPlaintext)
+              (return (.setErrorLocked (.-in c) (.sendAlert c alertRecordOverflow))))
+
+
+            ;; Application Data messages are always protected.
+            (when (and (== (.-cipher (.-in c)) nil) (== typ recordTypeApplicationData))
+              (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))
+
+
+            (when (and ^:go/paren (or (== typ recordTypeApplicationData) ^:go/paren (and (== typ recordTypeHandshake) (not handshakeComplete))) (> (len data) 0))
+              ;; This is a state-advancing message: reset the retry count.
+              (set! (.-retryCount c) 0))
+
+
+            ;; Handshake messages MUST NOT be interleaved with other record types in TLS 1.3.
+            (when (and (== (.-vers c) VersionTLS13) (!= typ recordTypeHandshake) (> (.Len (.-hand c)) 0))
+              (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))
+
+
+            (switch typ
+              (default
+                (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))
+
+              (case [recordTypeAlert]
+                (when (!= (.-quic c) nil)
+                  (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))
+
+                (when (!= (len data) 2)
+                  (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))
+
+                (when (== (conv alert (aget data 1)) alertCloseNotify)
+                  (return (.setErrorLocked (.-in c) io/EOF)))
+
+                (when (== (.-vers c) VersionTLS13)
+                  ;; TLS 1.3 removed warning-level alerts except for alertUserCanceled
+                  ;; (RFC 8446, § 6.1). Since at least one major implementation
+                  ;; (https://bugs.openjdk.org/browse/JDK-8323517) misuses this alert,
+                  ;; many TLS stacks now ignore it outright when seen in a TLS 1.3
+                  ;; handshake (e.g. BoringSSL, NSS, Rustls).
+                  (when (== (conv alert (aget data 1)) alertUserCanceled)
+                    ;; Like TLS 1.2 alertLevelWarning alerts, we drop the record and retry.
+                    (return (.retryReadRecord c expectChangeCipherSpec)))
+
+                  (return (.setErrorLocked (.-in c) (addr (lit net/OpError :Op "remote error" :Err (conv alert (aget data 1)))))))
+
+                (switch (aget data 0)
+                  (case [alertLevelWarning]
+                    ;; Drop the record on the floor and retry.
+                    (return (.retryReadRecord c expectChangeCipherSpec)))
+                  (case [alertLevelError]
+                    (return (.setErrorLocked (.-in c) (addr (lit net/OpError :Op "remote error" :Err (conv alert (aget data 1)))))))
+                  (default
+                    (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))))
+
+
+              (case [recordTypeChangeCipherSpec]
+                (when (or (!= (len data) 1) (!= (aget data 0) 1))
+                  (return (.setErrorLocked (.-in c) (.sendAlert c alertDecodeError))))
+
+                ;; Handshake messages are not allowed to fragment across the CCS.
+                (when (> (.Len (.-hand c)) 0)
+                  (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))
+
+                ;; In TLS 1.3, change_cipher_spec records are ignored until the
+                ;; Finished. See RFC 8446, Appendix D.4. Note that according to Section
+                ;; 5, a server can send a ChangeCipherSpec before its ServerHello, when
+                ;; c.vers is still unset. That's not useful though and suspicious if the
+                ;; server then selects a lower protocol version, so don't allow that.
+                (when (== (.-vers c) VersionTLS13)
+                  (return (.retryReadRecord c expectChangeCipherSpec)))
+
+                (when (not expectChangeCipherSpec)
+                  (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))
+
+                (when [err (.changeCipherSpec (.-in c))] (!= err nil)
+                  (return (.setErrorLocked (.-in c) (.sendAlert c (assert alert err))))))
+
+
+              (case [recordTypeApplicationData]
+                (when (or (not handshakeComplete) expectChangeCipherSpec)
+                  (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))
+
+                ;; Some OpenSSL servers send empty records in order to randomize the
+                ;; CBC IV. Ignore a limited number of empty records.
+                (when (== (len data) 0)
+                  (return (.retryReadRecord c expectChangeCipherSpec)))
+
+                ;; Note that data is owned by c.rawInput, following the Next call above,
+                ;; to avoid copying the plaintext. This is safe because c.rawInput is
+                ;; not read from or written to until c.input is drained.
+                (.Reset (.-input c) data))
+
+              (case [recordTypeHandshake]
+                (when (or (== (len data) 0) expectChangeCipherSpec)
+                  (return (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage))))
+
+                (.Write (.-hand c) data)))
+
+
+            nil))))))
+
+
+
+
+^{:go/end 801} (go/method retryReadRecord "retryReadRecord recurs into readRecordOrCCS to drop a non-advancing record, like\na warning alert, empty application_data, or a change_cipher_spec in TLS 1.3.\n" ^error [^{:tag (* Conn)} c ^bool expectChangeCipherSpec]
+  (inc! (.-retryCount c))
+  (when (> (.-retryCount c) maxUselessRecords)
+    (.sendAlert c alertUnexpectedMessage)
+    (return (.setErrorLocked (.-in c) (errors/New "tls: too many ignored records"))))
+
+  (.readRecordOrCCS c expectChangeCipherSpec))
+
+
+
+
+^{:go/end 838} (go/method readFromUntil "readFromUntil reads from r into c.rawInput until c.rawInput contains\nat least n bytes or else returns an error.\n" ^error [^{:tag (* Conn)} c ^io/Reader r ^int n]
+  (when (>= (.Len (.-rawInput c)) n)
+    (return nil))
+
+  (let [needs (- n (.Len (.-rawInput c)))]
+    ;; There might be extra input waiting on the wire. Make a best effort
+    ;; attempt to fetch it so that it can be used in (*Conn).Read to
+    ;; "predict" closeNotify alerts.
+    ;; TODO(dmo): we use bytes.MinRead here because we used the buffer
+    ;; ReadFrom mechanism to avoid allocations, but we've hoisted this
+    ;; loop for performance. We really should use our own heuristic here
+    ;; for how much to read ahead.
+    (.Grow (.-rawInput c) (+ needs bytes/MinRead))
+    (while true
+      (let [buf (subslice (.AvailableBuffer (.-rawInput c)) _ (.Available (.-rawInput c)))
+          (values n err) (.Read r buf)]
+        ;; This write is just to update the internal state of the
+        ;; rawInput bytes.Buffer. It cannot fail.
+        (.Write (.-rawInput c) (subslice buf _ n))
+        (set! needs - n)
+        (when (<= needs 0)
+          (when (== err io/EOF)
+            (set! err nil))
+
+          (return err))
+
+        (when (== err io/EOF)
+          (return io/ErrUnexpectedEOF))
+
+        (when (!= err nil)
+          (return err))))))
+
+
+
+
+
+^{:go/end 861} (go/method sendAlertLocked "sendAlertLocked sends a TLS alert message.\n" ^error [^{:tag (* Conn)} c ^alert err]
+  (when (!= (.-quic c) nil)
+    (return (.setErrorLocked (.-out c) (addr (lit net/OpError :Op "local error" :Err err)))))
+
+
+  (switch err
+    (case [alertNoRenegotiation alertCloseNotify]
+      (aset (.-tmp c) 0 alertLevelWarning))
+    (default
+      (aset (.-tmp c) 0 alertLevelError)))
+
+  (aset (.-tmp c) 1 (conv byte err))
+
+  (let [(values _ writeErr) (.writeRecordLocked c recordTypeAlert (subslice (.-tmp c) 0 2))]
+    (when (== err alertCloseNotify)
+      ;; closeNotify is a special case in that it isn't an error.
+      (return writeErr))
+
+
+    (.setErrorLocked (.-out c) (addr (lit net/OpError :Op "local error" :Err err)))))
+
+
+
+^{:go/end 868} (go/method sendAlert "sendAlert sends a TLS alert message.\n" ^error [^{:tag (* Conn)} c ^alert err]
+  ^{:go/via [Mutex]} (.Lock (.-out c))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-out c)))
+  (.sendAlertLocked c err))
+
+
+(go/const
+
+
+
+
+
+  ^{:line 876} [^{:val 1208 :doc "tcpMSSEstimate is a conservative estimate of the TCP maximum segment\nsize (MSS). A constant is used, rather than querying the kernel for\nthe actual MSS, to avoid complexity. The value here is the IPv6\nminimum MTU (1280 bytes) minus the overhead of an IPv6 header (40\nbytes) and a TCP header with timestamps (32 bytes).\n"} tcpMSSEstimate 1208]
+
+
+
+
+  ^{:line 881} [^{:val 131072 :doc "recordSizeBoostThreshold is the number of bytes of application data\nsent after which the TLS record size will be increased to the\nmaximum.\n"} recordSizeBoostThreshold (* 128 1024)])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 945} (go/method maxPayloadSizeForWrite "maxPayloadSizeForWrite returns the maximum TLS payload size to use for the\nnext application data record. There is the following trade-off:\n\n  - For latency-sensitive applications, such as web browsing, each TLS\n    record should fit in one TCP segment.\n  - For throughput-sensitive applications, such as large file transfers,\n    larger TLS records better amortize framing and encryption overheads.\n\nA simple heuristic that works well in practice is to use small records for\nthe first 1MB of data, then use larger records for subsequent data, and\nreset back to smaller records after the connection becomes idle. See \"High\nPerformance Web Networking\", Chapter 4, or:\nhttps://www.igvita.com/2013/10/24/optimizing-tls-record-size-and-buffering-latency/\n\nIn the interests of simplicity and determinism, this code does not attempt\nto reset the record size once the connection is idle, however.\n" ^int [^{:tag (* Conn)} c ^recordType typ]
+  (when (or (.-DynamicRecordSizingDisabled (.-config c)) (!= typ recordTypeApplicationData))
+    (return maxPlaintext))
+
+
+  (when (>= (.-bytesSent c) recordSizeBoostThreshold)
+    (return maxPlaintext))
+
+
+  ;; Subtract TLS overheads to get the maximum payload size.
+  (let [payloadBytes (- tcpMSSEstimate recordHeaderLen (.explicitNonceLen (.-out c)))]
+    (when (!= (.-cipher (.-out c)) nil)
+      (type-switch [ciph (.-cipher (.-out c))]
+        (case [cipher/Stream]
+          (set! payloadBytes - (.Size (.-mac (.-out c)))))
+        (case [cipher/AEAD]
+          (set! payloadBytes - (.Overhead ciph)))
+        (case [cbcMode]
+          (let [blockSize (.BlockSize ciph)]
+            ;; The payload must fit in a multiple of blockSize, with
+            ;; room for at least one padding byte.
+            (set! payloadBytes (- (bit-and payloadBytes (bit-not (- blockSize 1))) 1))
+            ;; The MAC is appended before padding so affects the
+            ;; payload size directly.
+            (set! payloadBytes - (.Size (.-mac (.-out c))))))
+        (default
+          (panic "unknown cipher type"))))
+
+
+    (when (== (.-vers c) VersionTLS13)
+      (dec! payloadBytes)) ; encrypted ContentType
+
+
+    ;; Allow packet growth in arithmetic progression up to max.
+    (let [pkt (.-packetsSent c)]
+      (inc! (.-packetsSent c))
+      (when (> pkt 1000)
+        (return maxPlaintext)) ; avoid overflow in multiply below
+
+
+      (let [n (* payloadBytes (conv int (+ pkt 1)))]
+        (when (> n maxPlaintext)
+          (set! n maxPlaintext))
+
+        ^{:line 944} n))))
+
+
+^{:go/end 956} (go/method write [^{:tag (* Conn)} c ^{:tag (slice byte)} data] :results [int error]
+  (when (.-buffering c)
+    (set! (.-sendBuf c) (append (.-sendBuf c) (spread data)))
+    (return (len data) nil))
+
+
+  (let [(values n err) (.Write (.-conn c) data)]
+    (set! (.-bytesSent c) + (conv int64 n))
+    (return n err)))
+
+
+^{:go/end 968} (go/method flush [^{:tag (* Conn)} c] :results [int error]
+  (when (== (len (.-sendBuf c)) 0)
+    (return 0 nil))
+
+
+  (let [(values n err) (.Write (.-conn c) (.-sendBuf c))]
+    (set! (.-bytesSent c) + (conv int64 n))
+    (set! (.-sendBuf c) nil)
+    (set! (.-buffering c) false)
+    (return n err)))
+
+
+
+(go/var ^{:doc "outBufPool pools the record-sized scratch buffers used by writeRecordLocked.\n"} outBufPool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 974} (fn ^any []
+      (new (slice byte)))))
+
+
+
+
+
+^{:go/end 1048} (go/method writeRecordLocked "writeRecordLocked writes a TLS record with the given type and payload to the\nconnection and updates the record layer state.\n" [^{:tag (* Conn)} c ^recordType typ ^{:tag (slice byte)} data] :results [int error]
+  (when (!= (.-quic c) nil)
+    (when (!= typ recordTypeHandshake)
+      (return 0 (errors/New "tls: internal error: sending non-handshake message to QUIC transport")))
+
+    (.quicWriteCryptoData c (.-level (.-out c)) data)
+    (when (not (.-buffering c))
+      (when [(values _ err) (.flush c)] (!= err nil)
+        (return 0 err)))
+
+
+    (return (len data) nil))
+
+
+  (let [outBufPtr (assert (* (slice byte)) (.Get outBufPool))
+      ^{:line 994} outBuf @outBufPtr]
+    (defer (^{:go/end 1003} (fn []
+          ;; You might be tempted to simplify this by just passing &outBuf to Put,
+          ;; but that would make the local copy of the outBuf slice header escape
+          ;; to the heap, causing an allocation. Instead, we keep around the
+          ;; pointer to the slice header returned by Get, which is already on the
+          ;; heap, and overwrite and return that.
+          (set! @outBufPtr outBuf)
+          (.Put outBufPool outBufPtr))))
+
+
+    (let [^int n (zero int)]
+      (while (> (len data) 0)
+        (let [m (len data)]
+          (when [maxPayload (.maxPayloadSizeForWrite c typ)] (> m maxPayload)
+            (set! m maxPayload))
+
+
+          (set! (values _ outBuf) (sliceForAppend (subslice outBuf _ 0) recordHeaderLen))
+          (aset outBuf 0 (conv byte typ))
+          (let [vers (.-vers c)]
+            (cond (== vers 0)
+              ;; Some TLS servers fail if the record version is
+              ;; greater than TLS 1.0 for the initial ClientHello.
+              (set! vers VersionTLS10)
+              (== vers VersionTLS13)
+              ;; TLS 1.3 froze the record layer version to 1.2.
+              ;; See RFC 8446, Section 5.1.
+              (set! vers VersionTLS12))
+
+            (aset outBuf 1 (conv byte (>> vers 8)))
+            (aset outBuf 2 (conv byte vers))
+            (aset outBuf 3 (conv byte (>> m 8)))
+            (aset outBuf 4 (conv byte m))
+
+            (let [^error err (zero error)]
+              (set! (values outBuf err) (.encrypt (.-out c) outBuf (subslice data _ m) (.rand (.-config c))))
+              (when (!= err nil)
+                (return n err))
+
+              (when [(values _ err) (.write c outBuf)] (!= err nil)
+                (return n err))
+
+              (set! n + m)
+              (set! data (subslice data m))))))
+
+
+      (when (and (== typ recordTypeChangeCipherSpec) (!= (.-vers c) VersionTLS13))
+        (when [err (.changeCipherSpec (.-out c))] (!= err nil)
+          (return n (.sendAlertLocked c (assert alert err)))))
+
+
+
+      (return n nil))))
+
+
+
+
+
+^{:go/end 1066} (go/method writeHandshakeRecord "writeHandshakeRecord writes a handshake message to the connection and updates\nthe record layer state. If transcript is non-nil the marshaled message is\nwritten to it.\n" [^{:tag (* Conn)} c ^handshakeMessage msg ^transcriptHash transcript] :results [int error]
+  ^{:go/via [Mutex]} (.Lock (.-out c))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-out c)))
+
+  (let [(values data err) (.marshal msg)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (when (!= transcript nil)
+      (.Write transcript data))
+
+
+    (.writeRecordLocked c recordTypeHandshake data)))
+
+
+
+
+^{:go/end 1075} (go/method writeChangeCipherRecord "writeChangeCipherRecord writes a ChangeCipherSpec message to the connection and\nupdates the record layer state.\n" ^error [^{:tag (* Conn)} c]
+  ^{:go/via [Mutex]} (.Lock (.-out c))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-out c)))
+  (let [(values _ err) (.writeRecordLocked c recordTypeChangeCipherSpec (lit (slice byte) 1))]
+    ^{:line 1074} err))
+
+
+
+^{:go/breaks [[6 1087]] :go/end 1088} (go/method readHandshakeBytes "readHandshakeBytes reads handshake data until c.hand contains at least n bytes.\n" ^error [^{:tag (* Conn)} c ^int n]
+  (when (!= (.-quic c) nil)
+    (return (.quicReadHandshakeBytes c n)))
+
+  (while (< (.Len (.-hand c)) n)
+    (when [err (.readRecord c)] (!= err nil)
+      (return err)))
+
+
+  nil)
+
+
+
+
+
+^{:go/end 1120} (go/method readHandshake "readHandshake reads the next handshake message from\nthe record layer. If transcript is non-nil, the message\nis written to the passed transcriptHash.\n" [^{:tag (* Conn)} c ^transcriptHash transcript] :results [any error]
+  (when [err (.readHandshakeBytes c 4)] (!= err nil)
+    (return nil err))
+
+  (let [data (.Bytes (.-hand c))
+
+      ^{:line 1099} maxHandshakeSize maxHandshake]
+    ;; hasVers indicates we're past the first message, forcing someone trying to
+    ;; make us just allocate a large buffer to at least do the initial part of
+    ;; the handshake first.
+    (when (and (.-haveVers c) (== (aget data 0) typeCertificate))
+      ;; Since certificate messages are likely to be the only messages that
+      ;; can be larger than maxHandshake, we use a special limit for just
+      ;; those messages.
+      (set! maxHandshakeSize maxHandshakeCertificateMsg))
+
+
+    (let [n (bit-or (<< (conv int (aget data 1)) 16) (<< (conv int (aget data 2)) 8) (conv int (aget data 3)))]
+      (when (> n maxHandshakeSize)
+        (.sendAlertLocked c alertInternalError)
+        (return nil (.setErrorLocked (.-in c) (fmt/Errorf "tls: handshake message of length %d bytes exceeds maximum of %d bytes" n maxHandshakeSize))))
+
+      (when [err (.readHandshakeBytes c (+ 4 n))] (!= err nil)
+        (return nil err))
+
+      (set! data (.Next (.-hand c) (+ 4 n)))
+      (.unmarshalHandshakeMessage c data transcript))))
+
+
+^{:go/end 1189} (go/method unmarshalHandshakeMessage [^{:tag (* Conn)} c ^{:tag (slice byte)} data ^transcriptHash transcript] :results [handshakeMessage error]
+  (let [^handshakeMessage m (zero handshakeMessage)]
+    (switch (aget data 0)
+      (case [typeHelloRequest]
+        (set! m (new helloRequestMsg)))
+      (case [typeClientHello]
+        (set! m (new clientHelloMsg)))
+      (case [typeServerHello]
+        (set! m (new serverHelloMsg)))
+      (case [typeNewSessionTicket]
+        (if (== (.-vers c) VersionTLS13)
+          (set! m (new newSessionTicketMsgTLS13))
+
+          (set! m (new newSessionTicketMsg))))
+
+      (case [typeCertificate]
+        (if (== (.-vers c) VersionTLS13)
+          (set! m (new certificateMsgTLS13))
+
+          (set! m (new certificateMsg))))
+
+      (case [typeCertificateRequest]
+        (if (== (.-vers c) VersionTLS13)
+          (set! m (new certificateRequestMsgTLS13))
+
+          (set! m (addr ^{:go/breaks [2]} (lit certificateRequestMsg
+                :hasSignatureAlgorithm (>= (.-vers c) VersionTLS12))))))
+
+
+      (case [typeCertificateStatus]
+        (set! m (new certificateStatusMsg)))
+      (case [typeServerKeyExchange]
+        (set! m (new serverKeyExchangeMsg)))
+      (case [typeServerHelloDone]
+        (set! m (new serverHelloDoneMsg)))
+      (case [typeClientKeyExchange]
+        (set! m (new clientKeyExchangeMsg)))
+      (case [typeCertificateVerify]
+        (set! m (addr ^{:go/breaks [2]} (lit certificateVerifyMsg
+              :hasSignatureAlgorithm (>= (.-vers c) VersionTLS12)))))
+
+      (case [typeFinished]
+        (set! m (new finishedMsg)))
+      (case [typeEncryptedExtensions]
+        (set! m (new encryptedExtensionsMsg)))
+      (case [typeEndOfEarlyData]
+        (set! m (new endOfEarlyDataMsg)))
+      (case [typeKeyUpdate]
+        (set! m (new keyUpdateMsg)))
+      (default
+        (return nil (.setErrorLocked (.-in c) (.sendAlert c alertUnexpectedMessage)))))
+
+
+    ;; The handshake message unmarshalers
+    ;; expect to be able to keep references to data,
+    ;; so pass in a fresh copy that won't be overwritten.
+    (set! data (append (conv (slice byte) nil) (spread data)))
+
+    (when (not (.unmarshal m data))
+      (return nil (.setErrorLocked (.-in c) (.sendAlert c alertDecodeError))))
+
+
+    (when (!= transcript nil)
+      (.Write transcript data))
+
+
+    (return m nil)))
+
+
+(go/var
+  ^{:line 1192} [errShutdown (errors/New "tls: protocol is shutdown")])
+
+
+
+
+
+
+
+
+^{:go/end 1255} (go/method Write "Write writes data to the connection.\n\nAs Write calls [Conn.Handshake], in order to prevent indefinite blocking a deadline\nmust be set for both [Conn.Read] and Write before Write is called when the handshake\nhas not yet completed. See [Conn.SetDeadline], [Conn.SetReadDeadline], and\n[Conn.SetWriteDeadline].\n" [^{:tag (* Conn)} c ^{:tag (slice byte)} b] :results [int error]
+  ;; interlock with Close below
+  (while true
+    (let [x (.Load (.-activeCall c))]
+      (when (!= (bit-and x 1) 0)
+        (return 0 net/ErrClosed))
+
+      (when (.CompareAndSwap (.-activeCall c) x (+ x 2))
+        (break))))
+
+
+  (defer (.Add (.-activeCall c) -2))
+
+  (when [err (.Handshake c)] (!= err nil)
+    (return 0 err))
+
+
+  ^{:go/via [Mutex]} (.Lock (.-out c))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-out c)))
+
+  (when [err (.-err (.-out c))] (!= err nil)
+    (return 0 err))
+
+
+  (when (not (.Load (.-isHandshakeComplete c)))
+    (return 0 alertInternalError))
+
+
+  (when (.-closeNotifySent c)
+    (return 0 errShutdown))
+
+
+  ;; TLS 1.0 is susceptible to a chosen-plaintext
+  ;; attack when using block mode ciphers due to predictable IVs.
+  ;; This can be prevented by splitting each Application Data
+  ;; record into two records, effectively randomizing the IV.
+  ;;
+  ;; https://www.openssl.org/~bodo/tls-cbc.txt
+  ;; https://bugzilla.mozilla.org/show_bug.cgi?id=665814
+  ;; https://www.imperialviolet.org/2012/01/15/beastfollowup.html
+
+  (let [^int m (zero int)]
+    (when (and (> (len b) 1) (== (.-vers c) VersionTLS10))
+      (when [(values _ ok) (assert cipher/BlockMode (.-cipher (.-out c)))] ok
+        (let [(values n err) (.writeRecordLocked c recordTypeApplicationData (subslice b _ 1))]
+          (when (!= err nil)
+            (return n (.setErrorLocked (.-out c) err)))
+
+          (set! (values m b) (values 1 (subslice b 1))))))
+
+
+
+    (let [(values n err) (.writeRecordLocked c recordTypeApplicationData b)]
+      (return (+ n m) (.setErrorLocked (.-out c) err)))))
+
+
+
+^{:go/end 1300} (go/method handleRenegotiation "handleRenegotiation processes a HelloRequest handshake message.\n" ^error [^{:tag (* Conn)} c]
+  (when (== (.-vers c) VersionTLS13)
+    (return (errors/New "tls: internal error: unexpected renegotiation")))
+
+
+  (let [(values msg err) (.readHandshake c nil)]
+    (when (!= err nil)
+      (return err))
+
+
+    (let [(values helloReq ok) (assert (* helloRequestMsg) msg)]
+      (when (not ok)
+        (.sendAlert c alertUnexpectedMessage)
+        (return (unexpectedMessageError helloReq msg)))
+
+
+      (when (not (.-isClient c))
+        (return (.sendAlert c alertNoRenegotiation)))
+
+
+      (switch (.-Renegotiation (.-config c))
+        (case [RenegotiateNever]
+          (return (.sendAlert c alertNoRenegotiation)))
+        (case [RenegotiateOnceAsClient]
+          (when (> (.-handshakes c) 1)
+            (return (.sendAlert c alertNoRenegotiation))))
+
+        (case [RenegotiateFreelyAsClient])
+        ;; Ok.
+        (default
+          (.sendAlert c alertInternalError)
+          (return (errors/New "tls: unknown Renegotiation value"))))
+
+
+      (.Lock (.-handshakeMutex c))
+      (defer (.Unlock (.-handshakeMutex c)))
+
+      (.Store (.-isHandshakeComplete c) false)
+      (when [(set! (.-handshakeErr c) (.clientHandshake c (context/Background)))] (== (.-handshakeErr c) nil)
+        (inc! (.-handshakes c)))
+
+      (.-handshakeErr c))))
+
+
+
+
+^{:go/end 1331} (go/method handlePostHandshakeMessage "handlePostHandshakeMessage processes a handshake message arrived after the\nhandshake is complete. Up to TLS 1.2, it indicates the start of a renegotiation.\n" ^error [^{:tag (* Conn)} c]
+  (when (!= (.-vers c) VersionTLS13)
+    (return (.handleRenegotiation c)))
+
+
+  (let [(values msg err) (.readHandshake c nil)]
+    (when (!= err nil)
+      (return err))
+
+    (inc! (.-retryCount c))
+    (when (> (.-retryCount c) maxUselessRecords)
+      (.sendAlert c alertUnexpectedMessage)
+      (return (.setErrorLocked (.-in c) (errors/New "tls: too many non-advancing records"))))
+
+
+    (type-switch [msg msg]
+      (case [(* newSessionTicketMsgTLS13)]
+        (return (.handleNewSessionTicket c msg)))
+      (case [(* keyUpdateMsg)]
+        (return (.handleKeyUpdate c msg))))
+
+    ;; The QUIC layer is supposed to treat an unexpected post-handshake CertificateRequest
+    ;; as a QUIC-level PROTOCOL_VIOLATION error (RFC 9001, Section 4.4). Returning an
+    ;; unexpected_message alert here doesn't provide it with enough information to distinguish
+    ;; this condition from other unexpected messages. This is probably fine.
+    (.sendAlert c alertUnexpectedMessage)
+    (fmt/Errorf "tls: received unexpected handshake message of type %T" msg)))
+
+
+^{:go/end 1370} (go/method handleKeyUpdate ^error [^{:tag (* Conn)} c ^{:tag (* keyUpdateMsg)} keyUpdate]
+  (when (!= (.-quic c) nil)
+    (.sendAlert c alertUnexpectedMessage)
+    (return (.setErrorLocked (.-in c) (errors/New "tls: received unexpected key update message"))))
+
+
+  (let [cipherSuite (cipherSuiteTLS13ByID (.-cipherSuite c))]
+    (when (== cipherSuite nil)
+      (return (.setErrorLocked (.-in c) (.sendAlert c alertInternalError))))
+
+
+    (when (.-updateRequested keyUpdate)
+      ^{:go/via [Mutex]} (.Lock (.-out c))
+      (defer ^{:go/via [Mutex]} (.Unlock (.-out c)))
+
+      (let [msg (addr (lit keyUpdateMsg))
+          (values msgBytes err) (.marshal msg)]
+        (when (!= err nil)
+          (return err))
+
+        (set! (values _ err) (.writeRecordLocked c recordTypeHandshake msgBytes))
+        (when (!= err nil)
+          ;; Surface the error at the next write.
+          (.setErrorLocked (.-out c) err)
+          (return nil))
+
+
+        (let [newSecret (.nextTrafficSecret cipherSuite (.-trafficSecret (.-out c)))]
+          (.setWriteTrafficSecret c cipherSuite QUICEncryptionLevelInitial newSecret))))
+
+
+    ^{:go/breaks [[3 1369]]} (let [newSecret (.nextTrafficSecret cipherSuite (.-trafficSecret (.-in c)))]
+      (when [err (.setReadTrafficSecret c cipherSuite QUICEncryptionLevelInitial newSecret (.-updateRequested keyUpdate))] (!= err nil)
+        (return err))
+
+
+      nil)))
+
+
+
+
+
+
+
+
+^{:go/end 1419} (go/method Read "Read reads data from the connection.\n\nAs Read calls [Conn.Handshake], in order to prevent indefinite blocking a deadline\nmust be set for both Read and [Conn.Write] before Read is called when the handshake\nhas not yet completed. See [Conn.SetDeadline], [Conn.SetReadDeadline], and\n[Conn.SetWriteDeadline].\n" [^{:tag (* Conn)} c ^{:tag (slice byte)} b] :results [int error]
+  (when [err (.Handshake c)] (!= err nil)
+    (return 0 err))
+
+  (when (== (len b) 0)
+    ;; Put this after Handshake, in case people were calling
+    ;; Read(nil) for the side effect of the Handshake.
+    (return 0 nil))
+
+
+  ^{:go/via [Mutex]} (.Lock (.-in c))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-in c)))
+
+  (while (== (.Len (.-input c)) 0)
+    (when [err (.readRecord c)] (!= err nil)
+      (return 0 err))
+
+    (while (> (.Len (.-hand c)) 0)
+      (when [err (.handlePostHandshakeMessage c)] (!= err nil)
+        (return 0 err))))
+
+
+
+
+  (let [(values n _) (.Read (.-input c) b)]
+
+    ;; If a close-notify alert is waiting, read it so that we can return (n,
+    ;; EOF) instead of (n, nil), to signal to the HTTP response reading
+    ;; goroutine that the connection is now closed. This eliminates a race
+    ;; where the HTTP response reading goroutine would otherwise not observe
+    ;; the EOF until its next read, by which time a client goroutine might
+    ;; have already tried to reuse the HTTP connection for a new request.
+    ;; See https://golang.org/cl/76400046 and https://golang.org/issue/3514
+    (when (and (!= n 0) (== (.Len (.-input c)) 0) (> (.Len (.-rawInput c)) 0)
+        (== (conv recordType (aget (.Bytes (.-rawInput c)) 0)) recordTypeAlert))
+      (when [err (.readRecord c)] (!= err nil)
+        (return n err))) ; will be io.EOF on closeNotify
+
+
+
+    (return n nil)))
+
+
+
+^{:go/end 1455} (go/method Close "Close closes the connection.\n" ^error [^{:tag (* Conn)} c]
+  ;; Interlock with Conn.Write above.
+  (let [^int32 x (zero int32)]
+    (while true
+      (set! x (.Load (.-activeCall c)))
+      (when (!= (bit-and x 1) 0)
+        (return net/ErrClosed))
+
+      (when (.CompareAndSwap (.-activeCall c) x (bit-or x 1))
+        (break)))
+
+
+    (when (!= x 0)
+      ;; io.Writer and io.Closer should not be used concurrently.
+      ;; If Close is called while a Write is currently in-flight,
+      ;; interpret that as a sign that this Close is really just
+      ;; being used to break the Write and/or clean up resources and
+      ;; avoid sending the alertCloseNotify, which may block
+      ;; waiting on handshakeMutex or the c.out mutex.
+      (return (.Close (.-conn c))))
+
+
+    (let [^error alertErr (zero error)]
+      (when (.Load (.-isHandshakeComplete c))
+        (when [err (.closeNotify c)] (!= err nil)
+          (set! alertErr (fmt/Errorf "tls: failed to send closeNotify alert (but connection was closed anyway): %w" err))))
+
+
+
+      (when [err (.Close (.-conn c))] (!= err nil)
+        (return err))
+
+      ^{:line 1454} alertErr)))
+
+
+(go/var errEarlyCloseWrite (errors/New "tls: CloseWrite called before handshake complete"))
+
+
+
+
+^{:go/end 1468} (go/method CloseWrite "CloseWrite shuts down the writing side of the connection. It should only be\ncalled once the handshake has completed and does not call CloseWrite on the\nunderlying connection. Most callers should just use [Conn.Close].\n" ^error [^{:tag (* Conn)} c]
+  (when (not (.Load (.-isHandshakeComplete c)))
+    (return errEarlyCloseWrite))
+
+
+  (.closeNotify c))
+
+
+^{:go/end 1483} (go/method closeNotify ^error [^{:tag (* Conn)} c]
+  ^{:go/via [Mutex]} (.Lock (.-out c))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-out c)))
+
+  (when (not (.-closeNotifySent c))
+    ;; Set a Write Deadline to prevent possibly blocking forever.
+    (.SetWriteDeadline c (.Add (time/Now) (* time/Second 5)))
+    (set! (.-closeNotifyErr c) (.sendAlertLocked c alertCloseNotify))
+    (set! (.-closeNotifySent c) true)
+    ;; Any subsequent writes will fail.
+    (.SetWriteDeadline c (time/Now)))
+
+  (.-closeNotifyErr c))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1500} (go/method Handshake "Handshake runs the client or server handshake\nprotocol if it has not yet been run.\n\nMost uses of this package need not call Handshake explicitly: the\nfirst [Conn.Read] or [Conn.Write] will call it automatically.\n\nFor control over canceling or setting a timeout on a handshake, use\n[Conn.HandshakeContext] or the [Dialer]'s DialContext method instead.\n\nIn order to avoid denial of service attacks, the maximum RSA key size allowed\nin certificates sent by either the TLS server or client is limited to 8192\nbits. This limit can be overridden by setting tlsmaxrsasize in the GODEBUG\nenvironment variable (e.g. GODEBUG=tlsmaxrsasize=4096).\n" ^error [^{:tag (* Conn)} c]
+  (.HandshakeContext c (context/Background)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1516} (go/method HandshakeContext "HandshakeContext runs the client or server handshake\nprotocol if it has not yet been run.\n\nThe provided Context must be non-nil. If the context is canceled before\nthe handshake is complete, the handshake is interrupted and an error is returned.\nOnce the handshake has completed, cancellation of the context will not affect the\nconnection.\n\nMost uses of this package need not call HandshakeContext explicitly: the\nfirst [Conn.Read] or [Conn.Write] will call it automatically.\n" ^error [^{:tag (* Conn)} c ^context/Context ctx]
+  ;; Delegate to unexported method for named return
+  ;; without confusing documented signature.
+  (.handshakeContext c ctx))
+
+
+^{:go/end 1604} (go/method handshakeContext [^{:tag (* Conn)} c ^context/Context ctx] :results [^error ret]
+  ;; Fast sync/atomic-based exit if there is no handshake in flight and the
+  ;; last one succeeded without an error. Avoids the expensive context setup
+  ;; and mutex for most Read and Write calls.
+  (when (.Load (.-isHandshakeComplete c))
+    (return nil))
+
+
+  (let [(values handshakeCtx cancel) (context/WithCancel ctx)]
+    ;; Note: defer this before calling context.AfterFunc
+    ;; so that we can tell the difference between the input being canceled and
+    ;; this cancellation. In the former case, we need to close the connection.
+    (defer (cancel))
+
+    (cond (!= (.-quic c) nil) (do
+        (set! (.-ctx (.-quic c)) handshakeCtx)
+        (set! (.-cancel (.-quic c)) cancel))
+      (!= (.Done ctx) nil)
+      ;; Close the connection if ctx is canceled before the function returns.
+      (let [stop (context/AfterFunc ctx ^{:go/end 1539} (fn []
+              (set! _ (.Close (.-conn c)))))]
+
+        (defer (^{:go/end 1545} (fn []
+              (when (not (stop))
+                ;; Return context error to user.
+                (set! ret (.Err ctx))))))))
+
+
+
+
+    (.Lock (.-handshakeMutex c))
+    (defer (.Unlock (.-handshakeMutex c)))
+
+    (when [err (.-handshakeErr c)] (!= err nil)
+      (return err))
+
+    (when (.Load (.-isHandshakeComplete c))
+      (return nil))
+
+
+    ^{:go/via [Mutex]} (.Lock (.-in c))
+    (defer ^{:go/via [Mutex]} (.Unlock (.-in c)))
+
+    (set! (.-handshakeErr c) ((.-handshakeFn c) handshakeCtx))
+    (if (== (.-handshakeErr c) nil)
+      (inc! (.-handshakes c))
+
+      ;; If an error occurred during the handshake try to flush the
+      ;; alert that might be left in the buffer.
+      (.flush c))
+
+
+    (when (and (== (.-handshakeErr c) nil) (not (.Load (.-isHandshakeComplete c))))
+      (set! (.-handshakeErr c) (errors/New "tls: internal error: handshake should have had a result")))
+
+    (when (and (!= (.-handshakeErr c) nil) (.Load (.-isHandshakeComplete c)))
+      (panic "tls: internal error: handshake returned an error but is marked successful"))
+
+
+    (when (!= (.-quic c) nil)
+      (if (== (.-handshakeErr c) nil) (do
+          (.quicHandshakeComplete c)
+          ;; Provide the 1-RTT read secret now that the handshake is complete.
+          ;; The QUIC layer MUST NOT decrypt 1-RTT packets prior to completing
+          ;; the handshake (RFC 9001, Section 5.7).
+          (when [err (.quicSetReadSecret c QUICEncryptionLevelApplication (.-cipherSuite c) (.-trafficSecret (.-in c)))] (!= err nil)
+            (return err)))
+
+        (do
+          ^{:go/via [Mutex]} (.Lock (.-out c))
+          (let [(values a ok) ((inst errors/AsType alert) (.-err (.-out c)))]
+            (when (not ok)
+              (set! a alertInternalError))
+
+            ^{:go/via [Mutex]} (.Unlock (.-out c))
+            ;; Return an error which wraps both the handshake error and
+            ;; any alert error we may have sent, or alertInternalError
+            ;; if we didn't send an alert.
+            ;; Truncate the text of the alert to 0 characters.
+            (set! (.-handshakeErr c) (fmt/Errorf "%w%.0w" (.-handshakeErr c) (conv AlertError a))))))
+
+      (close (.-blockedc (.-quic c)))
+      (close (.-signalc (.-quic c))))
+
+
+    (.-handshakeErr c)))
+
+
+
+
+
+
+
+
+
+^{:go/end 1617} (go/method ConnectionState "ConnectionState returns basic TLS details about the connection.\n\nThe returned [ConnectionState] is only meaningful after the handshake has\ncompleted, as reported by [ConnectionState.HandshakeComplete]; before then\nits fields are not populated. The handshake is run automatically by the\nfirst [Conn.Read] or [Conn.Write], or it can be triggered explicitly with\n[Conn.Handshake].\n" ^ConnectionState [^{:tag (* Conn)} c]
+  (.Lock (.-handshakeMutex c))
+  (defer (.Unlock (.-handshakeMutex c)))
+  (.connectionStateLocked c))
+
+
+^{:go/end 1652} (go/method connectionStateLocked ^ConnectionState [^{:tag (* Conn)} c]
+  (let [^ConnectionState state (zero ConnectionState)]
+    (set! (.-HandshakeComplete state) (.Load (.-isHandshakeComplete c)))
+    (set! (.-Version state) (.-vers c))
+    (set! (.-NegotiatedProtocol state) (.-clientProtocol c))
+    (set! (.-DidResume state) (.-didResume c))
+    (set! (.-HelloRetryRequest state) (.-didHRR c))
+    (set! (.-testingOnlyPeerSignatureAlgorithm state) (.-peerSigAlg c))
+    (set! (.-CurveID state) (.-curveID c))
+    (set! (.-NegotiatedProtocolIsMutual state) true)
+    (set! (.-ServerName state) (.-serverName c))
+    (set! (.-CipherSuite state) (.-cipherSuite c))
+    (set! (.-PeerCertificates state) (.-peerCertificates c))
+    (set! (.-LocalCertificate state) (.-localCertificate c))
+    (set! (.-VerifiedChains state) (.-verifiedChains c))
+    (set! (.-SignedCertificateTimestamps state) (.-scts c))
+    (set! (.-OCSPResponse state) (.-ocspResponse c))
+    (when (and ^:go/paren (or (not (.-didResume c)) (.-extMasterSecret c)) (!= (.-vers c) VersionTLS13))
+      (if (.-clientFinishedIsFirst c)
+        (set! (.-TLSUnique state) (subslice (.-clientFinished c)))
+
+        (set! (.-TLSUnique state) (subslice (.-serverFinished c)))))
+
+
+    (cond (!= (.-Renegotiation (.-config c)) RenegotiateNever)
+      (set! (.-ekm state) noEKMBecauseRenegotiation)
+      (and (!= (.-vers c) VersionTLS13) (not (.-extMasterSecret c)))
+      (set! (.-ekm state) noEKMBecauseNoEMS) :else
+
+      (set! (.-ekm state) (.-ekm c)))
+
+    (set! (.-ECHAccepted state) (.-echAccepted c))
+    ^{:line 1651} state))
+
+
+
+
+^{:go/end 1661} (go/method OCSPResponse "OCSPResponse returns the stapled OCSP response from the TLS server, if\nany. (Only valid for client connections.)\n" ^{:tag (slice byte)} [^{:tag (* Conn)} c]
+  (.Lock (.-handshakeMutex c))
+  (defer (.Unlock (.-handshakeMutex c)))
+
+  (.-ocspResponse c))
+
+
+
+
+
+^{:go/end 1679} (go/method VerifyHostname "VerifyHostname checks that the peer certificate chain is valid for\nconnecting to host. If so, it returns nil; if not, it returns an error\ndescribing the problem.\n" ^error [^{:tag (* Conn)} c ^string host]
+  (.Lock (.-handshakeMutex c))
+  (defer (.Unlock (.-handshakeMutex c)))
+  (when (not (.-isClient c))
+    (return (errors/New "tls: VerifyHostname called on TLS server connection")))
+
+  (when (not (.Load (.-isHandshakeComplete c)))
+    (return (errors/New "tls: handshake has not yet been performed")))
+
+  (when (== (len (.-verifiedChains c)) 0)
+    (return (errors/New "tls: handshake did not verify certificate chain")))
+
+  (.VerifyHostname (aget (.-peerCertificates c) 0) host))
+
+
+
+
+
+^{:go/breaks [6] :go/end 1698} (go/method setReadTrafficSecret "setReadTrafficSecret sets the read traffic secret for the given encryption level. If\nbeing called at the same time as setWriteTrafficSecret, the caller must ensure the call\nto setWriteTrafficSecret happens first so any alerts are sent at the write level.\n" ^error [^{:tag (* Conn)} c ^{:tag (* cipherSuiteTLS13)} suite ^QUICEncryptionLevel level ^{:tag (slice byte)} secret ^bool locked]
+  ;; Ensure that there are no buffered handshake messages before changing the
+  ;; read keys, since that can cause messages to be parsed that were encrypted
+  ;; using old keys which are no longer appropriate.
+  (when (!= (.Len (.-hand c)) 0)
+    (if locked
+      (.sendAlertLocked c alertUnexpectedMessage)
+
+      (.sendAlert c alertUnexpectedMessage))
+
+    (return (errors/New "tls: handshake buffer not empty before setting read traffic secret")))
+
+  (.setTrafficSecret (.-in c) suite level secret)
+  nil)
+
+
+
+
+
+^{:go/end 1705} (go/method setWriteTrafficSecret "setWriteTrafficSecret sets the write traffic secret for the given encryption level. If\nbeing called at the same time as setReadTrafficSecret, the caller must ensure the call\nto setWriteTrafficSecret happens first so any alerts are sent at the write level.\n" [^{:tag (* Conn)} c ^{:tag (* cipherSuiteTLS13)} suite ^QUICEncryptionLevel level ^{:tag (slice byte)} secret]
+  (.setTrafficSecret (.-out c) suite level secret))

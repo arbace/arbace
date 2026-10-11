@@ -1,0 +1,314 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package dag implements a language for expressing directed acyclic
+;; graphs.
+;;
+;; The general syntax of a rule is:
+;;
+;;	a, b < c, d;
+;;
+;; which means c and d come after a and b in the partial order
+;; (that is, there are edges from c and d to a and b),
+;; but doesn't provide a relative order between a vs b or c vs d.
+;;
+;; The rules can chain together, as in:
+;;
+;;	e < f, g < h;
+;;
+;; which is equivalent to
+;;
+;;	e < f, g;
+;;	f, g < h;
+;;
+;; Except for the special bottom element "NONE", each name
+;; must appear exactly once on the right-hand side of any rule.
+;; That rule serves as the definition of the allowed successor
+;; for that name. The definition must appear before any uses
+;; of the name on the left-hand side of a rule. (That is, the
+;; rules themselves must be ordered according to the partial
+;; order, for easier reading by people.)
+;;
+;; Negative assertions double-check the partial order:
+;;
+;;	i !< j
+;;
+;; means that it must NOT be the case that i < j.
+;; Negative assertions may appear anywhere in the rules,
+;; even before i and j have been defined.
+;;
+;; Comments begin with #.
+(in-ns 'go.internal.dag) (go/file "parse.go" :doc "Package dag implements a language for expressing directed acyclic\ngraphs.\n\nThe general syntax of a rule is:\n\n\ta, b < c, d;\n\nwhich means c and d come after a and b in the partial order\n(that is, there are edges from c and d to a and b),\nbut doesn't provide a relative order between a vs b or c vs d.\n\nThe rules can chain together, as in:\n\n\te < f, g < h;\n\nwhich is equivalent to\n\n\te < f, g;\n\tf, g < h;\n\nExcept for the special bottom element \"NONE\", each name\nmust appear exactly once on the right-hand side of any rule.\nThat rule serves as the definition of the allowed successor\nfor that name. The definition must appear before any uses\nof the name on the left-hand side of a rule. (That is, the\nrules themselves must be ordered according to the partial\norder, for easier reading by people.)\n\nNegative assertions double-check the partial order:\n\n\ti !< j\n\nmeans that it must NOT be the case that i < j.\nNegative assertions may appear anywhere in the rules,\neven before i and j have been defined.\n\nComments begin with #.\n" :imports [
+
+
+    ^{:line 45} [cmp "cmp"]
+    ^{:line 46} [fmt "fmt"]
+    ^{:line 47} [slices "slices"]
+    ^{:line 48} [strings "strings"]])
+
+
+(go/type Graph (struct
+    ^{:line 52 :tag (slice string)} Nodes
+    ^{:line 53 :tag (map string int)} byLabel
+    ^{:line 54 :tag (map string (map string bool))} edges))
+
+
+^{:go/end 59} (go/func newGraph ^{:tag (* Graph)} []
+  (addr (lit Graph :byLabel (lit (map string int)) :edges (lit (map string (map string bool))))))
+
+
+^{:go/breaks [7] :go/end 69} (go/method addNode ^bool [^{:tag (* Graph)} g ^string label]
+  (when [(values _ ok) (aget (.-byLabel g) label)] ok
+    (return false))
+
+  (aset (.-byLabel g) label (len (.-Nodes g)))
+  (set! (.-Nodes g) (append (.-Nodes g) label))
+  (aset (.-edges g) label (lit (map string bool)))
+  true)
+
+
+^{:go/end 73} (go/method AddEdge [^{:tag (* Graph)} g ^string from ^string to]
+  (aset (aget (.-edges g) from) to true))
+
+
+^{:go/end 77} (go/method DelEdge [^{:tag (* Graph)} g ^string from ^string to]
+  (delete (aget (.-edges g) from) to))
+
+
+^{:go/end 81} (go/method HasEdge ^bool [^{:tag (* Graph)} g ^string from ^string to]
+  (and (!= (aget (.-edges g) from) nil) (aget (aget (.-edges g) from) to)))
+
+
+^{:go/end 92} (go/method Edges ^{:tag (slice string)} [^{:tag (* Graph)} g ^string from]
+  (let [edges (make (slice string) 0 16)]
+    (range [k (aget (.-edges g) from)]
+      (set! edges (append edges k)))
+
+    (^{:inst [(slice string) string]} slices/SortFunc edges ^{:go/end 90} (fn ^int [^string a ^string b]
+        (^{:inst [int]} cmp/Compare (aget (.-byLabel g) a) (aget (.-byLabel g) b))))
+
+    ^{:line 91} edges))
+
+
+
+
+
+^{:go/end 179} (go/func Parse "Parse parses the DAG language and returns the transitive closure of\nthe described graph. In the returned graph, there is an edge from \"b\"\nto \"a\" if b < a (or a > b) in the partial order.\n" [^string dag] :results [(* Graph) error]
+  (let [g (newGraph)
+      ^{:line 99} disallowed (lit (slice rule))
+
+      (values rules err) (parseRules dag)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    ;; TODO: Add line numbers to errors.
+    (let [^{:tag (slice string)} errors (zero (slice string))
+        ^{:line 108} errorf ^{:go/end 110} (fn [^string format & ^{:tag (slice any)} a]
+          (set! errors (append errors (fmt/Sprintf format (spread a)))))]
+
+      (range [_ r rules]
+        (when (== (.-op r) "!<")
+          (set! disallowed (append disallowed r))
+          (continue))
+
+        (range [_ def (.-def r)]
+          (when (== def "NONE")
+            (errorf "NONE cannot be a predecessor")
+            (continue))
+
+          (when (not (.addNode g def))
+            (errorf "multiple definitions for %s" def))
+
+          (range [_ less (.-less r)]
+            (when (== less "NONE")
+              (continue))
+
+            (if [(values _ ok) (aget (.-byLabel g) less)] (not ok)
+              (errorf "use of %s before its definition" less)
+
+              (.AddEdge g def less)))))
+
+
+
+
+
+      ;; Check for missing definition.
+      (range [_ tos (.-edges g)]
+        (range [to tos]
+          (when (== (aget (.-edges g) to) nil)
+            (errorf "missing definition for %s" to))))
+
+
+
+
+      ;; Complete transitive closure.
+      (range [_ k (.-Nodes g)]
+        (range [_ i (.-Nodes g)]
+          (range [_ j (.-Nodes g)]
+            (when (and (!= i k) (!= k j) (.HasEdge g i k) (.HasEdge g k j))
+              (when (== i j)
+                ;; Can only happen along with a "use of X before deps" error above,
+                ;; but this error is more specific - it makes clear that reordering the
+                ;; rules will not be enough to fix the problem.
+                (errorf "graph cycle: %s < %s < %s" j k i))
+
+              (.AddEdge g i j)))))
+
+
+
+
+
+      ;; Check negative assertions against completed allowed graph.
+      (range [_ bad disallowed]
+        (range [_ less (.-less bad)]
+          (range [_ def (.-def bad)]
+            (when (.HasEdge g def less)
+              (errorf "graph edge assertion failed: %s !< %s" less def)))))
+
+
+
+
+
+      (when (> (len errors) 0)
+        (return nil (fmt/Errorf "%s" (strings/Join errors "\n"))))
+
+
+      (return g nil))))
+
+
+
+(go/type rule "A rule is a line in the DAG language where \"less < def\" or \"less !< def\".\n" (struct
+    ^{:line 183 :tag (slice string)} less
+    ^{:line 184 :tag string} op ; Either "<" or "!<"
+    ^{:line 185 :tag (slice string)} def))
+
+
+(go/type syntaxError string)
+
+^{:go/end 192} (go/method Error ^string [^syntaxError e]
+  (conv string e))
+
+
+
+^{:go/end 235} (go/func parseRules "parseRules parses the rules of a DAG.\n" [^string rules] :results [^{:tag (slice rule)} out ^error err]
+  (defer (^{:go/end 206} (fn []
+        (let [e (recover)]
+          (type-switch [e e]
+            (case [nil]
+              (return))
+            (case [syntaxError]
+              (set! err e))
+            (default
+              (panic e)))))))
+
+
+  (let [p (addr (lit rulesParser :lineno 1 :text rules))
+
+      ^{:line 209 :tag (slice string)} prev (zero (slice string))
+      ^{:line 210 :tag string} op (zero string)]
+    (while true
+      (let [(values list tok) (.nextList p)]
+        (when (== tok "")
+          (when (== prev nil)
+            (break))
+
+          (.syntaxError p "unexpected EOF"))
+
+        (when (!= prev nil)
+          (set! out (append out (lit rule prev op list))))
+
+        (set! prev list)
+        (when (== tok ";")
+          (set! prev nil)
+          (set! op "")
+          (continue))
+
+        (when (and (!= tok "<") (!= tok "!<"))
+          (.syntaxError p "missing <"))
+
+        (set! op tok)))
+
+
+    (return out err)))
+
+
+
+(go/type rulesParser "A rulesParser parses the depsRules syntax described above.\n" (struct
+    ^{:line 239 :tag int} lineno
+    ^{:line 240 :tag string} lastWord
+    ^{:line 241 :tag string} text))
+
+
+
+^{:go/end 247} (go/method syntaxError "syntaxError reports a parsing error.\n" [^{:tag (* rulesParser)} p ^string msg]
+  (panic (conv syntaxError (fmt/Sprintf "parsing graph: line %d: syntax error: %s near %s" (.-lineno p) msg (.-lastWord p)))))
+
+
+
+^{:go/end 269} (go/method nextList "nextList parses and returns a comma-separated list of names.\n" [^{:tag (* rulesParser)} p] :results [^{:tag (slice string)} list ^string token]
+  (while true
+    (let [tok (.nextToken p)]
+      (switch tok
+        (case [""]
+          (when (== (len list) 0)
+            (return nil ""))
+
+          (fallthrough))
+        (case ["," "<" "!<" ";"]
+          (.syntaxError p "bad list syntax")))
+
+      (set! list (append list tok))
+
+      (set! tok (.nextToken p))
+      (when (!= tok ",")
+        (return list tok)))))
+
+
+
+
+
+
+^{:go/end 317} (go/method nextToken "nextToken returns the next token in the deps rules,\none of \";\" \",\" \"<\" \"!<\" or a name.\n" ^string [^{:tag (* rulesParser)} p]
+  (while true
+    (when (== (.-text p) "")
+      (return ""))
+
+    (switch (aget (.-text p) 0)
+      (case [\; \, \<]
+        (let [t (subslice (.-text p) _ 1)]
+          (set! (.-text p) (subslice (.-text p) 1))
+          (return t)))
+
+      (case [\!]
+        (when (or (< (len (.-text p)) 2) (!= (aget (.-text p) 1) \<))
+          (.syntaxError p "unexpected token !"))
+
+        (set! (.-text p) (subslice (.-text p) 2))
+        (return "!<"))
+
+      (case [\#]
+        (let [i (strings/Index (.-text p) "\n")]
+          (when (< i 0)
+            (set! i (len (.-text p))))
+
+          (set! (.-text p) (subslice (.-text p) i))
+          (continue)))
+
+      (case [\newline]
+        (inc! (.-lineno p))
+        (fallthrough))
+      (case [\space \tab]
+        (set! (.-text p) (subslice (.-text p) 1))
+        (continue))
+
+      (default
+        (let [i (strings/IndexAny (.-text p) "!;,<#\n \t")]
+          (when (< i 0)
+            (set! i (len (.-text p))))
+
+          (let [t (subslice (.-text p) _ i)]
+            (set! (.-text p) (subslice (.-text p) i))
+            (set! (.-lastWord p) t)
+            (return t)))))))

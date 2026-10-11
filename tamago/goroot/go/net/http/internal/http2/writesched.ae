@@ -1,0 +1,284 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.internal.http2) (go/file "writesched.go" :imports [
+
+    ^{:line 7} [fmt "fmt"]])
+
+
+
+(go/type WriteScheduler "WriteScheduler is the interface implemented by HTTP/2 write schedulers.\nMethods are never called concurrently.\n" (interface
+
+
+
+    (^{:doc "OpenStream opens a new stream in the write scheduler.\nIt is illegal to call this with streamID=0 or with a streamID that is\nalready open -- the call may panic.\n"} OpenStream [^uint32 streamID ^OpenStreamOptions options])
+
+
+
+
+    (^{:doc "CloseStream closes a stream in the write scheduler. Any frames queued on\nthis stream should be discarded. It is illegal to call this on a stream\nthat is not open -- the call may panic.\n"} CloseStream [^uint32 streamID])
+
+
+
+
+
+    (^{:doc "AdjustStream adjusts the priority of the given stream. This may be called\non a stream that has not yet been opened or has been closed. Note that\nRFC 7540 allows PRIORITY frames to be sent on streams in any state. See:\nhttps://tools.ietf.org/html/rfc7540#section-5.1\n"} AdjustStream [^uint32 streamID ^PriorityParam priority])
+
+
+
+
+    (^{:doc "Push queues a frame in the scheduler. In most cases, this will not be\ncalled with wr.StreamID()!=0 unless that stream is currently open. The one\nexception is RST_STREAM frames, which may be sent on idle or closed streams.\n"} Push [^FrameWriteRequest wr])
+
+
+
+
+
+    (^{:doc "Pop dequeues the next frame to write. Returns false if no frames can\nbe written. Frames with a given wr.StreamID() are Pop'd in the same\norder they are Push'd, except RST_STREAM frames. No frames should be\ndiscarded except by CloseStream.\n"} Pop [] :results [^FrameWriteRequest wr ^bool ok])))
+
+
+
+(go/type OpenStreamOptions "OpenStreamOptions specifies extra options for WriteScheduler.OpenStream.\n" (struct
+
+
+    ^{:line 44 :tag uint32 :doc "PusherID is zero if the stream was initiated by the client. Otherwise,\nPusherID names the stream that pushed the newly opened stream.\n"} PusherID
+
+    ^{:line 46 :tag PriorityParam :doc "priority is used to set the priority of the newly opened stream.\n"} priority))
+
+
+
+(go/type FrameWriteRequest "FrameWriteRequest is a request to write a frame.\n" (struct
+
+
+
+    ^{:line 54 :tag writeFramer :doc "write is the interface value that does the writing, once the\nWriteScheduler has selected this frame to write. The write\nfunctions are all defined in write.go.\n"} write
+
+
+
+
+    ^{:line 59 :tag (* stream) :doc "stream is the stream on which this frame will be written.\nnil for non-stream frames like PING and SETTINGS.\nnil for RST_STREAM streams, which use the StreamError.StreamID field instead.\n"} stream
+
+
+
+
+    ^{:line 64 :tag (chan error) :doc "done, if non-nil, must be a buffered channel with space for\n1 message and is sent the return value from write (or an\nearlier error) when the frame has been written.\n"} done))
+
+
+
+
+^{:go/end 81} (go/method StreamID "StreamID returns the id of the stream this frame will be written to.\n0 is used for non-stream frames such as PING and SETTINGS.\n" ^uint32 [^FrameWriteRequest wr]
+  (when (== (.-stream wr) nil)
+    (when [(values se ok) (assert StreamError (.-write wr))] ok
+      ;; (*serverConn).resetStream doesn't set
+      ;; stream because it doesn't necessarily have
+      ;; one. So special case this type of write
+      ;; message.
+      (return (.-StreamID se)))
+
+    (return 0))
+
+  (.-id (.-stream wr)))
+
+
+
+
+^{:go/end 87} (go/method isControl "isControl reports whether wr is a control frame for MaxQueuedControlFrames\npurposes. That includes non-stream frames and RST_STREAM frames.\n" ^bool [^FrameWriteRequest wr]
+  (== (.-stream wr) nil))
+
+
+
+
+^{:go/breaks [[5 95]] :go/end 96} (go/method DataSize "DataSize returns the number of flow control bytes that must be consumed\nto write this entire frame. This is 0 for non-DATA frames.\n" ^int [^FrameWriteRequest wr]
+  (when [(values wd ok) (assert (* writeData) (.-write wr))] ok
+    (return (len (.-p wd))))
+
+  0)
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 157} (go/method Consume "Consume consumes min(n, available) bytes from this frame, where available\nis the number of flow control bytes available on the stream. Consume returns\n0, 1, or 2 frames, where the integer return value gives the number of frames\nreturned.\n\nIf flow control prevents consuming any bytes, this returns (_, _, 0). If\nthe entire frame was consumed, this returns (wr, _, 1). Otherwise, this\nreturns (consumed, rest, 2), where 'consumed' contains the consumed bytes and\n'rest' contains the remaining bytes. The consumed bytes are deducted from the\nunderlying stream's flow control budget.\n" [^FrameWriteRequest wr ^int32 n] :results [FrameWriteRequest FrameWriteRequest int]
+  (let [^FrameWriteRequest empty (zero FrameWriteRequest)
+
+      ;; Non-DATA frames are always consumed whole.
+      (values wd ok) (assert (* writeData) (.-write wr))]
+    (when (or (not ok) (== (len (.-p wd)) 0))
+      (return wr empty 1))
+
+
+    ;; Might need to split after applying limits.
+    (let [allowed (min n (.available (.-flow (.-stream wr))))]
+      (when (< (.-maxFrameSize (.-sc (.-stream wr))) allowed)
+        (set! allowed (.-maxFrameSize (.-sc (.-stream wr)))))
+
+      (when (<= allowed 0)
+        (return empty empty 0))
+
+      (when (> (len (.-p wd)) (conv int allowed))
+        (.take (.-flow (.-stream wr)) allowed)
+        (let [consumed ^{:go/breaks [2 4 [6 139]]} (lit FrameWriteRequest
+              :stream (.-stream wr)
+              :write (addr ^{:go/breaks [2 4 [6 135]]} (lit writeData
+                  :streamID (.-streamID wd)
+                  :p (subslice (.-p wd) _ allowed)
+                  ;; Even if the original had endStream set, there
+                  ;; are bytes remaining because len(wd.p) > allowed,
+                  ;; so we know endStream is false.
+                  :endStream false))
+
+              ;; Our caller is blocking on the final DATA frame, not
+              ;; this intermediate frame, so no need to wait.
+              :done nil)
+
+            ^{:line 141} rest ^{:go/breaks [2 4 [6 148]]} (lit FrameWriteRequest
+              :stream (.-stream wr)
+              :write (addr ^{:go/breaks [2 4 6]} (lit writeData
+                  :streamID (.-streamID wd)
+                  :p (subslice (.-p wd) allowed)
+                  :endStream (.-endStream wd)))
+
+              :done (.-done wr))]
+
+          (return consumed rest 2)))
+
+
+      ;; The frame is consumed whole.
+      ;; NB: This cast cannot overflow because allowed is <= math.MaxInt32.
+      (.take (.-flow (.-stream wr)) (conv int32 (len (.-p wd))))
+      (return wr empty 1))))
+
+
+
+^{:go/end 168} (go/method String "String is for debugging only.\n" ^string [^FrameWriteRequest wr]
+  (let [^string des (zero string)]
+    (if [(values s ok) (assert fmt/Stringer (.-write wr))] ok
+      (set! des (.String s))
+
+      (set! des (fmt/Sprintf "%T" (.-write wr))))
+
+    (fmt/Sprintf "[FrameWriteRequest stream=%d, ch=%v, writer=%v]" (.StreamID wr) (!= (.-done wr) nil) des)))
+
+
+
+
+^{:go/end 182} (go/method replyToWriter "replyToWriter sends err to wr.done and panics if the send must block\nThis does nothing if wr.done is nil.\n" [^{:tag (* FrameWriteRequest)} wr ^error err]
+  (when (== (.-done wr) nil)
+    (return))
+
+  (select
+    (case (>! (.-done wr) err))
+    (default
+      (panic (fmt/Sprintf "unbuffered done channel passed in for type %T" (.-write wr)))))
+
+  (set! (.-write wr) nil)) ; prevent use (assume it's tainted after wr.done send)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type writeQueue "writeQueue is used by implementations of WriteScheduler.\n\nEach writeQueue contains a queue of FrameWriteRequests, meant to store all\nFrameWriteRequests associated with a given stream. This is implemented as a\ntwo-stage queue: currQueue[currPos:] and nextQueue. Removing an item is done\nby incrementing currPos of currQueue. Adding an item is done by appending it\nto the nextQueue. If currQueue is empty when trying to remove an item, we\ncan swap currQueue and nextQueue to remedy the situation.\nThis two-stage queue is analogous to the use of two lists in Okasaki's\npurely functional queue but without the overhead of reversing the list when\nswapping stages.\n\nwriteQueue also contains prev and next, this can be used by implementations\nof WriteScheduler to construct data structures that represent the order of\nwriting between different streams (e.g. circular linked list).\n" (struct
+    ^{:line 200 :tag (slice FrameWriteRequest)} currQueue
+    ^{:line 201 :tag (slice FrameWriteRequest)} nextQueue
+    ^{:line 202 :tag int} currPos
+
+    ^{:line 204 :tag (* writeQueue)} prev ^{:tag (* writeQueue)} next))
+
+
+^{:go/end 209} (go/method empty ^bool [^{:tag (* writeQueue)} q]
+  (== (+ (- (len (.-currQueue q)) (.-currPos q)) (len (.-nextQueue q))) 0))
+
+
+^{:go/end 213} (go/method push [^{:tag (* writeQueue)} q ^FrameWriteRequest wr]
+  (set! (.-nextQueue q) (append (.-nextQueue q) wr)))
+
+
+^{:go/end 226} (go/method shift ^FrameWriteRequest [^{:tag (* writeQueue)} q]
+  (when (.empty q)
+    (panic "invalid use of queue"))
+
+  (when (>= (.-currPos q) (len (.-currQueue q)))
+    (set! (values (.-currQueue q) (.-currPos q) (.-nextQueue q)) (values (.-nextQueue q) 0 (subslice (.-currQueue q) _ 0))))
+
+  (let [wr (aget (.-currQueue q) (.-currPos q))]
+    (aset (.-currQueue q) (.-currPos q) (lit FrameWriteRequest))
+    (inc! (.-currPos q))
+    ^{:line 225} wr))
+
+
+^{:go/breaks [[5 235]] :go/end 236} (go/method peek ^{:tag (* FrameWriteRequest)} [^{:tag (* writeQueue)} q]
+  (when (< (.-currPos q) (len (.-currQueue q)))
+    (return (addr (aget (.-currQueue q) (.-currPos q)))))
+
+  (when (> (len (.-nextQueue q)) 0)
+    (return (addr (aget (.-nextQueue q) 0))))
+
+  nil)
+
+
+
+
+
+
+^{:go/end 256} (go/method consume "consume consumes up to n bytes from q.s[0]. If the frame is\nentirely consumed, it is removed from the queue. If the frame\nis partially consumed, the frame is kept with the consumed\nbytes removed. Returns true iff any bytes were consumed.\n" [^{:tag (* writeQueue)} q ^int32 n] :results [FrameWriteRequest bool]
+  (when (.empty q)
+    (return (lit FrameWriteRequest) false))
+
+  (let [(values consumed rest numresult) (.Consume (.peek q) n)]
+    (switch numresult
+      (case [0]
+        (return (lit FrameWriteRequest) false))
+      (case [1]
+        (.shift q))
+      (case [2]
+        (set! @(.peek q) rest)))
+
+    (return consumed true)))
+
+
+(go/type writeQueuePool (slice (* writeQueue)))
+
+
+^{:go/end 272} (go/method put "put inserts an unused writeQueue into the pool.\n" [^{:tag (* writeQueuePool)} p ^{:tag (* writeQueue)} q]
+  (range [i (.-currQueue q)]
+    (aset (.-currQueue q) i (lit FrameWriteRequest)))
+
+  (range [i (.-nextQueue q)]
+    (aset (.-nextQueue q) i (lit FrameWriteRequest)))
+
+  (set! (.-currQueue q) (subslice (.-currQueue q) _ 0))
+  (set! (.-nextQueue q) (subslice (.-nextQueue q) _ 0))
+  (set! (.-currPos q) 0)
+  (set! @p (append @p q)))
+
+
+
+^{:go/end 285} (go/method get "get returns an empty writeQueue.\n" ^{:tag (* writeQueue)} [^{:tag (* writeQueuePool)} p]
+  (let [ln (len @p)]
+    (when (== ln 0)
+      (return (new writeQueue)))
+
+    (let [x (- ln 1)
+        ^{:line 281} q (aget @p x)]
+      (aset @p x nil)
+      (set! @p (subslice @p _ x))
+      ^{:line 284} q)))

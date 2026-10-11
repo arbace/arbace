@@ -1,0 +1,130 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "utf8.go" :imports [])
+
+
+(go/const "Numbers fundamental to the encoding.\n"
+  ^{:line 9} [^{:val \ufffd} runeError \ufffd] ; the "error" Rune or "Unicode replacement character"
+  ^{:line 10} [^{:val 128} runeSelf 0x80] ; characters below runeSelf are represented as themselves in a single byte.
+  ^{:line 11} [^{:val (rune 0x10FFFF)} maxRune (rune 0x10FFFF)]) ; Maximum valid Unicode code point.
+
+
+
+(go/const "Code points in the surrogate range are not valid for UTF-8.\n"
+  ^{:line 16} [^{:val 55296} surrogateMin 0xD800]
+  ^{:line 17} [^{:val 57343} surrogateMax 0xDFFF])
+
+
+(go/const
+  ^{:line 21} [^{:val 0} t1 0x00] ; 0000 0000
+  ^{:line 22} [^{:val 128} tx 0x80] ; 1000 0000
+  ^{:line 23} [^{:val 192} t2 0xC0] ; 1100 0000
+  ^{:line 24} [^{:val 224} t3 0xE0] ; 1110 0000
+  ^{:line 25} [^{:val 240} t4 0xF0] ; 1111 0000
+  ^{:line 26} [^{:val 248} t5 0xF8] ; 1111 1000
+
+  ^{:line 28} [^{:val 63} maskx 0x3F] ; 0011 1111
+  ^{:line 29} [^{:val 31} mask2 0x1F] ; 0001 1111
+  ^{:line 30} [^{:val 15} mask3 0x0F] ; 0000 1111
+  ^{:line 31} [^{:val 7} mask4 0x07] ; 0000 0111
+
+  ^{:line 33} [^{:val 127} rune1Max (- (<< 1 7) 1)]
+  ^{:line 34} [^{:val 2047} rune2Max (- (<< 1 11) 1)]
+  ^{:line 35} [^{:val 65535} rune3Max (- (<< 1 16) 1)]
+
+
+  ^{:line 38} [^{:val 128 :doc "The default lowest and highest continuation byte.\n"} locb 0x80] ; 1000 0000
+  ^{:line 39} [^{:val 191} hicb 0xBF]) ; 1011 1111
+
+
+
+^{:go/end 49} (go/func countrunes "countrunes returns the number of runes in s.\n" ^int [^string s]
+  (let [n 0]
+    (range [s]
+      (inc! n))
+
+    ^{:line 48} n))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 100} (go/func decoderune "decoderune returns the non-ASCII rune at the start of\ns[k:] and the index after the rune in s.\n\ndecoderune assumes that caller has checked that\nthe to be decoded rune is a non-ASCII rune.\n\nIf the string appears to be incomplete or decoding problems\nare encountered (runeerror, k + 1) is returned to ensure\nprogress when decoderune is used to iterate over a string.\n" [^string s ^uint k] :results [^rune r ^uint pos]
+  (set! pos k)
+
+  (when (>= k (conv uint (len s)))
+    (return runeError (+ k 1)))
+
+
+  (set! s (subslice s k))
+
+  (switch
+    (case [(and (<= t2 (aget s 0)) (< (aget s 0) t3))]
+      ;; 0080-07FF two byte sequence
+      (when (and (> (len s) 1) ^:go/paren (and (<= locb (aget s 1)) (<= (aget s 1) hicb)))
+        (set! r (bit-or (<< (conv rune (bit-and (aget s 0) mask2)) 6) (conv rune (bit-and (aget s 1) maskx))))
+        (set! pos + 2)
+        (when (< rune1Max r)
+          (return))))
+
+
+    (case [(and (<= t3 (aget s 0)) (< (aget s 0) t4))]
+      ;; 0800-FFFF three byte sequence
+      (when (and (> (len s) 2) ^:go/paren (and (<= locb (aget s 1)) (<= (aget s 1) hicb)) ^:go/paren (and (<= locb (aget s 2)) (<= (aget s 2) hicb)))
+        (set! r (bit-or (<< (conv rune (bit-and (aget s 0) mask3)) 12) (<< (conv rune (bit-and (aget s 1) maskx)) 6) (conv rune (bit-and (aget s 2) maskx))))
+        (set! pos + 3)
+        (when (and (< rune2Max r) (not (and (<= surrogateMin r) (<= r surrogateMax))))
+          (return))))
+
+
+    (case [(and (<= t4 (aget s 0)) (< (aget s 0) t5))]
+      ;; 10000-1FFFFF four byte sequence
+      (when (and (> (len s) 3) ^:go/paren (and (<= locb (aget s 1)) (<= (aget s 1) hicb)) ^:go/paren (and (<= locb (aget s 2)) (<= (aget s 2) hicb)) ^:go/paren (and (<= locb (aget s 3)) (<= (aget s 3) hicb)))
+        (set! r (bit-or (<< (conv rune (bit-and (aget s 0) mask4)) 18) (<< (conv rune (bit-and (aget s 1) maskx)) 12) (<< (conv rune (bit-and (aget s 2) maskx)) 6) (conv rune (bit-and (aget s 3) maskx))))
+        (set! pos + 4)
+        (when (and (< rune3Max r) (<= r maxRune))
+          (return)))))
+
+
+
+
+  (return runeError (+ k 1)))
+
+
+
+
+^{:go/end 132} (go/func encoderune "encoderune writes into p (which must be large enough) the UTF-8 encoding of the rune.\nIt returns the number of bytes written.\n" ^int [^{:tag (slice byte)} p ^rune r]
+  ;; Negative values are erroneous. Making it unsigned addresses the problem.
+  (switch [i (conv uint32 r)]
+    (case [(<= i rune1Max)]
+      (aset p 0 (conv byte r))
+      (return 1))
+    (case [(<= i rune2Max)]
+      (set! _ (aget p 1)) ; eliminate bounds checks
+      (aset p 0 (bit-or t2 (conv byte (>> r 6))))
+      (aset p 1 (bit-or tx (bit-and (conv byte r) maskx)))
+      (return 2))
+    (case [(> i maxRune) (and (<= surrogateMin i) (<= i surrogateMax))]
+      (set! r runeError)
+      (fallthrough))
+    (case [(<= i rune3Max)]
+      (set! _ (aget p 2)) ; eliminate bounds checks
+      (aset p 0 (bit-or t3 (conv byte (>> r 12))))
+      (aset p 1 (bit-or tx (bit-and (conv byte (>> r 6)) maskx)))
+      (aset p 2 (bit-or tx (bit-and (conv byte r) maskx)))
+      (return 3))
+    (default
+      (set! _ (aget p 3)) ; eliminate bounds checks
+      (aset p 0 (bit-or t4 (conv byte (>> r 18))))
+      (aset p 1 (bit-or tx (bit-and (conv byte (>> r 12)) maskx)))
+      (aset p 2 (bit-or tx (bit-and (conv byte (>> r 6)) maskx)))
+      (aset p 3 (bit-or tx (bit-and (conv byte r) maskx)))
+      (return 4))))

@@ -1,0 +1,920 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; DNS client: see RFC 1035.
+;; Has to be linked into package net for Dial.
+
+;; TODO(rsc):
+;;	Could potentially handle many outstanding lookups faster.
+;;	Random UDP source port (net.Dial should do that for us).
+;;	Random request IDs.
+
+(in-ns 'go.net) (go/file "dnsclient_unix.go" :imports [
+
+
+    ^{:line 16} [context "context"]
+    ^{:line 17} [errors "errors"]
+    ^{:line 18} [bytealg "internal/bytealg"]
+    ^{:line 19} [godebug "internal/godebug"]
+    ^{:line 20} [strconv "internal/strconv"]
+    ^{:line 21} [stringslite "internal/stringslite"]
+    ^{:line 22} [io "io"]
+    ^{:line 23} [os "os"]
+    ^{:line 24} [runtime "runtime"]
+    ^{:line 25} [sync "sync"]
+    ^{:line 26} [atomic "sync/atomic"]
+    ^{:line 27} [time "time"]
+
+    ^{:line 29} [dnsmessage "golang.org/x/net/dns/dnsmessage"]])
+
+
+(go/const
+
+  ^{:line 34} [^{:val true :doc "to be used as a useTCP parameter to exchange\n"} useTCPOnly true]
+  ^{:line 35} [^{:val false} useUDPOrTCP false]
+
+
+
+  ^{:line 39} [^{:val 1232 :doc "Maximum DNS packet size.\nValue taken from https://dnsflagday.net/2020/.\n"} maxDNSPacketSize 1232])
+
+
+(go/var
+  ^{:line 43} [errLameReferral (errors/New "lame referral")]
+  ^{:line 44} [errCannotUnmarshalDNSMessage (errors/New "cannot unmarshal DNS message")]
+  ^{:line 45} [errCannotMarshalDNSMessage (errors/New "cannot marshal DNS message")]
+  ^{:line 46} [errServerMisbehaving (errors/New "server misbehaving")]
+  ^{:line 47} [errInvalidDNSResponse (errors/New "invalid DNS response")]
+  ^{:line 48} [errNoAnswerFromDNSServer (errors/New "no answer from DNS server")]
+
+
+
+
+  ^{:line 53} [^{:doc "errServerTemporarilyMisbehaving is like errServerMisbehaving, except\nthat when it gets translated to a DNSError, the IsTemporary field\ngets set to true.\n"} errServerTemporarilyMisbehaving (addr (lit temporaryError "server misbehaving"))])
+
+
+
+(go/var ^{:doc "netedns0 controls whether we send an EDNS0 additional header.\n"} netedns0 (godebug/New "netedns0"))
+
+^{:go/end 94} (go/func newRequest [^dnsmessage/Question q ^bool ad] :results [^uint16 id ^{:tag (slice byte)} udpReq ^{:tag (slice byte)} tcpReq ^error err]
+  (set! id (conv uint16 (randInt)))
+  (let [b (dnsmessage/NewBuilder (make (slice byte) 2 514) (lit dnsmessage/Header :ID id :RecursionDesired true :AuthenticData ad))]
+    (when [err (.StartQuestions b)] (!= err nil)
+      (return 0 nil nil err))
+
+    (when [err (.Question b q)] (!= err nil)
+      (return 0 nil nil err))
+
+
+    (if (== (.Value netedns0) "0")
+      (.IncNonDefault netedns0)
+      (do
+        ;; Accept packets up to maxDNSPacketSize.  RFC 6891.
+        (when [err (.StartAdditionals b)] (!= err nil)
+          (return 0 nil nil err))
+
+        (let [^dnsmessage/ResourceHeader rh (zero dnsmessage/ResourceHeader)]
+          (when [err (.SetEDNS0 rh maxDNSPacketSize dnsmessage/RCodeSuccess false)] (!= err nil)
+            (return 0 nil nil err))
+
+          (when [err (.OPTResource b rh (lit dnsmessage/OPTResource))] (!= err nil)
+            (return 0 nil nil err)))))
+
+
+
+    (set! (values tcpReq err) (.Finish b))
+    (when (!= err nil)
+      (return 0 nil nil err))
+
+    (set! udpReq (subslice tcpReq 2))
+    (let [l (- (len tcpReq) 2)]
+      (aset tcpReq 0 (conv byte (>> l 8)))
+      (aset tcpReq 1 (conv byte l))
+      (return id udpReq tcpReq nil))))
+
+
+^{:go/breaks [[6 106]] :go/end 107} (go/func checkResponse ^bool [^uint16 reqID ^dnsmessage/Question reqQues ^dnsmessage/Header respHdr ^dnsmessage/Question respQues]
+  (when (not (.-Response respHdr))
+    (return false))
+
+  (when (!= reqID (.-ID respHdr))
+    (return false))
+
+  (when (or (!= (.-Type reqQues) (.-Type respQues)) (!= (.-Class reqQues) (.-Class respQues)) (not (equalASCIIName (.-Name reqQues) (.-Name respQues))))
+    (return false))
+
+  true)
+
+
+^{:go/end 134} (go/func dnsPacketRoundTrip [^Conn c ^uint16 id ^dnsmessage/Question query ^{:tag (slice byte)} b] :results [dnsmessage/Parser dnsmessage/Header error]
+  (when [(values _ err) (.Write c b)] (!= err nil)
+    (return (lit dnsmessage/Parser) (lit dnsmessage/Header) err))
+
+
+  (set! b (make (slice byte) maxDNSPacketSize))
+  (while true
+    (let [(values n err) (.Read c b)]
+      (when (!= err nil)
+        (return (lit dnsmessage/Parser) (lit dnsmessage/Header) err))
+
+      (let [^dnsmessage/Parser p (zero dnsmessage/Parser)
+          ;; Ignore invalid responses as they may be malicious
+          ;; forgery attempts. Instead continue waiting until
+          ;; timeout. See golang.org/issue/13281.
+          (values h ^:assign err) (.Start p (subslice b _ n))]
+        (when (!= err nil)
+          (continue))
+
+        (let [(values q ^:assign err) (.Question p)]
+          (when (or (!= err nil) (not (checkResponse id query h q)))
+            (continue))
+
+          (return p h nil))))))
+
+
+
+^{:go/end 166} (go/func dnsStreamRoundTrip [^Conn c ^uint16 id ^dnsmessage/Question query ^{:tag (slice byte)} b] :results [dnsmessage/Parser dnsmessage/Header error]
+  (when [(values _ err) (.Write c b)] (!= err nil)
+    (return (lit dnsmessage/Parser) (lit dnsmessage/Header) err))
+
+
+  (set! b (make (slice byte) 1280)) ; 1280 is a reasonable initial size for IP over Ethernet, see RFC 4035
+  (when [(values _ err) (io/ReadFull c (subslice b _ 2))] (!= err nil)
+    (return (lit dnsmessage/Parser) (lit dnsmessage/Header) err))
+
+  (let [l (bit-or (<< (conv int (aget b 0)) 8) (conv int (aget b 1)))]
+    (when (> l (len b))
+      (set! b (make (slice byte) l)))
+
+    (let [(values n err) (io/ReadFull c (subslice b _ l))]
+      (when (!= err nil)
+        (return (lit dnsmessage/Parser) (lit dnsmessage/Header) err))
+
+      (let [^dnsmessage/Parser p (zero dnsmessage/Parser)
+          (values h ^:assign err) (.Start p (subslice b _ n))]
+        (when (!= err nil)
+          (return (lit dnsmessage/Parser) (lit dnsmessage/Header) errCannotUnmarshalDNSMessage))
+
+        (let [(values q ^:assign err) (.Question p)]
+          (when (!= err nil)
+            (return (lit dnsmessage/Parser) (lit dnsmessage/Header) errCannotUnmarshalDNSMessage))
+
+          (when (not (checkResponse id query h q))
+            (return (lit dnsmessage/Parser) (lit dnsmessage/Header) errInvalidDNSResponse))
+
+          (return p h nil))))))
+
+
+
+^{:go/end 219} (go/method exchange "exchange sends a query on the connection and hopes for a response.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string server ^dnsmessage/Question q ^time/Duration timeout ^bool useTCP ^bool ad] :results [dnsmessage/Parser dnsmessage/Header error]
+  (set! (.-Class q) dnsmessage/ClassINET)
+  (let [(values id udpReq tcpReq err) (newRequest q ad)]
+    (when (!= err nil)
+      (return (lit dnsmessage/Parser) (lit dnsmessage/Header) errCannotMarshalDNSMessage))
+
+    (let [^{:tag (slice string)} networks (zero (slice string))]
+      (if useTCP
+        (set! networks (lit (slice string) "tcp"))
+
+        (set! networks (lit (slice string) "udp" "tcp")))
+
+      (range [_ network networks]
+        (let [(values ctx cancel) (context/WithDeadline ctx (.Add (time/Now) timeout))]
+          (defer (cancel))
+
+          (let [(values c err) (.dial r ctx network server)]
+            (when (!= err nil)
+              (return (lit dnsmessage/Parser) (lit dnsmessage/Header) err))
+
+            (when [(values d ok) (.Deadline ctx)] (and ok (not (.IsZero d)))
+              (.SetDeadline c d))
+
+            (let [^dnsmessage/Parser p (zero dnsmessage/Parser)
+                ^{:line 193 :tag dnsmessage/Header} h (zero dnsmessage/Header)]
+              (if [(values _ ok) (assert PacketConn c)] ok
+                (set! (values p h err) (dnsPacketRoundTrip c id q udpReq))
+
+                (set! (values p h err) (dnsStreamRoundTrip c id q tcpReq)))
+
+              (.Close c)
+              (when (!= err nil)
+                (return (lit dnsmessage/Parser) (lit dnsmessage/Header) (mapErr err)))
+
+              (when [err (.SkipQuestion p)] (!= err dnsmessage/ErrSectionDone)
+                (return (lit dnsmessage/Parser) (lit dnsmessage/Header) errInvalidDNSResponse))
+
+              ;; RFC 5966 indicates that when a client receives a UDP response with
+              ;; the TC flag set, it should take the TC flag as an indication that it
+              ;; should retry over TCP instead.
+              ;; The case when the TC flag is set in a TCP response is not well specified,
+              ;; so this implements the glibc resolver behavior, returning the existing
+              ;; dns response instead of returning a "errNoAnswerFromDNSServer" error.
+              ;; See go.dev/issue/64896
+              (when (and (.-Truncated h) (== network "udp"))
+                (continue))
+
+              (return p h nil)))))
+
+      (return (lit dnsmessage/Parser) (lit dnsmessage/Header) errNoAnswerFromDNSServer))))
+
+
+
+^{:go/end 253} (go/func checkHeader "checkHeader performs basic sanity checks on the header.\n" ^error [^{:tag (* dnsmessage/Parser)} p ^dnsmessage/Header h]
+  (let [(values rcode hasAdd) (extractExtendedRCode @p h)]
+
+    (when (== rcode dnsmessage/RCodeNameError)
+      (return errNoSuchHost))
+
+
+    ^{:go/breaks [[5 252]]} (let [(values _ err) (.AnswerHeader p)]
+      (when (and (!= err nil) (!= err dnsmessage/ErrSectionDone))
+        (return errCannotUnmarshalDNSMessage))
+
+
+      ;; libresolv continues to the next server when it receives
+      ;; an invalid referral response. See golang.org/issue/15434.
+      (when (and (== rcode dnsmessage/RCodeSuccess) (not (.-Authoritative h)) (not (.-RecursionAvailable h)) (== err dnsmessage/ErrSectionDone) (not hasAdd))
+        (return errLameReferral))
+
+
+      (when (and (!= rcode dnsmessage/RCodeSuccess) (!= rcode dnsmessage/RCodeNameError))
+        ;; None of the error codes make sense
+        ;; for the query we sent. If we didn't get
+        ;; a name error and we didn't get success,
+        ;; the server is behaving incorrectly or
+        ;; having temporary trouble.
+        (when (== rcode dnsmessage/RCodeServerFailure)
+          (return errServerTemporarilyMisbehaving))
+
+        (return errServerMisbehaving))
+
+
+      nil)))
+
+
+^{:go/end 271} (go/func skipToAnswer ^error [^{:tag (* dnsmessage/Parser)} p ^dnsmessage/Type qtype]
+  (while true
+    (let [(values h err) (.AnswerHeader p)]
+      (when (== err dnsmessage/ErrSectionDone)
+        (return errNoSuchHost))
+
+      (when (!= err nil)
+        (return errCannotUnmarshalDNSMessage))
+
+      (when (== (.-Type h) qtype)
+        (return nil))
+
+      (when [err (.SkipAnswer p)] (!= err nil)
+        (return errCannotUnmarshalDNSMessage)))))
+
+
+
+
+
+
+
+^{:go/end 293} (go/func extractExtendedRCode "extractExtendedRCode extracts the extended RCode from the OPT resource (EDNS(0))\nIf an OPT record is not found, the RCode from the hdr is returned.\nAnother return value indicates whether an additional resource was found.\n" [^dnsmessage/Parser p ^dnsmessage/Header hdr] :results [dnsmessage/RCode bool]
+  (.SkipAllAnswers p)
+  (.SkipAllAuthorities p)
+  (let [hasAdd false]
+    (while true
+      (let [(values ahdr err) (.AdditionalHeader p)]
+        (when (!= err nil)
+          (return (.-RCode hdr) hasAdd))
+
+        (set! hasAdd true)
+        (when (== (.-Type ahdr) dnsmessage/TypeOPT)
+          (return (.ExtendedRCode ahdr (.-RCode hdr)) hasAdd))
+
+        (when [err (.SkipAdditional p)] (!= err nil)
+          (return (.-RCode hdr) hasAdd))))))
+
+
+
+
+
+
+^{:go/end 352} (go/method tryOneName "Do a lookup for a single name, which must be rooted\n(otherwise answer will not find the answers).\n" [^{:tag (* Resolver)} r ^context/Context ctx ^{:tag (* dnsConfig)} cfg ^string name ^dnsmessage/Type qtype] :results [dnsmessage/Parser string error]
+  (let [^error lastErr (zero error)
+      ^{:line 299} serverOffset (.serverOffset cfg)
+      ^{:line 300} sLen (conv uint32 (len (.-servers cfg)))
+
+      (values n err) (dnsmessage/NewName name)]
+    (when (!= err nil)
+      (return (lit dnsmessage/Parser) "" (addr (lit DNSError :Err (.Error errCannotMarshalDNSMessage) :Name name))))
+
+    (let [q ^{:go/breaks [2 4 6]} (lit dnsmessage/Question
+          :Name n
+          :Type qtype
+          :Class dnsmessage/ClassINET)]
+
+
+      (for [i 0] (< i (.-attempts cfg)) (inc! i)
+        (for [j (conv uint32 0)] (< j sLen) (inc! j)
+          (let [server (aget (.-servers cfg) (% (+ serverOffset j) sLen))
+
+              (values p h err) (.exchange r ctx server q (.-timeout cfg) (.-useTCP cfg) (.-trustAD cfg))]
+            (when (!= err nil)
+              (let [dnsErr (newDNSError err name server)]
+                ;; Set IsTemporary for socket-level errors. Note that this flag
+                ;; may also be used to indicate a SERVFAIL response.
+                (when [(values _ ok) (assert (* OpError) err)] ok
+                  (set! (.-IsTemporary dnsErr) true))
+
+                (set! lastErr dnsErr)
+                (continue)))
+
+
+            (when [err (checkHeader (addr p) h)] (!= err nil)
+              (when (== err errNoSuchHost)
+                ;; The name does not exist, so trying
+                ;; another server won't help.
+                (return p server (newDNSError errNoSuchHost name server)))
+
+              (set! lastErr (newDNSError err name server))
+              (continue))
+
+
+            (when [err (skipToAnswer (addr p) qtype)] (!= err nil)
+              (when (== err errNoSuchHost)
+                ;; The name does not exist, so trying
+                ;; another server won't help.
+                (return p server (newDNSError errNoSuchHost name server)))
+
+              (set! lastErr (newDNSError err name server))
+              (continue))
+
+
+            (return p server nil))))
+
+
+      (return (lit dnsmessage/Parser) "" lastErr))))
+
+
+
+(go/type resolverConfig "A resolverConfig represents a DNS stub resolver configuration.\n" (struct
+    ^{:line 356 :tag sync/Once} initOnce ; guards init of resolverConfig
+
+
+
+    ^{:line 360 :tag (chan (struct)) :doc "ch is used as a semaphore that only allows one lookup at a\ntime to recheck resolv.conf.\n"} ch ; guards lastChecked and modTime
+    ^{:line 361 :tag time/Time} lastChecked ; last time resolv.conf was checked
+
+    ^{:line 363 :tag (atomic/Pointer dnsConfig)} dnsConfig)) ; parsed resolv.conf structure used in lookups
+
+
+(go/var ^resolverConfig resolvConf)
+
+^{:go/end 370} (go/func getSystemDNSConfig ^{:tag (* dnsConfig)} []
+  (getSystemDNSConfigNamed "/etc/resolv.conf"))
+
+
+^{:go/end 375} (go/func getSystemDNSConfigNamed ^{:tag (* dnsConfig)} [^string path]
+  (.tryUpdate resolvConf path)
+  (.Load (.-dnsConfig resolvConf)))
+
+
+
+^{:go/end 387} (go/method init "init initializes conf and is only called via conf.initOnce.\n" [^{:tag (* resolverConfig)} conf]
+  ;; Set dnsConfig and lastChecked so we don't parse
+  ;; resolv.conf twice the first time.
+  (.Store (.-dnsConfig conf) (dnsReadConfig "/etc/resolv.conf"))
+  (set! (.-lastChecked conf) (time/Now))
+
+  ;; Prepare ch so that only one update of resolverConfig may
+  ;; run at once.
+  (set! (.-ch conf) (make (chan (struct)) 1)))
+
+
+
+
+(go/var ^{:doc "distantFuture is a sentinel time used for tests to signal that\nresolv.conf should not be rechecked.\n"} distantFuture (time/Date 3000 1 2 3 4 5 6 time/UTC))
+
+
+
+
+^{:go/end 457} (go/method tryUpdate "tryUpdate tries to update conf with the named resolv.conf file.\nThe name variable only exists for testing. It is otherwise always\n\"/etc/resolv.conf\".\n" [^{:tag (* resolverConfig)} conf ^string name]
+  (.Do (.-initOnce conf) (.-init conf))
+
+  (let [dc (.Load (.-dnsConfig conf))]
+
+    ;; Currently we should never have a config that does not have any
+    ;; available servers to query, since in such cases the servers field
+    ;; is set to [defaultNS], see dnsReadConfig.
+    ;; This assertion main purpose is for testing, such that we never set
+    ;; the mocked dnsConfig in such way.
+    (when (== (len (.-servers dc)) 0)
+      (panic "unreachable"))
+
+
+    (when (.-noReload dc)
+      (return))
+
+
+    ;; Ensure only one update at a time checks resolv.conf.
+    (when (not (.tryAcquireSema conf))
+      (return))
+
+    (defer (.releaseSema conf))
+
+    (let [now (time/Now)
+
+        ;; Only recheck the resolv.conf when:
+        ;; - expired (last re-check was more that 5 seconds ago)
+        ;; - the default nameservers are used (the last parse could not load
+        ;;   resolv.conf, or it did not contain any nameservers)
+        ;; - rechecks are not disabled (only possible in case of testing)
+        ;;
+        ;; Note: We only do one check at a time. Other concurrent requests might
+        ;; still use the previous (outdated) version of the configuration file.
+        ^{:line 430} expired (.After now (.Add (.-lastChecked conf) (* 5 time/Second)))
+        ^{:line 431} rechecksEnabled (!= (.-lastChecked conf) distantFuture) ; for testing purposes
+        ^{:line 432} recheck (and ^:go/paren (or expired (.isDefaultNS dc)) rechecksEnabled)]
+      (when (not recheck)
+        (return))
+
+      (set! (.-lastChecked conf) now)
+
+      (switch runtime/GOOS
+        (case ["windows"])
+        ;; There's no file on disk, so don't bother checking
+        ;; and failing.
+        ;;
+        ;; The Windows implementation of dnsReadConfig (called
+        ;; below) ignores the name.
+        (default
+          (let [^time/Time mtime (zero time/Time)]
+            (when [(values fi err) (os/Stat name)] (== err nil)
+              (set! mtime (.ModTime fi)))
+
+            (when (.Equal mtime (.-mtime (.Load (.-dnsConfig conf))))
+              (return)))))
+
+
+
+      (let [dnsConf (dnsReadConfig name)]
+        (.Store (.-dnsConfig conf) dnsConf)))))
+
+
+^{:go/end 466} (go/method tryAcquireSema ^bool [^{:tag (* resolverConfig)} conf]
+  (select
+    (case (>! (.-ch conf) (lit (struct)))
+      (return true))
+    (default
+      (return false))))
+
+
+
+^{:go/end 470} (go/method releaseSema [^{:tag (* resolverConfig)} conf]
+  (<! (.-ch conf)))
+
+
+^{:go/end 512} (go/method lookup [^{:tag (* Resolver)} r ^context/Context ctx ^string name ^dnsmessage/Type qtype ^{:tag (* dnsConfig)} conf] :results [dnsmessage/Parser string error]
+  (when (not (isDomainName name))
+    ;; We used to use "invalid domain name" as the error,
+    ;; but that is a detail of the specific lookup mechanism.
+    ;; Other lookups might allow broader name syntax
+    ;; (for example Multicast DNS allows UTF-8; see RFC 6762).
+    ;; For consistency with libc resolvers, report no such host.
+    (return (lit dnsmessage/Parser) "" (newDNSError errNoSuchHost name "")))
+
+
+  (when (== conf nil)
+    (set! conf (getSystemDNSConfig)))
+
+
+  (let [
+      ^{:line 487 :tag dnsmessage/Parser} p (zero dnsmessage/Parser)
+      ^{:line 488 :tag string} server (zero string)
+      ^{:line 489 :tag error} err (zero error)]
+
+    (range [_ fqdn (.nameList conf name)]
+      (set! (values p server err) (.tryOneName r ctx conf fqdn qtype))
+      (when (== err nil)
+        (break))
+
+      (when [(values nerr ok) (assert Error err)] (and ok (.Temporary nerr) (.strictErrors r))
+        ;; If we hit a temporary error with StrictErrors enabled,
+        ;; stop immediately instead of trying more names.
+        (break)))
+
+
+    (when (== err nil)
+      (return p server nil))
+
+    (when [(values err ok) (assert (* DNSError) err)] ok
+      ;; Show original name passed to lookup, not suffixed one.
+      ;; In general we might have tried many suffixes; showing
+      ;; just one is misleading. See also golang.org/issue/6324.
+      (set! (.-Name err) name))
+
+    (return (lit dnsmessage/Parser) "" err)))
+
+
+
+
+
+
+^{:go/end 524} (go/func avoidDNS "avoidDNS reports whether this is a hostname for which we should not\nuse DNS. Currently this includes only .onion, per RFC 7686. See\ngolang.org/issue/13705. Does not cover .local names (RFC 6762),\nsee golang.org/issue/16739.\n" ^bool [^string name]
+  (when (== name "")
+    (return true))
+
+  (set! name (stringslite/TrimSuffix name "."))
+  (stringsHasSuffixFold name ".onion"))
+
+
+
+^{:go/end 563} (go/method nameList "nameList returns a list of names for sequential DNS queries.\n" ^{:tag (slice string)} [^{:tag (* dnsConfig)} conf ^string name]
+  ;; Check name length (see isDomainName).
+  (let [rooted (and (> (len name) 0) (== (aget name (- (len name) 1)) \.))]
+    (when (or (> (len name) 254) (and (== (len name) 254) (not rooted)))
+      (return nil))
+
+
+    ;; If name is rooted (trailing dot), try only that name.
+    (when rooted
+      (when (avoidDNS name)
+        (return nil))
+
+      (return (lit (slice string) name)))
+
+
+    (let [hasNdots (>= (bytealg/CountString name \.) (.-ndots conf))]
+      (set! name + ".")
+
+      ;; Build list of search choices.
+      (let [names (make (slice string) 0 (+ 1 (len (.-search conf))))]
+        ;; If name has enough dots, try unsuffixed first.
+        (when (and hasNdots (not (avoidDNS name)))
+          (set! names (append names name)))
+
+        ;; Try suffixes that are not too long (see isDomainName).
+        (range [_ suffix (.-search conf)]
+          (let [fqdn (+ name suffix)]
+            (when (and (not (avoidDNS fqdn)) (<= (len fqdn) 254))
+              (set! names (append names fqdn)))))
+
+
+        ;; Try unsuffixed, if not tried first above.
+        (when (and (not hasNdots) (not (avoidDNS name)))
+          (set! names (append names name)))
+
+        ^{:line 562} names))))
+
+
+
+
+
+(go/type hostLookupOrder "hostLookupOrder specifies the order of LookupHost lookup strategies.\nIt is basically a simplified representation of nsswitch.conf.\n\"files\" means /etc/hosts.\n" int)
+
+(go/const
+
+  ^{:line 572} [^{:tag hostLookupOrder :val 0 :doc "hostLookupCgo means defer to cgo.\n"} hostLookupCgo iota]
+  ^{:line 573} [^{:val 1} hostLookupFilesDNS] ; files first
+  ^{:line 574} [^{:val 2} hostLookupDNSFiles] ; dns first
+  ^{:line 575} [^{:val 3} hostLookupFiles] ; only files
+  ^{:line 576} [^{:val 4} hostLookupDNS]) ; only DNS
+
+
+(go/var lookupOrderName (lit (map hostLookupOrder string)
+    ^{:line 580} [hostLookupCgo "cgo"]
+    ^{:line 581} [hostLookupFilesDNS "files,dns"]
+    ^{:line 582} [hostLookupDNSFiles "dns,files"]
+    ^{:line 583} [hostLookupFiles "files"]
+    ^{:line 584} [hostLookupDNS "dns"]))
+
+
+^{:go/end 592} (go/method String ^string [^hostLookupOrder o]
+  (when [(values s ok) (aget lookupOrderName o)] ok
+    (return s))
+
+  (+ "hostLookupOrder=" (strconv/Itoa (conv int o)) "??"))
+
+
+^{:go/end 615} (go/method goLookupHostOrder [^{:tag (* Resolver)} r ^context/Context ctx ^string name ^hostLookupOrder order ^{:tag (* dnsConfig)} conf] :results [^{:tag (slice string)} addrs ^error err]
+  (when (or (== order hostLookupFilesDNS) (== order hostLookupFiles))
+    ;; Use entries from /etc/hosts if they match.
+    (set! (values addrs _) (lookupStaticHost name))
+    (when (> (len addrs) 0)
+      (return))
+
+
+    (when (== order hostLookupFiles)
+      (return nil (newDNSError errNoSuchHost name ""))))
+
+
+  (let [(values ips _ ^:assign err) (.goLookupIPCNAMEOrder r ctx "ip" name order conf)]
+    (when (!= err nil)
+      (return))
+
+    (set! addrs (make (slice string) 0 (len ips)))
+    (range [_ ip ips]
+      (set! addrs (append addrs (.String ip))))
+
+    (return)))
+
+
+
+^{:go/end 629} (go/func goLookupIPFiles "lookup entries from /etc/hosts\n" [^string name] :results [^{:tag (slice IPAddr)} addrs ^string canonical]
+  (let [(values addr ^:assign canonical) (lookupStaticHost name)]
+    (range [_ haddr addr]
+      (let [(values haddr zone) (splitHostZone haddr)]
+        (when [ip (ParseIP haddr)] (!= ip nil)
+          (let [addr (lit IPAddr :IP ip :Zone zone)]
+            (set! addrs (append addrs addr))))))
+
+
+    (sortByRFC6724 addrs)
+    (return addrs canonical)))
+
+
+
+
+^{:go/end 636} (go/method goLookupIP "goLookupIP is the native Go implementation of LookupIP.\nThe libc versions are in cgo_*.go.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string network ^string host ^hostLookupOrder order ^{:tag (* dnsConfig)} conf] :results [^{:tag (slice IPAddr)} addrs ^error err]
+  (set! (values addrs _ err) (.goLookupIPCNAMEOrder r ctx network host order conf))
+  (return))
+
+
+^{:go/end 847} (go/method goLookupIPCNAMEOrder [^{:tag (* Resolver)} r ^context/Context ctx ^string network ^string name ^hostLookupOrder order ^{:tag (* dnsConfig)} conf] :results [^{:tag (slice IPAddr)} addrs ^dnsmessage/Name cname ^error err]
+  (when (or (== order hostLookupFilesDNS) (== order hostLookupFiles))
+    (let [^string canonical (zero string)]
+      (set! (values addrs canonical) (goLookupIPFiles name))
+
+      (when (> (len addrs) 0)
+        (let [^error err (zero error)]
+          (set! (values cname err) (dnsmessage/NewName canonical))
+          (when (!= err nil)
+            (return nil (lit dnsmessage/Name) err))
+
+          (return addrs cname nil)))
+
+
+      (when (== order hostLookupFiles)
+        (return nil (lit dnsmessage/Name) (newDNSError errNoSuchHost name "")))))
+
+
+
+  (when (not (isDomainName name))
+    ;; See comment in func lookup above about use of errNoSuchHost.
+    (return nil (lit dnsmessage/Name) (newDNSError errNoSuchHost name "")))
+
+  (let-type [result (struct
+        ^{:line 662 :tag dnsmessage/Parser} p
+        ^{:line 663 :tag string} server
+        ^{:line 664 :tag error} error)]
+
+
+    (when (== conf nil)
+      (set! conf (getSystemDNSConfig)))
+
+
+    (let [lane (make (chan result) 1)
+        ^{:line 672} qtypes (lit (slice dnsmessage/Type) dnsmessage/TypeA dnsmessage/TypeAAAA)]
+      (when (== network "CNAME")
+        (set! qtypes (append qtypes dnsmessage/TypeCNAME)))
+
+      (switch (ipVersion network)
+        (case [\4]
+          (set! qtypes (lit (slice dnsmessage/Type) dnsmessage/TypeA)))
+        (case [\6]
+          (set! qtypes (lit (slice dnsmessage/Type) dnsmessage/TypeAAAA))))
+
+      (let [^{:tag (func [^string fqdn ^dnsmessage/Type qtype])} queryFn (zero (func [^string fqdn ^dnsmessage/Type qtype]))
+          ^{:line 683 :tag (func [^string fqdn ^dnsmessage/Type qtype] [result])} responseFn (zero (func [^string fqdn ^dnsmessage/Type qtype] [result]))]
+        (if (.-singleRequest conf) (do
+            (set! queryFn ^{:go/end 685} (fn [^string fqdn ^dnsmessage/Type qtype]))
+            (set! responseFn ^{:go/end 691} (fn ^result [^string fqdn ^dnsmessage/Type qtype]
+                (.Add dnsWaitGroup 1)
+                (defer (.Done dnsWaitGroup))
+                (let [(values p server err) (.tryOneName r ctx conf fqdn qtype)]
+                  (lit result p server err)))))
+
+          (do
+            (set! queryFn ^{:go/end 700} (fn [^string fqdn ^dnsmessage/Type qtype]
+                (.Add dnsWaitGroup 1)
+                (go (^{:go/end 699} (fn [^dnsmessage/Type qtype]
+                      (let [(values p server err) (.tryOneName r ctx conf fqdn qtype)]
+                        (>! lane (lit result p server err))
+                        (.Done dnsWaitGroup)))
+                    ^{:line 699} qtype))))
+
+            (set! responseFn ^{:go/end 703} (fn ^result [^string fqdn ^dnsmessage/Type qtype]
+                (<! lane)))))
+
+
+        (let [^error lastErr (zero error)]
+          (range [_ fqdn (.nameList conf name)]
+            (range [_ qtype qtypes]
+              (queryFn fqdn qtype))
+
+            (let [hitStrictError false]
+              (range [_ qtype qtypes]
+                (let [result (responseFn fqdn qtype)]
+                  (when (!= (.-error result) nil)
+                    (if [(values nerr ok) (assert Error (.-error result))] (and ok (.Temporary nerr) (.strictErrors r)) (do
+                        ;; This error will abort the nameList loop.
+                        (set! hitStrictError true)
+                        (set! lastErr (.-error result)))
+                      (when (or (== lastErr nil) (== fqdn (+ name ".")))
+                        ;; Prefer error for original name.
+                        (set! lastErr (.-error result))))
+
+                    (continue))
+
+
+                  ;; Presotto says it's okay to assume that servers listed in
+                  ;; /etc/resolv.conf are recursive resolvers.
+                  ;;
+                  ;; We asked for recursion, so it should have included all the
+                  ;; answers we need in this one packet.
+                  ;;
+                  ;; Further, RFC 1034 section 4.3.1 says that "the recursive
+                  ;; response to a query will be... The answer to the query,
+                  ;; possibly preface by one or more CNAME RRs that specify
+                  ;; aliases encountered on the way to an answer."
+                  ;;
+                  ;; Therefore, we should be able to assume that we can ignore
+                  ;; CNAMEs and that the A and AAAA records we requested are
+                  ;; for the canonical name.
+
+                  (label :loop
+                    (while true
+                      (let [(values h err) (.AnswerHeader (.-p result))]
+                        (when (and (!= err nil) (!= err dnsmessage/ErrSectionDone))
+                          (set! lastErr (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                                :Err (.Error errCannotUnmarshalDNSMessage)
+                                :Name name
+                                :Server (.-server result)))))
+
+
+                        (when (!= err nil)
+                          (break))
+
+                        (switch (.-Type h)
+                          (case [dnsmessage/TypeA]
+                            (let [(values a err) (.AResource (.-p result))]
+                              (when (!= err nil)
+                                (set! lastErr (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                                      :Err (.Error errCannotUnmarshalDNSMessage)
+                                      :Name name
+                                      :Server (.-server result))))
+
+                                (break :loop))
+
+                              (set! addrs (append addrs (lit IPAddr :IP (conv IP (subslice (.-A a))))))
+                              (when (and (== (.-Length cname) 0) (!= (.-Length (.-Name h)) 0))
+                                (set! cname (.-Name h)))))
+
+
+                          (case [dnsmessage/TypeAAAA]
+                            (let [(values aaaa err) (.AAAAResource (.-p result))]
+                              (when (!= err nil)
+                                (set! lastErr (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                                      :Err (.Error errCannotUnmarshalDNSMessage)
+                                      :Name name
+                                      :Server (.-server result))))
+
+                                (break :loop))
+
+                              (set! addrs (append addrs (lit IPAddr :IP (conv IP (subslice (.-AAAA aaaa))))))
+                              (when (and (== (.-Length cname) 0) (!= (.-Length (.-Name h)) 0))
+                                (set! cname (.-Name h)))))
+
+
+                          (case [dnsmessage/TypeCNAME]
+                            (let [(values c err) (.CNAMEResource (.-p result))]
+                              (when (!= err nil)
+                                (set! lastErr (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                                      :Err (.Error errCannotUnmarshalDNSMessage)
+                                      :Name name
+                                      :Server (.-server result))))
+
+                                (break :loop))
+
+                              (when (and (== (.-Length cname) 0) (> (.-Length (.-CNAME c)) 0))
+                                (set! cname (.-CNAME c)))))
+
+
+                          (default
+                            (when [err (.SkipAnswer (.-p result))] (!= err nil)
+                              (set! lastErr (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                                    :Err (.Error errCannotUnmarshalDNSMessage)
+                                    :Name name
+                                    :Server (.-server result))))
+
+                              (break :loop))
+
+                            (continue))))))))
+
+
+
+              (when hitStrictError
+                ;; If either family hit an error with StrictErrors enabled,
+                ;; discard all addresses. This ensures that network flakiness
+                ;; cannot turn a dualstack hostname IPv4/IPv6-only.
+                (set! addrs nil)
+                (break))
+
+              (when (or (> (len addrs) 0) (and (== network "CNAME") (> (.-Length cname) 0)))
+                (break))))
+
+
+          (when [(values lastErr ok) (assert (* DNSError) lastErr)] ok
+            ;; Show original name passed to lookup, not suffixed one.
+            ;; In general we might have tried many suffixes; showing
+            ;; just one is misleading. See also golang.org/issue/6324.
+            (set! (.-Name lastErr) name))
+
+          (sortByRFC6724 addrs)
+          (when (and (== (len addrs) 0) (not (and (== network "CNAME") (> (.-Length cname) 0))))
+            (when (== order hostLookupDNSFiles)
+              (let [^string canonical (zero string)]
+                (set! (values addrs canonical) (goLookupIPFiles name))
+                (when (> (len addrs) 0)
+                  (let [^error err (zero error)]
+                    (set! (values cname err) (dnsmessage/NewName canonical))
+                    (when (!= err nil)
+                      (return nil (lit dnsmessage/Name) err))
+
+                    (return addrs cname nil)))))
+
+
+            (when (!= lastErr nil)
+              (return nil (lit dnsmessage/Name) lastErr)))
+
+
+          (return addrs cname nil))))))
+
+
+
+^{:go/end 853} (go/method goLookupCNAME "goLookupCNAME is the native Go (non-cgo) implementation of LookupCNAME.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string host ^hostLookupOrder order ^{:tag (* dnsConfig)} conf] :results [string error]
+  (let [(values _ cname err) (.goLookupIPCNAMEOrder r ctx "CNAME" host order conf)]
+    (return (.String cname) err)))
+
+
+
+^{:go/end 921} (go/method goLookupPTR "goLookupPTR is the native Go implementation of LookupAddr.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string addr ^hostLookupOrder order ^{:tag (* dnsConfig)} conf] :results [(slice string) error]
+  (when (or (== order hostLookupFiles) (== order hostLookupFilesDNS))
+    (let [names (lookupStaticAddr addr)]
+      (when (> (len names) 0)
+        (return names nil))
+
+
+      (when (== order hostLookupFiles)
+        (return nil (newDNSError errNoSuchHost addr "")))))
+
+
+
+  (let [(values arpa err) (reverseaddr addr)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values p server ^:assign err) (.lookup r ctx arpa dnsmessage/TypePTR conf)]
+      (when (!= err nil)
+        (when [(values dnsErr ok) ((inst errors/AsType (* DNSError)) err)] (and ok (.-IsNotFound dnsErr))
+          (when (== order hostLookupDNSFiles)
+            (let [names (lookupStaticAddr addr)]
+              (when (> (len names) 0)
+                (return names nil)))))
+
+
+
+        (return nil err))
+
+      (let [^{:tag (slice string)} ptrs (zero (slice string))]
+        (while true
+          (let [(values h err) (.AnswerHeader p)]
+            (when (== err dnsmessage/ErrSectionDone)
+              (break))
+
+            (when (!= err nil)
+              (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                    :Err (.Error errCannotUnmarshalDNSMessage)
+                    :Name addr
+                    :Server server))))
+
+
+            (when (!= (.-Type h) dnsmessage/TypePTR)
+              (let [err (.SkipAnswer p)]
+                (when (!= err nil)
+                  (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                        :Err (.Error errCannotUnmarshalDNSMessage)
+                        :Name addr
+                        :Server server))))
+
+
+                (continue)))
+
+            (let [(values ptr ^:assign err) (.PTRResource p)]
+              (when (!= err nil)
+                (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                      :Err (.Error errCannotUnmarshalDNSMessage)
+                      :Name addr
+                      :Server server))))
+
+
+              (set! ptrs (append ptrs (.String (.-PTR ptr)))))))
+
+
+
+        (return ptrs nil)))))

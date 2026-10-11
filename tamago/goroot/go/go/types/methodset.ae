@@ -1,0 +1,245 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements method sets.
+
+(in-ns 'go.go.types) (go/file "methodset.go" :imports [
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [sort "sort"]
+    ^{:line 12} [strings "strings"]])
+
+
+
+
+
+(go/type MethodSet "A MethodSet is an ordered set of concrete or abstract (interface) methods;\na method is a [MethodVal] selection, and they are ordered by ascending m.Obj().Id().\nThe zero value for a MethodSet is a ready-to-use empty method set.\n" (struct
+    ^{:line 19 :tag (slice (* Selection))} list))
+
+
+^{:go/end 34} (go/method String ^string [^{:tag (* MethodSet)} s]
+  (when (== (.Len s) 0)
+    (return "MethodSet {}"))
+
+
+  (let [^strings/Builder buf (zero strings/Builder)]
+    (fmt/Fprintln (addr buf) "MethodSet {")
+    (range [_ f (.-list s)]
+      (fmt/Fprintf (addr buf) "\t%s\n" f))
+
+    (fmt/Fprintln (addr buf) "}")
+    (.String buf)))
+
+
+
+^{:go/end 37} (go/method Len "Len returns the number of methods in s.\n" ^int [^{:tag (* MethodSet)} s] (len (.-list s)))
+
+
+^{:go/end 40} (go/method At "At returns the i'th method in s for 0 <= i < s.Len().\n" ^{:tag (* Selection)} [^{:tag (* MethodSet)} s ^int i] (aget (.-list s) i))
+
+
+^{:go/end 60} (go/method Lookup "Lookup returns the method with matching package and name, or nil if not found.\n" ^{:tag (* Selection)} [^{:tag (* MethodSet)} s ^{:tag (* Package)} pkg ^string name]
+  (when (== (.Len s) 0)
+    (return nil))
+
+
+  ^{:go/breaks [[3 59]]} (let [key (Id pkg name)
+      ^{:line 49} i (sort/Search (len (.-list s)) ^{:go/end 52} (fn ^bool [^int i]
+          (let [m (aget (.-list s) i)]
+            (>= (.Id (.-obj m)) key))))]
+
+    (when (< i (len (.-list s)))
+      (let [m (aget (.-list s) i)]
+        (when (== (.Id (.-obj m)) key)
+          (return m))))
+
+
+    nil))
+
+
+
+(go/var ^{:tag MethodSet :doc "Shared empty method set.\n"} emptyMethodSet)
+
+;; Note: NewMethodSet is intended for external use only as it
+;;       requires interfaces to be complete. It may be used
+;;       internally if LookupFieldOrMethod completed the same
+;;       interfaces beforehand.
+
+
+
+^{:go/end 208} (go/func NewMethodSet "NewMethodSet returns the method set for the given type T.\nIt always returns a non-nil method set, even if it is empty.\n" ^{:tag (* MethodSet)} [^Type T]
+  ;; WARNING: The code in this function is extremely subtle - do not modify casually!
+  ;;          This function and lookupFieldOrMethod should be kept in sync.
+
+  ;; TODO(rfindley) confirm that this code is in sync with lookupFieldOrMethod
+  ;;                with respect to type params.
+
+  ;; Methods cannot be associated with a named pointer type.
+  ;; (spec: "The type denoted by T is called the receiver base type;
+  ;; it must not be a pointer or interface type and it must be declared
+  ;; in the same package as the method.").
+  (when [t (asNamed T)] (and (!= t nil) (isPointer t))
+    (return (addr emptyMethodSet)))
+
+
+  ;; method set up to the current depth, allocated lazily
+  (let [^methodSet base (zero methodSet)
+
+      (values typ isPtr) (go/call deref T)]
+
+    ;; *typ where typ is an interface has no methods.
+    (when (and isPtr (IsInterface typ))
+      (return (addr emptyMethodSet)))
+
+
+    ;; Start with typ as single entry at shallowest depth.
+    (let [current (lit (slice embeddedType) (lit _ typ nil isPtr false))
+
+        ;; seen tracks named types that we have seen already, allocated lazily.
+        ;; Used to avoid endless searches in case of recursive types.
+        ;;
+        ;; We must use a lookup on identity rather than a simple map[*Named]bool as
+        ;; instantiated types may be identical but not equal.
+        ^{:line 105 :tag instanceLookup} seen (zero instanceLookup)]
+
+      ;; collect methods at current depth
+      (while (> (len current) 0)
+        (let [^{:tag (slice embeddedType)} next (zero (slice embeddedType)) ; embedded types found at current depth
+
+            ;; field and method sets at current depth, indexed by names (Id's), and allocated lazily
+            ^{:line 112 :tag (map string bool)} fset (zero (map string bool)) ; we only care about the field names
+            ^{:line 113 :tag methodSet} mset (zero methodSet)]
+
+          (range [_ e current]
+            (let [typ (.-typ e)]
+
+              ;; If we have a named type, we may have associated methods.
+              ;; Look for those first.
+              (when [named (asNamed typ)] (!= named nil)
+                (when [alt (.lookup seen named)] (!= alt nil)
+                  ;; We have seen this type before, at a more shallow depth
+                  ;; (note that multiples of this type at the current depth
+                  ;; were consolidated before). The type at that depth shadows
+                  ;; this same type at the current depth, so we can ignore
+                  ;; this one.
+                  (continue))
+
+                (.add seen named)
+
+                (for [i 0] (< i (.NumMethods named)) (inc! i)
+                  (set! mset (.addOne mset (.Method named i) (concat (.-index e) i) (.-indirect e) (.-multiples e)))))
+
+
+
+              (type-switch [t (.Underlying typ)]
+                (case [(* Struct)]
+                  (range [i f (.-fields t)]
+                    (when (== fset nil)
+                      (set! fset (make (map string bool))))
+
+                    (aset fset ^{:go/via [object]} (.Id f) true)
+
+                    ;; Embedded fields are always of the form T or *T where
+                    ;; T is a type name. If typ appeared multiple times at
+                    ;; this depth, f.Type appears multiple times at the next
+                    ;; depth.
+                    (when (.-embedded f)
+                      (let [(values typ isPtr) (go/call deref ^{:go/via [object]} (.-typ f))]
+                        ;; TODO(gri) optimization: ignore types that can't
+                        ;; have fields or methods (only Named, Struct, and
+                        ;; Interface types need to be considered).
+                        (set! next (append next (lit embeddedType typ (concat (.-index e) i) (or (.-indirect e) isPtr) (.-multiples e))))))))
+
+
+
+                (case [(* Interface)]
+                  (set! mset (.add mset (.-methods (.typeSet t)) (.-index e) true (.-multiples e)))))))
+
+
+
+          ;; Add methods and collisions at this depth to base if no entries with matching
+          ;; names exist already.
+          (range [k m mset]
+            (when [(values _ found) (aget base k)] (not found)
+              ;; Fields collide with methods of the same name at this depth.
+              (when (aget fset k)
+                (set! m nil)) ; collision
+
+              (when (== base nil)
+                (set! base (make methodSet)))
+
+              (aset base k m)))
+
+
+
+          ;; Add all (remaining) fields at this depth as collisions (since they will
+          ;; hide any method further down) if no entries with matching names exist already.
+          (range [k fset]
+            (when [(values _ found) (aget base k)] (not found)
+              (when (== base nil)
+                (set! base (make methodSet)))
+
+              (aset base k nil))) ; collision
+
+
+
+          (set! current (consolidateMultiples next))))
+
+
+      (when (== (len base) 0)
+        (return (addr emptyMethodSet)))
+
+
+      ;; collect methods
+      (let [^{:tag (slice (* Selection))} list (zero (slice (* Selection)))]
+        (range [_ m base]
+          (when (!= m nil)
+            (set! (.-recv m) T)
+            (set! list (append list m))))
+
+
+        ;; sort by unique name
+        (sort/Slice list ^{:go/end 206} (fn ^bool [^int i ^int j]
+            (< (.Id (.-obj (aget list i))) (.Id (.-obj (aget list j))))))
+
+        (addr (lit MethodSet list))))))
+
+
+
+
+
+(go/type methodSet "A methodSet is a set of methods and name collisions.\nA collision indicates that multiple methods with the\nsame unique id, or a field with that id appeared.\n" (map string (* Selection))) ; a nil entry indicates a name collision
+
+
+
+
+^{:go/end 226} (go/method add "Add adds all functions in list to the method set s.\nIf multiples is set, every function in list appears multiple times\nand is treated as a collision.\n" ^methodSet [^methodSet s ^{:tag (slice (* Func))} list ^{:tag (slice int)} index ^bool indirect ^bool multiples]
+  (when (== (len list) 0)
+    (return s))
+
+  (range [i f list]
+    (set! s (.addOne s f (concat index i) indirect multiples)))
+
+  ^{:line 225} s)
+
+
+^{:go/end 246} (go/method addOne ^methodSet [^methodSet s ^{:tag (* Func)} f ^{:tag (slice int)} index ^bool indirect ^bool multiples]
+  (when (== s nil)
+    (set! s (make methodSet)))
+
+  (let [key ^{:go/via [object]} (.Id f)]
+    ;; if f is not in the set, add it
+    (when (not multiples)
+      ;; TODO(gri) A found method may not be added because it's not in the method set
+      ;; (!indirect && f.hasPtrRecv()). A 2nd method on the same level may be in the method
+      ;; set and may not collide with the first one, thus leading to a false positive.
+      ;; Is that possible? Investigate.
+      (when [(values _ found) (aget s key)] (and (not found) ^:go/paren (or indirect (not (.hasPtrRecv f))))
+        (aset s key (addr (lit Selection MethodVal nil f index indirect)))
+        (return s)))
+
+
+    (aset s key nil) ; collision
+    ^{:line 245} s))

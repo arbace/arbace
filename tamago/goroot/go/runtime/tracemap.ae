@@ -1,0 +1,146 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Simple append-only thread-safe hash map for tracing.
+;; Provides a mapping between variable-length data and a
+;; unique ID. Subsequent puts of the same data will return
+;; the same ID. The zero value is ready to use.
+;;
+;; Uses a region-based allocation scheme internally, and
+;; reset clears the whole map.
+;;
+;; It avoids doing any high-level Go operations so it's safe
+;; to use even in sensitive contexts.
+
+(in-ns 'go.runtime) (go/file "tracemap.go" :imports [
+
+
+    ^{:line 19} [cpu "internal/cpu"]
+    ^{:line 20} [goarch "internal/goarch"]
+    ^{:line 21} [atomic "internal/runtime/atomic"]
+    ^{:line 22} [sys "internal/runtime/sys"]
+    ^{:line 23} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+(go/type traceMap "traceMap is a map of a variable-sized array of bytes to a unique ID.\n\nBecause traceMap just operates on raw bytes, this type is used as the\nbacking store for both the trace string table and trace stack table,\nthe latter of which is just an array of PCs.\n\nID 0 is reserved for arrays of bytes of size zero.\n" (struct
+    ^{:line 34 :tag atomic/UnsafePointer} root ; *traceMapNode (can't use generics because it's notinheap)
+    ^{:line 35 :tag cpu/CacheLinePad} _
+    ^{:line 36 :tag atomic/Uint64} seq
+    ^{:line 37 :tag cpu/CacheLinePad} _
+    ^{:line 38 :tag traceRegionAlloc} mem))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type traceMapNode "traceMapNode is an implementation of a lock-free append-only hash-trie\n(a trie of the hash bits).\n\nKey features:\n  - 4-ary trie. Child nodes are indexed by the upper 2 (remaining) bits of the hash.\n    For example, top level uses bits [63:62], next level uses [61:60] and so on.\n  - New nodes are placed at the first empty level encountered.\n  - When the first child is added to a node, the existing value is not moved into a child.\n    This means that you must check the key at each level, not just at the leaf.\n  - No deletion or rebalancing.\n  - Intentionally devolves into a linked list on hash collisions (the hash bits will all\n    get shifted out during iteration, and new nodes will just be appended to the 0th child).\n" (struct
+    ^{:line 54 :tag sys/NotInHeap} _
+
+    ^{:line 56 :tag (array 4 atomic/UnsafePointer)} children ; *traceMapNode (can't use generics because it's notinheap)
+    ^{:line 57 :tag uintptr} hash
+    ^{:line 58 :tag uint64} id
+    ^{:line 59 :tag (slice byte)} data))
+
+
+
+
+^{:go/end 66} (go/method stealID "stealID steals an ID from the table, ensuring that it will not\nappear in the table anymore.\n" ^uint64 [^{:tag (* traceMap)} tab]
+  (.Add (.-seq tab) 1))
+
+
+
+
+
+
+
+
+^{:go/end 120} (go/method put "put inserts the data into the table.\n\nIt's always safe for callers to noescape data because put copies its bytes.\n\nReturns a unique ID for the data and whether this is the first time\nthe data has been added to the map.\n" [^{:tag (* traceMap)} tab ^unsafe/Pointer data ^uintptr size] :results [uint64 bool]
+  (when (== size 0)
+    (return 0 false))
+
+  (let [hash (memhash data 0 size)
+
+      ^{:line 80 :tag (* traceMapNode)} newNode (zero (* traceMapNode))
+      ^{:line 81} m (addr (.-root tab))
+      ^{:line 82} hashIter hash]
+    (while true
+      (let [n (conv (* traceMapNode) (.Load m))]
+        (when (== n nil)
+          ;; Try to insert a new map node. We may end up discarding
+          ;; this node if we fail to insert because it turns out the
+          ;; value is already in the map.
+          ;;
+          ;; The discard will only happen if two threads race on inserting
+          ;; the same value. Both might create nodes, but only one will
+          ;; succeed on insertion. If two threads race to insert two
+          ;; different values, then both nodes will *always* get inserted,
+          ;; because the equality checking below will always fail.
+          ;;
+          ;; Performance note: contention on insertion is likely to be
+          ;; higher for small maps, but since this data structure is
+          ;; append-only, either the map stays small because there isn't
+          ;; much activity, or the map gets big and races to insert on
+          ;; the same node are much less likely.
+          (when (== newNode nil)
+            (set! newNode (.newTraceMapNode tab data size hash (.Add (.-seq tab) 1))))
+
+          (when (.CompareAndSwapNoWB m nil (conv unsafe/Pointer newNode))
+            (return (.-id newNode) true))
+
+          ;; Reload n. Because pointers are only stored once,
+          ;; we must have lost the race, and therefore n is not nil
+          ;; anymore.
+          (set! n (conv (* traceMapNode) (.Load m))))
+
+        (when (and (== (.-hash n) hash) (== (conv uintptr (len (.-data n))) size))
+          (when (memequal (conv unsafe/Pointer (addr (aget (.-data n) 0))) data size)
+            (return (.-id n) false)))
+
+
+        (set! m (addr (aget (.-children n) (>> hashIter (- (* 8 goarch/PtrSize) 2)))))
+        (set! hashIter << 2)))))
+
+
+
+^{:go/end 137} (go/method newTraceMapNode ^{:tag (* traceMapNode)} [^{:tag (* traceMap)} tab ^unsafe/Pointer data ^uintptr size ^uintptr hash ^uint64 id]
+  ;; Create data array.
+  (let [sl ^{:go/breaks [2 4 6]} (lit notInHeapSlice
+        :array (.alloc (.-mem tab) size)
+        :len (conv int size)
+        :cap (conv int size))]
+
+    (memmove (conv unsafe/Pointer (.-array sl)) data size)
+
+    ;; Create metadata structure.
+    (let [meta (conv (* traceMapNode) (conv unsafe/Pointer (.alloc (.-mem tab) (unsafe/Sizeof (lit traceMapNode)))))]
+      (set! @(conv (* notInHeapSlice) (conv unsafe/Pointer (addr (.-data meta)))) sl)
+      (set! (.-id meta) id)
+      (set! (.-hash meta) hash)
+      ^{:line 136} meta)))
+
+
+
+
+
+
+^{:go/end 147} (go/method reset "reset drops all allocated memory from the table and resets it.\n\nThe caller must ensure that there are no put operations executing concurrently\nwith this function.\n" [^{:tag (* traceMap)} tab]
+  (.Store (.-root tab) nil)
+  (.Store (.-seq tab) 0)
+  (.drop (.-mem tab)))

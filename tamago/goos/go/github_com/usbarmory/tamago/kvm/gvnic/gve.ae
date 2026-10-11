@@ -1,0 +1,159 @@
+;; Google Compute Engine Virtual Ethernet (gVNIC) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package gvnic implements a driver for Google Compute Engine Virtual Ethernet
+;; (gVNIC) virtual network interfaces.
+;;
+;; This package is only meant to be used with `GOOS=tamago` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.kvm.gvnic) (go/file "gve.go" :doc "Package gvnic implements a driver for Google Compute Engine Virtual Ethernet\n(gVNIC) virtual network interfaces.\n\nThis package is only meant to be used with `GOOS=tamago` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 18} [errors "errors"]
+    ^{:line 19} [fmt "fmt"]
+    ^{:line 20} [bits "math/bits"]
+    ^{:line 21} [sync "sync"]
+
+    ^{:line 23} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 24} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 25} [pci "github.com/usbarmory/tamago/soc/intel/pci"]])
+
+
+
+(go/const "Google Virtual NIC PCI Device\n"
+  ^{:line 30} [^{:val 6880} PCI_VENDOR 0x1ae0] ; Google, Inc.
+  ^{:line 31} [^{:val 66} PCI_DEVICE 0x0042]) ; Compute Engine Virtual Ethernet [gVNIC]
+
+
+
+(go/const "gVNIC configuration registers (Bar0)\n"
+  ^{:line 36} [^{:val 0} DEVICE_STATUS 0x00]
+  ^{:line 37} [^{:tag uint32 :val 1} DEVICE_STATUS_LINK 1]
+  ^{:line 38} [^{:tag uint32 :val 0} DEVICE_STATUS_RESET 0]
+
+  ^{:line 40} [^{:val 4} DRIVER_STATUS 0x04]
+  ^{:line 41} [^{:tag uint32 :val 0} DRIVER_STATUS_RESET 0]
+  ^{:line 42} [^{:tag uint32 :val 1} DRIVER_STATUS_RUN 1]
+
+  ^{:line 44} [^{:val 8} MAX_TX_QUEUES 0x08]
+  ^{:line 45} [^{:val 12} MAX_RX_QUEUES 0x0c]
+  ^{:line 46} [^{:val 20} ADMINQ_DOORBELL 0x14]
+  ^{:line 47} [^{:val 24} ADMINQ_EVENT_COUNTER 0x18]
+
+
+  ^{:line 50} [^{:val 16 :doc "PCI Revision 00\n"} ADMINQ_PFN 0x10]
+
+
+  ^{:line 53} [^{:val 32 :doc "PCI Revision 01\n"} ADMINQ_BASE_ADDRESS_LOW 0x20]
+  ^{:line 54} [^{:val 36} ADMINQ_BASE_ADDRESS_HIGH 0x24]
+  ^{:line 55} [^{:val 40} ADMINQ_LENGTH 0x28])
+
+
+(go/const
+  ^{:line 59} [^{:val 0} registersBAR 0]
+  ^{:line 60} [^{:val 1} MSIXTableBAR 1]
+  ^{:line 61} [^{:val 2} doorbellsBAR 2]
+
+  ^{:line 63} [^{:val 0} txID 0]
+  ^{:line 64} [^{:val 1} rxID 1]
+
+  ^{:line 66} [^{:val 64} descSize 64])
+
+
+
+(go/type GVE "GVE represents a Google Virtual NIC instance.\n" (struct
+    ^{:line 71} sync/Mutex
+
+
+    ^{:line 74 :tag int :doc "Controller index\n"} Index
+
+    ^{:line 76 :tag int :doc "Interrupt ID\n"} IRQ
+
+
+    ^{:line 79 :tag (* pci/Device) :doc "Device represents the probed PCI device.\n"} Device
+
+    ^{:line 81 :tag (* DeviceDescriptor) :doc "Info represents the initialized device descriptor.\n"} Info
+
+
+
+
+
+
+
+    ^{:line 89 :tag (* dma/Region) :doc "Region represents the memory region for shared DMA buffers, it is\ninitialized to the global DMA region if unset during [GVE.Init].\n\nIt can be used to override the global DMA region as needed, for\nexample to specify an unencrypted memory region when running in\nConfidential VMs.\n"} Region
+
+
+    ^{:line 92 :tag uint32 :doc "PCI memory BARS\n"} registers
+    ^{:line 93 :tag uint32} msixTable
+    ^{:line 94 :tag uint32} doorbells
+
+
+    ^{:line 97 :tag (* adminQueue) :doc "queues\n"} aq
+    ^{:line 98 :tag (* rxQueue)} rx
+    ^{:line 99 :tag (* txQueue)} tx
+
+
+    ^{:line 102 :tag (slice byte) :doc "DMA buffers\n"} counters
+    ^{:line 103 :tag (slice byte)} irqs))
+
+
+^{:go/end 113} (go/method set [^{:tag (* GVE)} hw ^uint32 off ^any val]
+  (type-switch [v val]
+    (case [uint32]
+      (reg/Write (+ (.-registers hw) off) (bits/ReverseBytes32 v)))
+    (case [uint16]
+      (reg/Write16 (+ (.-registers hw) off) (bits/ReverseBytes16 v)))))
+
+
+
+
+^{:go/end 160} (go/method Init "Init initializes a Google Virtual NIC instance.\n" [^{:tag (* GVE)} hw] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (== (.-Device hw) nil)
+    (return (errors/New "invalid GVE instance")))
+
+
+  (when (== (.-Region hw) nil)
+    (set! (.-Region hw) (dma/Default)))
+
+
+  (set! (.-registers hw) (conv uint32 (.BaseAddress (.-Device hw) registersBAR)))
+  (set! (.-doorbells hw) (conv uint32 (.BaseAddress (.-Device hw) doorbellsBAR)))
+
+  (when (or (!= (bit-and (.-registers hw) 1) 0) (!= (bit-and (.-doorbells hw) 1) 0))
+    (return (errors/New "unexpected PCI BAR type, expected memory")))
+
+
+  (.set hw DEVICE_STATUS (conv uint32 DEVICE_STATUS_RESET))
+
+  (when [err (.initAdminQueue hw)] (!= err nil)
+    (return (fmt/Errorf "failed to initialize admin queue, %v" err)))
+
+
+  (.set hw DRIVER_STATUS (conv uint32 DRIVER_STATUS_RUN))
+
+  (when [(set! err (.describeDevice hw))] (!= err nil)
+    (return (fmt/Errorf "failed to describe device, %v" err)))
+
+
+  (when [(set! err (.configureDeviceResources hw))] (!= err nil)
+    (return (fmt/Errorf "failed to configure device resources, %v" err)))
+
+
+  (when [(set! err (.initTxQueue hw txID))] (!= err nil)
+    (return (fmt/Errorf "failed to initialize tx queue, %v" err)))
+
+
+  (when [(set! err (.initRxQueue hw rxID))] (!= err nil)
+    (return (fmt/Errorf "failed to initialize rx queue, %v" err)))
+
+
+  (return))

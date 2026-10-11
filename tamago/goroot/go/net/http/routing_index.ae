@@ -1,0 +1,123 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http) (go/file "routing_index.go" :imports [
+
+    ^{:line 7} [math "math"]])
+
+
+
+
+
+
+(go/type routingIndex "A routingIndex optimizes conflict detection by indexing patterns.\n\nThe basic idea is to rule out patterns that cannot conflict with a given\npattern because they have a different literal in a corresponding segment.\nSee the comments in [routingIndex.possiblyConflictingPatterns] for more details.\n" (struct
+
+
+
+
+    ^{:line 19 :tag (map routingIndexKey (slice (* pattern))) :doc "map from a particular segment position and value to all registered patterns\nwith that value in that position.\nFor example, the key {1, \"b\"} would hold the patterns \"/a/b\" and \"/a/b/c\"\nbut not \"/a\", \"b/a\", \"/a/c\" or \"/a/{x}\".\n"} segments
+
+
+
+    ^{:line 23 :tag (slice (* pattern)) :doc "All patterns that end in a multi wildcard (including trailing slash).\nWe do not try to be clever about indexing multi patterns, because there\nare unlikely to be many of them.\n"} multis))
+
+
+(go/type routingIndexKey (struct
+    ^{:line 27 :tag int} pos ; 0-based segment position
+    ^{:line 28 :tag string} s)) ; literal, or empty for wildcard
+
+
+^{:go/end 46} (go/method addPattern [^{:tag (* routingIndex)} idx ^{:tag (* pattern)} pat]
+  (if (.-multi (.lastSegment pat))
+    (set! (.-multis idx) (append (.-multis idx) pat))
+    (do
+      (when (== (.-segments idx) nil)
+        (set! (.-segments idx) (lit (map routingIndexKey (slice (* pattern))))))
+
+      (range [pos seg (.-segments pat)]
+        (let [key (lit routingIndexKey :pos pos :s "")]
+          (when (not (.-wild seg))
+            (set! (.-s key) (.-s seg)))
+
+          (aset (.-segments idx) key (append (aget (.-segments idx) key) pat)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 124} (go/method possiblyConflictingPatterns "possiblyConflictingPatterns calls f on all patterns that might conflict with\npat. If f returns a non-nil error, possiblyConflictingPatterns returns immediately\nwith that error.\n\nTo be correct, possiblyConflictingPatterns must include all patterns that\nmight conflict. But it may also include patterns that cannot conflict.\nFor instance, an implementation that returns all registered patterns is correct.\nWe use this fact throughout, simplifying the implementation by returning more\npatterns that we might need to.\n" [^{:tag (* routingIndex)} idx ^{:tag (* pattern)} pat ^{:tag (func [(* pattern)] [error])} f] :results [^error err]
+  ;; Terminology:
+  ;;   dollar pattern: one ending in "{$}"
+  ;;   multi pattern: one ending in a trailing slash or "{x...}" wildcard
+  ;;   ordinary pattern: neither of the above
+
+  ;; apply f to all the pats, stopping on error.
+  (let [apply ^{:go/breaks [[4 74]] :go/end 75} (fn ^error [^{:tag (slice (* pattern))} pats]
+        (when (!= err nil)
+          (return err))
+
+        (range [_ p pats]
+          (set! err (f p))
+          (when (!= err nil)
+            (return err)))
+
+
+        nil)]
+
+
+    ;; Our simple indexing scheme doesn't try to prune multi patterns; assume
+    ;; any of them can match the argument.
+    (when [err (apply (.-multis idx))] (!= err nil)
+      (return err))
+
+    (when (== (.-s (.lastSegment pat)) "/")
+      ;; All paths that a dollar pattern matches end in a slash; no paths that
+      ;; an ordinary pattern matches do. So only other dollar or multi
+      ;; patterns can conflict with a dollar pattern. Furthermore, conflicting
+      ;; dollar patterns must have the {$} in the same position.
+      (return (apply (aget (.-segments idx) (lit routingIndexKey :s "/" :pos (- (len (.-segments pat)) 1))))))
+
+    ;; For ordinary and multi patterns, the only conflicts can be with a multi,
+    ;; or a pattern that has the same literal or a wildcard at some literal
+    ;; position.
+    ;; We could intersect all the possible matches at each position, but we
+    ;; do something simpler: we find the position with the fewest patterns.
+    (let [(values ^{:tag (slice (* pattern))} lmin ^{:tag (slice (* pattern))} wmin) (zero (slice (* pattern)))
+        ^{:line 95} min math/MaxInt
+        ^{:line 96} hasLit false]
+      (range [i seg (.-segments pat)]
+        (when (.-multi seg)
+          (break))
+
+        (when (not (.-wild seg))
+          (set! hasLit true)
+          (let [lpats (aget (.-segments idx) (lit routingIndexKey :s (.-s seg) :pos i))
+              ^{:line 104} wpats (aget (.-segments idx) (lit routingIndexKey :s "" :pos i))]
+            (when [sum (+ (len lpats) (len wpats))] (< sum min)
+              (set! lmin lpats)
+              (set! wmin wpats)
+              (set! min sum)))))
+
+
+
+      (when hasLit
+        (apply lmin)
+        (apply wmin)
+        (return err))
+
+
+      ;; This pattern is all wildcards.
+      ;; Check it against everything.
+      (range [_ pats (.-segments idx)]
+        (apply pats))
+
+      ^{:line 123} err)))

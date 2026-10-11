@@ -1,0 +1,334 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package pem implements the PEM data encoding, which originated in Privacy
+;; Enhanced Mail. The most common use of PEM encoding today is in TLS keys and
+;; certificates. See RFC 1421.
+(in-ns 'go.encoding.pem) (go/file "pem.go" :doc "Package pem implements the PEM data encoding, which originated in Privacy\nEnhanced Mail. The most common use of PEM encoding today is in TLS keys and\ncertificates. See RFC 1421.\n" :imports [
+
+
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [base64 "encoding/base64"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [slices "slices"]
+    ^{:line 16} [strings "strings"]])
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Block "A Block represents a PEM encoded structure.\n\nThe encoded form is:\n\n\t-----BEGIN Type-----\n\tHeaders\n\tbase64-encoded Bytes\n\t-----END Type-----\n\nwhere [Block.Headers] is a possibly empty sequence of Key: Value lines.\n" (struct
+    ^{:line 30 :tag string} Type ; The type, taken from the preamble (i.e. "RSA PRIVATE KEY").
+    ^{:line 31 :tag (map string string)} Headers ; Optional headers.
+    ^{:line 32 :tag (slice byte)} Bytes)) ; The decoded bytes of the contents. Typically a DER encoded ASN.1 structure.
+
+
+
+
+
+
+
+^{:go/end 53} (go/func getLine "getLine results the first \\r\\n or \\n delineated line from the given byte\narray. The line does not include trailing whitespace or the trailing new\nline bytes. The remainder of the byte array (also not including the new line\nbytes) is also returned and this will always be smaller than the original\nargument.\n" [^{:tag (slice byte)} data] :results [^{:tag (slice byte)} line ^{:tag (slice byte)} rest ^int consumed]
+  (let [i (bytes/IndexByte data \newline)
+      ^{:line 42 :tag int} j (zero int)]
+    (if (< i 0) (do
+        (set! i (len data))
+        (set! j i))
+      (do
+        (set! j (+ i 1))
+        (when (and (> i 0) (== (aget data (- i 1)) \return))
+          (dec! i))))
+
+
+    (return (bytes/TrimRight (subslice data 0 i) " \t") (subslice data j) j)))
+
+
+
+
+
+
+
+^{:go/end 78} (go/func removeSpacesAndTabs "removeSpacesAndTabs returns a copy of its input with all spaces and tabs\nremoved, if there were any. Otherwise, the input is returned unchanged.\n\nThe base64 decoder already skips newline characters, so we don't need to\nfilter them out here.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} data]
+  (when (not (bytes/ContainsAny data " \t"))
+    ;; Fast path; most base64 data within PEM contains newlines, but
+    ;; no spaces nor tabs. Skip the extra alloc and work.
+    (return data))
+
+  (let [result (make (slice byte) (len data))
+      ^{:line 67} n 0]
+
+    (range [_ b data]
+      (when (or (== b \space) (== b \tab))
+        (continue))
+
+      (aset result n b)
+      (inc! n))
+
+
+    (subslice result 0 n)))
+
+
+(go/var pemStart (conv (slice byte) "\n-----BEGIN "))
+(go/var pemEnd (conv (slice byte) "\n-----END "))
+(go/var pemEndOfLine (conv (slice byte) "-----"))
+(go/var colon (conv (slice byte) ":"))
+
+
+
+
+
+^{:go/end 198} (go/func Decode "Decode will find the next PEM formatted block (certificate, private key\netc) in the input. It returns that block and the remainder of the input. If\nno PEM data is found, p is nil and the whole of the input is returned in\nrest. Blocks must start at the beginning of a line and end at the end of a line.\n" [^{:tag (slice byte)} data] :results [^{:tag (* Block)} p ^{:tag (slice byte)} rest]
+  ;; pemStart begins with a newline. However, at the very beginning of
+  ;; the byte array, we'll accept the start string without it.
+  (set! rest data)
+
+  (let [endTrailerIndex 0]
+    (while true
+      ;; If we've already tried parsing a block, skip past the END we already
+      ;; saw.
+      (when (or (< endTrailerIndex 0) (> endTrailerIndex (len rest)))
+        (return nil data))
+
+      (set! rest (subslice rest endTrailerIndex))
+
+      ;; Find the first END line, and then find the last BEGIN line before
+      ;; the end line. This lets us skip any repeated BEGIN lines that don't
+      ;; have a matching END.
+      (let [endIndex (bytes/Index rest pemEnd)]
+        (when (< endIndex 0)
+          (return nil data))
+
+        (set! endTrailerIndex (+ endIndex (len pemEnd)))
+        (let [beginIndex (bytes/LastIndex (subslice rest _ endIndex) (subslice pemStart 1))]
+          (when (or (< beginIndex 0) ^:go/paren (and (> beginIndex 0) (!= (aget rest (- beginIndex 1)) \newline)))
+            (continue))
+
+          (set! rest (subslice rest (- (+ beginIndex (len pemStart)) 1)))
+          (set! endIndex - (- (+ beginIndex (len pemStart)) 1))
+          (set! endTrailerIndex - (- (+ beginIndex (len pemStart)) 1))
+
+          (let [^{:tag (slice byte)} typeLine (zero (slice byte))
+              ^{:line 120 :tag int} consumed (zero int)]
+            (set! (values typeLine rest consumed) (getLine rest))
+            (set! endIndex - consumed)
+            (set! endTrailerIndex - consumed)
+            (when (not (bytes/HasSuffix typeLine pemEndOfLine))
+              (continue))
+
+            (set! typeLine (subslice typeLine 0 (- (len typeLine) (len pemEndOfLine))))
+
+            (set! p (addr ^{:go/breaks [2 4]} (lit Block
+                  :Headers (make (map string string))
+                  :Type (conv string typeLine))))
+
+
+            (while true
+              ;; This loop terminates because getLine's second result is
+              ;; always smaller than its argument.
+              (when (== (len rest) 0)
+                (return nil data))
+
+              (let [(values line next consumed) (getLine rest)
+
+                  (values key val ok) (bytes/Cut line colon)]
+                (when (not ok)
+                  (break))
+
+
+                ;; TODO(agl): need to cope with values that spread across lines.
+                (set! key (bytes/TrimSpace key))
+                (set! val (bytes/TrimSpace val))
+                (aset (.-Headers p) (conv string key) (conv string val))
+                (set! rest next)
+                (set! endIndex - consumed)
+                (set! endTrailerIndex - consumed)))
+
+
+            ;; If there were headers, there must be a newline between the headers
+            ;; and the END line, so endIndex should be >= 0.
+            (when (and (> (len (.-Headers p)) 0) (< endIndex 0))
+              (continue))
+
+
+            ;; After the "-----" of the ending line, there should be the same type
+            ;; and then a final five dashes.
+            (let [endTrailer (subslice rest endTrailerIndex)
+                ^{:line 165} endTrailerLen (+ (len typeLine) (len pemEndOfLine))]
+              (when (< (len endTrailer) endTrailerLen)
+                (continue))
+
+
+              (let [restOfEndLine (subslice endTrailer endTrailerLen)]
+                (set! endTrailer (subslice endTrailer _ endTrailerLen))
+                (when (or (not (bytes/HasPrefix endTrailer typeLine))
+                    (not (bytes/HasSuffix endTrailer pemEndOfLine)))
+                  (continue))
+
+
+                ;; The line must end with only whitespace.
+                (when [(values s _ _) (getLine restOfEndLine)] (!= (len s) 0)
+                  (continue))
+
+
+                (set! (.-Bytes p) (lit (slice byte)))
+                (when (> endIndex 0)
+                  (let [base64Data (removeSpacesAndTabs (subslice rest _ endIndex))]
+                    (set! (.-Bytes p) (make (slice byte) (.DecodedLen base64/StdEncoding (len base64Data))))
+                    (let [(values n err) (.Decode base64/StdEncoding (.-Bytes p) base64Data)]
+                      (when (!= err nil)
+                        (continue))
+
+                      (set! (.-Bytes p) (subslice (.-Bytes p) _ n)))))
+
+
+                ;; the -1 is because we might have only matched pemEnd without the
+                ;; leading newline if the PEM block was empty.
+                (set! (values _ rest _) (getLine (subslice rest (- (+ endIndex (len pemEnd)) 1))))
+                (return p rest)))))))))
+
+
+
+(go/const ^{:val 64} pemLineLength 64)
+
+(go/type lineBreaker (struct
+    ^{:line 203 :tag (array pemLineLength byte)} line
+    ^{:line 204 :tag int} used
+    ^{:line 205 :tag io/Writer} out))
+
+
+(go/var nl (lit (slice byte) \newline))
+
+^{:go/end 235} (go/method Write [^{:tag (* lineBreaker)} l ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (when (< (+ (.-used l) (len b)) pemLineLength)
+    (copy (subslice (.-line l) (.-used l)) b)
+    (set! (.-used l) + (len b))
+    (return (len b) nil))
+
+
+  (set! (values n err) (.Write (.-out l) (subslice (.-line l) 0 (.-used l))))
+  (when (!= err nil)
+    (return))
+
+  (let [excess (- pemLineLength (.-used l))]
+    (set! (.-used l) 0)
+
+    (set! (values n err) (.Write (.-out l) (subslice b 0 excess)))
+    (when (!= err nil)
+      (return))
+
+
+    (set! (values n err) (.Write (.-out l) nl))
+    (when (!= err nil)
+      (return))
+
+
+    (.Write l (subslice b excess))))
+
+
+^{:go/end 247} (go/method Close [^{:tag (* lineBreaker)} l] :results [^error err]
+  (when (> (.-used l) 0)
+    (set! (values _ err) (.Write (.-out l) (subslice (.-line l) 0 (.-used l))))
+    (when (!= err nil)
+      (return))
+
+    (set! (values _ err) (.Write (.-out l) nl)))
+
+
+  (return))
+
+
+^{:go/end 252} (go/func writeHeader ^error [^io/Writer out ^string k ^string v]
+  (let [(values _ err) (.Write out (conv (slice byte) (+ k ": " v "\n")))]
+    ^{:line 251} err))
+
+
+
+^{:go/end 322} (go/func Encode "Encode writes the PEM encoding of b to out.\n" ^error [^io/Writer out ^{:tag (* Block)} b]
+  ;; Check for invalid block before writing any output.
+  (range [k (.-Headers b)]
+    (when (strings/Contains k ":")
+      (return (errors/New "pem: cannot encode a header key that contains a colon"))))
+
+
+
+  ;; All errors below are relayed from underlying io.Writer,
+  ;; so it is now safe to write data.
+
+  (when [(values _ err) (.Write out (subslice pemStart 1))] (!= err nil)
+    (return err))
+
+  (when [(values _ err) (.Write out (conv (slice byte) (+ (.-Type b) "-----\n")))] (!= err nil)
+    (return err))
+
+
+  (when (> (len (.-Headers b)) 0)
+    (let [^:const ^{:val "Proc-Type"} procType "Proc-Type"
+        ^{:line 275} h (make (slice string) 0 (len (.-Headers b)))
+        ^{:line 276} hasProcType false]
+      (range [k (.-Headers b)]
+        (when (== k procType)
+          (set! hasProcType true)
+          (continue))
+
+        (set! h (append h k)))
+
+      ;; The Proc-Type header must be written first.
+      ;; See RFC 1421, section 4.6.1.1
+      (when hasProcType
+        (when [err (writeHeader out procType (aget (.-Headers b) procType))] (!= err nil)
+          (return err)))
+
+
+      ;; For consistency of output, write other headers sorted by key.
+      (^{:inst [(slice string) string]} slices/Sort h)
+      (range [_ k h]
+        (when [err (writeHeader out k (aget (.-Headers b) k))] (!= err nil)
+          (return err)))
+
+
+      (when [(values _ err) (.Write out nl)] (!= err nil)
+        (return err))))
+
+
+
+  (let [^lineBreaker breaker (zero lineBreaker)]
+    (set! (.-out breaker) out)
+
+    (let [b64 (base64/NewEncoder base64/StdEncoding (addr breaker))]
+      (when [(values _ err) (.Write b64 (.-Bytes b))] (!= err nil)
+        (return err))
+
+      (when [err (.Close b64)] (!= err nil)
+        (return err))
+
+      (when [err (.Close breaker)] (!= err nil)
+        (return err))
+
+
+      (when [(values _ err) (.Write out (subslice pemEnd 1))] (!= err nil)
+        (return err))
+
+      (let [(values _ err) (.Write out (conv (slice byte) (+ (.-Type b) "-----\n")))]
+        ^{:line 321} err))))
+
+
+
+
+
+
+
+^{:go/end 335} (go/func EncodeToMemory "EncodeToMemory returns the PEM encoding of b.\n\nIf b has invalid headers and cannot be encoded,\nEncodeToMemory returns nil. If it is important to\nreport details about this error case, use [Encode] instead.\n" ^{:tag (slice byte)} [^{:tag (* Block)} b]
+  (let [^bytes/Buffer buf (zero bytes/Buffer)]
+    (when [err (Encode (addr buf) b)] (!= err nil)
+      (return nil))
+
+    (.Bytes buf)))

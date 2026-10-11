@@ -1,0 +1,473 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.internal.httpcommon) (go/file "request.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [httptrace "net/http/httptrace"]
+    ^{:line 12} [textproto "net/textproto"]
+    ^{:line 13} [url "net/url"]
+    ^{:line 14} [sort "sort"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [strings "strings"]
+
+    ^{:line 18} [httpguts "golang.org/x/net/http/httpguts"]
+    ^{:line 19} [hpack "golang.org/x/net/http2/hpack"]])
+
+
+(go/var
+  ^{:line 23} [ErrRequestHeaderListSize (errors/New "request header list larger than peer's advertised limit")])
+
+
+
+
+
+(go/type Request "Request is a subset of http.Request.\nIt'd be simpler to pass an *http.Request, of course, but we can't depend on net/http\nwithout creating a dependency cycle.\n" (struct
+    ^{:line 30 :tag (* url/URL)} URL
+    ^{:line 31 :tag string} Method
+    ^{:line 32 :tag string} Host
+    ^{:line 33 :tag (map string (slice string))} Header
+    ^{:line 34 :tag (map string (slice string))} Trailer
+    ^{:line 35 :tag int64} ActualContentLength)) ; 0 means 0, -1 means unknown
+
+
+
+(go/type EncodeHeadersParam "EncodeHeadersParam is parameters to EncodeHeaders.\n" (struct
+    ^{:line 40 :tag Request} Request
+
+
+
+    ^{:line 44 :tag bool :doc "AddGzipHeader indicates that an \"accept-encoding: gzip\" header should be\nadded to the request.\n"} AddGzipHeader
+
+
+    ^{:line 47 :tag uint64 :doc "PeerMaxHeaderListSize, when non-zero, is the peer's MAX_HEADER_LIST_SIZE setting.\n"} PeerMaxHeaderListSize
+
+
+
+    ^{:line 51 :tag string :doc "DefaultUserAgent is the User-Agent header to send when the request\nneither contains a User-Agent nor disables it.\n"} DefaultUserAgent))
+
+
+
+(go/type EncodeHeadersResult "EncodeHeadersResult is the result of EncodeHeaders.\n" (struct
+    ^{:line 56 :tag bool} HasBody
+    ^{:line 57 :tag bool} HasTrailers))
+
+
+
+
+
+
+^{:go/end 264} (go/func EncodeHeaders "EncodeHeaders constructs request headers common to HTTP/2 and HTTP/3.\nIt validates a request and calls headerf with each pseudo-header and header\nfor the request.\nThe headerf function is called with the validated, canonicalized header name.\n" [^context/Context ctx ^EncodeHeadersParam param ^{:tag (func [^string name ^string value])} headerf] :results [^EncodeHeadersResult res ^error _]
+  (let [req (.-Request param)]
+
+    ;; Check for invalid connection-level headers.
+    (when [err (checkConnHeaders (.-Header req))] (!= err nil)
+      (return res err))
+
+
+    (when (== (.-URL req) nil)
+      (return res (errors/New "Request.URL is nil")))
+
+
+    (let [host (.-Host req)]
+      (when (== host "")
+        (set! host (.-Host (.-URL req))))
+
+      (let [(values ^:assign host err) (httpguts/PunycodeHostPort host)]
+        (when (!= err nil)
+          (return res err))
+
+        (when (not (httpguts/ValidHostHeader host))
+          (return res (errors/New "invalid Host header")))
+
+
+        ;; isNormalConnect is true if this is a non-extended CONNECT request.
+        (let [isNormalConnect false
+            ^{:line 90 :tag string} protocol (zero string)]
+          (when [vv (aget (.-Header req) ":protocol")] (> (len vv) 0)
+            (set! protocol (aget vv 0)))
+
+          (cond (and (== (.-Method req) "CONNECT") (== protocol ""))
+            (set! isNormalConnect true)
+            (and (!= protocol "") (!= (.-Method req) "CONNECT"))
+            (return res (errors/New "invalid :protocol header in non-CONNECT request")))
+
+
+          ;; Validate the path, except for non-extended CONNECT requests which have no path.
+          (let [^string path (zero string)]
+            (when (not isNormalConnect)
+              (set! path (.RequestURI (.-URL req)))
+              (when (not (validPseudoPath path))
+                (let [orig path]
+                  (set! path (strings/TrimPrefix path (+ (.-Scheme (.-URL req)) "://" host)))
+                  (when (not (validPseudoPath path))
+                    (if (!= (.-Opaque (.-URL req)) "")
+                      (return res (fmt/Errorf "invalid request :path %q from URL.Opaque = %q" orig (.-Opaque (.-URL req))))
+
+                      (return res (fmt/Errorf "invalid request :path %q" orig)))))))
+
+
+
+
+
+            ;; Check for any invalid headers+trailers and return an error before we
+            ;; potentially pollute our hpack state. (We want to be able to
+            ;; continue to reuse the hpack encoder for future requests)
+            (when [err (validateHeaders (.-Header req))] (!= err "")
+              (return res (fmt/Errorf "invalid HTTP header %s" err)))
+
+            (when [err (validateHeaders (.-Trailer req))] (!= err "")
+              (return res (fmt/Errorf "invalid HTTP trailer %s" err)))
+
+
+            (let [(values trailers ^:assign err) (commaSeparatedTrailers (.-Trailer req))]
+              (when (!= err nil)
+                (return res err))
+
+
+              (let [enumerateHeaders ^{:go/end 225} (fn [^{:tag (func [^string name ^string value])} f]
+                    ;; 8.1.2.3 Request Pseudo-Header Fields
+                    ;; The :path pseudo-header field includes the path and query parts of the
+                    ;; target URI (the path-absolute production and optionally a '?' character
+                    ;; followed by the query production, see Sections 3.3 and 3.4 of
+                    ;; [RFC3986]).
+                    (f ":authority" host)
+                    (let [m (.-Method req)]
+                      (when (== m "")
+                        (set! m "GET"))
+
+                      (f ":method" m)
+                      (when (not isNormalConnect)
+                        (f ":path" path)
+                        (f ":scheme" (.-Scheme (.-URL req))))
+
+                      (when (!= protocol "")
+                        (f ":protocol" protocol))
+
+                      (when (!= trailers "")
+                        (f "trailer" trailers))
+
+
+                      (let [^bool didUA (zero bool)]
+                        (range [k vv (.-Header req)]
+                          (cond (or (asciiEqualFold k "host") (asciiEqualFold k "content-length"))
+                            ;; Host is :authority, already sent.
+                            ;; Content-Length is automatic, set below.
+                            (continue)
+                            (or (asciiEqualFold k "connection")
+                              (asciiEqualFold k "proxy-connection")
+                              (asciiEqualFold k "transfer-encoding")
+                              (asciiEqualFold k "upgrade")
+                              (asciiEqualFold k "keep-alive"))
+                            ;; Per 8.1.2.2 Connection-Specific Header
+                            ;; Fields, don't send connection-specific
+                            ;; fields. We have already checked if any
+                            ;; are error-worthy so just ignore the rest.
+                            (continue)
+                            (asciiEqualFold k "user-agent") (do
+                              ;; Match Go's http1 behavior: at most one
+                              ;; User-Agent. If set to nil or empty string,
+                              ;; then omit it. Otherwise if not mentioned,
+                              ;; include the default (below).
+                              (set! didUA true)
+                              (when (< (len vv) 1)
+                                (continue))
+
+                              (set! vv (subslice vv _ 1))
+                              (when (== (aget vv 0) "")
+                                (continue)))
+
+                            (asciiEqualFold k "cookie") (do
+                              ;; Per 8.1.2.5 To allow for better compression efficiency, the
+                              ;; Cookie header field MAY be split into separate header fields,
+                              ;; each with one or more cookie-pairs.
+                              (range [_ v vv]
+                                (while true
+                                  (let [p (strings/IndexByte v \;)]
+                                    (when (< p 0)
+                                      (break))
+
+                                    (f "cookie" (subslice v _ p))
+                                    (inc! p)
+                                    ;; strip space after semicolon if any.
+                                    (while (and (<= (+ p 1) (len v)) (== (aget v p) \space))
+                                      (inc! p))
+
+                                    (set! v (subslice v p))))
+
+                                (when (> (len v) 0)
+                                  (f "cookie" v)))
+
+
+                              (continue))
+                            (== k ":protocol")
+                            ;; :protocol pseudo-header was already sent above.
+                            (continue))
+
+
+                          (range [_ v vv]
+                            (f k v)))
+
+
+                        (when (shouldSendReqContentLength (.-Method req) (.-ActualContentLength req))
+                          (f "content-length" (strconv/FormatInt (.-ActualContentLength req) 10)))
+
+                        (when (.-AddGzipHeader param)
+                          (f "accept-encoding" "gzip"))
+
+                        (when (not didUA)
+                          (f "user-agent" (.-DefaultUserAgent param))))))]
+
+
+
+                ;; Do a first pass over the headers counting bytes to ensure
+                ;; we don't exceed cc.peerMaxHeaderListSize. This is done as a
+                ;; separate pass before encoding the headers to prevent
+                ;; modifying the hpack state.
+                (when (> (.-PeerMaxHeaderListSize param) 0)
+                  (let [hlSize (conv uint64 0)]
+                    (enumerateHeaders ^{:go/end 236} (fn [^string name ^string value]
+                        (let [hf (lit hpack/HeaderField :Name name :Value value)]
+                          (set! hlSize + (conv uint64 (.Size hf))))))
+
+
+                    (when (> hlSize (.-PeerMaxHeaderListSize param))
+                      (return res ErrRequestHeaderListSize))))
+
+
+
+                (let [trace (httptrace/ContextClientTrace ctx)]
+
+                  ;; Header list size is ok. Write the headers.
+                  (enumerateHeaders ^{:go/end 259} (fn [^string name ^string value]
+                      (let [(values ^:assign name ascii) (LowerHeader name)]
+                        (when (not ascii)
+                          ;; Skip writing invalid headers. Per RFC 7540, Section 8.1.2, header
+                          ;; field names have to be ASCII characters (just as in HTTP/1.x).
+                          (return))
+
+
+                        (headerf name value)
+
+                        (when (and (!= trace nil) (!= (.-WroteHeaderField trace) nil))
+                          ((.-WroteHeaderField trace) name (lit (slice string) value))))))
+
+
+
+                  (set! (.-HasBody res) (!= (.-ActualContentLength req) 0))
+                  (set! (.-HasTrailers res) (!= trailers ""))
+                  (return res nil))))))))))
+
+
+
+
+^{:go/breaks [[5 288]] :go/end 289} (go/func IsRequestGzip "IsRequestGzip reports whether we should add an Accept-Encoding: gzip header\nfor a request.\n" ^bool [^string method ^{:tag (map string (slice string))} header ^bool disableCompression]
+  ;; TODO(bradfitz): this is a copy of the logic in net/http. Unify somewhere?
+  (when (and (not disableCompression)
+      (== (len (aget header "Accept-Encoding")) 0)
+      (== (len (aget header "Range")) 0)
+      (!= method "HEAD"))
+    ;; Request gzip only, not deflate. Deflate is ambiguous and
+    ;; not as universally supported anyway.
+    ;; See: https://zlib.net/zlib_faq.html#faq39
+    ;;
+    ;; Note that we don't request this for HEAD requests,
+    ;; due to a bug in nginx:
+    ;;   http://trac.nginx.org/nginx/ticket/358
+    ;;   https://golang.org/issue/5522
+    ;;
+    ;; We don't request gzip if the request is for a range, since
+    ;; auto-decoding a portion of a gzipped document will just fail
+    ;; anyway. See https://golang.org/issue/8923
+    (return true))
+
+  false)
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 308]] :go/end 309} (go/func checkConnHeaders "checkConnHeaders checks whether req has any invalid connection-level headers.\n\nhttps://www.rfc-editor.org/rfc/rfc9114.html#section-4.2-3\nhttps://www.rfc-editor.org/rfc/rfc9113.html#section-8.2.2-1\n\nCertain headers are special-cased as okay but not transmitted later.\nFor example, we allow \"Transfer-Encoding: chunked\", but drop the header when encoding.\n" ^error [^{:tag (map string (slice string))} h]
+  (when [vv (aget h "Upgrade")] (and (> (len vv) 0) ^:go/paren (and (!= (aget vv 0) "") (!= (aget vv 0) "chunked")))
+    (return (fmt/Errorf "invalid Upgrade request header: %q" vv)))
+
+  (when [vv (aget h "Transfer-Encoding")] (and (> (len vv) 0) ^:go/paren (or (> (len vv) 1) (and (!= (aget vv 0) "") (!= (aget vv 0) "chunked"))))
+    (return (fmt/Errorf "invalid Transfer-Encoding request header: %q" vv)))
+
+  (when [vv (aget h "Connection")] (and (> (len vv) 0) ^:go/paren (or (> (len vv) 1) (and (!= (aget vv 0) "") (not (asciiEqualFold (aget vv 0) "close")) (not (asciiEqualFold (aget vv 0) "keep-alive")))))
+    (return (fmt/Errorf "invalid Connection request header: %q" vv)))
+
+  nil)
+
+
+^{:go/end 326} (go/func commaSeparatedTrailers [^{:tag (map string (slice string))} trailer] :results [string error]
+  (let [keys (make (slice string) 0 (len trailer))]
+    (range [k trailer]
+      (set! k (CanonicalHeader k))
+      (switch k
+        (case ["Transfer-Encoding" "Trailer" "Content-Length"]
+          (return "" (fmt/Errorf "invalid Trailer key %q" k))))
+
+      (set! keys (append keys k)))
+
+    (when (> (len keys) 0)
+      (sort/Strings keys)
+      (return (strings/Join keys ",") nil))
+
+    (return "" nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 343} (go/func validPseudoPath "validPseudoPath reports whether v is a valid :path pseudo-header\nvalue. It must be either:\n\n  - a non-empty string starting with '/'\n  - the string '*', for OPTIONS requests.\n\nFor now this is only used a quick check for deciding when to clean\nup Opaque URLs before sending requests from the Transport.\nSee golang.org/issue/16847\n\nWe used to enforce that the path also didn't start with \"//\", but\nGoogle's GFE accepts such paths and Chrome sends them, so ignore\nthat part of the spec. See golang.org/issue/19103.\n" ^bool [^string v]
+  (or ^:go/paren (and (> (len v) 0) (== (aget v 0) \/)) (== v "*")))
+
+
+^{:go/breaks [[4 358]] :go/end 359} (go/func validateHeaders ^string [^{:tag (map string (slice string))} hdrs]
+  (range [k vv hdrs]
+    (when (and (not (httpguts/ValidHeaderFieldName k)) (!= k ":protocol"))
+      (return (fmt/Sprintf "name %q" k)))
+
+    (range [_ v vv]
+      (when (not (httpguts/ValidHeaderFieldValue v))
+        ;; Don't include the value in the error,
+        ;; because it may be sensitive.
+        (return (fmt/Sprintf "value for header %q" k)))))
+
+
+
+  "")
+
+
+
+
+
+
+
+^{:go/end 381} (go/func shouldSendReqContentLength "shouldSendReqContentLength reports whether we should send\na \"content-length\" request header. This logic is basically a copy of the net/http\ntransferWriter.shouldSendContentLength.\nThe contentLength is the corrected contentLength (so 0 means actually 0, not unknown).\n-1 means unknown.\n" ^bool [^string method ^int64 contentLength]
+  (when (> contentLength 0)
+    (return true))
+
+  (when (< contentLength 0)
+    (return false))
+
+  ;; For zero bodies, whether we send a content-length depends on the method.
+  ;; It also kinda doesn't matter for http2 either way, with END_STREAM.
+  (switch method
+    (case ["POST" "PUT" "PATCH"]
+      (return true))
+    (default
+      (return false))))
+
+
+
+
+(go/type ServerRequestParam "ServerRequestParam is parameters to NewServerRequest.\n" (struct
+    ^{:line 385 :tag string} Method
+    ^{:line 386 :tag string} Scheme ^string Authority ^string Path
+    ^{:line 387 :tag string} Protocol
+    ^{:line 388 :tag (map string (slice string))} Header))
+
+
+
+(go/type ServerRequestResult "ServerRequestResult is the result of NewServerRequest.\n" (struct
+
+    ^{:line 394 :tag (* url/URL) :doc "Various http.Request fields.\n"} URL
+    ^{:line 395 :tag string} RequestURI
+    ^{:line 396 :tag (map string (slice string))} Trailer
+
+    ^{:line 398 :tag bool} NeedsContinue ; client provided an "Expect: 100-continue" header
+
+
+
+
+
+    ^{:line 404 :tag string :doc "If the request should be rejected, this is a short string suitable for passing\nto the http2 package's CountError function.\nIt might be a bit odd to return errors this way rather than returning an error,\nbut this ensures we don't forget to include a CountError reason.\n"} InvalidReason))
+
+
+^{:go/end 475} (go/func NewServerRequest ^ServerRequestResult [^ServerRequestParam rp]
+  (let [needsContinue (httpguts/HeaderValuesContainsToken (aget (.-Header rp) "Expect") "100-continue")]
+    (when needsContinue
+      (delete (.-Header rp) "Expect"))
+
+    ;; Merge Cookie headers into one "; "-delimited value.
+    (when [cookies (aget (.-Header rp) "Cookie")] (> (len cookies) 1)
+      (aset (.-Header rp) "Cookie" (lit (slice string) (strings/Join cookies "; "))))
+
+
+    ;; Setup Trailers
+    (let [^{:tag (map string (slice string))} trailer (zero (map string (slice string)))]
+      (range [_ v (aget (.-Header rp) "Trailer")]
+        (range [_ key (strings/Split v ",")]
+          (set! key (textproto/CanonicalMIMEHeaderKey (textproto/TrimString key)))
+          (switch key
+            (case ["Transfer-Encoding" "Trailer" "Content-Length"])
+            ;; Bogus. (copy of http1 rules)
+            ;; Ignore.
+            (default
+              (when (== trailer nil)
+                (set! trailer (make (map string (slice string)))))
+
+              (aset trailer key nil)))))
+
+
+
+      (delete (.-Header rp) "Trailer")
+
+      ;; "':authority' MUST NOT include the deprecated userinfo subcomponent
+      ;; for "http" or "https" schemed URIs."
+      ;; https://www.rfc-editor.org/rfc/rfc9113.html#section-8.3.1-2.3.8
+      (when (and (!= (strings/IndexByte (.-Authority rp) \@) -1) ^:go/paren (or (== (.-Scheme rp) "http") (== (.-Scheme rp) "https")))
+        (return ^{:go/breaks [2]} (lit ServerRequestResult
+            :InvalidReason "userinfo_in_authority")))
+
+
+
+      (let [^{:tag (* url/URL)} url_ (zero (* url/URL))
+          ^{:line 446 :tag string} requestURI (zero string)]
+        (if (and (== (.-Method rp) "CONNECT") (== (.-Protocol rp) "")) (do
+            (set! url_ (addr (lit url/URL :Host (.-Authority rp))))
+            (set! requestURI (.-Authority rp))) ; mimic HTTP/1 server behavior
+          (do
+            ;; "[The :path] pseudo-header field MUST NOT be empty [...]"
+            ;; https://www.rfc-editor.org/rfc/rfc9113.html#section-8.3.1-2.4.2
+            (when (or (== (.-Path rp) "") ^:go/paren (and (!= (aget (.-Path rp) 0) \/) (!= (.-Path rp) "*")))
+              (return ^{:go/breaks [2]} (lit ServerRequestResult
+                  :InvalidReason "bad_path")))
+
+
+
+            (let [^error err (zero error)]
+              (set! (values url_ err) (url/ParseRequestURI (.-Path rp)))
+              (when (!= err nil)
+                (return ^{:go/breaks [2]} (lit ServerRequestResult
+                    :InvalidReason "bad_path")))
+
+
+              (set! requestURI (.-Path rp)))))
+
+
+        ^{:go/breaks [2 4 6 8]} (lit ServerRequestResult
+          :URL url_
+          :NeedsContinue needsContinue
+          :RequestURI requestURI
+          :Trailer trailer)))))

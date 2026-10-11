@@ -1,0 +1,263 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.image.jpeg) (go/file "huffman.go" :imports [
+
+
+    ^{:line 8} [io "io"]])
+
+
+
+(go/const ^{:val 16 :doc "maxCodeLength is the maximum (inclusive) number of bits in a Huffman code.\n"} maxCodeLength 16)
+
+
+(go/const ^{:val 256 :doc "maxNCodes is the maximum (inclusive) number of codes in a Huffman tree.\n"} maxNCodes 256)
+
+
+(go/const ^{:val 8 :doc "lutSize is the log-2 size of the Huffman decoder's look-up table.\n"} lutSize 8)
+
+
+(go/type huffman "huffman is a Huffman decoder, specified in section C.\n" (struct
+
+    ^{:line 23 :tag int32 :doc "length is the number of codes in the tree.\n"} nCodes
+
+
+
+
+    ^{:line 28 :tag (array (<< 1 lutSize) uint16) :doc "lut is the look-up table for the next lutSize bits in the bit-stream.\nThe high 8 bits of the uint16 are the encoded value. The low 8 bits\nare 1 plus the code length, or 0 if the value is too large to fit in\nlutSize bits.\n"} lut
+
+    ^{:line 30 :tag (array maxNCodes uint8) :doc "vals are the decoded values, sorted by their encoding.\n"} vals
+
+
+    ^{:line 33 :tag (array maxCodeLength int32) :doc "minCodes[i] is the minimum code of length i, or -1 if there are no\ncodes of that length.\n"} minCodes
+
+
+    ^{:line 36 :tag (array maxCodeLength int32) :doc "maxCodes[i] is the maximum code of length i, or -1 if there are no\ncodes of that length.\n"} maxCodes
+
+    ^{:line 38 :tag (array maxCodeLength int32) :doc "valsIndices[i] is the index into vals of minCodes[i].\n"} valsIndices))
+
+
+
+
+(go/var ^{:doc "errShortHuffmanData means that an unexpected EOF occurred while decoding\nHuffman data.\n"} errShortHuffmanData (conv FormatError "short Huffman data"))
+
+
+
+
+^{:go/breaks [[5 68]] :go/end 69} (go/method ensureNBits "ensureNBits reads bytes from the byte buffer to ensure that d.bits.n is at\nleast n. For best performance (avoiding function calls inside hot loops),\nthe caller is the one responsible for first checking that d.bits.n < n.\n" ^error [^{:tag (* decoder)} d ^int32 n]
+  (while true
+    (let [(values c err) (.readByteStuffedByte d)]
+      (when (!= err nil)
+        (when (== err io/ErrUnexpectedEOF)
+          (return errShortHuffmanData))
+
+        (return err))
+
+      (set! (.-a (.-bits d)) (bit-or (<< (.-a (.-bits d)) 8) (conv uint32 c)))
+      (set! (.-n (.-bits d)) + 8)
+      (if (== (.-m (.-bits d)) 0)
+        (set! (.-m (.-bits d)) (<< 1 7))
+
+        (set! (.-m (.-bits d)) << 8))
+
+      (when (>= (.-n (.-bits d)) n)
+        (break))))
+
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 106} (go/method receiveExtend "receiveExtend is the composition of RECEIVE and EXTEND, specified in section\nF.2.2.1.\n\nIt returns the signed integer that's encoded in t bits, where t < 16. The\npossible return values are:\n\n  - t ==  0:   0\n  - t ==  1:   -1, +1\n  - t ==  2:   -3, -2, +2, +3\n  - t ==  3:   -7, -6, -5, -4, +4, +5, +6, +7\n  - ...\n  - t == 15:   -32767, -32766, ..., -16384, +16384, ..., +32766, +32767\n" [^{:tag (* decoder)} d ^uint8 t] :results [int32 error]
+  (when (< (.-n (.-bits d)) (conv int32 t))
+    (when [err (.ensureNBits d (conv int32 t))] (!= err nil)
+      (return 0 err)))
+
+
+  (set! (.-n (.-bits d)) - (conv int32 t))
+  (set! (.-m (.-bits d)) >> t)
+  (let [s (<< (conv int32 1) t)
+      ^{:line 92} x (bit-and (conv int32 (>> (.-a (.-bits d)) (conv uint8 (.-n (.-bits d))))) (- s 1))
+
+      ;; This adjustment, assuming two's complement, is a branchless equivalent of:
+      ;;
+      ;; if x < s>>1 {
+      ;;   x += ((-1) << t) + 1
+      ;; }
+      ;;
+      ;; sign is either -1 or 0, depending on whether x is in the low or high
+      ;; half of the range 0 .. 1<<t.
+      ^{:line 102} sign (- (>> x (- t 1)) 1)]
+    (set! x + (bit-and sign (+ ^int32 (<< -1 t) 1)))
+
+    (return x nil)))
+
+
+
+
+^{:go/breaks [[5 190]] :go/end 191} (go/method processDHT "processDHT processes a Define Huffman Table marker, and initializes a huffman\nstruct from its contents. Specified in section B.2.4.2.\n" ^error [^{:tag (* decoder)} d ^int n]
+  (while (> n 0)
+    (when (< n 17)
+      (return (conv FormatError "DHT has wrong length")))
+
+    (when [err (.readFull d (subslice (.-tmp d) _ 17))] (!= err nil)
+      (return err))
+
+    (let [tc (>> (aget (.-tmp d) 0) 4)]
+      (when (> tc maxTc)
+        (return (conv FormatError "bad Tc value")))
+
+      (let [th (bit-and (aget (.-tmp d) 0) 0x0f)]
+        ;; The baseline th <= 1 restriction is specified in table B.5.
+        (when (or (> th maxTh) ^:go/paren (and (.-baseline d) (> th 1)))
+          (return (conv FormatError "bad Th value")))
+
+        (let [h (addr (aget (aget (.-huff d) tc) th))]
+
+          ;; Read nCodes and h.vals (and derive h.nCodes).
+          ;; nCodes[i] is the number of codes with code length i.
+          ;; h.nCodes is the total number of codes.
+          (set! (.-nCodes h) 0)
+          (let [^{:tag (array maxCodeLength int32)} nCodes (zero (array maxCodeLength int32))]
+            (range [i nCodes]
+              (aset nCodes i (conv int32 (aget (.-tmp d) (+ i 1))))
+              (set! (.-nCodes h) + (aget nCodes i)))
+
+            (when (== (.-nCodes h) 0)
+              (return (conv FormatError "Huffman table has zero length")))
+
+            (when (> (.-nCodes h) maxNCodes)
+              (return (conv FormatError "Huffman table has excessive length")))
+
+            (set! n - (+ (conv int (.-nCodes h)) 17))
+            (when (< n 0)
+              (return (conv FormatError "DHT has wrong length")))
+
+            (when [err (.readFull d (subslice (.-vals h) _ (.-nCodes h)))] (!= err nil)
+              (return err))
+
+
+            ;; Derive the look-up table.
+            (clear (subslice (.-lut h)))
+            (let [(values ^uint32 x ^uint32 code) (zero uint32)]
+              (for [i (conv uint32 0)] (< i lutSize) (inc! i)
+                (set! code << 1)
+                (for [j (conv int32 0)] (< j (aget nCodes i)) (inc! j)
+                  ;; The codeLength is 1+i, so shift code by 8-(1+i) to
+                  ;; calculate the high bits for every 8-bit sequence
+                  ;; whose codeLength's high bits matches code.
+                  ;; The high 8 bits of lutValue are the encoded value.
+                  ;; The low 8 bits are 1 plus the codeLength.
+                  (let [base (conv uint8 (<< code (- 7 i)))
+                      ^{:line 164} lutValue (bit-or (<< (conv uint16 (aget (.-vals h) x)) 8) (conv uint16 (+ 2 i)))]
+                    (for [k (conv uint8 0)] (< k ^uint8 (<< 1 (- 7 i))) (inc! k)
+                      (aset (.-lut h) (bit-or base k) lutValue))
+
+                    (inc! code)
+                    (inc! x))))
+
+
+
+              ;; Derive minCodes, maxCodes, and valsIndices.
+              (let [(values ^int32 c ^int32 index) (zero int32)]
+                (range [i n nCodes]
+                  (if (== n 0) (do
+                      (aset (.-minCodes h) i -1)
+                      (aset (.-maxCodes h) i -1)
+                      (aset (.-valsIndices h) i -1))
+                    (do
+                      (aset (.-minCodes h) i c)
+                      (aset (.-maxCodes h) i (- (+ c n) 1))
+                      (aset (.-valsIndices h) i index)
+                      (set! c + n)
+                      (set! index + n)))
+
+                  (set! c << 1)))))))))
+
+
+  nil)
+
+
+
+
+^{:go/end 239} (go/method decodeHuffman "decodeHuffman returns the next Huffman-coded value from the bit-stream,\ndecoded according to h.\n" [^{:tag (* decoder)} d ^{:tag (* huffman)} h] :results [uint8 error]
+  (when (== (.-nCodes h) 0)
+    (return 0 (conv FormatError "uninitialized Huffman table")))
+
+
+  (when (< (.-n (.-bits d)) 8)
+    (when [err (.ensureNBits d 8)] (!= err nil)
+      (when (and (!= err errMissingFF00) (!= err errShortHuffmanData))
+        (return 0 err))
+
+      ;; There are no more bytes of data in this segment, but we may still
+      ;; be able to read the next symbol out of the previously read bits.
+      ;; First, undo the readByte that the ensureNBits call made.
+      (when (!= (.-nUnreadable (.-bytes d)) 0)
+        (.unreadByteStuffedByte d))
+
+      (goto :slowPath)))
+
+
+  (when [v (aget (.-lut h) (bit-and (>> (.-a (.-bits d)) (conv uint32 (- (.-n (.-bits d)) lutSize))) 0xff))] (!= v 0)
+    (let [n (- (bit-and v 0xff) 1)]
+      (set! (.-n (.-bits d)) - (conv int32 n))
+      (set! (.-m (.-bits d)) >> n)
+      (return (conv uint8 (>> v 8)) nil)))
+
+
+  (label :slowPath
+    (for [(values i code) (values 0 (conv int32 0))] (< i maxCodeLength) (inc! i)
+      (when (== (.-n (.-bits d)) 0)
+        (when [err (.ensureNBits d 1)] (!= err nil)
+          (return 0 err)))
+
+
+      (when (!= (bit-and (.-a (.-bits d)) (.-m (.-bits d))) 0)
+        (set! code bit-or 1))
+
+      (dec! (.-n (.-bits d)))
+      (set! (.-m (.-bits d)) >> 1)
+      (when (<= code (aget (.-maxCodes h) i))
+        (return (aget (.-vals h) (- (+ (aget (.-valsIndices h) i) code) (aget (.-minCodes h) i))) nil))
+
+      (set! code << 1)))
+
+  (return 0 (conv FormatError "bad Huffman code")))
+
+
+^{:go/end 251} (go/method decodeBit [^{:tag (* decoder)} d] :results [bool error]
+  (when (== (.-n (.-bits d)) 0)
+    (when [err (.ensureNBits d 1)] (!= err nil)
+      (return false err)))
+
+
+  (let [ret (!= (bit-and (.-a (.-bits d)) (.-m (.-bits d))) 0)]
+    (dec! (.-n (.-bits d)))
+    (set! (.-m (.-bits d)) >> 1)
+    (return ret nil)))
+
+
+^{:go/end 264} (go/method decodeBits [^{:tag (* decoder)} d ^int32 n] :results [uint32 error]
+  (when (< (.-n (.-bits d)) n)
+    (when [err (.ensureNBits d n)] (!= err nil)
+      (return 0 err)))
+
+
+  (let [ret (>> (.-a (.-bits d)) (conv uint32 (- (.-n (.-bits d)) n)))]
+    (set! ret bit-and (- ^uint32 (<< 1 (conv uint32 n)) 1))
+    (set! (.-n (.-bits d)) - n)
+    (set! (.-m (.-bits d)) >> (conv uint32 n))
+    (return ret nil)))

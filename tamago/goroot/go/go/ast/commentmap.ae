@@ -1,0 +1,326 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.ast) (go/file "commentmap.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [cmp "cmp"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [token "go/token"]
+    ^{:line 12} [slices "slices"]
+    ^{:line 13} [strings "strings"]])
+
+
+
+^{:go/end 21} (go/func sortComments "sortComments sorts the list of comment groups in source order.\n" [^{:tag (slice (* CommentGroup))} list]
+  (^{:inst [(slice (* CommentGroup)) (* CommentGroup)]} slices/SortFunc list ^{:go/end 20} (fn ^int [^{:tag (* CommentGroup)} a ^{:tag (* CommentGroup)} b]
+      (^{:inst [token/Pos]} cmp/Compare (.Pos a) (.Pos b)))))
+
+
+
+
+
+
+(go/type CommentMap "A CommentMap maps an AST node to a list of comment groups\nassociated with it. See [NewCommentMap] for a description of\nthe association.\n" (map Node (slice (* CommentGroup))))
+
+^{:go/end 36} (go/method addComment [^CommentMap cmap ^Node n ^{:tag (* CommentGroup)} c]
+  (let [list (aget cmap n)]
+    (if (== (len list) 0)
+      (set! list (lit (slice (* CommentGroup)) c))
+
+      (set! list (append list c)))
+
+    (aset cmap n list)))
+
+
+
+^{:go/end 64} (go/func nodeList "nodeList returns the list of nodes of the AST n in source order.\n" ^{:tag (slice Node)} [^Node n]
+  (let [^{:tag (slice Node)} list (zero (slice Node))]
+    (Inspect n ^{:go/breaks [4] :go/end 49} (fn ^bool [^Node n]
+        ;; don't collect comments
+        (type-switch n
+          (case [nil (* CommentGroup) (* Comment)]
+            (return false)))
+
+        (set! list (append list n))
+        true))
+
+
+    ;; Note: The current implementation assumes that Inspect traverses the
+    ;;       AST in depth-first and thus _source_ order. If AST traversal
+    ;;       does not follow source order, the sorting call below will be
+    ;;       required.
+    ;; slices.Sort(list, func(a, b Node) int {
+    ;;       r := cmp.Compare(a.Pos(), b.Pos())
+    ;;       if r != 0 {
+    ;;               return r
+    ;;       }
+    ;;       return cmp.Compare(a.End(), b.End())
+    ;; })
+
+    ^{:line 63} list))
+
+
+
+(go/type commentListReader "A commentListReader helps iterating through a list of comment groups.\n" (struct
+    ^{:line 68 :tag (* token/FileSet)} fset
+    ^{:line 69 :tag (slice (* CommentGroup))} list
+    ^{:line 70 :tag int} index
+    ^{:line 71 :tag (* CommentGroup)} comment ; comment group at current index
+    ^{:line 72 :tag token/Position} pos ^token/Position end)) ; source interval of comment group at current index
+
+
+^{:go/end 77} (go/method eol ^bool [^{:tag (* commentListReader)} r]
+  (>= (.-index r) (len (.-list r))))
+
+
+^{:go/end 86} (go/method next [^{:tag (* commentListReader)} r]
+  (when (not (.eol r))
+    (set! (.-comment r) (aget (.-list r) (.-index r)))
+    (set! (.-pos r) (.Position (.-fset r) (.Pos (.-comment r))))
+    (set! (.-end r) (.Position (.-fset r) (.End (.-comment r))))
+    (inc! (.-index r))))
+
+
+
+
+
+(go/type nodeStack "A nodeStack keeps track of nested nodes.\nA node lower on the stack lexically contains the nodes higher on the stack.\n" (slice Node))
+
+
+
+^{:go/end 97} (go/method push "push pops all nodes that appear lexically before n\nand then pushes n on the stack.\n" [^{:tag (* nodeStack)} s ^Node n]
+  (.pop s (.Pos n))
+  (set! @s (append @s n)))
+
+
+
+
+
+^{:go/end 110} (go/method pop "pop pops all nodes that appear lexically before pos\n(i.e., whose lexical extent has ended before or at pos).\nIt returns the last node popped.\n" [^{:tag (* nodeStack)} s ^token/Pos pos] :results [^Node top]
+  (let [i (len @s)]
+    (while (and (> i 0) (<= (.End (aget @s (- i 1))) pos))
+      (set! top (aget @s (- i 1)))
+      (dec! i))
+
+    (set! @s (subslice @s 0 i))
+    ^{:line 109} top))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 224} (go/func NewCommentMap "NewCommentMap creates a new comment map by associating comment groups\nof the comments list with the nodes of the AST specified by node.\n\nA comment group g is associated with a node n if:\n\n  - g starts on the same line as n ends\n  - g starts on the line immediately following n, and there is\n    at least one empty line after g and before the next node\n  - g starts before n and is not associated to the node before n\n    via the previous rules\n\nNewCommentMap tries to associate a comment group to the \"largest\"\nnode possible: For instance, if the comment is a line comment\ntrailing an assignment, the comment is associated with the entire\nassignment rather than just the last operand in the assignment.\n" ^CommentMap [^{:tag (* token/FileSet)} fset ^Node node ^{:tag (slice (* CommentGroup))} comments]
+  (when (== (len comments) 0)
+    (return nil)) ; no comments to map
+
+
+  (let [cmap (make CommentMap)
+
+      ;; set up comment reader r
+      ^{:line 135} tmp (make (slice (* CommentGroup)) (len comments))]
+    (copy tmp comments) ; don't change incoming comments
+    (sortComments tmp)
+    (let [r (lit commentListReader :fset fset :list tmp)] ; !r.eol() because len(comments) > 0
+      (.next r)
+
+      ;; create node list in lexical order
+      (let [nodes (nodeList node)]
+        (set! nodes (append nodes nil)) ; append sentinel
+
+        ;; set up iteration variables
+        (let [
+            ^{:line 147 :tag Node} p (zero Node) ; previous node
+            ^{:line 148 :tag token/Position} pend (zero token/Position) ; end of p
+            ^{:line 149 :tag Node} pg (zero Node) ; previous node group (enclosing nodes of "importance")
+            ^{:line 150 :tag token/Position} pgend (zero token/Position) ; end of pg
+            ^{:line 151 :tag nodeStack} stack (zero nodeStack)] ; stack of node groups
+
+
+          (range [_ q nodes]
+            (let [^token/Position qpos (zero token/Position)]
+              (if (!= q nil)
+                (set! qpos (.Position fset (.Pos q))) ; current node position
+
+                ;; set fake sentinel position to infinity so that
+                ;; all comments get processed before the sentinel
+                (let [^:const ^{:val 1073741824} infinity (<< 1 30)]
+                  (set! (.-Offset qpos) infinity)
+                  (set! (.-Line qpos) infinity)))
+
+
+              ;; process comments before current node
+              (while (<= (.-Offset (.-end r)) (.-Offset qpos))
+                ;; determine recent node group
+                (when [top (.pop stack (.Pos (.-comment r)))] (!= top nil)
+                  (set! pg top)
+                  (set! pgend (.Position fset (.End pg))))
+
+                ;; Try to associate a comment first with a node group
+                ;; (i.e., a node of "importance" such as a declaration);
+                ;; if that fails, try to associate it with the most recent
+                ;; node.
+                ;; TODO(gri) try to simplify the logic below
+                (let [^Node assoc (zero Node)]
+                  (switch
+                    (case [(and (!= pg nil)
+                          ^:go/paren (or (== (.-Line pgend) (.-Line (.-pos r)))
+                            (and (== (+ (.-Line pgend) 1) (.-Line (.-pos r))) (< (+ (.-Line (.-end r)) 1) (.-Line qpos)))))]
+                      ;; 1) comment starts on same line as previous node group ends, or
+                      ;; 2) comment starts on the line immediately after the
+                      ;;    previous node group and there is an empty line before
+                      ;;    the current node
+                      ;; => associate comment with previous node group
+                      (set! assoc pg))
+                    (case [(and (!= p nil)
+                          ^:go/paren (or (== (.-Line pend) (.-Line (.-pos r)))
+                            (and (== (+ (.-Line pend) 1) (.-Line (.-pos r))) (< (+ (.-Line (.-end r)) 1) (.-Line qpos)))
+                            (== q nil)))]
+                      ;; same rules apply as above for p rather than pg,
+                      ;; but also associate with p if we are at the end (q == nil)
+                      (set! assoc p))
+                    (default
+                      ;; otherwise, associate comment with current node
+                      (when (== q nil)
+                        ;; we can only reach here if there was no p
+                        ;; which would imply that there were no nodes
+                        (panic "internal error: no comments should be associated with sentinel"))
+
+                      (set! assoc q)))
+
+                  (.addComment cmap assoc (.-comment r))
+                  (when (.eol r)
+                    (return cmap))
+
+                  (.next r)))
+
+
+              ;; update previous node
+              (set! p q)
+              (set! pend (.Position fset (.End p)))
+
+              ;; update previous node group if we see an "important" node
+              (type-switch q
+                (case [(* File) (* Field) Decl Spec Stmt]
+                  (.push stack q)))))
+
+
+
+          ^{:line 223} cmap)))))
+
+
+
+
+
+^{:go/end 235} (go/method Update "Update replaces an old node in the comment map with the new node\nand returns the new node. Comments that were associated with the\nold node are associated with the new node.\n" ^Node [^CommentMap cmap ^Node old ^Node new]
+  (when [list (aget cmap old)] (> (len list) 0)
+    (delete cmap old)
+    (aset cmap new (append (aget cmap new) (spread list))))
+
+  ^{:line 234} new)
+
+
+
+
+
+^{:go/end 249} (go/method Filter "Filter returns a new comment map consisting of only those\nentries of cmap for which a corresponding node exists in\nthe AST specified by node.\n" ^CommentMap [^CommentMap cmap ^Node node]
+  (let [umap (make CommentMap)]
+    (Inspect node ^{:go/breaks [[3 246]] :go/end 247} (fn ^bool [^Node n]
+        (when [g (aget cmap n)] (> (len g) 0)
+          (aset umap n g))
+
+        true))
+
+    ^{:line 248} umap))
+
+
+
+
+^{:go/end 260} (go/method Comments "Comments returns the list of comment groups in the comment map.\nThe result is sorted in source order.\n" ^{:tag (slice (* CommentGroup))} [^CommentMap cmap]
+  (let [list (make (slice (* CommentGroup)) 0 (len cmap))]
+    (range [_ e cmap]
+      (set! list (append list (spread e))))
+
+    (sortComments list)
+    ^{:line 259} list))
+
+
+^{:go/end 296} (go/func summary ^string [^{:tag (slice (* CommentGroup))} list]
+  (let [^:const ^{:val 40} maxLen 40
+      ^{:line 264 :tag bytes/Buffer} buf (zero bytes/Buffer)]
+
+    ;; collect comments text
+    (label :loop
+      (range [_ group list]
+        ;; Note: CommentGroup.Text() does too much work for what we
+        ;;       need and would only replace this innermost loop.
+        ;;       Just do it explicitly.
+        (range [_ comment (.-List group)]
+          (when (>= (.Len buf) maxLen)
+            (break :loop))
+
+          (.WriteString buf (.-Text comment)))))
+
+
+
+    ;; truncate if too long
+    (when (> (.Len buf) maxLen)
+      (.Truncate buf (- maxLen 3))
+      (.WriteString buf "..."))
+
+
+    ;; replace any invisibles with blanks
+    (let [bytes (.Bytes buf)]
+      (range [i b bytes]
+        (switch b
+          (case [\tab \newline \return]
+            (aset bytes i \space))))
+
+
+
+      (conv string bytes))))
+
+
+^{:go/end 327} (go/method String ^string [^CommentMap cmap]
+  ;; print map entries in sorted order
+  (let [^{:tag (slice Node)} nodes (zero (slice Node))]
+    (range [node cmap]
+      (set! nodes (append nodes node)))
+
+    (^{:inst [(slice Node) Node]} slices/SortFunc nodes ^{:go/end 310} (fn ^int [^Node a ^Node b]
+        (let [r (^{:inst [token/Pos]} cmp/Compare (.Pos a) (.Pos b))]
+          (when (!= r 0)
+            (return r))
+
+          (^{:inst [token/Pos]} cmp/Compare (.End a) (.End b)))))
+
+
+    (let [^strings/Builder buf (zero strings/Builder)]
+      (fmt/Fprintln (addr buf) "CommentMap {")
+      (range [_ node nodes]
+        (let [comment (aget cmap node)
+            ;; print name of identifiers; print node type for other nodes
+            ^{:line 317 :tag string} s (zero string)]
+          (if [(values ident ok) (assert (* Ident) node)] ok
+            (set! s (.-Name ident))
+
+            (set! s (fmt/Sprintf "%T" node)))
+
+          (fmt/Fprintf (addr buf) "\t%p  %20s:  %s\n" node s (summary comment))))
+
+      (fmt/Fprintln (addr buf) "}")
+      (.String buf))))

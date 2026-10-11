@@ -1,0 +1,1947 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.tls) (go/file "common.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [list "container/list"]
+    ^{:line 10} [context "context"]
+    ^{:line 11} [crypto "crypto"]
+    ^{:line 12} [ecdsa "crypto/ecdsa"]
+    ^{:line 13} [ed25519 "crypto/ed25519"]
+    ^{:line 14} [elliptic "crypto/elliptic"]
+    ^{:line 15} [fips140 "crypto/fips140"]
+    ^{:line 16} [mldsa "crypto/mldsa"]
+    ^{:line 17} [rand "crypto/rand"]
+    ^{:line 18} [rsa "crypto/rsa"]
+    ^{:line 19} [sha512 "crypto/sha512"]
+    ^{:line 20} [fips140tls "crypto/tls/internal/fips140tls"]
+    ^{:line 21} [x509 "crypto/x509"]
+    ^{:line 22} [errors "errors"]
+    ^{:line 23} [fmt "fmt"]
+    ^{:line 24} [godebug "internal/godebug"]
+    ^{:line 25} [io "io"]
+    ^{:line 26} [net "net"]
+    ^{:line 27} [runtime "runtime"]
+    ^{:line 28} [slices "slices"]
+    ^{:line 29} [strings "strings"]
+    ^{:line 30} [sync "sync"]
+    ^{:line 31} [time "time"]
+    ^{:line 32} [_ "unsafe"]]) ; for linkname
+
+
+(go/const
+  ^{:line 36} [^{:val 769} VersionTLS10 0x0301]
+  ^{:line 37} [^{:val 770} VersionTLS11 0x0302]
+  ^{:line 38} [^{:val 771} VersionTLS12 0x0303]
+  ^{:line 39} [^{:val 772} VersionTLS13 0x0304]
+
+
+
+  ^{:line 43} [^{:val 768 :doc "Deprecated: SSLv3 is cryptographically broken, and is no longer\nsupported by this package. See golang.org/issue/32716.\n"} VersionSSL30 0x0300])
+
+
+
+
+
+^{:go/end 64} (go/func VersionName "VersionName returns the name for the provided TLS version number\n(e.g. \"TLS 1.3\"), or a fallback representation of the value if the\nversion is not implemented by this package.\n" ^string [^uint16 version]
+  (switch version
+    (case [VersionSSL30]
+      (return "SSLv3"))
+    (case [VersionTLS10]
+      (return "TLS 1.0"))
+    (case [VersionTLS11]
+      (return "TLS 1.1"))
+    (case [VersionTLS12]
+      (return "TLS 1.2"))
+    (case [VersionTLS13]
+      (return "TLS 1.3"))
+    (default
+      (return (fmt/Sprintf "0x%04X" version)))))
+
+
+
+(go/const
+  ^{:line 67} [^{:val 16384} maxPlaintext 16384] ; maximum plaintext payload length
+  ^{:line 68} [^{:val 18432} maxCiphertext (+ 16384 2048)] ; maximum ciphertext payload length
+  ^{:line 69} [^{:val 16640} maxCiphertextTLS13 (+ 16384 256)] ; maximum ciphertext length in TLS 1.3
+  ^{:line 70} [^{:val 5} recordHeaderLen 5] ; record header length
+  ^{:line 71} [^{:val 65536} maxHandshake 65536] ; maximum handshake we support (protocol max is 16 MB)
+  ^{:line 72} [^{:val 262144} maxHandshakeCertificateMsg 262144] ; maximum certificate message size (256 KiB)
+  ^{:line 73} [^{:val 16} maxUselessRecords 16]) ; maximum number of consecutive non-advancing records
+
+
+
+(go/type recordType "TLS record types.\n" uint8)
+
+(go/const
+  ^{:line 80} [^{:tag recordType :val 20} recordTypeChangeCipherSpec 20]
+  ^{:line 81} [^{:tag recordType :val 21} recordTypeAlert 21]
+  ^{:line 82} [^{:tag recordType :val 22} recordTypeHandshake 22]
+  ^{:line 83} [^{:tag recordType :val 23} recordTypeApplicationData 23])
+
+
+
+(go/const "TLS handshake message types.\n"
+  ^{:line 88} [^{:tag uint8 :val 0} typeHelloRequest 0]
+  ^{:line 89} [^{:tag uint8 :val 1} typeClientHello 1]
+  ^{:line 90} [^{:tag uint8 :val 2} typeServerHello 2]
+  ^{:line 91} [^{:tag uint8 :val 4} typeNewSessionTicket 4]
+  ^{:line 92} [^{:tag uint8 :val 5} typeEndOfEarlyData 5]
+  ^{:line 93} [^{:tag uint8 :val 8} typeEncryptedExtensions 8]
+  ^{:line 94} [^{:tag uint8 :val 11} typeCertificate 11]
+  ^{:line 95} [^{:tag uint8 :val 12} typeServerKeyExchange 12]
+  ^{:line 96} [^{:tag uint8 :val 13} typeCertificateRequest 13]
+  ^{:line 97} [^{:tag uint8 :val 14} typeServerHelloDone 14]
+  ^{:line 98} [^{:tag uint8 :val 15} typeCertificateVerify 15]
+  ^{:line 99} [^{:tag uint8 :val 16} typeClientKeyExchange 16]
+  ^{:line 100} [^{:tag uint8 :val 20} typeFinished 20]
+  ^{:line 101} [^{:tag uint8 :val 22} typeCertificateStatus 22]
+  ^{:line 102} [^{:tag uint8 :val 24} typeKeyUpdate 24]
+  ^{:line 103} [^{:tag uint8 :val 254} typeMessageHash 254]) ; synthetic message
+
+
+
+(go/const "TLS compression types.\n"
+  ^{:line 108} [^{:tag uint8 :val 0} compressionNone 0])
+
+
+
+(go/const "TLS extension numbers\n"
+  ^{:line 113} [^{:tag uint16 :val 0} extensionServerName 0]
+  ^{:line 114} [^{:tag uint16 :val 5} extensionStatusRequest 5]
+  ^{:line 115} [^{:tag uint16 :val 10} extensionSupportedCurves 10] ; supported_groups in TLS 1.3, see RFC 8446, Section 4.2.7
+  ^{:line 116} [^{:tag uint16 :val 11} extensionSupportedPoints 11]
+  ^{:line 117} [^{:tag uint16 :val 13} extensionSignatureAlgorithms 13]
+  ^{:line 118} [^{:tag uint16 :val 16} extensionALPN 16]
+  ^{:line 119} [^{:tag uint16 :val 18} extensionSCT 18]
+  ^{:line 120} [^{:tag uint16 :val 23} extensionExtendedMasterSecret 23]
+  ^{:line 121} [^{:tag uint16 :val 35} extensionSessionTicket 35]
+  ^{:line 122} [^{:tag uint16 :val 41} extensionPreSharedKey 41]
+  ^{:line 123} [^{:tag uint16 :val 42} extensionEarlyData 42]
+  ^{:line 124} [^{:tag uint16 :val 43} extensionSupportedVersions 43]
+  ^{:line 125} [^{:tag uint16 :val 44} extensionCookie 44]
+  ^{:line 126} [^{:tag uint16 :val 45} extensionPSKModes 45]
+  ^{:line 127} [^{:tag uint16 :val 47} extensionCertificateAuthorities 47]
+  ^{:line 128} [^{:tag uint16 :val 50} extensionSignatureAlgorithmsCert 50]
+  ^{:line 129} [^{:tag uint16 :val 51} extensionKeyShare 51]
+  ^{:line 130} [^{:tag uint16 :val 57} extensionQUICTransportParameters 57]
+  ^{:line 131} [^{:tag uint16 :val 65281} extensionRenegotiationInfo 0xff01]
+  ^{:line 132} [^{:tag uint16 :val 64768} extensionECHOuterExtensions 0xfd00]
+  ^{:line 133} [^{:tag uint16 :val 65037} extensionEncryptedClientHello 0xfe0d])
+
+
+
+(go/const "TLS signaling cipher suite values\n"
+  ^{:line 138} [^{:tag uint16 :val 255} scsvRenegotiation 0x00ff])
+
+
+
+
+
+
+
+
+
+(go/type CurveID "CurveID is the type of a TLS identifier for a key exchange mechanism. See\nhttps://www.iana.org/assignments/tls-parameters/tls-parameters.xml#tls-parameters-8.\n\nIn TLS 1.2, this registry used to support only elliptic curves. In TLS 1.3,\nit was extended to other groups and renamed NamedGroup. See RFC 8446, Section\n4.2.7. It was then also extended to other mechanisms, such as hybrid\npost-quantum KEMs.\n" uint16)
+
+(go/const
+  ^{:line 151} [^{:tag CurveID :val 23} CurveP256 23]
+  ^{:line 152} [^{:tag CurveID :val 24} CurveP384 24]
+  ^{:line 153} [^{:tag CurveID :val 25} CurveP521 25]
+  ^{:line 154} [^{:tag CurveID :val 29} X25519 29]
+  ^{:line 155} [^{:tag CurveID :val 4588} X25519MLKEM768 4588]
+  ^{:line 156} [^{:tag CurveID :val 4587} SecP256r1MLKEM768 4587]
+  ^{:line 157} [^{:tag CurveID :val 4589} SecP384r1MLKEM1024 4589]
+  ^{:line 158} [^{:tag CurveID :val 514} MLKEM1024 514])
+
+
+^{:go/end 168} (go/func isTLS13OnlyKeyExchange ^bool [^CurveID curve]
+  (switch curve
+    (case [X25519MLKEM768 SecP256r1MLKEM768 SecP384r1MLKEM1024 MLKEM1024]
+      (return true))
+    (default
+      (return false))))
+
+
+
+^{:go/end 177} (go/func isPQKeyExchange ^bool [^CurveID curve]
+  (switch curve
+    (case [X25519MLKEM768 SecP256r1MLKEM768 SecP384r1MLKEM1024 MLKEM1024]
+      (return true))
+    (default
+      (return false))))
+
+
+
+
+(go/type keyShare "TLS 1.3 Key Share. See RFC 8446, Section 4.2.8.\n" (struct
+    ^{:line 181 :tag CurveID} group
+    ^{:line 182 :tag (slice byte)} data))
+
+
+
+(go/const "TLS 1.3 PSK Key Exchange Modes. See RFC 8446, Section 4.2.9.\n"
+  ^{:line 187} [^{:tag uint8 :val 0} pskModePlain 0]
+  ^{:line 188} [^{:tag uint8 :val 1} pskModeDHE 1])
+
+
+
+
+(go/type pskIdentity "TLS 1.3 PSK Identity. Can be a Session Ticket, or a reference to a saved\nsession. See RFC 8446, Section 4.2.11.\n" (struct
+    ^{:line 194 :tag (slice byte)} label
+    ^{:line 195 :tag uint32} obfuscatedTicketAge))
+
+
+
+
+(go/const "TLS Elliptic Curve Point Formats\nhttps://www.iana.org/assignments/tls-parameters/tls-parameters.xml#tls-parameters-9\n"
+  ^{:line 201} [^{:tag uint8 :val 0} pointFormatUncompressed 0])
+
+
+
+(go/const "TLS CertificateStatusType (RFC 3546)\n"
+  ^{:line 206} [^{:tag uint8 :val 1} statusTypeOCSP 1])
+
+
+
+(go/const "Certificate types (for certificateRequestMsg)\n"
+  ^{:line 211} [^{:val 1} certTypeRSASign 1]
+  ^{:line 212} [^{:val 64} certTypeECDSASign 64]) ; ECDSA or EdDSA keys, see RFC 8422, Section 3.
+
+
+
+
+(go/const "Signature algorithms (for internal signaling use). Starting at 225 to avoid overlap with\nTLS 1.2 codepoints (RFC 5246, Appendix A.4.1), with which these have nothing to do.\n"
+  ^{:line 218} [^{:tag uint8 :val 225} signaturePKCS1v15 (+ iota 225)]
+  ^{:line 219} [^{:val 226} signatureRSAPSS]
+  ^{:line 220} [^{:val 227} signatureECDSA]
+  ^{:line 221} [^{:val 228} signatureEd25519]
+  ^{:line 222} [^{:val 229} signatureMLDSA])
+
+
+
+
+
+(go/var ^{:tag crypto/Hash :doc "directSigning is a standard Hash value that signals that no pre-hashing\nshould be performed, and that the input should be signed directly. It is the\nhash function associated with the Ed25519 and ML-DSA signature schemes.\n"} directSigning 0)
+
+
+
+(go/var ^{:doc "helloRetryRequestRandom is set as the Random value of a ServerHello\nto signal that the message is actually a HelloRetryRequest.\n"} helloRetryRequestRandom ^{:go/breaks [2 10 18 26]} (lit (slice byte) ; See RFC 8446, Section 4.1.3.
+    0xCF 0x21 0xAD 0x74 0xE5 0x9A 0x61 0x11
+    0xBE 0x1D 0x8C 0x02 0x1E 0x65 0xB8 0x91
+    0xC2 0xA2 0x11 0x16 0x7A 0xBB 0x8C 0x5E
+    0x07 0x9E 0x09 0xE2 0xC8 0xA8 0x33 0x9C))
+
+
+(go/const
+
+
+
+  ^{:line 243} [^{:val "DOWNGRD\u0001" :doc "downgradeCanaryTLS12 or downgradeCanaryTLS11 is embedded in the server\nrandom as a downgrade protection if the server would be capable of\nnegotiating a higher version. See RFC 8446, Section 4.1.3.\n"} downgradeCanaryTLS12 "DOWNGRD\u0001"]
+  ^{:line 244} [^{:val "DOWNGRD\u0000"} downgradeCanaryTLS11 "DOWNGRD\u0000"])
+
+
+
+
+(go/var ^{:tag bool :doc "testingOnlyForceDowngradeCanary is set in tests to force the server side to\ninclude downgrade canaries even if it's using its highers supported version.\n"} testingOnlyForceDowngradeCanary)
+
+
+(go/type ConnectionState "ConnectionState records basic TLS details about the connection.\n" (struct
+
+    ^{:line 254 :tag uint16 :doc "Version is the TLS version used by the connection (e.g. VersionTLS12).\n"} Version
+
+
+    ^{:line 257 :tag bool :doc "HandshakeComplete is true if the handshake has concluded.\n"} HandshakeComplete
+
+
+
+    ^{:line 261 :tag bool :doc "DidResume is true if this connection was successfully resumed from a\nprevious session with a session ticket or similar mechanism.\n"} DidResume
+
+
+
+    ^{:line 265 :tag uint16 :doc "CipherSuite is the cipher suite negotiated for the connection (e.g.\nTLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_AES_128_GCM_SHA256).\n"} CipherSuite
+
+
+
+
+    ^{:line 270 :tag CurveID :doc "CurveID is the key exchange mechanism used for the connection. The name\nrefers to elliptic curves for legacy reasons, see [CurveID]. If a legacy\nRSA key exchange is used, this value is zero.\n"} CurveID
+
+
+    ^{:line 273 :tag string :doc "NegotiatedProtocol is the application protocol negotiated with ALPN.\n"} NegotiatedProtocol
+
+
+
+
+    ^{:line 278 :tag bool :doc "NegotiatedProtocolIsMutual used to indicate a mutual NPN negotiation.\n\nDeprecated: this value is always true.\n"} NegotiatedProtocolIsMutual
+
+
+
+    ^{:line 282 :tag string :doc "ServerName is the value of the Server Name Indication extension sent by\nthe client. It's available both on the server and on the client side.\n"} ServerName
+
+
+
+
+
+
+
+
+
+
+    ^{:line 293 :tag (slice (* x509/Certificate)) :doc "PeerCertificates are the parsed certificates sent by the peer, in the\norder in which they were sent. The first element is the leaf certificate\nthat the connection is verified against.\n\nOn the client side, it can't be empty. On the server side, it can be\nempty if Config.ClientAuth is not RequireAnyClientCert or\nRequireAndVerifyClientCert.\n\nPeerCertificates and its contents should not be modified.\n"} PeerCertificates
+
+
+
+
+
+
+
+
+
+
+    ^{:line 304 :tag (slice (slice (* x509/Certificate))) :doc "VerifiedChains is a list of one or more chains where the first element is\nPeerCertificates[0] and the last element is from Config.RootCAs (on the\nclient side) or Config.ClientCAs (on the server side).\n\nOn the client side, it's set if Config.InsecureSkipVerify is false. On\nthe server side, it's set if Config.ClientAuth is VerifyClientCertIfGiven\n(and the peer provided a certificate) or RequireAndVerifyClientCert.\n\nVerifiedChains and its contents should not be modified.\n"} VerifiedChains
+
+
+
+    ^{:line 308 :tag (slice (slice byte)) :doc "SignedCertificateTimestamps is a list of SCTs provided by the peer\nthrough the TLS handshake for the leaf certificate, if any.\n"} SignedCertificateTimestamps
+
+
+
+    ^{:line 312 :tag (slice byte) :doc "OCSPResponse is a stapled Online Certificate Status Protocol (OCSP)\nresponse provided by the peer for the leaf certificate, if any.\n"} OCSPResponse
+
+
+
+
+    ^{:line 317 :tag (slice byte) :doc "TLSUnique contains the \"tls-unique\" channel binding value (see RFC 5929,\nSection 3). This value will be nil for TLS 1.3 connections and for\nresumed connections that don't support Extended Master Secret (RFC 7627).\n"} TLSUnique
+
+
+
+
+    ^{:line 322 :tag bool :doc "ECHAccepted indicates if Encrypted Client Hello was offered by the client\nand accepted by the server. Currently, ECH is supported only on the\nclient side.\n"} ECHAccepted
+
+
+
+    ^{:line 326 :tag bool :doc "HelloRetryRequest indicates whether we sent a HelloRetryRequest if we\nare a server, or if we received a HelloRetryRequest if we are a client.\n"} HelloRetryRequest
+
+
+
+
+    ^{:line 331 :tag (slice (slice byte)) :doc "LocalCertificate is the certificate chain presented to the peer, if any,\nduring the handshake. This field is only populated for connections which\nare not resumed (DidResume is false).\n"} LocalCertificate
+
+
+    ^{:line 334 :tag (func [^string label ^{:tag (slice byte)} context ^int length] [(slice byte) error]) :doc "ekm is a closure exposed via ExportKeyingMaterial.\n"} ekm
+
+
+
+    ^{:line 338 :tag SignatureScheme :doc "testingOnlyPeerSignatureAlgorithm is the signature algorithm used by the\npeer to sign the handshake. It is not set for resumed connections.\n"} testingOnlyPeerSignatureAlgorithm))
+
+
+
+
+
+
+
+^{:go/end 348} (go/method ExportKeyingMaterial "ExportKeyingMaterial returns length bytes of exported key material in a new\nslice as defined in RFC 5705. If context is nil, it is not used as part of\nthe seed. If the connection was set to allow renegotiation via\nConfig.Renegotiation, or if the connections supports neither TLS 1.3 nor\nExtended Master Secret, this function will return an error.\n" [^{:tag (* ConnectionState)} cs ^string label ^{:tag (slice byte)} context ^int length] :results [(slice byte) error]
+  ((.-ekm cs) label context length))
+
+
+
+
+(go/type ClientAuthType "ClientAuthType declares the policy the server will follow for\nTLS Client Authentication.\n" int)
+
+(go/const
+
+
+
+  ^{:line 358} [^{:tag ClientAuthType :val 0 :doc "NoClientCert indicates that no client certificate should be requested\nduring the handshake, and if any certificates are sent they will not\nbe verified.\n"} NoClientCert iota]
+
+
+
+  ^{:line 362} [^{:val 1 :doc "RequestClientCert indicates that a client certificate should be requested\nduring the handshake, but does not require that the client send any\ncertificates.\n"} RequestClientCert]
+
+
+
+  ^{:line 366} [^{:val 2 :doc "RequireAnyClientCert indicates that a client certificate should be requested\nduring the handshake, and that at least one certificate is required to be\nsent by the client, but that certificate is not required to be valid.\n"} RequireAnyClientCert]
+
+
+
+
+  ^{:line 371} [^{:val 3 :doc "VerifyClientCertIfGiven indicates that a client certificate should be requested\nduring the handshake, but does not require that the client sends a\ncertificate. If the client does send a certificate it is required to be\nvalid.\n"} VerifyClientCertIfGiven]
+
+
+
+  ^{:line 375} [^{:val 4 :doc "RequireAndVerifyClientCert indicates that a client certificate should be requested\nduring the handshake, and that at least one valid certificate is required\nto be sent by the client.\n"} RequireAndVerifyClientCert])
+
+
+
+
+^{:go/end 387} (go/func requiresClientCert "requiresClientCert reports whether the ClientAuthType requires a client\ncertificate to be provided.\n" ^bool [^ClientAuthType c]
+  (switch c
+    (case [RequireAnyClientCert RequireAndVerifyClientCert]
+      (return true))
+    (default
+      (return false))))
+
+
+
+
+
+
+
+
+
+(go/type ClientSessionCache "ClientSessionCache is a cache of ClientSessionState objects that can be used\nby a client to resume a TLS session with a given server. ClientSessionCache\nimplementations should expect to be called concurrently from different\ngoroutines. Up to TLS 1.2, only ticket-based resumption is supported, not\nSessionID-based resumption. In TLS 1.3 they were merged into PSK modes, which\nare supported via this interface.\n" (interface
+
+
+    (^{:doc "Get searches for a ClientSessionState associated with the given key.\nOn return, ok is true if one was found.\n"} Get [^string sessionKey] :results [^{:tag (* ClientSessionState)} session ^bool ok])
+
+
+
+
+
+    (^{:doc "Put adds the ClientSessionState to the cache with the given key. It might\nget called multiple times in a connection if a TLS 1.3 server provides\nmore than one session ticket. If called with a nil *ClientSessionState,\nit should remove the cache entry.\n"} Put [^string sessionKey ^{:tag (* ClientSessionState)} cs])))
+
+
+(go/directive "//go:generate stringer -linecomment -type=SignatureScheme,CurveID,ClientAuthType -output=common_string.go")
+
+
+
+(go/type SignatureScheme "SignatureScheme identifies a signature algorithm supported by TLS. See\nRFC 8446, Section 4.2.3.\n" uint16)
+
+(go/const
+
+  ^{:line 415} [^{:tag SignatureScheme :val 1025 :doc "RSASSA-PKCS1-v1_5 algorithms.\n"} PKCS1WithSHA256 0x0401]
+  ^{:line 416} [^{:tag SignatureScheme :val 1281} PKCS1WithSHA384 0x0501]
+  ^{:line 417} [^{:tag SignatureScheme :val 1537} PKCS1WithSHA512 0x0601]
+
+
+  ^{:line 420} [^{:tag SignatureScheme :val 2052 :doc "RSASSA-PSS algorithms with public key OID rsaEncryption.\n"} PSSWithSHA256 0x0804]
+  ^{:line 421} [^{:tag SignatureScheme :val 2053} PSSWithSHA384 0x0805]
+  ^{:line 422} [^{:tag SignatureScheme :val 2054} PSSWithSHA512 0x0806]
+
+
+  ^{:line 425} [^{:tag SignatureScheme :val 1027 :doc "ECDSA algorithms. Only constrained to a specific curve in TLS 1.3.\n"} ECDSAWithP256AndSHA256 0x0403]
+  ^{:line 426} [^{:tag SignatureScheme :val 1283} ECDSAWithP384AndSHA384 0x0503]
+  ^{:line 427} [^{:tag SignatureScheme :val 1539} ECDSAWithP521AndSHA512 0x0603]
+
+
+  ^{:line 430} [^{:tag SignatureScheme :val 2055 :doc "EdDSA algorithms.\n"} Ed25519 0x0807]
+
+
+  ^{:line 433} [^{:tag SignatureScheme :val 2308 :doc "ML-DSA algorithms.\n"} MLDSA44 0x0904]
+  ^{:line 434} [^{:tag SignatureScheme :val 2309} MLDSA65 0x0905]
+  ^{:line 435} [^{:tag SignatureScheme :val 2310} MLDSA87 0x0906]
+
+
+  ^{:line 438} [^{:tag SignatureScheme :val 513 :doc "Legacy signature and hash algorithms for TLS 1.2.\n"} PKCS1WithSHA1 0x0201]
+  ^{:line 439} [^{:tag SignatureScheme :val 515} ECDSAWithSHA1 0x0203])
+
+
+
+
+(go/type ClientHelloInfo "ClientHelloInfo contains information from a ClientHello message in order to\nguide application logic in the GetCertificate and GetConfigForClient callbacks.\n" (struct
+
+
+    ^{:line 447 :tag (slice uint16) :doc "CipherSuites lists the CipherSuites supported by the client (e.g.\nTLS_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256).\n"} CipherSuites
+
+
+
+
+    ^{:line 452 :tag string :doc "ServerName indicates the name of the server requested by the client\nin order to support virtual hosting. ServerName is only set if the\nclient is using SNI (see RFC 4366, Section 3.1).\n"} ServerName
+
+
+
+
+
+
+
+    ^{:line 460 :tag (slice CurveID) :doc "SupportedCurves lists the key exchange mechanisms supported by the\nclient. It was renamed to \"supported groups\" in TLS 1.3, see RFC 8446,\nSection 4.2.7 and [CurveID].\n\nSupportedCurves may be nil in TLS 1.2 and lower if the Supported Elliptic\nCurves Extension is not being used (see RFC 4492, Section 5.1.1).\n"} SupportedCurves
+
+
+
+
+    ^{:line 465 :tag (slice uint8) :doc "SupportedPoints lists the point formats supported by the client.\nSupportedPoints is set only if the Supported Point Formats Extension\nis being used (see RFC 4492, Section 5.1.2).\n"} SupportedPoints
+
+
+
+
+    ^{:line 470 :tag (slice SignatureScheme) :doc "SignatureSchemes lists the signature and hash schemes that the client\nis willing to verify. SignatureSchemes is set only if the Signature\nAlgorithms Extension is being used (see RFC 5246, Section 7.4.1.4.1).\n"} SignatureSchemes
+
+
+
+
+
+
+
+    ^{:line 478 :tag (slice string) :doc "SupportedProtos lists the application protocols supported by the client.\nSupportedProtos is set only if the Application-Layer Protocol\nNegotiation Extension is being used (see RFC 7301, Section 3.1).\n\nServers can select a protocol by setting Config.NextProtos in a\nGetConfigForClient return value.\n"} SupportedProtos
+
+
+
+
+
+    ^{:line 484 :tag (slice uint16) :doc "SupportedVersions lists the TLS versions supported by the client.\nFor TLS versions less than 1.3, this is extrapolated from the max\nversion advertised by the client, so values other than the greatest\nmight be rejected if used.\n"} SupportedVersions
+
+
+
+    ^{:line 488 :tag (slice uint16) :doc "Extensions lists the IDs of the extensions presented by the client\nin the ClientHello.\n"} Extensions
+
+
+
+
+    ^{:line 493 :tag net/Conn :doc "Conn is the underlying net.Conn for the connection. Do not read\nfrom, or write to, this connection; that will cause the TLS\nconnection to fail.\n"} Conn
+
+
+
+    ^{:line 497 :tag bool :doc "HelloRetryRequest indicates whether the ClientHello was sent in response\nto a HelloRetryRequest message.\n"} HelloRetryRequest
+
+
+
+    ^{:line 501 :tag (* Config) :doc "config is embedded by the GetCertificate or GetConfigForClient caller,\nfor use with SupportsCertificate.\n"} config
+
+
+    ^{:line 504 :tag bool :doc "isQUIC indicates whether the connection is a QUIC connection.\n"} isQUIC
+
+
+    ^{:line 507 :tag context/Context :doc "ctx is the context of the handshake that is in progress.\n"} ctx))
+
+
+
+
+
+^{:go/end 515} (go/method Context "Context returns the context of the handshake that is in progress.\nThis context is a child of the context passed to HandshakeContext,\nif any, and is canceled when the handshake concludes.\n" ^context/Context [^{:tag (* ClientHelloInfo)} c]
+  (.-ctx c))
+
+
+
+
+
+(go/type CertificateRequestInfo "CertificateRequestInfo contains information from a server's\nCertificateRequest message, which is used to demand a certificate and proof\nof control from a client.\n" (struct
+
+
+
+
+    ^{:line 525 :tag (slice (slice byte)) :doc "AcceptableCAs contains zero or more, DER-encoded, X.501\nDistinguished Names. These are the names of root or intermediate CAs\nthat the server wishes the returned certificate to be signed by. An\nempty slice indicates that the server has no preference.\n"} AcceptableCAs
+
+
+
+    ^{:line 529 :tag (slice SignatureScheme) :doc "SignatureSchemes lists the signature schemes that the server is\nwilling to verify.\n"} SignatureSchemes
+
+
+    ^{:line 532 :tag uint16 :doc "Version is the TLS version that was negotiated for this connection.\n"} Version
+
+
+    ^{:line 535 :tag context/Context :doc "ctx is the context of the handshake that is in progress.\n"} ctx))
+
+
+
+
+
+^{:go/end 543} (go/method Context "Context returns the context of the handshake that is in progress.\nThis context is a child of the context passed to HandshakeContext,\nif any, and is canceled when the handshake concludes.\n" ^context/Context [^{:tag (* CertificateRequestInfo)} c]
+  (.-ctx c))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type RenegotiationSupport "RenegotiationSupport enumerates the different levels of support for TLS\nrenegotiation. TLS renegotiation is the act of performing subsequent\nhandshakes on a connection after the first. This significantly complicates\nthe state machine and has been the source of numerous, subtle security\nissues. Initiating a renegotiation is not supported, but support for\naccepting renegotiation requests may be enabled.\n\nEven when enabled, the server may not change its identity between handshakes\n(i.e. the leaf certificate must be the same). Additionally, concurrent\nhandshake and application data flow is not permitted so renegotiation can\nonly be used with protocols that synchronise with the renegotiation, such as\nHTTPS.\n\nRenegotiation is not defined in TLS 1.3.\n" int)
+
+(go/const
+
+  ^{:line 563} [^{:tag RenegotiationSupport :val 0 :doc "RenegotiateNever disables renegotiation.\n"} RenegotiateNever iota]
+
+
+
+  ^{:line 567} [^{:val 1 :doc "RenegotiateOnceAsClient allows a remote server to request\nrenegotiation once per connection.\n"} RenegotiateOnceAsClient]
+
+
+
+  ^{:line 571} [^{:val 2 :doc "RenegotiateFreelyAsClient allows a remote server to repeatedly\nrequest renegotiation.\n"} RenegotiateFreelyAsClient])
+
+
+
+
+
+
+(go/type Config "A Config structure is used to configure a TLS client or server.\nAfter one has been passed to a TLS function it must not be\nmodified. A Config may be reused; the tls package will also not\nmodify it.\n" (struct
+
+
+
+
+
+
+
+    ^{:line 586 :tag io/Reader :doc "Rand provides the source of entropy for the connection.\nIf Rand is nil, TLS uses the cryptographic random reader in package\ncrypto/rand. The Reader must be safe for use by multiple goroutines.\n\nDeprecated: this should be left nil in production. Not all TLS\nconfigurations are guaranteed to use Rand. Test code can use\n[testing/cryptotest.SetGlobalRandom] instead.\n"} Rand
+
+
+
+    ^{:line 590 :tag (func [] [time/Time]) :doc "Time returns the current time as the number of seconds since the epoch.\nIf Time is nil, TLS uses time.Now.\n"} Time
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 603 :tag (slice Certificate) :doc "Certificates contains one or more certificate chains to present to the\nother side of the connection. The first certificate compatible with the\npeer's requirements is selected automatically.\n\nServer configurations must set one of Certificates, GetCertificate or\nGetConfigForClient. Clients doing client-authentication may set either\nCertificates or GetClientCertificate.\n\nNote: if there are multiple Certificates, and they don't have the\noptional field Leaf set, certificate selection will incur a significant\nper-handshake performance cost.\n"} Certificates
+
+
+
+
+
+
+
+
+    ^{:line 612 :tag (map string (* Certificate)) :doc "NameToCertificate maps from a certificate name to an element of\nCertificates. Note that a certificate name can be of the form\n'*.example.com' and so doesn't have to be a domain name as such.\n\nDeprecated: NameToCertificate only allows associating a single\ncertificate with a given name. Leave this field nil to let the library\nselect the first compatible chain from Certificates.\n"} NameToCertificate
+
+
+
+
+
+
+
+
+
+
+    ^{:line 623 :tag (func [(* ClientHelloInfo)] [(* Certificate) error]) :doc "GetCertificate returns a Certificate based on the given\nClientHelloInfo. It will only be called if the client supplies SNI\ninformation or if Certificates is empty.\n\nIf GetCertificate is nil or returns nil, then the certificate is\nretrieved from NameToCertificate. If NameToCertificate is nil, the\nbest element of Certificates will be used.\n\nOnce a Certificate is returned it should not be modified.\n"} GetCertificate
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 640 :tag (func [(* CertificateRequestInfo)] [(* Certificate) error]) :doc "GetClientCertificate, if not nil, is called when a server requests a\ncertificate from a client. If set, the contents of Certificates will\nbe ignored.\n\nIf GetClientCertificate returns an error, the handshake will be\naborted and that error will be returned. Otherwise\nGetClientCertificate must return a non-nil Certificate. If\nCertificate.Certificate is empty then no certificate will be sent to\nthe server. If this is unacceptable to the server then it may abort\nthe handshake.\n\nGetClientCertificate may be called multiple times for the same\nconnection if renegotiation occurs or if TLS 1.3 is in use.\n\nOnce a Certificate is returned it should not be modified.\n"} GetClientCertificate
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 658 :tag (func [(* ClientHelloInfo)] [(* Config) error]) :doc "GetConfigForClient, if not nil, is called after a ClientHello is\nreceived from a client. It may return a non-nil Config in order to\nchange the Config that will be used to handle this connection. If\nthe returned Config is nil, the original Config will be used. The\nConfig returned by this callback may not be subsequently modified.\n\nIf GetConfigForClient is nil, the Config passed to Server() will be\nused for all connections.\n\nIf SessionTicketKey is explicitly set on the returned Config, or if\nSetSessionTicketKeys is called on the returned Config, those keys will\nbe used. Otherwise, the original Config keys will be used (and possibly\nrotated if they are automatically managed). WARNING: this allows session\nresumption of connections originally established with the parent (or a\nsibling) Config, which may bypass the [Config.VerifyPeerCertificate]\nvalue of the returned Config.\n"} GetConfigForClient
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 681 :tag (func [^{:tag (slice (slice byte))} rawCerts ^{:tag (slice (slice (* x509/Certificate)))} verifiedChains] [error]) :doc "VerifyPeerCertificate, if not nil, is called after normal\ncertificate verification by either a TLS client or server. It\nreceives the raw ASN.1 certificates provided by the peer and also\nany verified chains that normal processing found. If it returns a\nnon-nil error, the handshake is aborted and that error results.\n\nIf normal verification fails then the handshake will abort before\nconsidering this callback. If normal verification is disabled (on the\nclient when InsecureSkipVerify is set, or on a server when ClientAuth is\nRequestClientCert or RequireAnyClientCert), then this callback will be\nconsidered but the verifiedChains argument will always be nil. When\nClientAuth is NoClientCert, this callback is not called on the server.\nrawCerts may be empty on the server if ClientAuth is RequestClientCert or\nVerifyClientCertIfGiven.\n\nThis callback is not invoked on resumed connections. WARNING: this\nincludes connections resumed across Configs returned by [Config.Clone] or\n[Config.GetConfigForClient] and their parents. If that is not intended,\nuse [Config.VerifyConnection] instead, or set [Config.SessionTicketsDisabled].\n\nverifiedChains and its contents should not be modified.\n"} VerifyPeerCertificate
+
+
+
+
+
+
+
+
+
+
+    ^{:line 692 :tag (func [ConnectionState] [error]) :doc "VerifyConnection, if not nil, is called after normal certificate\nverification and after VerifyPeerCertificate by either a TLS client\nor server. If it returns a non-nil error, the handshake is aborted\nand that error results.\n\nIf normal verification fails then the handshake will abort before\nconsidering this callback. This callback will run for all connections,\nincluding resumptions, regardless of InsecureSkipVerify or ClientAuth\nsettings.\n"} VerifyConnection
+
+
+
+
+    ^{:line 697 :tag (* x509/CertPool) :doc "RootCAs defines the set of root certificate authorities\nthat clients use when verifying server certificates.\nIf RootCAs is nil, TLS uses the host's root CA set.\n"} RootCAs
+
+
+
+
+
+
+
+    ^{:line 705 :tag (slice string) :doc "NextProtos is a list of supported application level protocols, in\norder of preference. If both peers support ALPN, the selected\nprotocol will be one from this list, and the connection will fail\nif there is no mutually supported protocol. If NextProtos is empty\nor the peer doesn't support ALPN, the connection will succeed and\nConnectionState.NegotiatedProtocol will be empty.\n"} NextProtos
+
+
+
+
+
+    ^{:line 711 :tag string :doc "ServerName is used to verify the hostname on the returned\ncertificates unless InsecureSkipVerify is given. It is also included\nin the client's handshake to support virtual hosting unless it is\nan IP address.\n"} ServerName
+
+
+
+    ^{:line 715 :tag ClientAuthType :doc "ClientAuth determines the server's policy for\nTLS Client Authentication. The default is NoClientCert.\n"} ClientAuth
+
+
+
+
+    ^{:line 720 :tag (* x509/CertPool) :doc "ClientCAs defines the set of root certificate authorities\nthat servers use if required to verify a client certificate\nby the policy in ClientAuth.\n"} ClientCAs
+
+
+
+
+
+
+
+    ^{:line 728 :tag bool :doc "InsecureSkipVerify controls whether a client verifies the server's\ncertificate chain and host name. If InsecureSkipVerify is true, crypto/tls\naccepts any certificate presented by the server and any host name in that\ncertificate. In this mode, TLS is susceptible to machine-in-the-middle\nattacks unless custom verification is used. This should be used only for\ntesting or in combination with VerifyConnection or VerifyPeerCertificate.\n"} InsecureSkipVerify
+
+
+
+
+
+
+    ^{:line 735 :tag (slice uint16) :doc "CipherSuites is a list of enabled TLS 1.0–1.2 cipher suites. The order of\nthe list is ignored. Note that TLS 1.3 ciphersuites are not configurable.\n\nIf CipherSuites is nil, a safe default list is used. The default cipher\nsuites might change over time.\n"} CipherSuites
+
+
+
+
+
+
+
+
+
+    ^{:line 745 :tag bool :doc "PreferServerCipherSuites is a legacy field and has no effect.\n\nIt used to control whether the server would follow the client's or the\nserver's preference. Servers now select the best mutually supported\ncipher suite based on logic that takes into account inferred client\nhardware, server hardware, and security.\n\nDeprecated: PreferServerCipherSuites is ignored.\n"} PreferServerCipherSuites
+
+
+
+
+    ^{:line 750 :tag bool :doc "SessionTicketsDisabled may be set to true to disable session ticket and\nPSK (resumption) support. Note that on clients, session ticket support is\nalso disabled if ClientSessionCache is nil.\n"} SessionTicketsDisabled
+
+
+
+
+
+
+
+
+
+    ^{:line 760 :tag (array 32 byte) :doc "SessionTicketKey is used by TLS servers to provide session resumption.\nSee RFC 5077 and the PSK mode of RFC 8446. If zero, it will be filled\nwith random data before the first server handshake.\n\nDeprecated: if this field is left at zero, session ticket keys will be\nautomatically rotated every day and dropped after seven days. For\ncustomizing the rotation schedule or synchronizing servers that are\nterminating connections for the same host, use SetSessionTicketKeys.\n"} SessionTicketKey
+
+
+
+    ^{:line 764 :tag ClientSessionCache :doc "ClientSessionCache is a cache of ClientSessionState entries for TLS\nsession resumption. It is only used by clients.\n"} ClientSessionCache
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 777 :tag (func [^{:tag (slice byte)} identity ^ConnectionState cs] [(* SessionState) error]) :doc "UnwrapSession is called on the server to turn a ticket/identity\npreviously produced by [WrapSession] into a usable session.\n\nUnwrapSession will usually either decrypt a session state in the ticket\n(for example with [Config.EncryptTicket]), or use the ticket as a handle\nto recover a previously stored state. It must use [ParseSessionState] to\ndeserialize the session state.\n\nIf UnwrapSession returns an error, the connection is terminated. If it\nreturns (nil, nil), the session is ignored. crypto/tls may still choose\nnot to resume the returned session.\n"} UnwrapSession
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 793 :tag (func [ConnectionState (* SessionState)] [(slice byte) error]) :doc "WrapSession is called on the server to produce a session ticket/identity.\n\nWrapSession must serialize the session state with [SessionState.Bytes].\nIt may then encrypt the serialized state (for example with\n[Config.DecryptTicket]) and use it as the ticket, or store the state and\nreturn a handle for it.\n\nIf WrapSession returns an error, the connection is terminated.\n\nWarning: the return value will be exposed on the wire and to clients in\nplaintext. The application is in charge of encrypting and authenticating\nit (and rotating keys) or returning high-entropy identifiers. Failing to\ndo so correctly can compromise current, previous, and future connections\ndepending on the protocol version.\n"} WrapSession
+
+
+
+
+
+    ^{:line 799 :tag uint16 :doc "MinVersion contains the minimum TLS version that is acceptable.\n\nBy default, TLS 1.2 is currently used as the minimum. TLS 1.0 is the\nminimum supported by this package.\n"} MinVersion
+
+
+
+
+
+    ^{:line 805 :tag uint16 :doc "MaxVersion contains the maximum TLS version that is acceptable.\n\nBy default, the maximum version supported by this package is used,\nwhich is currently TLS 1.3.\n"} MaxVersion
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 821 :tag (slice CurveID) :doc "CurvePreferences contains a set of supported key exchange mechanisms.\nThe name refers to elliptic curves for legacy reasons, see [CurveID].\nThe order of the list is ignored, and key exchange mechanisms are chosen\nfrom this list using an internal preference order. If empty, the default\nwill be used.\n\nFrom Go 1.24, the default includes the [X25519MLKEM768] hybrid\npost-quantum key exchange. To disable it, set CurvePreferences explicitly\nor use the GODEBUG=tlsmlkem=0 environment variable.\n\nFrom Go 1.26, the default includes the [SecP256r1MLKEM768] and\n[SecP384r1MLKEM1024] hybrid post-quantum key exchanges, too. To disable\nthem, set CurvePreferences explicitly or use either the\nGODEBUG=tlsmlkem=0 or the GODEBUG=tlssecpmlkem=0 environment variable.\n"} CurvePreferences
+
+
+
+
+
+    ^{:line 827 :tag bool :doc "DynamicRecordSizingDisabled disables adaptive sizing of TLS records.\nWhen true, the largest possible TLS record size is always used. When\nfalse, the size of TLS records may be adjusted in an attempt to\nimprove latency.\n"} DynamicRecordSizingDisabled
+
+
+
+    ^{:line 831 :tag RenegotiationSupport :doc "Renegotiation controls what types of renegotiation are supported.\nThe default, none, is correct for the vast majority of applications.\n"} Renegotiation
+
+
+
+
+
+
+
+    ^{:line 839 :tag io/Writer :doc "KeyLogWriter optionally specifies a destination for TLS master secrets\nin NSS key log format that can be used to allow external programs\nsuch as Wireshark to decrypt TLS connections.\nSee https://datatracker.ietf.org/doc/draft-ietf-tls-keylogfile/.\nUse of KeyLogWriter compromises security and should only be\nused for debugging.\n"} KeyLogWriter
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 861 :tag (slice byte) :doc "EncryptedClientHelloConfigList is a serialized ECHConfigList. If\nprovided, clients will attempt to connect to servers using Encrypted\nClient Hello (ECH) using one of the provided ECHConfigs.\n\nServers do not use this field. In order to configure ECH for servers, see\nthe EncryptedClientHelloKeys field.\n\nIf the list contains no valid ECH configs, the handshake will fail\nand return an error.\n\nIf EncryptedClientHelloConfigList is set, MinVersion, if set, must\nbe VersionTLS13.\n\nWhen EncryptedClientHelloConfigList is set, the handshake will only\nsucceed if ECH is successfully negotiated. If the server rejects ECH,\nan ECHRejectionError error will be returned, which may contain a new\nECHConfigList that the server suggests using.\n\nHow this field is parsed may change in future Go versions, if the\nencoding described in the final Encrypted Client Hello RFC changes.\n"} EncryptedClientHelloConfigList
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 878 :tag (func [ConnectionState] [error]) :doc "EncryptedClientHelloRejectionVerify, if not nil, is called when ECH is\nrejected by the remote server, in order to verify the ECH provider\ncertificate in the outer ClientHello. If it returns a non-nil error, the\nhandshake is aborted and that error results.\n\nOn the server side this field is not used.\n\nUnlike VerifyPeerCertificate and VerifyConnection, normal certificate\nverification will not be performed before calling\nEncryptedClientHelloRejectionVerify.\n\nIf EncryptedClientHelloRejectionVerify is nil and ECH is rejected, the\nroots in RootCAs will be used to verify the ECH providers public\ncertificate. VerifyPeerCertificate and VerifyConnection are not called\nwhen ECH is rejected, even if set, and InsecureSkipVerify is ignored.\n"} EncryptedClientHelloRejectionVerify
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 892 :tag (func [(* ClientHelloInfo)] [(slice EncryptedClientHelloKey) error]) :doc "GetEncryptedClientHelloKeys, if not nil, is called when by a server when\na client attempts ECH.\n\nIf GetEncryptedClientHelloKeys is not nil, [EncryptedClientHelloKeys] is\nignored.\n\nIf GetEncryptedClientHelloKeys returns an error, the handshake will be\naborted and the error will be returned. Otherwise,\nGetEncryptedClientHelloKeys must return a non-nil slice of\n[EncryptedClientHelloKey] that represents the acceptable ECH keys.\n\nFor further details, see [EncryptedClientHelloKeys].\n"} GetEncryptedClientHelloKeys
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 909 :tag (slice EncryptedClientHelloKey) :doc "EncryptedClientHelloKeys are the ECH keys to use when a client\nattempts ECH.\n\nIf EncryptedClientHelloKeys is set, MinVersion, if set, must be\nVersionTLS13.\n\nIf a client attempts ECH, but it is rejected by the server, the server\nwill send a list of configs to retry based on the set of\nEncryptedClientHelloKeys which have the SendAsRetry field set.\n\nIf GetEncryptedClientHelloKeys is non-nil, EncryptedClientHelloKeys is\nignored.\n\nOn the client side, this field is ignored. In order to configure ECH for\nclients, see the EncryptedClientHelloConfigList field.\n"} EncryptedClientHelloKeys
+
+
+    ^{:line 912 :tag sync/RWMutex :doc "mutex protects sessionTicketKeys and autoSessionTicketKeys.\n"} mutex
+
+
+
+
+
+    ^{:line 918 :tag (slice ticketKey) :doc "sessionTicketKeys contains zero or more ticket keys. If set, it means\nthe keys were set with SessionTicketKey or SetSessionTicketKeys. The\nfirst key is used for new tickets and any subsequent keys can be used to\ndecrypt old tickets. The slice contents are not protected by the mutex\nand are immutable.\n"} sessionTicketKeys
+
+
+    ^{:line 921 :tag (slice ticketKey) :doc "autoSessionTicketKeys is like sessionTicketKeys but is owned by the\nauto-rotation logic. See Config.ticketKeys.\n"} autoSessionTicketKeys))
+
+
+
+
+(go/type EncryptedClientHelloKey "EncryptedClientHelloKey holds a private key that is associated\nwith a specific ECH config known to a client.\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 953 :tag (slice byte) :doc "Config should be a marshalled ECHConfig associated with PrivateKey. This\nmust match the config provided to clients byte-for-byte. The config must\nuse as KEM one of\n\n  - DHKEM(P-256, HKDF-SHA256) (0x0010)\n  - DHKEM(P-384, HKDF-SHA384) (0x0011)\n  - DHKEM(P-521, HKDF-SHA512) (0x0012)\n  - DHKEM(X25519, HKDF-SHA256) (0x0020)\n  - ML-KEM-768 (0x0041)\n  - ML-KEM-1024 (0x0042)\n  - MLKEM768-P256 (0x0050)\n  - MLKEM1024-P384 (0x0051)\n  - MLKEM768-X25519 (0x647a)\n\nand as KDF one of\n\n  - HKDF-SHA256 (0x0001)\n  - HKDF-SHA384 (0x0002)\n  - HKDF-SHA512 (0x0003)\n\nand as AEAD one of\n\n  - AES-128-GCM (0x0001)\n  - AES-256-GCM (0x0002)\n  - ChaCha20Poly1305 (0x0003)\n"} Config
+
+
+    ^{:line 956 :tag (slice byte) :doc "PrivateKey should be a marshalled private key, in the format expected by\nHPKE's DeserializePrivateKey (see RFC 9180), for the KEM used in Config.\n"} PrivateKey
+
+
+
+    ^{:line 960 :tag bool :doc "SendAsRetry indicates if Config should be sent as part of the list of\nretry configs when ECH is requested by the client but rejected by the\nserver.\n"} SendAsRetry))
+
+
+(go/const
+
+
+  ^{:line 966} [^{:val 604800000000000 :doc "ticketKeyLifetime is how long a ticket key remains valid and can be used to\nresume a client connection.\n"} ticketKeyLifetime (* 7 24 time/Hour)] ; 7 days
+
+
+
+  ^{:line 970} [^{:val 86400000000000 :doc "ticketKeyRotation is how often the server should rotate the session ticket key\nthat is used for new tickets.\n"} ticketKeyRotation (* 24 time/Hour)])
+
+
+
+(go/type ticketKey "ticketKey is the internal representation of a session ticket key.\n" (struct
+    ^{:line 975 :tag (array 16 byte)} aesKey
+    ^{:line 976 :tag (array 16 byte)} hmacKey
+
+    ^{:line 978 :tag time/Time :doc "created is the time at which this ticket key was created. See Config.ticketKeys.\n"} created))
+
+
+
+
+
+^{:go/end 994} (go/method ticketKeyFromBytes "ticketKeyFromBytes converts from the external representation of a session\nticket key to a ticketKey. Externally, session ticket keys are 32 random\nbytes and this function expands that into sufficient name and key material.\n" [^{:tag (* Config)} c ^{:tag (array 32 byte)} b] :results [^ticketKey key]
+  (let [hashed (sha512/Sum512 (subslice b))
+      ;; The first 16 bytes of the hash used to be exposed on the wire as a ticket
+      ;; prefix. They MUST NOT be used as a secret. In the future, it would make
+      ;; sense to use a proper KDF here, like HKDF with a fixed salt.
+      ^:const ^{:line 989 :val 16} legacyTicketKeyNameLen 16]
+    (copy (subslice (.-aesKey key)) (subslice hashed legacyTicketKeyNameLen))
+    (copy (subslice (.-hmacKey key)) (subslice hashed (+ legacyTicketKeyNameLen (len (.-aesKey key)))))
+    (set! (.-created key) (.time c))
+    ^{:line 993} key))
+
+
+
+
+(go/const ^{:val 604800000000000 :doc "maxSessionTicketLifetime is the maximum allowed lifetime of a TLS 1.3 session\nticket, and the lifetime we set for all tickets we send.\n"} maxSessionTicketLifetime (* 7 24 time/Hour))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1051} (go/method Clone "Clone returns a shallow clone of c or nil if c is nil. It is safe to clone a\n[Config] that is being used concurrently by a TLS client or server.\n\nThe returned Config can share session ticket keys with the original Config,\nwhich means connections could be resumed across the two Configs. WARNING:\n[Config.VerifyPeerCertificate] does not get called on resumed connections,\nincluding connections that were originally established on the parent Config.\nIf that is not intended, use [Config.VerifyConnection] instead, or set\n[Config.SessionTicketsDisabled].\n" ^{:tag (* Config)} [^{:tag (* Config)} c]
+  (when (== c nil)
+    (return nil))
+
+  (.RLock (.-mutex c))
+  (defer (.RUnlock (.-mutex c)))
+  (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36 38 40 42 44 46 48 50 52 54 56 58 60 62 64 66 68]} (lit Config
+      :Rand (.-Rand c)
+      :Time (.-Time c)
+      :Certificates (.-Certificates c)
+      :NameToCertificate (.-NameToCertificate c)
+      :GetCertificate (.-GetCertificate c)
+      :GetClientCertificate (.-GetClientCertificate c)
+      :GetConfigForClient (.-GetConfigForClient c)
+      :GetEncryptedClientHelloKeys (.-GetEncryptedClientHelloKeys c)
+      :VerifyPeerCertificate (.-VerifyPeerCertificate c)
+      :VerifyConnection (.-VerifyConnection c)
+      :RootCAs (.-RootCAs c)
+      :NextProtos (.-NextProtos c)
+      :ServerName (.-ServerName c)
+      :ClientAuth (.-ClientAuth c)
+      :ClientCAs (.-ClientCAs c)
+      :InsecureSkipVerify (.-InsecureSkipVerify c)
+      :CipherSuites (.-CipherSuites c)
+      :PreferServerCipherSuites (.-PreferServerCipherSuites c)
+      :SessionTicketsDisabled (.-SessionTicketsDisabled c)
+      :SessionTicketKey (.-SessionTicketKey c)
+      :ClientSessionCache (.-ClientSessionCache c)
+      :UnwrapSession (.-UnwrapSession c)
+      :WrapSession (.-WrapSession c)
+      :MinVersion (.-MinVersion c)
+      :MaxVersion (.-MaxVersion c)
+      :CurvePreferences (.-CurvePreferences c)
+      :DynamicRecordSizingDisabled (.-DynamicRecordSizingDisabled c)
+      :Renegotiation (.-Renegotiation c)
+      :KeyLogWriter (.-KeyLogWriter c)
+      :EncryptedClientHelloConfigList (.-EncryptedClientHelloConfigList c)
+      :EncryptedClientHelloRejectionVerify (.-EncryptedClientHelloRejectionVerify c)
+      :EncryptedClientHelloKeys (.-EncryptedClientHelloKeys c)
+      :sessionTicketKeys (.-sessionTicketKeys c)
+      :autoSessionTicketKeys (.-autoSessionTicketKeys c))))
+
+
+
+
+
+(go/var ^{:doc "deprecatedSessionTicketKey is set as the prefix of SessionTicketKey if it was\nrandomized for backwards compatibility but is not in use.\n"} deprecatedSessionTicketKey (conv (slice byte) "DEPRECATED"))
+
+
+
+^{:go/end 1084} (go/method initLegacySessionTicketKeyRLocked "initLegacySessionTicketKeyRLocked ensures the legacy SessionTicketKey field is\nrandomized if empty, and that sessionTicketKeys is populated from it otherwise.\n" [^{:tag (* Config)} c]
+  ;; Don't write if SessionTicketKey is already defined as our deprecated string,
+  ;; or if it is defined by the user but sessionTicketKeys is already set.
+  (when (and (!= (.-SessionTicketKey c) (lit (array 32 byte)))
+      ^:go/paren (or (bytes/HasPrefix (subslice (.-SessionTicketKey c)) deprecatedSessionTicketKey) (> (len (.-sessionTicketKeys c)) 0)))
+    (return))
+
+
+  ;; We need to write some data, so get an exclusive lock and re-check any conditions.
+  (.RUnlock (.-mutex c))
+  (defer (.RLock (.-mutex c)))
+  (.Lock (.-mutex c))
+  (defer (.Unlock (.-mutex c)))
+  (cond (== (.-SessionTicketKey c) (lit (array 32 byte))) (do
+      (when [(values _ err) (io/ReadFull (.rand c) (subslice (.-SessionTicketKey c)))] (!= err nil)
+        (panic (fmt/Sprintf "tls: unable to generate random session ticket key: %v" err)))
+
+      ;; Write the deprecated prefix at the beginning so we know we created
+      ;; it. This key with the DEPRECATED prefix isn't used as an actual
+      ;; session ticket key, and is only randomized in case the application
+      ;; reuses it for some reason.
+      (copy (subslice (.-SessionTicketKey c)) deprecatedSessionTicketKey))
+    (and (not (bytes/HasPrefix (subslice (.-SessionTicketKey c)) deprecatedSessionTicketKey)) (== (len (.-sessionTicketKeys c)) 0))
+    (set! (.-sessionTicketKeys c) (lit (slice ticketKey) (.ticketKeyFromBytes c (.-SessionTicketKey c))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1149} (go/method ticketKeys "ticketKeys returns the ticketKeys for this connection.\nIf configForClient has explicitly set keys, those will\nbe returned. Otherwise, the keys on c will be used and\nmay be rotated if auto-managed.\nDuring rotation, any expired session ticket keys are deleted from\nc.sessionTicketKeys. If the session ticket key that is currently\nencrypting tickets (ie. the first ticketKey in c.sessionTicketKeys)\nis not fresh, then a new session ticket key will be\ncreated and prepended to c.sessionTicketKeys.\n" ^{:tag (slice ticketKey)} [^{:tag (* Config)} c ^{:tag (* Config)} configForClient]
+  ;; If the ConfigForClient callback returned a Config with explicitly set
+  ;; keys, use those, otherwise just use the original Config.
+  (when (!= configForClient nil)
+    (.RLock (.-mutex configForClient))
+    (when (.-SessionTicketsDisabled configForClient)
+      (.RUnlock (.-mutex configForClient))
+      (return nil))
+
+    (.initLegacySessionTicketKeyRLocked configForClient)
+    (when (!= (len (.-sessionTicketKeys configForClient)) 0)
+      (let [ret (.-sessionTicketKeys configForClient)]
+        (.RUnlock (.-mutex configForClient))
+        (return ret)))
+
+    (.RUnlock (.-mutex configForClient)))
+
+
+  (.RLock (.-mutex c))
+  (defer (.RUnlock (.-mutex c)))
+  (when (.-SessionTicketsDisabled c)
+    (return nil))
+
+  (.initLegacySessionTicketKeyRLocked c)
+  (when (!= (len (.-sessionTicketKeys c)) 0)
+    (return (.-sessionTicketKeys c)))
+
+  ;; Fast path for the common case where the key is fresh enough.
+  (when (and (> (len (.-autoSessionTicketKeys c)) 0) (< (.Sub (.time c) (.-created (aget (.-autoSessionTicketKeys c) 0))) ticketKeyRotation))
+    (return (.-autoSessionTicketKeys c)))
+
+
+  ;; autoSessionTicketKeys are managed by auto-rotation.
+  (.RUnlock (.-mutex c))
+  (defer (.RLock (.-mutex c)))
+  (.Lock (.-mutex c))
+  (defer (.Unlock (.-mutex c)))
+  ;; Re-check the condition in case it changed since obtaining the new lock.
+  (when (or (== (len (.-autoSessionTicketKeys c)) 0) (>= (.Sub (.time c) (.-created (aget (.-autoSessionTicketKeys c) 0))) ticketKeyRotation))
+    (let [^{:tag (array 32 byte)} newKey (zero (array 32 byte))]
+      (when [(values _ err) (io/ReadFull (.rand c) (subslice newKey))] (!= err nil)
+        (panic (fmt/Sprintf "unable to generate random session ticket key: %v" err)))
+
+      (let [valid (make (slice ticketKey) 0 (+ (len (.-autoSessionTicketKeys c)) 1))]
+        (set! valid (append valid (.ticketKeyFromBytes c newKey)))
+        (range [_ k (.-autoSessionTicketKeys c)]
+          ;; While rotating the current key, also remove any expired ones.
+          (when (< (.Sub (.time c) (.-created k)) ticketKeyLifetime)
+            (set! valid (append valid k))))
+
+
+        (set! (.-autoSessionTicketKeys c) valid))))
+
+  (.-autoSessionTicketKeys c))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1177} (go/method SetSessionTicketKeys "SetSessionTicketKeys updates the session ticket keys for a server.\n\nThe first key will be used when creating new tickets, while all keys can be\nused for decrypting tickets. It is safe to call this function while the\nserver is running in order to rotate the session ticket keys. The function\nwill panic if keys is empty.\n\nCalling this function will turn off automatic session ticket key rotation.\n\nIf multiple servers are terminating connections for the same host they should\nall have the same session ticket keys. If the session ticket keys leaks,\npreviously recorded and future TLS connections using those keys might be\ncompromised.\n" [^{:tag (* Config)} c ^{:tag (slice (array 32 byte))} keys]
+  (when (== (len keys) 0)
+    (panic "tls: keys must have at least one key"))
+
+
+  (let [newKeys (make (slice ticketKey) (len keys))]
+    (range [i bytes keys]
+      (aset newKeys i (.ticketKeyFromBytes c bytes)))
+
+
+    (.Lock (.-mutex c))
+    (set! (.-sessionTicketKeys c) newKeys)
+    (.Unlock (.-mutex c))))
+
+
+^{:go/end 1185} (go/method rand ^io/Reader [^{:tag (* Config)} c]
+  (let [r (.-Rand c)]
+    (when (== r nil)
+      (return rand/Reader))
+
+    ^{:line 1184} r))
+
+
+^{:go/end 1193} (go/method time ^time/Time [^{:tag (* Config)} c]
+  (let [t (.-Time c)]
+    (when (== t nil)
+      (set! t time/Now))
+
+    (t)))
+
+
+^{:go/end 1211} (go/method cipherSuites ^{:tag (slice uint16)} [^{:tag (* Config)} c ^bool aesGCMPreferred]
+  (let [^{:tag (slice uint16)} cipherSuites (zero (slice uint16))]
+    (if (== (.-CipherSuites c) nil)
+      (set! cipherSuites (defaultCipherSuites aesGCMPreferred))
+      (do
+        (set! cipherSuites (supportedCipherSuites aesGCMPreferred))
+        (set! cipherSuites (^{:inst [(slice uint16) uint16]} slices/DeleteFunc cipherSuites ^{:go/end 1203} (fn ^bool [^uint16 id]
+              (not (^{:inst [(slice uint16) uint16]} slices/Contains (.-CipherSuites c) id)))))))
+
+
+    (when (fips140tls/Required)
+      (set! cipherSuites (^{:inst [(slice uint16) uint16]} slices/DeleteFunc cipherSuites ^{:go/end 1208} (fn ^bool [^uint16 id]
+            (not (^{:inst [(slice uint16) uint16]} slices/Contains allowedCipherSuitesFIPS id))))))
+
+
+    ^{:line 1210} cipherSuites))
+
+
+
+
+^{:go/end 1217} (go/method supportedCipherSuites "supportedCipherSuites returns the supported TLS 1.0–1.2 cipher suites in an\nundefined order. For preference ordering, use [Config.cipherSuites].\n" ^{:tag (slice uint16)} [^{:tag (* Config)} c]
+  (.cipherSuites c false))
+
+
+(go/var supportedVersions (lit (slice uint16)
+    ^{:line 1220} VersionTLS13
+    ^{:line 1221} VersionTLS12
+    ^{:line 1222} VersionTLS11
+    ^{:line 1223} VersionTLS10))
+
+
+
+
+(go/const ^{:val true :doc "roleClient and roleServer are meant to call supportedVersions and parents\nwith more readability at the callsite.\n"} roleClient true)
+(go/const ^{:val false} roleServer false)
+
+
+
+^{:go/end 1257} (go/method supportedVersions "supportedVersions returns the list of supported TLS versions, sorted from\nhighest to lowest (and hence also in preference order).\n" ^{:tag (slice uint16)} [^{:tag (* Config)} c ^bool isClient ^bool isQUIC]
+  (let [versions (make (slice uint16) 0 (len supportedVersions))]
+    (range [_ v supportedVersions]
+      (when (and (fips140tls/Required) (not (^{:inst [(slice uint16) uint16]} slices/Contains allowedSupportedVersionsFIPS v)))
+        (continue))
+
+      (when (and ^:go/paren (or (== c nil) (== (.-MinVersion c) 0)) (< v VersionTLS12))
+        (continue))
+
+      (when (and isClient (!= (.-EncryptedClientHelloConfigList c) nil) (< v VersionTLS13))
+        (continue))
+
+      (when (and (!= c nil) (!= (.-MinVersion c) 0) (< v (.-MinVersion c)))
+        (continue))
+
+      (when (and (!= c nil) (!= (.-MaxVersion c) 0) (> v (.-MaxVersion c)))
+        (continue))
+
+      (when (and isQUIC (< v VersionTLS13))
+        (continue))
+
+      (set! versions (append versions v)))
+
+    ^{:line 1256} versions))
+
+
+^{:go/end 1265} (go/method maxSupportedVersion ^uint16 [^{:tag (* Config)} c ^bool isClient ^bool isQUIC]
+  (let [supportedVersions (.supportedVersions c isClient isQUIC)]
+    (when (== (len supportedVersions) 0)
+      (return 0))
+
+    (aget supportedVersions 0)))
+
+
+
+
+
+^{:go/end 1279} (go/func supportedVersionsFromMax "supportedVersionsFromMax returns a list of supported versions derived from a\nlegacy maximum version value. Note that only versions supported by this\nlibrary are returned. Any newer peer will use supportedVersions anyway.\n" ^{:tag (slice uint16)} [^uint16 maxVersion]
+  (let [versions (make (slice uint16) 0 (len supportedVersions))]
+    (range [_ v supportedVersions]
+      (when (> v maxVersion)
+        (continue))
+
+      (set! versions (append versions v)))
+
+    ^{:line 1278} versions))
+
+
+^{:go/end 1285} (go/method curvePreferences ^{:tag (slice CurveID)} [^{:tag (* Config)} c ^uint16 version]
+  (^{:inst [(slice CurveID) CurveID]} slices/DeleteFunc (curvePreferenceOrder) ^{:go/end 1284} (fn ^bool [^CurveID x]
+      (not (.supportsCurve c version x)))))
+
+
+
+^{:go/breaks [[6 1307]] :go/end 1308} (go/method supportsCurve ^bool [^{:tag (* Config)} c ^uint16 version ^CurveID x]
+  (if (and (!= c nil) (!= (len (.-CurvePreferences c)) 0)) (do
+      (when (not (^{:inst [(slice CurveID) CurveID]} slices/Contains (.-CurvePreferences c) x))
+        (return false))
+
+      ;; Ignore unimplemented entries in c.CurvePreferences.
+      (when (not (^{:inst [(slice CurveID) CurveID]} slices/Contains (curvePreferenceOrder) x))
+        (return false)))
+
+    (do
+      (when (not (defaultCurveEnabled x))
+        (return false))))
+
+
+  (when (and (fips140tls/Required) (not (^{:inst [(slice CurveID) CurveID]} slices/Contains allowedCurvePreferencesFIPS x)))
+    (return false))
+
+  (when (and (< version VersionTLS13) (isTLS13OnlyKeyExchange x))
+    (return false))
+
+  true)
+
+
+
+
+^{:go/end 1320} (go/method mutualVersion "mutualVersion returns the protocol version to use given the advertised\nversions of the peer. The highest supported version is preferred.\n" [^{:tag (* Config)} c ^bool isClient ^bool isQUIC ^{:tag (slice uint16)} peerVersions] :results [uint16 bool]
+  (let [supportedVersions (.supportedVersions c isClient isQUIC)]
+    (range [_ v supportedVersions]
+      (when (^{:inst [(slice uint16) uint16]} slices/Contains peerVersions v)
+        (return v true)))
+
+
+    (return 0 false)))
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "errNoCertificates should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/xtls/xray-core\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" :go/linkname "errNoCertificates"} errNoCertificates (errors/New "tls: no certificates configured"))
+
+
+
+^{:go/end 1376} (go/method getCertificate "getCertificate returns the best certificate for the given ClientHelloInfo,\ndefaulting to the first element of c.Certificates.\n" [^{:tag (* Config)} c ^{:tag (* ClientHelloInfo)} clientHello] :results [(* Certificate) error]
+  (when (and (!= (.-GetCertificate c) nil)
+      ^:go/paren (or (== (len (.-Certificates c)) 0) (> (len (.-ServerName clientHello)) 0)))
+    (let [(values cert err) ((.-GetCertificate c) clientHello)]
+      (when (or (!= cert nil) (!= err nil))
+        (return cert err))))
+
+
+
+  (when (== (len (.-Certificates c)) 0)
+    (return nil errNoCertificates))
+
+
+  (when (== (len (.-Certificates c)) 1)
+    ;; There's only one choice, so no point doing any work.
+    (return (addr (aget (.-Certificates c) 0)) nil))
+
+
+  (when (!= (.-NameToCertificate c) nil)
+    (let [name (strings/ToLower (.-ServerName clientHello))]
+      (when [(values cert ok) (aget (.-NameToCertificate c) name)] ok
+        (return cert nil))
+
+      (when (> (len name) 0)
+        (let [labels (strings/Split name ".")]
+          (aset labels 0 "*")
+          (let [wildcardName (strings/Join labels ".")]
+            (when [(values cert ok) (aget (.-NameToCertificate c) wildcardName)] ok
+              (return cert nil)))))))
+
+
+
+
+  (range [_ cert (.-Certificates c)]
+    (when [err (.SupportsCertificate clientHello (addr cert))] (== err nil)
+      (return (addr cert) nil)))
+
+
+
+  ;; If nothing matches, return the first certificate.
+  (return (addr (aget (.-Certificates c) 0)) nil))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1544} (go/method SupportsCertificate "SupportsCertificate returns nil if the provided certificate is supported by\nthe client that sent the ClientHello. Otherwise, it returns an error\ndescribing the reason for the incompatibility.\n\nIf this [ClientHelloInfo] was passed to a GetConfigForClient or GetCertificate\ncallback, this method will take into account the associated [Config]. Note that\nif GetConfigForClient returns a different [Config], the change can't be\naccounted for by this method.\n\nThis function will call x509.ParseCertificate unless c.Leaf is set, which can\nincur a significant performance cost.\n" ^error [^{:tag (* ClientHelloInfo)} chi ^{:tag (* Certificate)} c]
+  ;; Note we don't currently support certificate_authorities nor
+  ;; signature_algorithms_cert, and don't check the algorithms of the
+  ;; signatures on the chain (which anyway are a SHOULD, see RFC 8446,
+  ;; Section 4.4.2.2).
+
+  (let [config (.-config chi)]
+    (when (== config nil)
+      (set! config (addr (lit Config))))
+
+    (let [(values vers ok) (.mutualVersion config roleServer (.-isQUIC chi) (.-SupportedVersions chi))]
+      (when (not ok)
+        (return (errors/New "no mutually supported protocol versions")))
+
+
+      ;; If the client specified the name they are trying to connect to, the
+      ;; certificate needs to be valid for it.
+      (when (!= (.-ServerName chi) "")
+        (let [(values x509Cert err) (.leaf c)]
+          (when (!= err nil)
+            (return (fmt/Errorf "failed to parse certificate: %w" err)))
+
+          (when [err (.VerifyHostname x509Cert (.-ServerName chi))] (!= err nil)
+            (return (fmt/Errorf "certificate is not valid for requested server name: %w" err)))))
+
+
+
+      ;; supportsRSAFallback returns nil if the certificate and connection support
+      ;; the static RSA key exchange, and unsupported otherwise. The logic for
+      ;; supporting static RSA is completely disjoint from the logic for
+      ;; supporting signed key exchanges, so we just check it as a fallback.
+      (let [supportsRSAFallback ^{:go/end 1450} (fn ^error [^error unsupported]
+            ;; TLS 1.3 dropped support for the static RSA key exchange.
+            (when (== vers VersionTLS13)
+              (return unsupported))
+
+            ;; The static RSA key exchange works by decrypting a challenge with the
+            ;; RSA private key, not by signing, so check the PrivateKey implements
+            ;; crypto.Decrypter, like *rsa.PrivateKey does.
+            (if [(values priv ok) (assert crypto/Decrypter (.-PrivateKey c))] ok
+              (when [(values _ ok) (assert (* rsa/PublicKey) (.Public priv))] (not ok)
+                (return unsupported))
+
+
+              (return unsupported))
+
+            ;; Finally, there needs to be a mutual cipher suite that uses the static
+            ;; RSA key exchange instead of ECDHE.
+            ^{:go/breaks [[3 1449]]} (let [rsaCipherSuite (selectCipherSuite (.-CipherSuites chi) (.supportedCipherSuites config) ^{:go/breaks [[4 1444]] :go/end 1445} (fn ^bool [^{:tag (* cipherSuite)} c]
+                    (when (!= (bit-and (.-flags c) suiteECDHE) 0)
+                      (return false))
+
+                    (when (and (< vers VersionTLS12) (!= (bit-and (.-flags c) suiteTLS12) 0))
+                      (return false))
+
+                    true))]
+
+              (when (== rsaCipherSuite nil)
+                (return unsupported))
+
+              nil))]
+
+
+        ;; If the client sent the signature_algorithms extension, ensure it supports
+        ;; schemes we can use with this certificate and TLS version.
+        (when (> (len (.-SignatureSchemes chi)) 0)
+          (when [(values _ err) (selectSignatureScheme vers c (.-SignatureSchemes chi))] (!= err nil)
+            (return (supportsRSAFallback err))))
+
+
+
+        ;; In TLS 1.3 we are done because supported_groups is only relevant to the
+        ;; ECDHE computation, point format negotiation is removed, cipher suites are
+        ;; only relevant to the AEAD choice, and static RSA does not exist.
+        (when (== vers VersionTLS13)
+          (return nil))
+
+
+        ;; The only signed key exchange we support is ECDHE.
+        (let [(values ecdheSupported err) (supportsECDHE config vers (.-SupportedCurves chi) (.-SupportedPoints chi))]
+          (when (!= err nil)
+            (return err))
+
+          (when (not ecdheSupported)
+            (return (supportsRSAFallback (errors/New "client doesn't support ECDHE, can only use legacy RSA key exchange"))))
+
+
+          (let [^bool ecdsaCipherSuite (zero bool)]
+            (if [(values priv ok) (assert crypto/Signer (.-PrivateKey c))] ok
+              (type-switch [pub (.Public priv)]
+                (case [(* ecdsa/PublicKey)]
+                  (let [^CurveID curve (zero CurveID)]
+                    (switch (.-Curve pub)
+                      (case [(elliptic/P256)]
+                        (set! curve CurveP256))
+                      (case [(elliptic/P384)]
+                        (set! curve CurveP384))
+                      (case [(elliptic/P521)]
+                        (set! curve CurveP521))
+                      (default
+                        (return (supportsRSAFallback (unsupportedCertificateError c)))))
+
+                    (let [^bool curveOk (zero bool)]
+                      (range [_ c (.-SupportedCurves chi)]
+                        (when (and (== c curve) (.supportsCurve config vers c))
+                          (set! curveOk true)
+                          (break)))
+
+
+                      (when (not curveOk)
+                        (return (errors/New "client doesn't support certificate curve")))
+
+                      (set! ecdsaCipherSuite true))))
+                (case [ed25519/PublicKey]
+                  (when (or (< vers VersionTLS12) (== (len (.-SignatureSchemes chi)) 0))
+                    (return (errors/New "connection doesn't support Ed25519")))
+
+                  (set! ecdsaCipherSuite true))
+                (case [(* mldsa/PublicKey)]
+                  ;; ML-DSA requires TLS 1.3, which we already excluded above.
+                  (return (errors/New "connection doesn't support ML-DSA")))
+                (case [(* rsa/PublicKey)])
+                (default
+                  (return (supportsRSAFallback (unsupportedCertificateError c)))))
+
+
+              (return (supportsRSAFallback (unsupportedCertificateError c))))
+
+
+            ;; Make sure that there is a mutually supported cipher suite that works with
+            ;; this certificate. Cipher suite selection will then apply the logic in
+            ;; reverse to pick it. See also serverHandshakeState.cipherSuiteOk.
+            ^{:go/breaks [[3 1543]]} (let [cipherSuite (selectCipherSuite (.-CipherSuites chi) (.supportedCipherSuites config) ^{:go/breaks [[5 1537]] :go/end 1538} (fn ^bool [^{:tag (* cipherSuite)} c]
+                    (when (== (bit-and (.-flags c) suiteECDHE) 0)
+                      (return false))
+
+                    (if (!= (bit-and (.-flags c) suiteECSign) 0)
+                      (when (not ecdsaCipherSuite)
+                        (return false))
+
+                      (do
+                        (when ecdsaCipherSuite
+                          (return false))))
+
+
+                    (when (and (< vers VersionTLS12) (!= (bit-and (.-flags c) suiteTLS12) 0))
+                      (return false))
+
+                    true))]
+
+              (when (== cipherSuite nil)
+                (return (supportsRSAFallback (errors/New "client doesn't support any cipher suites compatible with the certificate"))))
+
+
+              nil)))))))
+
+
+
+
+
+^{:go/end 1576} (go/method SupportsCertificate "SupportsCertificate returns nil if the provided certificate is supported by\nthe server that sent the CertificateRequest. Otherwise, it returns an error\ndescribing the reason for the incompatibility.\n" ^error [^{:tag (* CertificateRequestInfo)} cri ^{:tag (* Certificate)} c]
+  (when [(values _ err) (selectSignatureScheme (.-Version cri) c (.-SignatureSchemes cri))] (!= err nil)
+    (return err))
+
+
+  (when (== (len (.-AcceptableCAs cri)) 0)
+    (return nil))
+
+
+  (range [j cert (.-Certificate c)]
+    (let [x509Cert (.-Leaf c)]
+      ;; Parse the certificate if this isn't the leaf node, or if
+      ;; chain.Leaf was nil.
+      (when (or (!= j 0) (== x509Cert nil))
+        (let [^error err (zero error)]
+          (when [(set! (values x509Cert err) (x509/ParseCertificate cert))] (!= err nil)
+            (return (fmt/Errorf "failed to parse certificate #%d in the chain: %w" j err)))))
+
+
+
+      (range [_ ca (.-AcceptableCAs cri)]
+        (when (bytes/Equal (.-RawIssuer x509Cert) ca)
+          (return nil)))))
+
+
+
+  (errors/New "chain is not signed by an acceptable CA"))
+
+
+
+
+
+
+
+
+
+^{:go/end 1602} (go/method BuildNameToCertificate "BuildNameToCertificate parses c.Certificates and builds c.NameToCertificate\nfrom the CommonName and SubjectAlternateName fields of each of the leaf\ncertificates.\n\nDeprecated: NameToCertificate only allows associating a single certificate\nwith a given name. Leave that field nil to let the library select the first\ncompatible chain from Certificates.\n" [^{:tag (* Config)} c]
+  (set! (.-NameToCertificate c) (make (map string (* Certificate))))
+  (range [i (.-Certificates c)]
+    (let [cert (addr (aget (.-Certificates c) i))
+        (values x509Cert err) (.leaf cert)]
+      (when (!= err nil)
+        (continue))
+
+      ;; If SANs are *not* present, some clients will consider the certificate
+      ;; valid for the name in the Common Name.
+      (when (and (!= (.-CommonName (.-Subject x509Cert)) "") (== (len (.-DNSNames x509Cert)) 0))
+        (aset (.-NameToCertificate c) (.-CommonName (.-Subject x509Cert)) cert))
+
+      (range [_ san (.-DNSNames x509Cert)]
+        (aset (.-NameToCertificate c) san cert)))))
+
+
+
+
+(go/const
+  ^{:line 1605} [^{:val "CLIENT_RANDOM"} keyLogLabelTLS12 "CLIENT_RANDOM"]
+  ^{:line 1606} [^{:val "CLIENT_HANDSHAKE_TRAFFIC_SECRET"} keyLogLabelClientHandshake "CLIENT_HANDSHAKE_TRAFFIC_SECRET"]
+  ^{:line 1607} [^{:val "SERVER_HANDSHAKE_TRAFFIC_SECRET"} keyLogLabelServerHandshake "SERVER_HANDSHAKE_TRAFFIC_SECRET"]
+  ^{:line 1608} [^{:val "CLIENT_TRAFFIC_SECRET_0"} keyLogLabelClientTraffic "CLIENT_TRAFFIC_SECRET_0"]
+  ^{:line 1609} [^{:val "SERVER_TRAFFIC_SECRET_0"} keyLogLabelServerTraffic "SERVER_TRAFFIC_SECRET_0"])
+
+
+^{:go/end 1627} (go/method writeKeyLog ^error [^{:tag (* Config)} c ^string label ^{:tag (slice byte)} clientRandom ^{:tag (slice byte)} secret]
+  (when (== (.-KeyLogWriter c) nil)
+    (return nil))
+
+
+  (let [logLine (fmt/Appendf nil "%s %x %x\n" label clientRandom secret)]
+
+    (.Lock writerMutex)
+    ^{:go/breaks [[4 1626]]} (let [(values _ err) (.Write (.-KeyLogWriter c) logLine)]
+      (.Unlock writerMutex)
+
+      (when (!= err nil)
+        (return (fmt/Errorf "tls: KeyLogWriter: %w" err)))
+
+      nil)))
+
+
+
+
+(go/var ^{:tag sync/Mutex :doc "writerMutex protects all KeyLogWriters globally. It is rarely enabled,\nand is only for debugging, so a global mutex saves space.\n"} writerMutex)
+
+
+(go/type Certificate "A Certificate is a chain of one or more certificates, leaf first.\n" (struct
+    ^{:line 1635 :tag (slice (slice byte))} Certificate
+
+
+
+
+
+
+
+
+
+    ^{:line 1645 :tag crypto/PrivateKey :doc "PrivateKey contains the private key corresponding to the public key in\nLeaf. This must implement [crypto.Signer] with an RSA, ECDSA, Ed25519\n(TLS 1.2+), or ML-DSA (TLS 1.3) PublicKey.\n\nFor a server up to TLS 1.2, it can also implement crypto.Decrypter with\nan RSA PublicKey.\n\nIf it implements [crypto.MessageSigner], SignMessage will be used instead\nof Sign for TLS 1.2 and later.\n"} PrivateKey
+
+
+    ^{:line 1648 :tag (slice SignatureScheme) :doc "SupportedSignatureAlgorithms is an optional list restricting what\nsignature algorithms the PrivateKey can be used for.\n"} SupportedSignatureAlgorithms
+
+
+    ^{:line 1651 :tag (slice byte) :doc "OCSPStaple contains an optional OCSP response which will be served\nto clients that request it.\n"} OCSPStaple
+
+
+    ^{:line 1654 :tag (slice (slice byte)) :doc "SignedCertificateTimestamps contains an optional list of Signed\nCertificate Timestamps which will be served to clients that request it.\n"} SignedCertificateTimestamps
+
+
+
+    ^{:line 1658 :tag (* x509/Certificate) :doc "Leaf is the parsed form of the leaf certificate, which may be initialized\nusing x509.ParseCertificate to reduce per-handshake processing. If nil,\nthe leaf certificate will be parsed as needed.\n"} Leaf))
+
+
+
+
+^{:go/end 1668} (go/method leaf "leaf returns the parsed leaf certificate, either from c.Leaf or by parsing\nthe corresponding c.Certificate[0].\n" [^{:tag (* Certificate)} c] :results [(* x509/Certificate) error]
+  (when (!= (.-Leaf c) nil)
+    (return (.-Leaf c) nil))
+
+  (x509/ParseCertificate (aget (.-Certificate c) 0)))
+
+
+(go/type handshakeMessage (interface
+    (marshal [] :results [(slice byte) error])
+    (unmarshal ^bool [(slice byte)])))
+
+
+(go/type handshakeMessageWithOriginalBytes (interface
+    ^{:line 1676} handshakeMessage
+
+
+
+
+    (^{:doc "originalBytes should return the original bytes that were passed to\nunmarshal to create the message. If the message was not produced by\nunmarshal, it should return nil.\n"} originalBytes ^{:tag (slice byte)} [])))
+
+
+
+
+(go/type lruSessionCache "lruSessionCache is a ClientSessionCache implementation that uses an LRU\ncaching strategy.\n" (struct
+    ^{:line 1687} sync/Mutex
+
+    ^{:line 1689 :tag (map string (* list/Element))} m
+    ^{:line 1690 :tag (* list/List)} q
+    ^{:line 1691 :tag int} capacity))
+
+
+(go/type lruSessionCacheEntry (struct
+    ^{:line 1695 :tag string} sessionKey
+    ^{:line 1696 :tag (* ClientSessionState)} state))
+
+
+
+
+
+^{:go/end 1713} (go/func NewLRUClientSessionCache "NewLRUClientSessionCache returns a [ClientSessionCache] with the given\ncapacity that uses an LRU strategy. If capacity is < 1, a default capacity\nis used instead.\n" ^ClientSessionCache [^int capacity]
+  (let [^:const ^{:val 64} defaultSessionCacheCapacity 64]
+
+    (when (< capacity 1)
+      (set! capacity defaultSessionCacheCapacity))
+
+    (addr ^{:go/breaks [2 4 6]} (lit lruSessionCache
+        :m (make (map string (* list/Element)))
+        :q (list/New)
+        :capacity capacity))))
+
+
+
+
+
+^{:go/end 1746} (go/method Put "Put adds the provided (sessionKey, cs) pair to the cache. If cs is nil, the entry\ncorresponding to sessionKey is removed from the cache instead.\n" [^{:tag (* lruSessionCache)} c ^string sessionKey ^{:tag (* ClientSessionState)} cs]
+  ^{:go/via [Mutex]} (.Lock c)
+  (defer ^{:go/via [Mutex]} (.Unlock c))
+
+  (when [(values elem ok) (aget (.-m c) sessionKey)] ok
+    (if (== cs nil) (do
+        (.Remove (.-q c) elem)
+        (delete (.-m c) sessionKey))
+
+      (let [entry (assert (* lruSessionCacheEntry) (.-Value elem))]
+        (set! (.-state entry) cs)
+        (.MoveToFront (.-q c) elem)))
+
+    (return))
+
+
+  (when (< (.Len (.-q c)) (.-capacity c))
+    (let [entry (addr (lit lruSessionCacheEntry sessionKey cs))]
+      (aset (.-m c) sessionKey (.PushFront (.-q c) entry))
+      (return)))
+
+
+  (let [elem (.Back (.-q c))
+      ^{:line 1740} entry (assert (* lruSessionCacheEntry) (.-Value elem))]
+    (delete (.-m c) (.-sessionKey entry))
+    (set! (.-sessionKey entry) sessionKey)
+    (set! (.-state entry) cs)
+    (.MoveToFront (.-q c) elem)
+    (aset (.-m c) sessionKey elem)))
+
+
+
+
+^{:go/end 1759} (go/method Get "Get returns the [ClientSessionState] value associated with a given key. It\nreturns (nil, false) if no value is found.\n" [^{:tag (* lruSessionCache)} c ^string sessionKey] :results [(* ClientSessionState) bool]
+  ^{:go/via [Mutex]} (.Lock c)
+  (defer ^{:go/via [Mutex]} (.Unlock c))
+
+  (when [(values elem ok) (aget (.-m c) sessionKey)] ok
+    (.MoveToFront (.-q c) elem)
+    (return (.-state (assert (* lruSessionCacheEntry) (.-Value elem))) true))
+
+  (return nil false))
+
+
+(go/var ^Config emptyConfig)
+
+^{:go/end 1765} (go/func defaultConfig ^{:tag (* Config)} []
+  (addr emptyConfig))
+
+
+^{:go/end 1769} (go/func unexpectedMessageError ^error [^any wanted ^any got]
+  (fmt/Errorf "tls: received unexpected handshake message of type %T when waiting for %T" got wanted))
+
+
+(go/var ^{:tag (slice SignatureScheme)} testingOnlySupportedSignatureAlgorithms)
+
+
+
+
+
+^{:go/end 1790} (go/func supportedSignatureAlgorithms "supportedSignatureAlgorithms returns the supported signature algorithms for\nthe given range of TLS versions, to advertise in ClientHello and\nCertificateRequest messages. An algorithm is included if it is enabled at any\nversion in the range.\n" ^{:tag (slice SignatureScheme)} [^uint16 minVers ^uint16 maxVers]
+  (let [sigAlgs (defaultSupportedSignatureAlgorithms)]
+    (when (!= testingOnlySupportedSignatureAlgorithms nil)
+      (set! sigAlgs (^{:inst [(slice SignatureScheme) SignatureScheme]} slices/Clone testingOnlySupportedSignatureAlgorithms)))
+
+    (^{:inst [(slice SignatureScheme) SignatureScheme]} slices/DeleteFunc sigAlgs ^{:go/breaks [[3 1788]] :go/end 1789} (fn ^bool [^SignatureScheme s]
+        (for [v minVers] (<= v maxVers) (inc! v)
+          (when (not (isDisabledSignatureAlgorithm v s false))
+            (return false)))
+
+
+        true))))
+
+
+
+(go/var tlssha1 (godebug/New "tlssha1"))
+
+^{:go/breaks [[7 1835]] :go/end 1836} (go/func isDisabledSignatureAlgorithm ^bool [^uint16 version ^SignatureScheme s ^bool isCert]
+  (when (and (fips140tls/Required) (not (^{:inst [(slice SignatureScheme) SignatureScheme]} slices/Contains allowedSignatureAlgorithmsFIPS s)))
+    (return true))
+
+
+  (switch s
+    (case [MLDSA44 MLDSA65 MLDSA87]
+      ;; ML-DSA is not available in FIPS 140-3 module v1.0.0.
+      (when (== (fips140/Version) "v1.0.0")
+        (return true))
+
+      ;; ML-DSA codepoints are only defined for TLS 1.3.
+      (when (< version VersionTLS13)
+        (return true))))
+
+
+
+  ;; For the _cert extension we include all algorithms, including SHA-1 and
+  ;; PKCS#1 v1.5, because it's more likely that something on our side will be
+  ;; willing to accept a *-with-SHA1 certificate (e.g. with a custom
+  ;; VerifyConnection or by a direct match with the CertPool), than that the
+  ;; peer would have a better certificate but is just choosing not to send it.
+  ;; crypto/x509 will refuse to verify important SHA-1 signatures anyway.
+  (when isCert
+    (return false))
+
+
+  ;; TLS 1.3 removed support for PKCS#1 v1.5 and SHA-1 signatures,
+  ;; and Go 1.25 removed support for SHA-1 signatures in TLS 1.2.
+  (cond (> version VersionTLS12)
+    (let [(values sigType sigHash _) (typeAndHashFromSignatureScheme s)]
+      (when (or (== sigType signaturePKCS1v15) (== sigHash crypto/SHA1))
+        (return true)))
+
+    (!= (.Value tlssha1) "1")
+    (let [(values _ sigHash _) (typeAndHashFromSignatureScheme s)]
+      (when (== sigHash crypto/SHA1)
+        (return true))))
+
+
+
+  false)
+
+
+
+
+^{:go/end 1850} (go/func supportedSignatureAlgorithmsCert "supportedSignatureAlgorithmsCert returns the supported algorithms for\nsignatures in certificates.\n" ^{:tag (slice SignatureScheme)} [^uint16 minVers ^uint16 maxVers]
+  (let [sigAlgs (defaultSupportedSignatureAlgorithms)]
+    (^{:inst [(slice SignatureScheme) SignatureScheme]} slices/DeleteFunc sigAlgs ^{:go/breaks [[3 1848]] :go/end 1849} (fn ^bool [^SignatureScheme s]
+        (for [v minVers] (<= v maxVers) (inc! v)
+          (when (not (isDisabledSignatureAlgorithm v s true))
+            (return false)))
+
+
+        true))))
+
+
+
+^{:go/end 1854} (go/func isSupportedSignatureAlgorithm ^bool [^SignatureScheme sigAlg ^{:tag (slice SignatureScheme)} supportedSignatureAlgorithms]
+  (^{:inst [(slice SignatureScheme) SignatureScheme]} slices/Contains supportedSignatureAlgorithms sigAlg))
+
+
+
+(go/type CertificateVerificationError "CertificateVerificationError is returned when certificate verification fails during the handshake.\n" (struct
+
+    ^{:line 1859 :tag (slice (* x509/Certificate)) :doc "UnverifiedCertificates and its contents should not be modified.\n"} UnverifiedCertificates
+    ^{:line 1860 :tag error} Err))
+
+
+^{:go/end 1865} (go/method Error ^string [^{:tag (* CertificateVerificationError)} e]
+  (fmt/Sprintf "tls: failed to verify certificate: %s" (.-Err e)))
+
+
+^{:go/end 1869} (go/method Unwrap ^error [^{:tag (* CertificateVerificationError)} e]
+  (.-Err e))
+
+
+
+
+
+
+
+
+^{:go/end 1894} (go/func fipsAllowedChains "fipsAllowedChains returns chains that are allowed to be used in a TLS connection\nbased on the current fips140tls enforcement setting.\n\nIf fips140tls is not required, the chains are returned as-is with no processing.\nOtherwise, the returned chains are filtered to only those allowed by FIPS 140-3.\nIf this results in no chains it returns an error.\n" [^{:tag (slice (slice (* x509/Certificate)))} chains] :results [(slice (slice (* x509/Certificate))) error]
+  (when (not (fips140tls/Required))
+    (return chains nil))
+
+
+  (let [permittedChains (make (slice (slice (* x509/Certificate))) 0 (len chains))]
+    (range [_ chain chains]
+      (when (fipsAllowChain chain)
+        (set! permittedChains (append permittedChains chain))))
+
+
+
+    (when (== (len permittedChains) 0)
+      (return nil (errors/New "tls: no FIPS compatible certificate chains found")))
+
+
+    (return permittedChains nil)))
+
+
+^{:go/breaks [[5 1907]] :go/end 1908} (go/func fipsAllowChain ^bool [^{:tag (slice (* x509/Certificate))} chain]
+  (when (== (len chain) 0)
+    (return false))
+
+
+  (range [_ cert chain]
+    (when (not (isCertificateAllowedFIPS cert))
+      (return false)))
+
+
+
+  true)
+
+
+
+
+
+
+^{:go/breaks [[5 1947]] :go/end 1948} (go/func anyValidVerifiedChain "anyValidVerifiedChain reports if at least one of the chains in verifiedChains\nis valid, as indicated by none of the certificates being expired and the root\nbeing in opts.Roots (or in the system root pool if opts.Roots is nil). If\nverifiedChains is empty, it returns false.\n" ^bool [^{:tag (slice (slice (* x509/Certificate)))} verifiedChains ^x509/VerifyOptions opts]
+  (range [_ chain verifiedChains]
+    (when (== (len chain) 0)
+      (continue))
+
+    (when (^{:inst [(slice (* x509/Certificate)) (* x509/Certificate)]} slices/ContainsFunc chain ^{:go/end 1921} (fn ^bool [^{:tag (* x509/Certificate)} cert]
+          (or (.Before (.-CurrentTime opts) (.-NotBefore cert)) (.After (.-CurrentTime opts) (.-NotAfter cert)))))
+
+      (continue))
+
+    ;; Since we already validated the chain, we only care that it is rooted
+    ;; in a CA in opts.Roots. On platforms where we control chain validation
+    ;; (e.g. not Windows or macOS) this is a simple lookup in the CertPool
+    ;; internal hash map, which we can simulate by running Verify on the
+    ;; root. On other platforms, we have to do full verification again,
+    ;; because EKU handling might differ. We will want to replace this with
+    ;; CertPool.Contains if/once that is available. See go.dev/issue/77376.
+    (if (or (== runtime/GOOS "windows") (== runtime/GOOS "darwin") (== runtime/GOOS "ios")) (do
+        (set! (.-Intermediates opts) (x509/NewCertPool))
+        (range [_ cert (subslice chain 1 (max 1 (- (len chain) 1)))]
+          (.AddCert (.-Intermediates opts) cert))
+
+        (let [leaf (aget chain 0)]
+          (when [(values _ err) (.Verify leaf opts)] (== err nil)
+            (return true))))
+
+
+      (let [root (aget chain (- (len chain) 1))]
+        (when [(values _ err) (.Verify root opts)] (== err nil)
+          (return true)))))
+
+
+
+  false)

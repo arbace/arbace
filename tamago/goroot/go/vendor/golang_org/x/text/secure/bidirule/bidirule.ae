@@ -1,0 +1,339 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package bidirule implements the Bidi Rule defined by RFC 5893.
+;;
+;; This package is under development. The API may change without notice and
+;; without preserving backward compatibility.
+(in-ns 'go.vendor.golang_org.x.text.secure.bidirule) (go/file "bidirule.go" :doc "Package bidirule implements the Bidi Rule defined by RFC 5893.\n\nThis package is under development. The API may change without notice and\nwithout preserving backward compatibility.\n" :imports [
+
+
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [utf8 "unicode/utf8"]
+
+    ^{:line 15} [transform "golang.org/x/text/transform"]
+    ^{:line 16} [bidi "golang.org/x/text/unicode/bidi"]])
+
+
+;; This file contains an implementation of RFC 5893: Right-to-Left Scripts for
+;; Internationalized Domain Names for Applications (IDNA)
+;;
+;; A label is an individual component of a domain name.  Labels are usually
+;; shown separated by dots; for example, the domain name "www.example.com" is
+;; composed of three labels: "www", "example", and "com".
+;;
+;; An RTL label is a label that contains at least one character of class R, AL,
+;; or AN. An LTR label is any label that is not an RTL label.
+;;
+;; A "Bidi domain name" is a domain name that contains at least one RTL label.
+;;
+;;  The following guarantees can be made based on the above:
+;;
+;;  o  In a domain name consisting of only labels that satisfy the rule,
+;;     the requirements of Section 3 are satisfied.  Note that even LTR
+;;     labels and pure ASCII labels have to be tested.
+;;
+;;  o  In a domain name consisting of only LDH labels (as defined in the
+;;     Definitions document [RFC5890]) and labels that satisfy the rule,
+;;     the requirements of Section 3 are satisfied as long as a label
+;;     that starts with an ASCII digit does not come after a
+;;     right-to-left label.
+;;
+;;  No guarantee is given for other combinations.
+
+
+(go/var ^{:doc "ErrInvalid indicates a label is invalid according to the Bidi Rule.\n"} ErrInvalid (errors/New "bidirule: failed Bidi Rule"))
+
+(go/type ruleState uint8)
+
+(go/const
+  ^{:line 51} [^{:tag ruleState :val 0} ruleInitial iota]
+  ^{:line 52} [^{:val 1} ruleLTR]
+  ^{:line 53} [^{:val 2} ruleLTRFinal]
+  ^{:line 54} [^{:val 3} ruleRTL]
+  ^{:line 55} [^{:val 4} ruleRTLFinal]
+  ^{:line 56} [^{:val 5} ruleInvalid])
+
+
+(go/type ruleTransition (struct
+    ^{:line 60 :tag ruleState} next
+    ^{:line 61 :tag uint16} mask))
+
+
+(go/var transitions (lit (array ... (array 2 ruleTransition))
+    ;; [2.1] The first character must be a character with Bidi property L, R, or
+    ;; AL. If it has the R or AL property, it is an RTL label; if it has the L
+    ;; property, it is an LTR label.
+    ^{:line 68} [ruleInitial (lit _
+        (lit _ ruleLTRFinal (<< 1 bidi/L))
+        (lit _ ruleRTLFinal (bit-or (<< 1 bidi/R) (<< 1 bidi/AL))))]
+
+    ^{:line 72} [ruleRTL (lit _
+        ;; [2.3] In an RTL label, the end of the label must be a character with
+        ;; Bidi property R, AL, EN, or AN, followed by zero or more characters
+        ;; with Bidi property NSM.
+        (lit _ ruleRTLFinal (bit-or (<< 1 bidi/R) (<< 1 bidi/AL) (<< 1 bidi/EN) (<< 1 bidi/AN)))
+
+        ;; [2.2] In an RTL label, only characters with the Bidi properties R,
+        ;; AL, AN, EN, ES, CS, ET, ON, BN, or NSM are allowed.
+        ;; We exclude the entries from [2.3]
+        (lit _ ruleRTL (bit-or (<< 1 bidi/ES) (<< 1 bidi/CS) (<< 1 bidi/ET) (<< 1 bidi/ON) (<< 1 bidi/BN) (<< 1 bidi/NSM))))]
+
+    ^{:line 83} [ruleRTLFinal (lit _
+        ;; [2.3] In an RTL label, the end of the label must be a character with
+        ;; Bidi property R, AL, EN, or AN, followed by zero or more characters
+        ;; with Bidi property NSM.
+        (lit _ ruleRTLFinal (bit-or (<< 1 bidi/R) (<< 1 bidi/AL) (<< 1 bidi/EN) (<< 1 bidi/AN) (<< 1 bidi/NSM)))
+
+        ;; [2.2] In an RTL label, only characters with the Bidi properties R,
+        ;; AL, AN, EN, ES, CS, ET, ON, BN, or NSM are allowed.
+        ;; We exclude the entries from [2.3] and NSM.
+        (lit _ ruleRTL (bit-or (<< 1 bidi/ES) (<< 1 bidi/CS) (<< 1 bidi/ET) (<< 1 bidi/ON) (<< 1 bidi/BN))))]
+
+    ^{:line 94} [ruleLTR (lit _
+        ;; [2.6] In an LTR label, the end of the label must be a character with
+        ;; Bidi property L or EN, followed by zero or more characters with Bidi
+        ;; property NSM.
+        (lit _ ruleLTRFinal (bit-or (<< 1 bidi/L) (<< 1 bidi/EN)))
+
+        ;; [2.5] In an LTR label, only characters with the Bidi properties L,
+        ;; EN, ES, CS, ET, ON, BN, or NSM are allowed.
+        ;; We exclude the entries from [2.6].
+        (lit _ ruleLTR (bit-or (<< 1 bidi/ES) (<< 1 bidi/CS) (<< 1 bidi/ET) (<< 1 bidi/ON) (<< 1 bidi/BN) (<< 1 bidi/NSM))))]
+
+    ^{:line 105} [ruleLTRFinal (lit _
+        ;; [2.6] In an LTR label, the end of the label must be a character with
+        ;; Bidi property L or EN, followed by zero or more characters with Bidi
+        ;; property NSM.
+        (lit _ ruleLTRFinal (bit-or (<< 1 bidi/L) (<< 1 bidi/EN) (<< 1 bidi/NSM)))
+
+        ;; [2.5] In an LTR label, only characters with the Bidi properties L,
+        ;; EN, ES, CS, ET, ON, BN, or NSM are allowed.
+        ;; We exclude the entries from [2.6].
+        (lit _ ruleLTR (bit-or (<< 1 bidi/ES) (<< 1 bidi/CS) (<< 1 bidi/ET) (<< 1 bidi/ON) (<< 1 bidi/BN))))]
+
+    ^{:line 116} [ruleInvalid (lit _
+        (lit _ ruleInvalid 0)
+        (lit _ ruleInvalid 0))]))
+
+
+
+
+
+(go/const ^{:val 36 :doc "[2.4] In an RTL label, if an EN is present, no AN may be present, and\nvice versa.\n"} exclusiveRTL (conv uint16 (bit-or (<< 1 bidi/EN) (<< 1 bidi/AN))))
+
+;; From RFC 5893
+;; An RTL label is a label that contains at least one character of type
+;; R, AL, or AN.
+;;
+;; An LTR label is any label that is not an RTL label.
+
+
+
+
+^{:go/end 148} (go/func Direction "Direction reports the direction of the given label as defined by RFC 5893.\nThe Bidi Rule does not have to be applied to labels of the category\nLeftToRight.\n" ^bidi/Direction [^{:tag (slice byte)} b]
+  (for [i 0] (< i (len b)) _
+    (let [(values e sz) (bidi/Lookup (subslice b i))]
+      (when (== sz 0)
+        (inc! i))
+
+      (let [c (.Class e)]
+        (when (or (== c bidi/R) (== c bidi/AL) (== c bidi/AN))
+          (return bidi/RightToLeft))
+
+        (set! i + sz))))
+
+  ^{:line 147} bidi/LeftToRight)
+
+
+
+
+
+^{:go/end 167} (go/func DirectionString "DirectionString reports the direction of the given label as defined by RFC\n5893. The Bidi Rule does not have to be applied to labels of the category\nLeftToRight.\n" ^bidi/Direction [^string s]
+  (for [i 0] (< i (len s)) _
+    (let [(values e sz) (bidi/LookupString (subslice s i))]
+      (when (== sz 0)
+        (inc! i)
+        (continue))
+
+      (let [c (.Class e)]
+        (when (or (== c bidi/R) (== c bidi/AL) (== c bidi/AN))
+          (return bidi/RightToLeft))
+
+        (set! i + sz))))
+
+  ^{:line 166} bidi/LeftToRight)
+
+
+
+^{:go/end 176} (go/func Valid "Valid reports whether b conforms to the BiDi rule.\n" ^bool [^{:tag (slice byte)} b]
+  (let [^Transformer t (zero Transformer)]
+    (when [(values n ok) (.advance t b)] (or (not ok) (< n (len b)))
+      (return false))
+
+    (.isFinal t)))
+
+
+
+^{:go/end 185} (go/func ValidString "ValidString reports whether s conforms to the BiDi rule.\n" ^bool [^string s]
+  (let [^Transformer t (zero Transformer)]
+    (when [(values n ok) (.advanceString t s)] (or (not ok) (< n (len s)))
+      (return false))
+
+    (.isFinal t)))
+
+
+
+^{:go/end 190} (go/func New "New returns a Transformer that verifies that input adheres to the Bidi Rule.\n" ^{:tag (* Transformer)} []
+  (addr (lit Transformer)))
+
+
+
+(go/type Transformer "Transformer implements transform.Transform.\n" (struct
+    ^{:line 194 :tag ruleState} state
+    ^{:line 195 :tag bool} hasRTL
+    ^{:line 196 :tag uint16} seen))
+
+
+
+
+^{:go/end 204} (go/method isRTL "A rule can only be violated for \"Bidi Domain names\", meaning if one of the\nfollowing categories has been observed.\n" ^bool [^{:tag (* Transformer)} t]
+  (let [^:const ^{:val 8226} isRTL (bit-or (<< 1 bidi/R) (<< 1 bidi/AL) (<< 1 bidi/AN))]
+    (!= (bit-and (.-seen t) isRTL) 0)))
+
+
+
+^{:go/end 207} (go/method Reset "Reset implements transform.Transformer.\n" [^{:tag (* Transformer)} t] (set! @t (lit Transformer)))
+
+
+
+^{:go/end 223} (go/method Transform "Transform implements transform.Transformer. This Transformer has state and\nneeds to be reset between uses.\n" [^{:tag (* Transformer)} t ^{:tag (slice byte)} dst ^{:tag (slice byte)} src ^bool atEOF] :results [^int nDst ^int nSrc ^error err]
+  (when (< (len dst) (len src))
+    (set! src (subslice src _ (len dst)))
+    (set! atEOF false)
+    (set! err transform/ErrShortDst))
+
+  (let [(values n err1) (.Span t src atEOF)]
+    (copy dst (subslice src _ n))
+    (when (or (== err nil) (and (!= err1 nil) (!= err1 transform/ErrShortSrc)))
+      (set! err err1))
+
+    (return n n err)))
+
+
+
+^{:go/end 244} (go/method Span "Span returns the first n bytes of src that conform to the Bidi rule.\n" [^{:tag (* Transformer)} t ^{:tag (slice byte)} src ^bool atEOF] :results [^int n ^error err]
+  (when (and (== (.-state t) ruleInvalid) (.isRTL t))
+    (return 0 ErrInvalid))
+
+  (let [(values ^:assign n ok) (.advance t src)]
+    (switch
+      (case [(not ok)]
+        (set! err ErrInvalid))
+      (case [(< n (len src))]
+        (when (not atEOF)
+          (set! err transform/ErrShortSrc)
+          (break))
+
+        (set! err ErrInvalid))
+      (case [(not (.isFinal t))]
+        (set! err ErrInvalid)))
+
+    (return n err)))
+
+
+
+
+(go/var ^{:tag (array 128 bidi/Properties) :doc "Precomputing the ASCII values decreases running time for the ASCII fast path\nby about 30%.\n"} asciiTable)
+
+^{:go/end 255} (go/func init []
+  (range [i asciiTable]
+    (let [(values p _) (bidi/LookupRune (conv rune i))]
+      (aset asciiTable i p))))
+
+
+
+^{:go/end 297} (go/method advance [^{:tag (* Transformer)} t ^{:tag (slice byte)} s] :results [^int n ^bool ok]
+  (let [^bidi/Properties e (zero bidi/Properties)
+      ^{:line 259 :tag int} sz (zero int)]
+    (while (< n (len s))
+      (if (< (aget s n) utf8/RuneSelf)
+        (set! (values e sz) (values (aget asciiTable (aget s n)) 1))
+        (do
+          (set! (values e sz) (bidi/Lookup (subslice s n)))
+          (when (<= sz 1)
+            (when (== sz 1)
+              ;; We always consider invalid UTF-8 to be invalid, even if
+              ;; the string has not yet been determined to be RTL.
+              ;; TODO: is this correct?
+              (return n false))
+
+            (return n true)))) ; incomplete UTF-8 encoding
+
+
+      ;; TODO: using CompactClass would result in noticeable speedup.
+      ;; See unicode/bidi/prop.go:Properties.CompactClass.
+      (let [c (conv uint16 ^uint16 (<< 1 (.Class e)))]
+        (set! (.-seen t) bit-or c)
+        (when (== (bit-and (.-seen t) exclusiveRTL) exclusiveRTL)
+          (set! (.-state t) ruleInvalid)
+          (return n false))
+
+        (switch [tr (aget transitions (.-state t))]
+          (case [(!= (bit-and (.-mask (aget tr 0)) c) 0)]
+            (set! (.-state t) (.-next (aget tr 0))))
+          (case [(!= (bit-and (.-mask (aget tr 1)) c) 0)]
+            (set! (.-state t) (.-next (aget tr 1))))
+          (default
+            (set! (.-state t) ruleInvalid)
+            (when (.isRTL t)
+              (return n false))))
+
+
+        (set! n + sz)))
+
+    (return n true)))
+
+
+^{:go/end 336} (go/method advanceString [^{:tag (* Transformer)} t ^string s] :results [^int n ^bool ok]
+  (let [^bidi/Properties e (zero bidi/Properties)
+      ^{:line 301 :tag int} sz (zero int)]
+    (while (< n (len s))
+      (if (< (aget s n) utf8/RuneSelf)
+        (set! (values e sz) (values (aget asciiTable (aget s n)) 1))
+        (do
+          (set! (values e sz) (bidi/LookupString (subslice s n)))
+          (when (<= sz 1)
+            (when (== sz 1)
+              (return n false)) ; invalid UTF-8
+
+            (return n true)))) ; incomplete UTF-8 encoding
+
+
+      ;; TODO: using CompactClass results in noticeable speedup.
+      ;; See unicode/bidi/prop.go:Properties.CompactClass.
+      (let [c (conv uint16 ^uint16 (<< 1 (.Class e)))]
+        (set! (.-seen t) bit-or c)
+        (when (== (bit-and (.-seen t) exclusiveRTL) exclusiveRTL)
+          (set! (.-state t) ruleInvalid)
+          (return n false))
+
+        (switch [tr (aget transitions (.-state t))]
+          (case [(!= (bit-and (.-mask (aget tr 0)) c) 0)]
+            (set! (.-state t) (.-next (aget tr 0))))
+          (case [(!= (bit-and (.-mask (aget tr 1)) c) 0)]
+            (set! (.-state t) (.-next (aget tr 1))))
+          (default
+            (set! (.-state t) ruleInvalid)
+            (when (.isRTL t)
+              (return n false))))
+
+
+        (set! n + sz)))
+
+    (return n true)))
+
+
+^{:go/end 340} (go/method isFinal ^bool [^{:tag (* Transformer)} t]
+  (or (== (.-state t) ruleLTRFinal) (== (.-state t) ruleRTLFinal) (== (.-state t) ruleInitial)))

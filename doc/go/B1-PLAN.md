@@ -6,7 +6,7 @@ fork-join pool and streams, dates, `defclass`, files, sockets, processes, java.t
 java.util.concurrent, java.security's basics, java.text: D6 below). Steps 0-8 are done: B1a
 ended with its freeze on 2026-10-11 (the branch `arbace-for-golang`, the tag
 `arbace-for-go1.27.1-v1`). B1b, the box, started the same day (below): S0, S1 and S2 done,
-S3 next.
+S6's amd64 half done (branch `box-s6`, amendments BX20-BX24 proposed), S3 next.
 B1 is the milestone after g2a's G0-G2 ([G2C-SURVEY.md](../G2C-SURVEY.md) §5.2, §7). The user's
 decisions of 2026-10-07 put the box built by gc + TamaGo first; on 2026-10-08 the user proposed
 to postpone the box and arm64, and to reach first **a standalone static `linux/amd64` Go
@@ -126,7 +126,11 @@ S2): the image mapped (BX11), the guest's symbol table cut to the monitor's symb
 limit in the box, the watchdog kept off, the suite's file tests and reducers passing in the box
 (the evaluator's tail calls clear the method's object, embedded namespaces load once), `fold`
 scaling on 4 vCPUs (the evaluator's yield counted per thread); start and suite times against
-native (amendments BX12-BX17 proposed).
+native (amendments BX12-BX17 proposed). S6's amd64 half done 2026-10-11 (BOX-NOTES.md, S6):
+the guest's own Go, TamaGo's runtime and standard library and its `goos` module, held as Go
+forms in `tamago/` (`bin/tamago-vendor`), the box's guest built from them printed by default,
+byte-identical to the guest built from the originals (without build IDs; amendments BX20-BX24
+proposed).
 
 ## Decisions (the user's, 2026-10-08)
 

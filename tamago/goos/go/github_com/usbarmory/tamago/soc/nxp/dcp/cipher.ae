@@ -1,0 +1,153 @@
+;; NXP Data Co-Processor (DCP) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.dcp) (go/file "cipher.go" :imports [
+
+
+    ^{:line 12} [aes "crypto/aes"]
+    ^{:line 13} [errors "errors"]
+
+    ^{:line 15} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 16} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+
+
+^{:go/end 29} (go/method SetCipherDefaults "SetCipherDefaults initializes default values for a DCP work packet that\nperforms cipher operation.\n" [^{:tag (* WorkPacket)} pkt]
+  (set! (.-Control0 pkt) bit-or (<< 1 DCP_CTRL0_INTERRUPT_ENABL))
+  (set! (.-Control0 pkt) bit-or (<< 1 DCP_CTRL0_DECR_SEMAPHORE))
+  (set! (.-Control0 pkt) bit-or (<< 1 DCP_CTRL0_ENABLE_CIPHER))
+  (set! (.-Control0 pkt) bit-or (<< 1 DCP_CTRL0_CIPHER_INIT))
+
+  (set! (.-Control1 pkt) bit-or (<< CIPHER_SELECT_AES128 DCP_CTRL1_CIPHER_SELECT))
+  (set! (.-Control1 pkt) bit-or (<< CIPHER_MODE_CBC DCP_CTRL1_CIPHER_MODE)))
+
+
+^{:go/end 74} (go/method cipher [^{:tag (* DCP)} hw ^{:tag (slice byte)} buf ^int index ^{:tag (slice byte)} iv ^bool enc] :results [^error err]
+  (when (!= (% (len buf) aes/BlockSize) 0)
+    (return (errors/New "invalid input size")))
+
+
+  (when (or (< index 0) (> index 3))
+    (return (errors/New "key index must be between 0 and 3")))
+
+
+  (when (!= (len iv) aes/BlockSize)
+    (return (errors/New "invalid IV size")))
+
+
+  (let [sourceBufferAddress (dma/Alloc buf aes/BlockSize)]
+    (defer (dma/Free sourceBufferAddress))
+
+    (let [payloadPointer (dma/Alloc iv 4)]
+      (defer (dma/Free payloadPointer))
+
+      (let [pkt (addr (lit WorkPacket))]
+        (.SetCipherDefaults pkt)
+
+        (when enc
+          (set! (.-Control0 pkt) bit-or (<< 1 DCP_CTRL0_CIPHER_ENCRYPT)))
+
+
+        ;; use key RAM slot
+        (set! (.-Control1 pkt) bit-or (<< (bit-and (conv uint32 index) 0xff) DCP_CTRL1_KEY_SELECT))
+        (set! (.-SourceBufferAddress pkt) (conv uint32 sourceBufferAddress))
+        (set! (.-DestinationBufferAddress pkt) (.-SourceBufferAddress pkt))
+        (set! (.-BufferSize pkt) (conv uint32 (len buf)))
+        (set! (.-PayloadPointer pkt) (conv uint32 payloadPointer))
+
+        (let [ptr (dma/Alloc (.Bytes pkt) 4)]
+          (defer (dma/Free ptr))
+
+          (when [(set! err (.cmd hw ptr 1))] (!= err nil)
+            (return))
+
+
+          (dma/Read sourceBufferAddress 0 buf)
+
+          (return))))))
+
+
+
+
+^{:go/end 80} (go/method Encrypt "Encrypt performs in-place buffer encryption using AES-128-CBC, the key can\nbe selected with the index argument from one previously set with SetKey().\n" [^{:tag (* DCP)} hw ^{:tag (slice byte)} buf ^int index ^{:tag (slice byte)} iv] :results [^error err]
+  (.cipher hw buf index iv true))
+
+
+
+
+^{:go/end 86} (go/method Decrypt "Decrypt performs in-place buffer decryption using AES-128-CBC, the key can\nbe selected with the index argument from one previously set with SetKey().\n" [^{:tag (* DCP)} hw ^{:tag (slice byte)} buf ^int index ^{:tag (slice byte)} iv] :results [^error err]
+  (.cipher hw buf index iv false))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 154} (go/method CipherChain "CipherChain performs chained in-place buffer encryption/decryption using\nAES-128-CBC, the key can be selected with the index argument from one\npreviously set with SetKey().\n\nThe function expects a byte array with concatenated input data and a byte\narray with concatenated initialization vectors, the count and size arguments\nshould reflect the number of slices, each to be ciphered and with the\ncorresponding initialization vector slice.\n" [^{:tag (* DCP)} hw ^{:tag (slice byte)} buf ^{:tag (slice byte)} ivs ^int count ^int size ^int index ^bool enc] :results [^error err]
+  (when (or (!= (len buf) (* size count)) (!= (% (len buf) aes/BlockSize) 0))
+    (return (errors/New "invalid input size")))
+
+
+  (when (!= (len ivs) (* aes/BlockSize count))
+    (return (errors/New "invalid IV size")))
+
+
+  (when (or (< index 0) (> index 3))
+    (return (errors/New "key index must be between 0 and 3")))
+
+
+  (let [src (dma/Alloc buf aes/BlockSize)]
+    (defer (dma/Free src))
+
+    (let [payloads (dma/Alloc ivs 4)]
+      (defer (dma/Free payloads))
+
+      (let [(values pkts pktBuf) (dma/Reserve (* WorkPacketLength count) 4)]
+        (defer (dma/Release pkts))
+
+        (let [pkt (addr (lit WorkPacket))]
+          (.SetCipherDefaults pkt)
+          (set! (.-Control0 pkt) bit-or (<< 1 DCP_CTRL0_CHAIN))
+          (set! (.-BufferSize pkt) (conv uint32 size))
+
+          (bits/Clear (addr (.-Control0 pkt)) DCP_CTRL0_INTERRUPT_ENABL)
+
+          (when enc
+            (set! (.-Control0 pkt) bit-or (<< 1 DCP_CTRL0_CIPHER_ENCRYPT)))
+
+
+          ;; use key RAM slot
+          (set! (.-Control1 pkt) bit-or (<< (bit-and (conv uint32 index) 0xff) DCP_CTRL1_KEY_SELECT))
+
+          (range [i count]
+            (set! (.-SourceBufferAddress pkt) (+ (conv uint32 src) (conv uint32 (* i size))))
+            (set! (.-DestinationBufferAddress pkt) (.-SourceBufferAddress pkt))
+            (set! (.-PayloadPointer pkt) (+ (conv uint32 payloads) (conv uint32 (* i aes/BlockSize))))
+
+            (if (< i (- count 1))
+              (set! (.-NextCmdAddr pkt) (+ (conv uint32 pkts) (conv uint32 (* (+ i 1) WorkPacketLength))))
+              (do
+                (bits/Clear (addr (.-Control0 pkt)) DCP_CTRL0_CHAIN)
+                (bits/Set (addr (.-Control0 pkt)) DCP_CTRL0_INTERRUPT_ENABL)))
+
+
+            (copy (subslice pktBuf (* i WorkPacketLength)) (.Bytes pkt)))
+
+
+          (when [(set! err (.cmd hw pkts count))] (!= err nil)
+            (return))
+
+
+          (dma/Read src 0 buf)
+
+          (return))))))

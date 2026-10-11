@@ -1,0 +1,232 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package sha3 implements the SHA-3 fixed-output-length hash functions and
+;; the SHAKE variable-output-length functions defined by [FIPS 202], as well as
+;; the cSHAKE extendable-output-length functions defined by [SP 800-185].
+;;
+;; [FIPS 202]: https://doi.org/10.6028/NIST.FIPS.202
+;; [SP 800-185]: https://doi.org/10.6028/NIST.SP.800-185
+(in-ns 'go.crypto.internal.fips140.sha3) (go/file "sha3.go" :doc "Package sha3 implements the SHA-3 fixed-output-length hash functions and\nthe SHAKE variable-output-length functions defined by [FIPS 202], as well as\nthe cSHAKE extendable-output-length functions defined by [SP 800-185].\n\n[FIPS 202]: https://doi.org/10.6028/NIST.FIPS.202\n[SP 800-185]: https://doi.org/10.6028/NIST.SP.800-185\n" :imports [
+
+
+    ^{:line 14} [fips140 "crypto/internal/fips140"]
+    ^{:line 15} [subtle "crypto/internal/fips140/subtle"]
+    ^{:line 16} [errors "errors"]])
+
+
+
+(go/type spongeDirection "spongeDirection indicates the direction bytes are flowing through the sponge.\n" int)
+
+(go/const
+
+  ^{:line 24} [^{:tag spongeDirection :val 0 :doc "spongeAbsorbing indicates that the sponge is absorbing input.\n"} spongeAbsorbing iota]
+
+  ^{:line 26} [^{:val 1 :doc "spongeSqueezing indicates that the sponge is being squeezed.\n"} spongeSqueezing])
+
+
+(go/type Digest (struct
+    ^{:line 30 :tag (array (/ 1600 8) byte)} a ; main state of the hash
+
+
+
+
+    ^{:line 35 :tag int :doc "a[n:rate] is the buffer. If absorbing, it's the remaining space to XOR\ninto before running the permutation. If squeezing, it's the remaining\noutput to produce before running the permutation.\n"} n ^{:tag int :doc "a[n:rate] is the buffer. If absorbing, it's the remaining space to XOR\ninto before running the permutation. If squeezing, it's the remaining\noutput to produce before running the permutation.\n"} rate
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 49 :tag byte :doc "dsbyte contains the \"domain separation\" bits and the first bit of\nthe padding. Sections 6.1 and 6.2 of [1] separate the outputs of the\nSHA-3 and SHAKE functions by appending bitstrings to the message.\nUsing a little-endian bit-ordering convention, these are \"01\" for SHA-3\nand \"1111\" for SHAKE, or 00000010b and 00001111b, respectively. Then the\npadding rule from section 5.1 is applied to pad the message to a multiple\nof the rate, which involves adding a \"1\" bit, zero or more \"0\" bits, and\na final \"1\" bit. We merge the first \"1\" bit from the padding into dsbyte,\ngiving 00000110b (0x06) and 00011111b (0x1f).\n[1] http://csrc.nist.gov/publications/drafts/fips-202/fips_202_draft.pdf\n    \"Draft FIPS 202: SHA-3 Standard: Permutation-Based Hash and\n     Extendable-Output Functions (May 2014)\"\n"} dsbyte
+
+    ^{:line 51 :tag int} outputLen ; the default output size in bytes
+    ^{:line 52 :tag spongeDirection} state)) ; whether the sponge is absorbing or squeezing
+
+
+
+^{:go/end 56} (go/method BlockSize "BlockSize returns the rate of sponge underlying this hash function.\n" ^int [^{:tag (* Digest)} d] (.-rate d))
+
+
+^{:go/end 59} (go/method Size "Size returns the output size of the hash function in bytes.\n" ^int [^{:tag (* Digest)} d] (.-outputLen d))
+
+
+^{:go/end 67} (go/method Reset "Reset resets the Digest to its initial state.\n" [^{:tag (* Digest)} d]
+  ;; Zero the permutation's state.
+  (clear (subslice (.-a d)))
+  (set! (.-state d) spongeAbsorbing)
+  (set! (.-n d) 0))
+
+
+^{:go/end 72} (go/method Clone ^{:tag (* Digest)} [^{:tag (* Digest)} d]
+  (let [ret @d]
+    (addr ret)))
+
+
+
+^{:go/end 78} (go/method permute "permute applies the KeccakF-1600 permutation.\n" [^{:tag (* Digest)} d]
+  (keccakF1600 (addr (.-a d)))
+  (set! (.-n d) 0))
+
+
+
+
+^{:go/end 95} (go/method padAndPermute "padAndPermute appends the domain separation bits in dsbyte, applies\nthe multi-bitrate 10..1 padding rule, and permutes the state.\n" [^{:tag (* Digest)} d]
+  ;; Pad with this instance's domain-separator bits. We know that there's
+  ;; at least one byte of space in the sponge because, if it were full,
+  ;; permute would have been called to empty it. dsbyte also contains the
+  ;; first one bit for the padding. See the comment in the state struct.
+  (set! (aget (.-a d) (.-n d)) bit-xor (.-dsbyte d))
+  ;; This adds the final one bit for the padding. Because of the way that
+  ;; bits are numbered from the LSB upwards, the final bit is the MSB of
+  ;; the last byte.
+  (set! (aget (.-a d) (- (.-rate d) 1)) bit-xor 0x80)
+  ;; Apply the permutation
+  (.permute d)
+  (set! (.-state d) spongeSqueezing))
+
+
+
+^{:go/end 98} (go/method Write "Write absorbs more data into the hash's state.\n" [^{:tag (* Digest)} d ^{:tag (slice byte)} p] :results [^int n ^error err] (.write d p))
+^{:go/end 118} (go/method writeGeneric [^{:tag (* Digest)} d ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (!= (.-state d) spongeAbsorbing)
+    (panic "sha3: Write after Read"))
+
+
+  (set! n (len p))
+
+  (while (> (len p) 0)
+    (let [x (subtle/XORBytes (subslice (.-a d) (.-n d) (.-rate d)) (subslice (.-a d) (.-n d) (.-rate d)) p)]
+      (set! (.-n d) + x)
+      (set! p (subslice p x))
+
+      ;; If the sponge is full, apply the permutation.
+      (when (== (.-n d) (.-rate d))
+        (.permute d))))
+
+
+
+  (return))
+
+
+
+^{:go/end 142} (go/method readGeneric "read squeezes an arbitrary number of bytes from the sponge.\n" [^{:tag (* Digest)} d ^{:tag (slice byte)} out] :results [^int n ^error err]
+  ;; If we're still absorbing, pad and apply the permutation.
+  (when (== (.-state d) spongeAbsorbing)
+    (.padAndPermute d))
+
+
+  (set! n (len out))
+
+  ;; Now, do the squeezing.
+  (while (> (len out) 0)
+    ;; Apply the permutation if we've squeezed the sponge dry.
+    (when (== (.-n d) (.-rate d))
+      (.permute d))
+
+
+    (let [x (copy out (subslice (.-a d) (.-n d) (.-rate d)))]
+      (set! (.-n d) + x)
+      (set! out (subslice out x))))
+
+
+  (return))
+
+
+
+
+^{:go/end 149} (go/method Sum "Sum appends the current hash to b and returns the resulting slice.\nIt does not change the underlying hash state.\n" ^{:tag (slice byte)} [^{:tag (* Digest)} d ^{:tag (slice byte)} b]
+  (fips140/RecordApproved)
+  (.sum d b))
+
+
+^{:go/end 162} (go/method sumGeneric ^{:tag (slice byte)} [^{:tag (* Digest)} d ^{:tag (slice byte)} b]
+  (when (!= (.-state d) spongeAbsorbing)
+    (panic "sha3: Sum after Read"))
+
+
+  ;; Make a copy of the original hash so that caller can keep writing
+  ;; and summing.
+  (let [dup (.Clone d)
+      ^{:line 159} hash (make (slice byte) (.-outputLen dup) 64)] ; explicit cap to allow stack allocation
+    (.read dup hash)
+    (append b (spread hash))))
+
+
+(go/const
+  ^{:line 165} [^{:val "sha\b"} magicSHA3 "sha\b"]
+  ^{:line 166} [^{:val "sha\t"} magicShake "sha\t"]
+  ^{:line 167} [^{:val "sha\n"} magicCShake "sha\n"]
+  ^{:line 168} [^{:val "sha\u000b"} magicKeccak "sha\u000b"]
+
+  ^{:line 170} [^{:val 207 :doc "magic || rate || main state || n || sponge direction\n"} marshaledSize (+ (len magicSHA3) 1 200 1 1)])
+
+
+^{:go/end 175} (go/method MarshalBinary [^{:tag (* Digest)} d] :results [(slice byte) error]
+  (.AppendBinary d (make (slice byte) 0 marshaledSize)))
+
+
+^{:go/end 195} (go/method AppendBinary [^{:tag (* Digest)} d ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (switch (.-dsbyte d)
+    (case [dsbyteSHA3]
+      (set! b (append b (spread magicSHA3))))
+    (case [dsbyteShake]
+      (set! b (append b (spread magicShake))))
+    (case [dsbyteCShake]
+      (set! b (append b (spread magicCShake))))
+    (case [dsbyteKeccak]
+      (set! b (append b (spread magicKeccak))))
+    (default
+      (panic "unknown dsbyte")))
+
+  ;; rate is at most 168, and n is at most rate.
+  (set! b (append b (conv byte (.-rate d))))
+  (set! b (append b (spread (subslice (.-a d)))))
+  (set! b (append b (conv byte (.-n d)) (conv byte (.-state d))))
+  (return b nil))
+
+
+^{:go/end 233} (go/method UnmarshalBinary ^error [^{:tag (* Digest)} d ^{:tag (slice byte)} b]
+  (when (!= (len b) marshaledSize)
+    (return (errors/New "sha3: invalid hash state")))
+
+
+  (let [magic (conv string (subslice b _ (len magicSHA3)))]
+    (set! b (subslice b (len magicSHA3)))
+    (switch
+      (case [(and (== magic magicSHA3) (== (.-dsbyte d) dsbyteSHA3))])
+      (case [(and (== magic magicShake) (== (.-dsbyte d) dsbyteShake))])
+      (case [(and (== magic magicCShake) (== (.-dsbyte d) dsbyteCShake))])
+      (case [(and (== magic magicKeccak) (== (.-dsbyte d) dsbyteKeccak))])
+      (default
+        (return (errors/New "sha3: invalid hash state identifier"))))
+
+
+    (let [rate (conv int (aget b 0))]
+      (set! b (subslice b 1))
+      (when (!= rate (.-rate d))
+        (return (errors/New "sha3: invalid hash state function")))
+
+
+      (copy (subslice (.-a d)) b)
+      (set! b (subslice b (len (.-a d))))
+
+      ^{:go/breaks [[6 232]]} (let [(values n state) (values (conv int (aget b 0)) (conv spongeDirection (aget b 1)))]
+        (when (> n (.-rate d))
+          (return (errors/New "sha3: invalid hash state")))
+
+        (set! (.-n d) n)
+        (when (and (!= state spongeAbsorbing) (!= state spongeSqueezing))
+          (return (errors/New "sha3: invalid hash state")))
+
+        (set! (.-state d) state)
+
+        nil))))

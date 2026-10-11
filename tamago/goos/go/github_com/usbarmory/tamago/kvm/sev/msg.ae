@@ -1,0 +1,146 @@
+;; AMD Secure Encrypted Virtualization support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.sev) (go/file "msg.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [aes "crypto/aes"]
+    ^{:line 14} [cipher "crypto/cipher"]
+    ^{:line 15} [binary "encoding/binary"]
+    ^{:line 16} [errors "errors"]])
+
+
+(go/const
+  ^{:line 20} [^{:val 1} headerVersion 0x1]
+  ^{:line 21} [^{:val 96} headerSize 96]
+
+  ^{:line 23} [^{:val 1} messageVersion 0x1])
+
+
+
+(go/const "AEAD Algorithm Encodings\n"
+  ^{:line 28} [^{:val 1} AES_256_GCM 1])
+
+
+(go/var ^uint64 seqNo)
+
+
+(go/type MessageHeader "MessageHeader represents an AMD SEV-SNP Message Header.\n" (struct
+    ^{:line 35 :tag (array 32 byte)} AuthTag
+    ^{:line 36 :tag (array 16 byte)} SeqNo
+    ^{:line 37 :tag uint8} Algo
+    ^{:line 38 :tag uint8} HeaderVersion
+    ^{:line 39 :tag uint16} HeaderSize
+    ^{:line 40 :tag uint8} MessageType
+    ^{:line 41 :tag uint8} MessageVersion
+    ^{:line 42 :tag uint16} MessageSize
+    ^{:line 43 :tag uint32} _
+    ^{:line 44 :tag uint8} VMPCK
+    ^{:line 45 :tag (array 35 byte)} _))
+
+
+^{:go/end 51} (go/method unmarshal [^{:tag (* MessageHeader)} h ^{:tag (slice byte)} buf] :results [^error err]
+  (set! (values _ err) (binary/Decode buf binary/LittleEndian h))
+  (return))
+
+
+
+^{:go/end 58} (go/method Bytes "Bytes converts the descriptor structure to byte array format.\n" ^{:tag (slice byte)} [^{:tag (* MessageHeader)} h]
+  (let [buf (new bytes/Buffer)]
+    (binary/Write buf binary/LittleEndian h)
+    (.Bytes buf)))
+
+
+
+^{:go/end 63} (go/method Seq "Seq returns the 64-bit sequence number for this message.\n" ^uint64 [^{:tag (* MessageHeader)} h]
+  (.Uint64 binary/LittleEndian (subslice (.-SeqNo h))))
+
+
+
+^{:go/end 68} (go/method SetSeq "SetSeq sets the 64-bit sequence number for this message.\n" [^{:tag (* MessageHeader)} h ^uint64 seq]
+  (.PutUint64 binary/LittleEndian (subslice (.-SeqNo h)) seq))
+
+
+^{:go/end 86} (go/func seal [^{:tag (slice byte)} key ^{:tag (slice byte)} nonce ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} additionalData] :results [^{:tag (slice byte)} ciphertext ^error err]
+  (let [(values block ^:assign err) (aes/NewCipher key)]
+
+    (when (!= err nil)
+      (return))
+
+
+    (let [(values aesgcm ^:assign err) (cipher/NewGCM block)]
+
+      (when (!= err nil)
+        (return))
+
+
+      (set! ciphertext (.Seal aesgcm nil nonce plaintext additionalData))
+
+      (return))))
+
+
+^{:go/end 102} (go/func unseal [^{:tag (slice byte)} key ^{:tag (slice byte)} nonce ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} additionalData] :results [^{:tag (slice byte)} plaintext ^error err]
+  (let [(values block ^:assign err) (aes/NewCipher key)]
+
+    (when (!= err nil)
+      (return))
+
+
+    (let [(values aesgcm ^:assign err) (cipher/NewGCM block)]
+
+      (when (!= err nil)
+        (return))
+
+
+      (.Open aesgcm nil nonce ciphertext additionalData))))
+
+
+^{:go/end 126} (go/method sealMessage [^{:tag (* GHCB)} b ^{:tag (* MessageHeader)} hdr ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} key] :results [^{:tag (slice byte)} msg ^error err]
+  ;; update header
+  (set! (.-MessageSize hdr) (conv uint16 (len plaintext)))
+  (.SetSeq hdr seqNo)
+
+  ;; encrypt request
+  (let [(values ciphertext ^:assign err) (seal key (subslice (.-SeqNo hdr) 0 12) plaintext (subslice (.Bytes hdr) 48))]
+
+    (when (!= err nil)
+      (return))
+
+
+    ;; set authentication tag
+    (let [tagOffset (- (len ciphertext) 16)
+        ^{:line 118} authTag (subslice ciphertext tagOffset)]
+      (copy (subslice (.-AuthTag hdr)) authTag)
+
+      ;; concatenate header and encrypted message
+      (set! msg (.Bytes hdr))
+      (set! msg (append msg (spread (subslice ciphertext _ tagOffset))))
+
+      (return))))
+
+
+^{:go/end 147} (go/method openMessage [^{:tag (* GHCB)} b ^{:tag (* MessageHeader)} hdr ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} key] :results [^{:tag (slice byte)} plaintext ^error err]
+  (when (!= (.Seq hdr) seqNo)
+    (return nil (errors/New "invalid response header")))
+
+
+  ;; append authentication tag to ciphertext
+  (set! ciphertext (append ciphertext (spread (subslice (.-AuthTag hdr) _ 16))))
+
+  ;; zero AuthTag header before unseal
+  (copy (subslice (.-AuthTag hdr)) (make (slice byte) 32))
+
+  ;; decrypt response
+  (when [(set! (values plaintext err) (unseal key (subslice (.-SeqNo hdr) 0 12) ciphertext (subslice (.Bytes hdr) 48)))] (!= err nil)
+    (return))
+
+
+  (set! seqNo + 1)
+
+  (return))

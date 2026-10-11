@@ -1,0 +1,531 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.html.template) (go/file "template.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [fs "io/fs"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [path "path"]
+    ^{:line 13} [filepath "path/filepath"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [template "text/template"]
+    ^{:line 16} [parse "text/template/parse"]])
+
+
+
+
+(go/type Template "Template is a specialized Template from \"text/template\" that produces a safe\nHTML document fragment.\n" (struct
+
+    ^{:line 23 :tag error :doc "Sticky error if escaping fails, or escapeOK if succeeded.\n"} escapeErr
+
+
+
+    ^{:line 27 :tag (* template/Template) :doc "We could embed the text/template field, but it's safer not to because\nwe need to keep our version of the name space and the underlying\ntemplate's in sync.\n"} text
+
+
+    ^{:line 30 :tag (* parse/Tree) :doc "The underlying template's parse tree, updated to be HTML-safe\nafter the first execution.\n"} Tree
+    (* nameSpace))) ; common to all associated templates
+
+
+
+(go/var ^{:doc "escapeOK is a sentinel value used to indicate valid escaping.\n"} escapeOK (fmt/Errorf "template escaped correctly"))
+
+
+(go/type nameSpace "nameSpace is the data structure shared by all templates in an association.\n" (struct
+    ^{:line 39 :tag sync/Mutex} mu
+    ^{:line 40 :tag (map string (* Template))} set
+    ^{:line 41 :tag bool} escaped
+    ^{:line 42 :tag escaper} esc))
+
+
+
+
+^{:go/end 57} (go/method Templates "Templates returns a slice of the templates associated with t, including t\nitself.\n" ^{:tag (slice (* Template))} [^{:tag (* Template)} t]
+  (let [ns (.-nameSpace t)]
+    (.Lock (.-mu ns))
+    (defer (.Unlock (.-mu ns)))
+    ;; Return a slice so we don't expose the map.
+    (let [m (make (slice (* Template)) 0 (len (.-set ns)))]
+      (range [_ v (.-set ns)]
+        (set! m (append m v)))
+
+      ^{:line 56} m)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 80} (go/method Option "Option sets options for the template. Options are described by\nstrings, either a simple string or \"key=value\". There can be at\nmost one equals sign in an option string. If the option string\nis unrecognized or otherwise invalid, Option panics.\n\nKnown options:\n\nmissingkey: Control the behavior during execution if a map is\nindexed with a key that is not present in the map.\n\n\t\"missingkey=default\" or \"missingkey=invalid\"\n\t\tThe default behavior: Do nothing and continue execution.\n\t\tIf printed, the result of the index operation is the string\n\t\t\"<no value>\".\n\t\"missingkey=zero\"\n\t\tThe operation returns the zero value for the map type's element.\n\t\"missingkey=error\"\n\t\tExecution stops immediately with an error.\n" ^{:tag (* Template)} [^{:tag (* Template)} t & ^{:tag (slice string)} opt]
+  (.Option (.-text t) (spread opt))
+  ^{:line 79} t)
+
+
+
+
+^{:go/breaks [[8 93]] :go/end 94} (go/method checkCanParse "checkCanParse checks whether it is OK to parse templates.\nIf not, it returns an error.\n" ^error [^{:tag (* Template)} t]
+  (when (== t nil)
+    (return nil))
+
+  (.Lock (.-mu (.-nameSpace t)))
+  (defer (.Unlock (.-mu (.-nameSpace t))))
+  (when (.-escaped (.-nameSpace t))
+    (return (fmt/Errorf "html/template: cannot Parse after Execute")))
+
+  nil)
+
+
+
+^{:go/breaks [[8 111]] :go/end 112} (go/method escape "escape escapes all associated templates.\n" ^error [^{:tag (* Template)} t]
+  (.Lock (.-mu (.-nameSpace t)))
+  (defer (.Unlock (.-mu (.-nameSpace t))))
+  (set! (.-escaped (.-nameSpace t)) true)
+  (cond (== (.-escapeErr t) nil) (do
+      (when (== (.-Tree t) nil)
+        (return (fmt/Errorf "template: %q is an incomplete or empty template" (.Name t))))
+
+      (when [err (escapeTemplate t ^{:go/via [Tree]} (.-Root (.-text t)) (.Name t))] (!= err nil)
+        (return err)))
+
+    (!= (.-escapeErr t) escapeOK)
+    (return (.-escapeErr t)))
+
+  nil)
+
+
+
+
+
+
+
+
+
+^{:go/end 126} (go/method Execute "Execute applies a parsed template to the specified data object,\nwriting the output to wr.\nIf an error occurs executing the template or writing its output,\nexecution stops, but partial results may already have been written to\nthe output writer.\nA template may be executed safely in parallel, although if parallel\nexecutions share a Writer the output may be interleaved.\n" ^error [^{:tag (* Template)} t ^io/Writer wr ^any data]
+  (when [err (.escape t)] (!= err nil)
+    (return err))
+
+  (.Execute (.-text t) wr data))
+
+
+
+
+
+
+
+
+
+^{:go/end 141} (go/method ExecuteTemplate "ExecuteTemplate applies the template associated with t that has the given\nname to the specified data object and writes the output to wr.\nIf an error occurs executing the template or writing its output,\nexecution stops, but partial results may already have been written to\nthe output writer.\nA template may be executed safely in parallel, although if parallel\nexecutions share a Writer the output may be interleaved.\n" ^error [^{:tag (* Template)} t ^io/Writer wr ^string name ^any data]
+  (let [(values tmpl err) (.lookupAndEscapeTemplate t name)]
+    (when (!= err nil)
+      (return err))
+
+    (.Execute (.-text tmpl) wr data)))
+
+
+
+
+
+^{:go/end 167} (go/method lookupAndEscapeTemplate "lookupAndEscapeTemplate guarantees that the template with the given name\nis escaped, or returns an error if it cannot be. It returns the named\ntemplate.\n" [^{:tag (* Template)} t ^string name] :results [^{:tag (* Template)} tmpl ^error err]
+  (.Lock (.-mu (.-nameSpace t)))
+  (defer (.Unlock (.-mu (.-nameSpace t))))
+  (set! (.-escaped (.-nameSpace t)) true)
+  (set! tmpl (aget ^{:go/via [nameSpace]} (.-set t) name))
+  (when (== tmpl nil)
+    (return nil (fmt/Errorf "html/template: %q is undefined" name)))
+
+  (when (and (!= (.-escapeErr tmpl) nil) (!= (.-escapeErr tmpl) escapeOK))
+    (return nil (.-escapeErr tmpl)))
+
+  (when (or (== (.-Tree (.-text tmpl)) nil) (== ^{:go/via [Tree]} (.-Root (.-text tmpl)) nil))
+    (return nil (fmt/Errorf "html/template: %q is an incomplete template" name)))
+
+  (when (== (.Lookup (.-text t) name) nil)
+    (panic "html/template internal error: template escaping out of sync"))
+
+  (when (== (.-escapeErr tmpl) nil)
+    (set! err (escapeTemplate tmpl ^{:go/via [Tree]} (.-Root (.-text tmpl)) name)))
+
+  (return tmpl err))
+
+
+
+
+
+^{:go/end 174} (go/method DefinedTemplates "DefinedTemplates returns a string listing the defined templates,\nprefixed by the string \"; defined templates are: \". If there are none,\nit returns the empty string. Used to generate an error message.\n" ^string [^{:tag (* Template)} t]
+  (.DefinedTemplates (.-text t)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 212} (go/method Parse "Parse parses text as a template body for t.\nNamed template definitions ({{define ...}} or {{block ...}} statements) in text\ndefine additional templates associated with t and are removed from the\ndefinition of t itself.\n\nTemplates can be redefined in successive calls to Parse,\nbefore the first use of [Template.Execute] on t or any associated template.\nA template definition with a body containing only white space and comments\nis considered empty and will not replace an existing template's body.\nThis allows using Parse to add new named template definitions without\noverwriting the main template body.\n" [^{:tag (* Template)} t ^string text] :results [(* Template) error]
+  (when [err (.checkCanParse t)] (!= err nil)
+    (return nil err))
+
+
+  (let [(values ret err) (.Parse (.-text t) text)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    ;; In general, all the named templates might have changed underfoot.
+    ;; Regardless, some new ones may have been defined.
+    ;; The template.Template set has been updated; update ours.
+    (.Lock (.-mu (.-nameSpace t)))
+    (defer (.Unlock (.-mu (.-nameSpace t))))
+    (range [_ v (.Templates ret)]
+      (let [name (.Name v)
+          ^{:line 204} tmpl (aget ^{:go/via [nameSpace]} (.-set t) name)]
+        (when (== tmpl nil)
+          (set! tmpl (.new t name)))
+
+        (set! (.-text tmpl) v)
+        (set! (.-Tree tmpl) (.-Tree v))))
+
+    (return t nil)))
+
+
+
+
+
+
+^{:go/end 237} (go/method AddParseTree "AddParseTree creates a new template with the name and parse tree\nand associates it with t.\n\nIt returns an error if t or any associated template has already been executed.\n" [^{:tag (* Template)} t ^string name ^{:tag (* parse/Tree)} tree] :results [(* Template) error]
+  (when [err (.checkCanParse t)] (!= err nil)
+    (return nil err))
+
+
+  (.Lock (.-mu (.-nameSpace t)))
+  (defer (.Unlock (.-mu (.-nameSpace t))))
+  (let [(values text err) (.AddParseTree (.-text t) name tree)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [ret (addr ^{:go/breaks [2]} (lit Template
+            nil
+            ^{:line 231} text
+            (.-Tree text)
+            (.-nameSpace t)))]
+
+      (aset ^{:go/via [nameSpace]} (.-set t) name ret)
+      (return ret nil))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 282} (go/method Clone "Clone returns a duplicate of the template, including all associated\ntemplates. The actual representation is not copied, but the name space of\nassociated templates is, so further calls to [Template.Parse] in the copy will add\ntemplates to the copy but not to the original. [Template.Clone] can be used to prepare\ncommon templates and use them with variant definitions for other templates\nby adding the variants after the clone is made.\n\nIt returns an error if t has already been executed.\n" [^{:tag (* Template)} t] :results [(* Template) error]
+  (.Lock (.-mu (.-nameSpace t)))
+  (defer (.Unlock (.-mu (.-nameSpace t))))
+  (when (!= (.-escapeErr t) nil)
+    (return nil (fmt/Errorf "html/template: cannot Clone %q after it has executed" (.Name t))))
+
+  (let [(values textClone err) (.Clone (.-text t))]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [ns (addr (lit nameSpace :set (make (map string (* Template)))))]
+      (set! (.-esc ns) (makeEscaper ns))
+      (let [ret (addr ^{:go/breaks [2]} (lit Template
+              nil
+              ^{:line 261} textClone
+              (.-Tree textClone)
+              ^{:line 263} ns))]
+
+        (aset ^{:go/via [nameSpace]} (.-set ret) (.Name ret) ret)
+        (range [_ x (.Templates textClone)]
+          (let [name (.Name x)
+              ^{:line 268} src (aget ^{:go/via [nameSpace]} (.-set t) name)]
+            (when (or (== src nil) (!= (.-escapeErr src) nil))
+              (return nil (fmt/Errorf "html/template: cannot Clone %q after it has executed" (.Name t))))
+
+            (set! (.-Tree x) (.Copy (.-Tree x)))
+            (aset ^{:go/via [nameSpace]} (.-set ret) name (addr ^{:go/breaks [2]} (lit Template
+                  nil
+                  ^{:line 275} x
+                  (.-Tree x)
+                  (.-nameSpace ret))))))
+
+
+        ;; Return the template associated with the name of this template.
+        (return (aget ^{:go/via [nameSpace]} (.-set ret) (.Name ret)) nil)))))
+
+
+
+^{:go/end 296} (go/func New "New allocates a new HTML template with the given name.\n" ^{:tag (* Template)} [^string name]
+  (let [ns (addr (lit nameSpace :set (make (map string (* Template)))))]
+    (set! (.-esc ns) (makeEscaper ns))
+    (let [tmpl (addr ^{:go/breaks [2 4]} (lit Template
+            nil
+            (template/New name)
+            nil
+            ^{:line 292} ns))]
+
+      (aset ^{:go/via [nameSpace]} (.-set tmpl) name tmpl)
+      ^{:line 295} tmpl)))
+
+
+
+
+
+
+
+
+
+^{:go/end 309} (go/method New "New allocates a new HTML template associated with the given one\nand with the same delimiters. The association, which is transitive,\nallows one template to invoke another with a {{template}} action.\n\nIf a template with the given name already exists, the new HTML template\nwill replace it. The existing template will be reset and disassociated with\nt.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^string name]
+  (.Lock (.-mu (.-nameSpace t)))
+  (defer (.Unlock (.-mu (.-nameSpace t))))
+  (.new t name))
+
+
+
+^{:go/end 325} (go/method new "new is the implementation of New, without the lock.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^string name]
+  (let [tmpl (addr ^{:go/breaks [2 4]} (lit Template
+          nil
+          (.New (.-text t) name)
+          nil
+          (.-nameSpace t)))]
+
+    (when [(values existing ok) (aget ^{:go/via [nameSpace]} (.-set tmpl) name)] ok
+      (let [emptyTmpl (New (.Name existing))]
+        (set! @existing @emptyTmpl)))
+
+    (aset ^{:go/via [nameSpace]} (.-set tmpl) name tmpl)
+    ^{:line 324} tmpl))
+
+
+
+^{:go/end 330} (go/method Name "Name returns the name of the template.\n" ^string [^{:tag (* Template)} t]
+  (.Name (.-text t)))
+
+
+(go/type ^:alias FuncMap template/FuncMap)
+
+
+
+
+
+
+
+
+^{:go/end 344} (go/method Funcs "Funcs adds the elements of the argument map to the template's function map.\nAny function used in the template must be added before the template is\nparsed. Funcs may be called more than once, including after parsing (for\nexample, after [Template.Clone]), to replace a function of the same name;\nthe replacement is used when the template is executed.\nIt panics if a value in the map is not a function with appropriate return\ntype. The return value is the template, so calls can be chained.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^FuncMap funcMap]
+  (.Funcs (.-text t) (conv template/FuncMap funcMap))
+  ^{:line 343} t)
+
+
+
+
+
+
+
+^{:go/end 354} (go/method Delims "Delims sets the action delimiters to the specified strings, to be used in\nsubsequent calls to [Template.Parse], [ParseFiles], or [ParseGlob]. Nested template\ndefinitions will inherit the settings. An empty delimiter stands for the\ncorresponding default: {{ or }}.\nThe return value is the template, so calls can be chained.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^string left ^string right]
+  (.Delims (.-text t) left right)
+  ^{:line 353} t)
+
+
+
+
+^{:go/end 362} (go/method Lookup "Lookup returns the template with the given name that is associated with t,\nor nil if there is no such template.\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^string name]
+  (.Lock (.-mu (.-nameSpace t)))
+  (defer (.Unlock (.-mu (.-nameSpace t))))
+  (aget ^{:go/via [nameSpace]} (.-set t) name))
+
+
+
+
+
+
+
+^{:go/end 374} (go/func Must "Must is a helper that wraps a call to a function returning ([*Template], error)\nand panics if the error is non-nil. It is intended for use in variable initializations\nsuch as\n\n\tvar t = template.Must(template.New(\"name\").Parse(\"html\"))\n" ^{:tag (* Template)} [^{:tag (* Template)} t ^error err]
+  (when (!= err nil)
+    (panic err))
+
+  ^{:line 373} t)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 387} (go/func ParseFiles "ParseFiles creates a new [Template] and parses the template definitions from\nthe named files. The returned template's name will have the (base) name and\n(parsed) contents of the first file. There must be at least one file.\nIf an error occurs, parsing stops and the returned [*Template] is nil.\n\nWhen parsing multiple files with the same name in different directories,\nthe last one mentioned will be the one that results.\nFor instance, ParseFiles(\"a/foo\", \"b/foo\") stores \"b/foo\" as the template\nnamed \"foo\", while \"a/foo\" is unavailable.\n" [& ^{:tag (slice string)} filenames] :results [(* Template) error]
+  (parseFiles nil readFileOS (spread filenames)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 399} (go/method ParseFiles "ParseFiles parses the named files and associates the resulting templates with\nt. If an error occurs, parsing stops and the returned template is nil;\notherwise it is t. There must be at least one file.\n\nWhen parsing multiple files with the same name in different directories,\nthe last one mentioned will be the one that results.\n\nParseFiles returns an error if t or any associated template has already been executed.\n" [^{:tag (* Template)} t & ^{:tag (slice string)} filenames] :results [(* Template) error]
+  (parseFiles t readFileOS (spread filenames)))
+
+
+
+
+^{:go/end 439} (go/func parseFiles "parseFiles is the helper for the method and function. If the argument\ntemplate is nil, it is created from the first file.\n" [^{:tag (* Template)} t ^{:tag (func [string] [string (slice byte) error])} readFile & ^{:tag (slice string)} filenames] :results [(* Template) error]
+  (when [err (.checkCanParse t)] (!= err nil)
+    (return nil err))
+
+
+  (when (== (len filenames) 0)
+    ;; Not really a problem, but be consistent.
+    (return nil (fmt/Errorf "html/template: no files named in call to ParseFiles")))
+
+  (range [_ filename filenames]
+    (let [(values name b err) (readFile filename)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [s (conv string b)
+          ;; First template becomes return value if not already defined,
+          ;; and we use that one for subsequent New calls to associate
+          ;; all the templates together. Also, if this file has the same name
+          ;; as t, this file becomes the contents of t, so
+          ;;  t, err := New(name).Funcs(xxx).ParseFiles(name)
+          ;; works. Otherwise we create a new template associated with t.
+          ^{:line 424 :tag (* Template)} tmpl (zero (* Template))]
+        (when (== t nil)
+          (set! t (New name)))
+
+        (if (== name (.Name t))
+          (set! tmpl t)
+
+          (set! tmpl (.New t name)))
+
+        (set! (values _ err) (.Parse tmpl s))
+        (when (!= err nil)
+          (return nil err)))))
+
+
+  (return t nil))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 452} (go/func ParseGlob "ParseGlob creates a new [Template] and parses the template definitions from\nthe files identified by the pattern. The files are matched according to the\nsemantics of filepath.Match, and the pattern must match at least one file.\nThe returned template will have the (base) name and (parsed) contents of the\nfirst file matched by the pattern. ParseGlob is equivalent to calling\n[ParseFiles] with the list of files matched by the pattern.\n\nWhen parsing multiple files with the same name in different directories,\nthe last one mentioned will be the one that results.\n" [^string pattern] :results [(* Template) error]
+  (parseGlob nil pattern))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 466} (go/method ParseGlob "ParseGlob parses the template definitions in the files identified by the\npattern and associates the resulting templates with t. The files are matched\naccording to the semantics of filepath.Match, and the pattern must match at\nleast one file. ParseGlob is equivalent to calling t.ParseFiles with the\nlist of files matched by the pattern.\n\nWhen parsing multiple files with the same name in different directories,\nthe last one mentioned will be the one that results.\n\nParseGlob returns an error if t or any associated template has already been executed.\n" [^{:tag (* Template)} t ^string pattern] :results [(* Template) error]
+  (parseGlob t pattern))
+
+
+
+^{:go/end 481} (go/func parseGlob "parseGlob is the implementation of the function and method ParseGlob.\n" [^{:tag (* Template)} t ^string pattern] :results [(* Template) error]
+  (when [err (.checkCanParse t)] (!= err nil)
+    (return nil err))
+
+  (let [(values filenames err) (filepath/Glob pattern)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (== (len filenames) 0)
+      (return nil (fmt/Errorf "html/template: pattern matches no files: %#q" pattern)))
+
+    (parseFiles t readFileOS (spread filenames))))
+
+
+
+
+
+^{:go/end 488} (go/func IsTrue "IsTrue reports whether the value is 'true', in the sense of not the zero of its type,\nand whether the value has a meaningful truth value. This is the definition of\ntruth used by if and other such actions.\n" [^any val] :results [^bool truth ^bool ok]
+  (template/IsTrue val))
+
+
+
+
+
+
+^{:go/end 496} (go/func ParseFS "ParseFS is like [ParseFiles] or [ParseGlob] but reads from the file system fs\ninstead of the host operating system's file system.\nIt accepts a list of glob patterns.\n(Note that most file names serve as glob patterns matching only themselves.)\n" [^fs/FS fs & ^{:tag (slice string)} patterns] :results [(* Template) error]
+  (parseFS nil fs patterns))
+
+
+
+
+
+
+^{:go/end 504} (go/method ParseFS "ParseFS is like [Template.ParseFiles] or [Template.ParseGlob] but reads from the file system fs\ninstead of the host operating system's file system.\nIt accepts a list of glob patterns.\n(Note that most file names serve as glob patterns matching only themselves.)\n" [^{:tag (* Template)} t ^fs/FS fs & ^{:tag (slice string)} patterns] :results [(* Template) error]
+  (parseFS t fs patterns))
+
+
+^{:go/end 519} (go/func parseFS [^{:tag (* Template)} t ^fs/FS fsys ^{:tag (slice string)} patterns] :results [(* Template) error]
+  (let [^{:tag (slice string)} filenames (zero (slice string))]
+    (range [_ pattern patterns]
+      (let [(values list err) (fs/Glob fsys pattern)]
+        (when (!= err nil)
+          (return nil err))
+
+        (when (== (len list) 0)
+          (return nil (fmt/Errorf "template: pattern matches no files: %#q" pattern)))
+
+        (set! filenames (append filenames (spread list)))))
+
+    (parseFiles t (readFileFS fsys) (spread filenames))))
+
+
+^{:go/end 525} (go/func readFileOS [^string file] :results [^string name ^{:tag (slice byte)} b ^error err]
+  (set! name (filepath/Base file))
+  (set! (values b err) (os/ReadFile file))
+  (return))
+
+
+^{:go/end 533} (go/func readFileFS ^{:tag (func [string] [string (slice byte) error])} [^fs/FS fsys]
+  ^{:go/end 532} (fn [^string file] :results [^string name ^{:tag (slice byte)} b ^error err]
+    (set! name (path/Base file))
+    (set! (values b err) (fs/ReadFile fsys file))
+    (return)))

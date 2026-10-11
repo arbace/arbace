@@ -1,0 +1,100 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.syscall) (go/file "dirent.go" :build ["//go:build unix || (js && wasm) || wasip1 || tamago"] :imports [
+
+
+    ^{:line 10} [byteorder "internal/byteorder"]
+    ^{:line 11} [goarch "internal/goarch"]
+    ^{:line 12} [runtime "runtime"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+
+^{:go/end 25} (go/func readInt "readInt returns the size-bytes unsigned integer in native byte order at offset off.\n" [^{:tag (slice byte)} b ^uintptr off ^uintptr size] :results [^uint64 u ^bool ok]
+  (when (< (len b) (conv int (+ off size)))
+    (return 0 false))
+
+  (when goarch/BigEndian
+    (return (readIntBE (subslice b off) size) true))
+
+  (return (readIntLE (subslice b off) size) true))
+
+
+^{:go/end 40} (go/func readIntBE ^uint64 [^{:tag (slice byte)} b ^uintptr size]
+  (switch size
+    (case [1]
+      (return (conv uint64 (aget b 0))))
+    (case [2]
+      (return (conv uint64 (byteorder/BEUint16 b))))
+    (case [4]
+      (return (conv uint64 (byteorder/BEUint32 b))))
+    (case [8]
+      (return (byteorder/BEUint64 b)))
+    (default
+      (panic "syscall: readInt with unsupported size"))))
+
+
+
+^{:go/end 55} (go/func readIntLE ^uint64 [^{:tag (slice byte)} b ^uintptr size]
+  (switch size
+    (case [1]
+      (return (conv uint64 (aget b 0))))
+    (case [2]
+      (return (conv uint64 (byteorder/LEUint16 b))))
+    (case [4]
+      (return (conv uint64 (byteorder/LEUint32 b))))
+    (case [8]
+      (return (byteorder/LEUint64 b)))
+    (default
+      (panic "syscall: readInt with unsupported size"))))
+
+
+
+
+
+
+
+^{:go/end 101} (go/func ParseDirent "ParseDirent parses up to max directory entries in buf,\nappending the names to names. It returns the number of\nbytes consumed from buf, the number of entries added\nto names, and the new names slice.\n" [^{:tag (slice byte)} buf ^int max ^{:tag (slice string)} names] :results [^int consumed ^int count ^{:tag (slice string)} newnames]
+  (let [origlen (len buf)]
+    (set! count 0)
+    (while (and (!= max 0) (> (len buf) 0))
+      (let [(values reclen ok) (direntReclen buf)]
+        (when (or (not ok) (> reclen (conv uint64 (len buf))))
+          (return origlen count names))
+
+        (let [rec (subslice buf _ reclen)]
+          (set! buf (subslice buf reclen))
+          (let [(values ino ^:assign ok) (direntIno rec)]
+            (when (not ok)
+              (break))
+
+            ;; See src/os/dir_unix.go for the reason why this condition is
+            ;; excluded on wasip1 and linux.
+            (when (and (== ino 0) (!= runtime/GOOS "linux") (!= runtime/GOOS "wasip1")) ; File absent in directory.
+              (continue))
+
+            (let [^:const ^{:val 18} namoff (conv uint64 (unsafe/Offsetof (.-Name (lit Dirent))))
+                (values namlen ^:assign ok) (direntNamlen rec)]
+              (when (or (not ok) (> (+ namoff namlen) (conv uint64 (len rec))))
+                (break))
+
+              (let [name (subslice rec namoff (+ namoff namlen))]
+                (range [i c name]
+                  (when (== c 0)
+                    (set! name (subslice name _ i))
+                    (break)))
+
+
+                ;; Check for useless names before allocating a string.
+                (when (or (== (conv string name) ".") (== (conv string name) ".."))
+                  (continue))
+
+                (dec! max)
+                (inc! count)
+                (set! names (append names (conv string name)))))))))
+
+    (return (- origlen (len buf)) count names)))

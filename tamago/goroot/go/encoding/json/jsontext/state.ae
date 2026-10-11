@@ -1,0 +1,826 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.jsontext) (go/file "state.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [iter "iter"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [strconv "strconv"]
+    ^{:line 14} [strings "strings"]
+    ^{:line 15} [utf8 "unicode/utf8"]
+
+    ^{:line 17} [jsonwire "encoding/json/internal/jsonwire"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "ErrDuplicateName indicates that a JSON token could not be\nencoded or decoded because it results in a duplicate JSON object name.\nThis error is directly wrapped within a [SyntacticError] when produced.\n\nThe name of a duplicate JSON object member can be extracted as:\n\n\terr := ...\n\tserr, ok := errors.AsType[*jsontext.SyntacticError](err)\n\tif ok && serr.Err == jsontext.ErrDuplicateName {\n\t\tptr := serr.JSONPointer // JSON pointer to duplicate name\n\t\tname := ptr.LastToken() // duplicate name itself\n\t\t...\n\t}\n\nThis error is only returned if [AllowDuplicateNames] is false.\n"} ErrDuplicateName (errors/New "duplicate object member name"))
+
+
+
+
+
+(go/var ^{:doc "ErrNonStringName indicates that a JSON token could not be\nencoded or decoded because it is not a string,\nas required for JSON object names according to RFC 8259, section 4.\nThis error is directly wrapped within a [SyntacticError] when produced.\n"} ErrNonStringName (errors/New "object member name must be a string"))
+
+(go/var
+  ^{:line 44} [errMissingValue (errors/New "missing value after object name")]
+  ^{:line 45} [errMismatchDelim (errors/New "mismatching structural token for object or array")]
+  ^{:line 46} [errMaxDepth (errors/New "exceeded max depth")]
+
+  ^{:line 48} [errInvalidNamespace (errors/New "object namespace is in an invalid state")])
+
+
+
+
+(go/const ^{:val 10000 :doc "Per RFC 8259, section 9, implementations may enforce a maximum depth.\nSuch a limit is necessary to prevent stack overflows.\n"} maxNestingDepth 10000)
+
+(go/type state (struct
+
+    ^{:line 57 :tag stateMachine :doc "Tokens validates whether the next token kind is valid.\n"} Tokens
+
+
+    ^{:line 60 :tag objectNameStack :doc "Names is a stack of object names.\n"} Names
+
+
+
+
+
+
+    ^{:line 67 :tag objectNamespaceStack :doc "Namespaces is a stack of object namespaces.\nFor performance reasons, Encoder or Decoder may not update this\nif Marshal or Unmarshal is able to track names in a more efficient way.\nSee makeMapArshaler and makeStructArshaler.\nNot used if AllowDuplicateNames is true.\n"} Namespaces))
+
+
+
+
+^{:go/end 74} (go/method needObjectValue "needObjectValue reports whether the next token should be an object value.\nThis method is used by [wrapSyntacticError].\n" ^bool [^{:tag (* state)} s]
+  (.needObjectValue (.-Last (.-Tokens s))))
+
+
+^{:go/end 80} (go/method reset [^{:tag (* state)} s]
+  (.reset (.-Tokens s))
+  (.reset (.-Names s))
+  (.reset (.-Namespaces s)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Pointer "Pointer is a JSON Pointer (RFC 6901) that references a particular JSON value\nrelative to the root of the top-level JSON value.\n\nA Pointer is a slash-separated list of tokens, where each token is\neither a JSON object name or an index to a JSON array element\nencoded as a base-10 integer value.\nIt is impossible to distinguish between an array index and an object name\n(that happens to be a base-10 encoded integer) without also knowing\nthe structure of the top-level JSON value that the pointer refers to.\n\nThere is exactly one representation of a pointer to a particular value,\nso comparability of Pointer values is equivalent to checking whether\nthey both point to the same value.\n" string)
+
+
+
+^{:go/end 109} (go/method IsValid "IsValid reports whether p is a valid JSON Pointer according to RFC 6901.\nNote that the concatenation of two valid pointers produces a valid pointer.\n" ^bool [^Pointer p]
+  (range [i r p]
+    (switch
+      (case [(and (== r \~) ^:go/paren (or (== (+ i 1) (len p)) ^:go/paren (and (!= (aget p (+ i 1)) \0) (!= (aget p (+ i 1)) \1))))]
+        (return false)) ; invalid escape
+      (case [(and (== r \ufffd) (not (strings/HasPrefix (conv string (subslice p i)) "\ufffd")))]
+        (return false)))) ; invalid UTF-8
+
+
+  (or (== (len p) 0) (== (aget p 0) \/)))
+
+
+
+
+^{:go/end 117} (go/method Contains "Contains reports whether the JSON value that p points to\nis equal to or contains the JSON value that pc points to.\n" ^bool [^Pointer p ^Pointer pc]
+  ;; Invariant: len(p) <= len(pc) if p.Contains(pc)
+  (let [(values suffix ok) (strings/CutPrefix (conv string pc) (conv string p))]
+    (and ok ^:go/paren (or (== suffix "") (== (aget suffix 0) \/)))))
+
+
+
+
+^{:go/end 123} (go/method Parent "Parent strips off the last token and returns the remaining pointer.\nThe parent of an empty Pointer is the empty string.\n" ^Pointer [^Pointer p]
+  (subslice p _ (max (strings/LastIndexByte (conv string p) \/) 0)))
+
+
+
+
+^{:go/end 130} (go/method LastToken "LastToken returns the last token in the pointer.\nThe last token of an empty Pointer is the empty string.\n" ^string [^Pointer p]
+  (let [last (subslice p (max (strings/LastIndexByte (conv string p) \/) 0))]
+    (unescapePointerToken (strings/TrimPrefix (conv string last) "/"))))
+
+
+
+^{:go/end 135} (go/method AppendToken "AppendToken appends a token to the end of p and returns the full pointer.\n" ^Pointer [^Pointer p ^string tok]
+  (conv Pointer (appendEscapePointerName (conv (slice byte) (+ p "/")) (conv (slice byte) tok))))
+
+
+;; TODO: Add Pointer.AppendTokens,
+;; but should this take in a ...string or an iter.Seq[string]?
+
+
+
+^{:go/end 153} (go/method Tokens "Tokens returns an iterator over the reference tokens in the JSON pointer,\nfrom first to last.\n" ^{:tag (iter/Seq string)} [^Pointer p]
+  ^{:go/end 152} (fn [^{:tag (func [string] [bool])} yield]
+    (while (> (len p) 0)
+      (set! p (conv Pointer (strings/TrimPrefix (conv string p) "/")))
+      (let [i (min (conv uint (strings/IndexByte (conv string p) \/)) (conv uint (len p)))]
+        (when (not (yield (unescapePointerToken (subslice (conv string p) _ i))))
+          (return))
+
+        (set! p (subslice p i))))))
+
+
+
+
+^{:go/end 162} (go/func unescapePointerToken ^string [^string token]
+  (when (strings/Contains token "~")
+    ;; Per RFC 6901, section 3, unescape '~' and '/' characters.
+    (set! token (strings/ReplaceAll token "~1" "/"))
+    (set! token (strings/ReplaceAll token "~0" "~")))
+
+  ^{:line 161} token)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 203} (go/method appendStackPointer "appendStackPointer appends a JSON Pointer (RFC 6901) to the current value.\n\n  - If where is -1, then it points to the previously processed token.\n\n  - If where is 0, then it points to the parent JSON object or array,\n    or an object member if in-between an object member key and value.\n    This is useful when the position is ambiguous whether\n    we are interested in the previous or next token, or\n    when we are uncertain whether the next token\n    continues or terminates the current object or array.\n\n  - If where is +1, then it points to the next expected value,\n    assuming that it continues the current JSON object or array.\n    As a special case, if the next token is a JSON object name,\n    then it points to the parent JSON object.\n\nInvariant: Must call s.names.copyQuotedBuffer beforehand.\n" ^{:tag (slice byte)} [^state s ^{:tag (slice byte)} b ^int where]
+  (let [^int objectDepth (zero int)]
+    (for [i 1] (< i (.Depth (.-Tokens s))) (inc! i)
+      (let [e (.index (.-Tokens s) i)
+          ^{:line 185} arrayDelta -1] ; by default point to previous array element
+        (when [isLast (== i (- (.Depth (.-Tokens s)) 1))] isLast
+          (switch
+            (case [(or (and (< where 0) (== (.Length e) 0)) (and (== where 0) (not (.needObjectValue e))) (and (> where 0) (.NeedObjectName e)))]
+              (return b))
+            (case [(and (> where 0) (.isArray e))]
+              (set! arrayDelta 0)))) ; point to next array element
+
+
+        (switch
+          (case [(.isObject e)]
+            (set! b (appendEscapePointerName (append b \/) (.getUnquoted (.-Names s) objectDepth)))
+            (inc! objectDepth))
+          (case [(.isArray e)]
+            (set! b (strconv/AppendUint (append b \/) (conv uint64 (+ (.Length e) (conv int64 arrayDelta))) 10))))))
+
+
+    ^{:line 202} b))
+
+
+^{:go/end 218} (go/func appendEscapePointerName ^{:tag (slice byte)} [^{:tag (slice byte)} b ^{:tag (slice byte)} name]
+  (range [_ r (conv string name)]
+    ;; Per RFC 6901, section 3, escape '~' and '/' characters.
+    (switch r
+      (case [\~]
+        (set! b (append b (spread "~0"))))
+      (case [\/]
+        (set! b (append b (spread "~1"))))
+      (default
+        (set! b (utf8/AppendRune b r)))))
+
+
+  ^{:line 217} b)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type stateMachine "stateMachine is a push-down automaton that validates whether\na sequence of tokens is valid or not according to the JSON grammar.\nIt is useful for both encoding and decoding.\n\nIt is a stack where each entry represents a nested JSON object or array.\nThe stack has a minimum depth of 1 where the first level is a\nvirtual JSON array to handle a stream of top-level JSON values.\nThe top-level virtual JSON array is special in that it doesn't require commas\nbetween each JSON value.\n\nFor performance, most methods are carefully written to be inlinable.\nThe zero value is a valid state machine ready for use.\n" (struct
+    ^{:line 233 :tag (slice stateEntry)} Stack
+    ^{:line 234 :tag stateEntry} Last))
+
+
+
+
+^{:go/end 245} (go/method reset "reset resets the state machine.\nThe machine always starts with a minimum depth of 1.\n" [^{:tag (* stateMachine)} m]
+  (set! (.-Stack m) (subslice (.-Stack m) _ 0))
+  (when (> (cap (.-Stack m)) (<< 1 10))
+    (set! (.-Stack m) nil))
+
+  (set! (.-Last m) stateTypeArray))
+
+
+
+
+^{:go/end 251} (go/method Depth "Depth is the current nested depth of JSON objects and arrays.\nIt is one-indexed (i.e., top-level values have a depth of 1).\n" ^int [^stateMachine m]
+  (+ (len (.-Stack m)) 1))
+
+
+
+
+^{:go/end 260} (go/method index "index returns a reference to the ith entry.\nIt is only valid until the next push method call.\n" ^{:tag (* stateEntry)} [^{:tag (* stateMachine)} m ^int i]
+  (when (== i (len (.-Stack m)))
+    (return (addr (.-Last m))))
+
+  (addr (aget (.-Stack m) i)))
+
+
+
+
+^{:go/end 266} (go/method DepthLength "DepthLength reports the current nested depth and\nthe length of the last JSON object or array.\n" [^stateMachine m] :results [int int64]
+  (return (.Depth m) (.Length (.-Last m))))
+
+
+
+
+^{:go/end 280} (go/method appendLiteral "appendLiteral appends a JSON literal as the next token in the sequence.\nIf an error is returned, the state is not mutated.\n" ^error [^{:tag (* stateMachine)} m]
+  (switch
+    (case [(.NeedObjectName (.-Last m))]
+      (return ErrNonStringName))
+    (case [(not (.isValidNamespace (.-Last m)))]
+      (return errInvalidNamespace))
+    (default
+      (.Increment (.-Last m))
+      (return nil))))
+
+
+
+
+
+^{:go/end 292} (go/method appendString "appendString appends a JSON string as the next token in the sequence.\nIf an error is returned, the state is not mutated.\n" ^error [^{:tag (* stateMachine)} m]
+  (switch
+    (case [(not (.isValidNamespace (.-Last m)))]
+      (return errInvalidNamespace))
+    (default
+      (.Increment (.-Last m))
+      (return nil))))
+
+
+
+
+
+^{:go/end 298} (go/method appendNumber "appendNumber appends a JSON number as the next token in the sequence.\nIf an error is returned, the state is not mutated.\n" ^error [^{:tag (* stateMachine)} m]
+  (.appendLiteral m))
+
+
+
+
+^{:go/end 316} (go/method pushObject "pushObject appends a JSON begin object token as next in the sequence.\nIf an error is returned, the state is not mutated.\n" ^error [^{:tag (* stateMachine)} m]
+  (switch
+    (case [(.NeedObjectName (.-Last m))]
+      (return ErrNonStringName))
+    (case [(not (.isValidNamespace (.-Last m)))]
+      (return errInvalidNamespace))
+    (case [(== (len (.-Stack m)) maxNestingDepth)]
+      (return errMaxDepth))
+    (default
+      (.Increment (.-Last m))
+      (set! (.-Stack m) (append (.-Stack m) (.-Last m)))
+      (set! (.-Last m) stateTypeObject)
+      (return nil))))
+
+
+
+
+
+^{:go/end 333} (go/method popObject "popObject appends a JSON end object token as next in the sequence.\nIf an error is returned, the state is not mutated.\n" ^error [^{:tag (* stateMachine)} m]
+  (switch
+    (case [(not (.isObject (.-Last m)))]
+      (return errMismatchDelim))
+    (case [(.needObjectValue (.-Last m))]
+      (return errMissingValue))
+    (case [(not (.isValidNamespace (.-Last m)))]
+      (return errInvalidNamespace))
+    (default
+      (set! (.-Last m) (aget (.-Stack m) (- (len (.-Stack m)) 1)))
+      (set! (.-Stack m) (subslice (.-Stack m) _ (- (len (.-Stack m)) 1)))
+      (return nil))))
+
+
+
+
+
+^{:go/end 351} (go/method pushArray "pushArray appends a JSON begin array token as next in the sequence.\nIf an error is returned, the state is not mutated.\n" ^error [^{:tag (* stateMachine)} m]
+  (switch
+    (case [(.NeedObjectName (.-Last m))]
+      (return ErrNonStringName))
+    (case [(not (.isValidNamespace (.-Last m)))]
+      (return errInvalidNamespace))
+    (case [(== (len (.-Stack m)) maxNestingDepth)]
+      (return errMaxDepth))
+    (default
+      (.Increment (.-Last m))
+      (set! (.-Stack m) (append (.-Stack m) (.-Last m)))
+      (set! (.-Last m) stateTypeArray)
+      (return nil))))
+
+
+
+
+
+^{:go/end 366} (go/method popArray "popArray appends a JSON end array token as next in the sequence.\nIf an error is returned, the state is not mutated.\n" ^error [^{:tag (* stateMachine)} m]
+  (switch
+    (case [(or (not (.isArray (.-Last m))) (== (len (.-Stack m)) 0))] ; forbid popping top-level virtual JSON array
+      (return errMismatchDelim))
+    (case [(not (.isValidNamespace (.-Last m)))]
+      (return errInvalidNamespace))
+    (default
+      (set! (.-Last m) (aget (.-Stack m) (- (len (.-Stack m)) 1)))
+      (set! (.-Stack m) (subslice (.-Stack m) _ (- (len (.-Stack m)) 1)))
+      (return nil))))
+
+
+
+
+
+
+
+^{:go/end 386} (go/method NeedIndent "NeedIndent reports whether indent whitespace should be injected.\nA zero value means that no whitespace should be injected.\nA positive value means '\\n', indentPrefix, and (n-1) copies of indentBody\nshould be appended to the output immediately before the next token.\n" [^stateMachine m ^Kind next] :results [^int n]
+  (let [willEnd (or (== next \}) (== next \]))]
+    (switch
+      (case [(== (.Depth m) 1)]
+        (return 0)) ; top-level values are never indented
+      (case [(and (== (.Length (.-Last m)) 0) willEnd)]
+        (return 0)) ; an empty object or array is never indented
+      (case [(or (== (.Length (.-Last m)) 0) (.needImplicitComma (.-Last m) next))]
+        (return (.Depth m)))
+      (case [willEnd]
+        (return (- (.Depth m) 1)))
+      (default
+        (return 0)))))
+
+
+
+
+^{:go/end 398} (go/method MayAppendDelim "MayAppendDelim appends a colon or comma that may precede the next token.\n" ^{:tag (slice byte)} [^stateMachine m ^{:tag (slice byte)} b ^Kind next]
+  (switch
+    (case [(.needImplicitColon (.-Last m))]
+      (return (append b \:)))
+    (case [(and (.needImplicitComma (.-Last m) next) (!= (len (.-Stack m)) 0))] ; comma not needed for top-level values
+      (return (append b \,)))
+    (default
+      (return b))))
+
+
+
+
+
+
+^{:go/end 412} (go/method needDelim "needDelim reports whether a colon or comma token should be implicitly emitted\nbefore the next token of the specified kind.\nA zero value means no delimiter should be emitted.\n" [^stateMachine m ^Kind next] :results [^byte delim]
+  (switch
+    (case [(.needImplicitColon (.-Last m))]
+      (return \:))
+    (case [(and (.needImplicitComma (.-Last m) next) (!= (len (.-Stack m)) 0))] ; comma not needed for top-level values
+      (return \,))
+    (default
+      (return 0))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 428} (go/method InvalidateDisabledNamespaces "InvalidateDisabledNamespaces marks all disabled namespaces as invalid.\n\nFor efficiency, Marshal and Unmarshal may disable namespaces since there are\nmore efficient ways to track duplicate names. However, if an error occurs,\nthe namespaces in Encoder or Decoder will be left in an inconsistent state.\nMark the namespaces as invalid so that future method calls on\nEncoder or Decoder will return an error.\n" [^{:tag (* stateMachine)} m]
+  (range [i (.Depth m)]
+    (let [e (.index m i)]
+      (when (not (.isActiveNamespace e))
+        (.invalidateNamespace e)))))
+
+
+
+
+
+
+
+
+(go/type stateEntry "stateEntry encodes several artifacts within a single unsigned integer:\n  - whether this represents a JSON object or array,\n  - whether this object should check for duplicate names, and\n  - how many elements are in this JSON object or array.\n" uint64)
+
+(go/const
+
+  ^{:line 438} [^{:tag stateEntry :val 9223372036854775808N :doc "The type mask (1 bit) records whether this is a JSON object or array.\n"} stateTypeMask 0x8000000000000000]
+  ^{:line 439} [^{:tag stateEntry :val 9223372036854775808N} stateTypeObject 0x8000000000000000]
+  ^{:line 440} [^{:tag stateEntry :val 0} stateTypeArray 0x0000000000000000]
+
+
+
+
+  ^{:line 445} [^{:tag stateEntry :val 6917529027641081856 :doc "The name check mask (2 bits) records whether to update\nthe namespaces for the current JSON object and\nwhether the namespace is valid.\n"} stateNamespaceMask 0x6000000000000000]
+  ^{:line 446} [^{:tag stateEntry :val 4611686018427387904} stateDisableNamespace 0x4000000000000000]
+  ^{:line 447} [^{:tag stateEntry :val 2305843009213693952} stateInvalidNamespace 0x2000000000000000]
+
+
+  ^{:line 450} [^{:tag stateEntry :val 2305843009213693951 :doc "The count mask (61 bits) records the number of elements.\n"} stateCountMask 0x1fffffffffffffff]
+  ^{:line 451} [^{:tag stateEntry :val 1} stateCountLSBMask 0x0000000000000001]
+  ^{:line 452} [^{:tag stateEntry :val 1} stateCountOdd 0x0000000000000001]
+  ^{:line 453} [^{:tag stateEntry :val 0} stateCountEven 0x0000000000000000])
+
+
+
+
+^{:go/end 460} (go/method Length "Length reports the number of elements in the JSON object or array.\nEach name and value in an object entry is treated as a separate element.\n" ^int64 [^stateEntry e]
+  (conv int64 (bit-and e stateCountMask)))
+
+
+
+^{:go/end 465} (go/method isObject "isObject reports whether this is a JSON object.\n" ^bool [^stateEntry e]
+  (== (bit-and e stateTypeMask) stateTypeObject))
+
+
+
+^{:go/end 470} (go/method isArray "isArray reports whether this is a JSON array.\n" ^bool [^stateEntry e]
+  (== (bit-and e stateTypeMask) stateTypeArray))
+
+
+
+
+^{:go/end 476} (go/method NeedObjectName "NeedObjectName reports whether the next token must be a JSON string,\nwhich is necessary for JSON object names.\n" ^bool [^stateEntry e]
+  (== (bit-and e (bit-or stateTypeMask stateCountLSBMask)) (bit-or stateTypeObject stateCountEven)))
+
+
+
+
+^{:go/end 482} (go/method needImplicitColon "needImplicitColon reports whether a colon should occur next,\nwhich always occurs after JSON object names.\n" ^bool [^stateEntry e]
+  (.needObjectValue e))
+
+
+
+
+^{:go/end 488} (go/method needObjectValue "needObjectValue reports whether the next token must be a JSON value,\nwhich is necessary after every JSON object name.\n" ^bool [^stateEntry e]
+  (== (bit-and e (bit-or stateTypeMask stateCountLSBMask)) (bit-or stateTypeObject stateCountOdd)))
+
+
+
+
+
+^{:go/end 495} (go/method needImplicitComma "needImplicitComma reports whether a comma should occur next,\nwhich always occurs after a value in a JSON object or array\nbefore the next value (or name).\n" ^bool [^stateEntry e ^Kind next]
+  (and (not (.needObjectValue e)) (> (.Length e) 0) (!= next \}) (!= next \])))
+
+
+
+
+
+^{:go/end 502} (go/method Increment "Increment increments the number of elements for the current object or array.\nThis assumes that overflow won't practically be an issue since\n1<<bits.OnesCount(stateCountMask) is sufficiently large.\n" [^{:tag (* stateEntry)} e]
+  (inc! @e))
+
+
+
+
+^{:go/end 508} (go/method decrement "decrement decrements the number of elements for the current object or array.\nIt is the caller's responsibility to ensure that e.length > 0.\n" [^{:tag (* stateEntry)} e]
+  (dec! @e))
+
+
+
+
+^{:go/end 514} (go/method DisableNamespace "DisableNamespace disables the JSON object namespace such that the\nEncoder or Decoder no longer updates the namespace.\n" [^{:tag (* stateEntry)} e]
+  (set! @e bit-or stateDisableNamespace))
+
+
+
+
+^{:go/end 520} (go/method isActiveNamespace "isActiveNamespace reports whether the JSON object namespace is actively\nbeing updated and used for duplicate name checks.\n" ^bool [^stateEntry e]
+  (== (bit-and e stateDisableNamespace) 0))
+
+
+
+^{:go/end 525} (go/method invalidateNamespace "invalidateNamespace marks the JSON object namespace as being invalid.\n" [^{:tag (* stateEntry)} e]
+  (set! @e bit-or stateInvalidNamespace))
+
+
+
+^{:go/end 530} (go/method isValidNamespace "isValidNamespace reports whether the JSON object namespace is valid.\n" ^bool [^stateEntry e]
+  (== (bit-and e stateInvalidNamespace) 0))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type objectNameStack "objectNameStack is a stack of names when descending into a JSON object.\nIn contrast to objectNamespaceStack, this only has to remember a single name\nper JSON object.\n\nThis data structure may contain offsets to encodeBuffer or decodeBuffer.\nIt violates clean abstraction of layers, but is significantly more efficient.\nThis ensures that popping and pushing in the common case is a trivial\npush/pop of an offset integer.\n\nThe zero value is an empty names stack ready for use.\n" (struct
+
+
+
+
+
+
+    ^{:line 549 :tag (slice int) :doc "offsets is a stack of offsets for each name.\nA non-negative offset is the ending offset into the local names buffer.\nA negative offset is the bit-wise inverse of a starting offset into\na remote buffer (e.g., encodeBuffer or decodeBuffer).\nA math.MinInt offset at the end implies that the last object is empty.\nInvariant: Positive offsets always occur before negative offsets.\n"} offsets
+
+    ^{:line 551 :tag (slice byte) :doc "unquotedNames is a back-to-back concatenation of names.\n"} unquotedNames))
+
+
+^{:go/end 563} (go/method reset [^{:tag (* objectNameStack)} ns]
+  (set! (.-offsets ns) (subslice (.-offsets ns) _ 0))
+  (set! (.-unquotedNames ns) (subslice (.-unquotedNames ns) _ 0))
+  (when (> (cap (.-offsets ns)) (<< 1 6))
+    (set! (.-offsets ns) nil)) ; avoid pinning arbitrarily large amounts of memory
+
+  (when (> (cap (.-unquotedNames ns)) (<< 1 10))
+    (set! (.-unquotedNames ns) nil))) ; avoid pinning arbitrarily large amounts of memory
+
+
+
+^{:go/end 567} (go/method length ^int [^{:tag (* objectNameStack)} ns]
+  (len (.-offsets ns)))
+
+
+
+
+
+
+^{:go/end 580} (go/method getUnquoted "getUnquoted retrieves the ith unquoted name in the stack.\nIt returns an empty string if the last object is empty.\n\nInvariant: Must call copyQuotedBuffer beforehand.\n" ^{:tag (slice byte)} [^{:tag (* objectNameStack)} ns ^int i]
+  (.ensureCopiedBuffer ns)
+  (if (== i 0)
+    (return (subslice (.-unquotedNames ns) _ (aget (.-offsets ns) 0)))
+
+    (return (subslice (.-unquotedNames ns) (aget (.-offsets ns) (- i 1)) (aget (.-offsets ns) i)))))
+
+
+
+
+(go/const ^{:val -9223372036854775808 :doc "invalidOffset indicates that the last JSON object currently has no name.\n"} invalidOffset math/MinInt)
+
+
+^{:go/end 588} (go/method push "push descends into a nested JSON object.\n" [^{:tag (* objectNameStack)} ns]
+  (set! (.-offsets ns) (append (.-offsets ns) invalidOffset)))
+
+
+
+
+
+^{:go/end 600} (go/method ReplaceLastQuotedOffset "ReplaceLastQuotedOffset replaces the last name with the starting offset\nto the quoted name in some remote buffer. All offsets provided must be\nrelative to the same buffer until copyQuotedBuffer is called.\n" [^{:tag (* objectNameStack)} ns ^int i]
+  ;; Use bit-wise inversion instead of naive multiplication by -1 to avoid
+  ;; ambiguity regarding zero (which is a valid offset into the names field).
+  ;; Bit-wise inversion is mathematically equivalent to -i-1,
+  ;; such that 0 becomes -1, 1 becomes -2, and so forth.
+  ;; This ensures that remote offsets are always negative.
+  (aset (.-offsets ns) (- (len (.-offsets ns)) 1) (bit-not i)))
+
+
+
+
+
+^{:go/end 613} (go/method replaceLastUnquotedName "replaceLastUnquotedName replaces the last name with the provided name.\n\nInvariant: Must call copyQuotedBuffer beforehand.\n" [^{:tag (* objectNameStack)} ns ^string s]
+  (.ensureCopiedBuffer ns)
+  (let [^int startOffset (zero int)]
+    (when (> (len (.-offsets ns)) 1)
+      (set! startOffset (aget (.-offsets ns) (- (len (.-offsets ns)) 2))))
+
+    (set! (.-unquotedNames ns) (append (subslice (.-unquotedNames ns) _ startOffset) (spread s)))
+    (aset (.-offsets ns) (- (len (.-offsets ns)) 1) (len (.-unquotedNames ns)))))
+
+
+
+
+^{:go/end 619} (go/method clearLast "clearLast removes any name in the last JSON object.\nIt is semantically equivalent to ns.push followed by ns.pop.\n" [^{:tag (* objectNameStack)} ns]
+  (aset (.-offsets ns) (- (len (.-offsets ns)) 1) invalidOffset))
+
+
+
+^{:go/end 624} (go/method pop "pop ascends out of a nested JSON object.\n" [^{:tag (* objectNameStack)} ns]
+  (set! (.-offsets ns) (subslice (.-offsets ns) _ (- (len (.-offsets ns)) 1))))
+
+
+
+
+
+
+^{:go/end 668} (go/method copyQuotedBuffer "copyQuotedBuffer copies names from the remote buffer into the local names\nbuffer so that there are no more offset references into the remote buffer.\nThis allows the remote buffer to change contents without affecting\nthe names that this data structure is trying to remember.\n" [^{:tag (* objectNameStack)} ns ^{:tag (slice byte)} b]
+  ;; Find the first negative offset.
+  (let [^int i (zero int)]
+    (for [(set! i (- (len (.-offsets ns)) 1))] (and (>= i 0) (< (aget (.-offsets ns) i) 0)) (dec! i)
+      (continue))
+
+
+    ;; Copy each name from the remote buffer into the local buffer.
+    (for [(set! i (+ i 1))] (< i (len (.-offsets ns))) (inc! i)
+      (when (and (== i (- (len (.-offsets ns)) 1)) (== (aget (.-offsets ns) i) invalidOffset))
+        (if (== i 0)
+          (aset (.-offsets ns) i 0)
+
+          (aset (.-offsets ns) i (aget (.-offsets ns) (- i 1))))
+
+        (break)) ; last JSON object had a push without any names
+
+
+      ;; As a form of Hyrum proofing, we write an invalid character into the
+      ;; buffer to make misuse of Decoder.ReadToken more obvious.
+      ;; We need to undo that mutation here.
+      (let [quotedName (subslice b (bit-not (aget (.-offsets ns) i)))]
+        (when (== (aget quotedName 0) invalidateBufferByte)
+          (aset quotedName 0 \"))
+
+
+        ;; Append the unquoted name to the local buffer.
+        (let [^int startOffset (zero int)]
+          (when (> i 0)
+            (set! startOffset (aget (.-offsets ns) (- i 1))))
+
+          (if [n (jsonwire/ConsumeSimpleString quotedName)] (> n 0)
+            (set! (.-unquotedNames ns) (append (subslice (.-unquotedNames ns) _ startOffset) (spread (subslice quotedName (len "\"") (- n (len "\""))))))
+
+            (set! (values (.-unquotedNames ns) _) (jsonwire/AppendUnquote (subslice (.-unquotedNames ns) _ startOffset) quotedName)))
+
+          (aset (.-offsets ns) i (len (.-unquotedNames ns))))))))
+
+
+
+^{:go/end 674} (go/method ensureCopiedBuffer [^{:tag (* objectNameStack)} ns]
+  (when (and (> (len (.-offsets ns)) 0) (< (aget (.-offsets ns) (- (len (.-offsets ns)) 1)) 0))
+    (panic "BUG: copyQuotedBuffer not called beforehand")))
+
+
+
+
+
+(go/type objectNamespaceStack "objectNamespaceStack is a stack of object namespaces.\nThis data structure assists in detecting duplicate names.\n" (slice objectNamespace))
+
+
+^{:go/end 686} (go/method reset "reset resets the object namespace stack.\n" [^{:tag (* objectNamespaceStack)} nss]
+  (when (> (cap @nss) (<< 1 10))
+    (set! @nss nil))
+
+  (set! @nss (subslice @nss _ 0)))
+
+
+
+^{:go/end 696} (go/method push "push starts a new namespace for a nested JSON object.\n" [^{:tag (* objectNamespaceStack)} nss]
+  (if (> (cap @nss) (len @nss)) (do
+      (set! @nss (subslice @nss _ (+ (len @nss) 1)))
+      (.reset (.Last nss)))
+
+    (set! @nss (append @nss (lit objectNamespace)))))
+
+
+
+
+^{:go/end 701} (go/method Last "Last returns a pointer to the last JSON object namespace.\n" ^{:tag (* objectNamespace)} [^objectNamespaceStack nss]
+  (addr (aget nss (- (len nss) 1))))
+
+
+
+^{:go/end 706} (go/method pop "pop terminates the namespace for a nested JSON object.\n" [^{:tag (* objectNamespaceStack)} nss]
+  (set! @nss (subslice @nss _ (- (len @nss) 1))))
+
+
+
+
+
+
+
+(go/type objectNamespace "objectNamespace is the namespace for a JSON object.\nIn contrast to objectNameStack, this needs to remember all names\nper JSON object.\n\nThe zero value is an empty namespace ready for use.\n" (struct
+    ;; It relies on a linear search over all the names before switching
+    ;; to use a Go map for direct lookup.
+
+
+
+    ^{:line 719 :tag (slice uint) :doc "endOffsets is a list of offsets to the end of each name in buffers.\nThe length of offsets is the number of names in the namespace.\n"} endOffsets
+
+    ^{:line 721 :tag (slice byte) :doc "allUnquotedNames is a back-to-back concatenation of every name in the namespace.\n"} allUnquotedNames
+
+
+    ^{:line 724 :tag (map string (struct)) :doc "mapNames is a Go map containing every name in the namespace.\nOnly valid if non-nil.\n"} mapNames))
+
+
+
+^{:go/end 738} (go/method reset "reset resets the namespace to be empty.\n" [^{:tag (* objectNamespace)} ns]
+  (set! (.-endOffsets ns) (subslice (.-endOffsets ns) _ 0))
+  (set! (.-allUnquotedNames ns) (subslice (.-allUnquotedNames ns) _ 0))
+  (set! (.-mapNames ns) nil)
+  (when (> (cap (.-endOffsets ns)) (<< 1 6))
+    (set! (.-endOffsets ns) nil)) ; avoid pinning arbitrarily large amounts of memory
+
+  (when (> (cap (.-allUnquotedNames ns)) (<< 1 10))
+    (set! (.-allUnquotedNames ns) nil))) ; avoid pinning arbitrarily large amounts of memory
+
+
+
+
+^{:go/end 743} (go/method length "length reports the number of names in the namespace.\n" ^int [^{:tag (* objectNamespace)} ns]
+  (len (.-endOffsets ns)))
+
+
+
+^{:go/end 752} (go/method getUnquoted "getUnquoted retrieves the ith unquoted name in the namespace.\n" ^{:tag (slice byte)} [^{:tag (* objectNamespace)} ns ^int i]
+  (if (== i 0)
+    (return (subslice (.-allUnquotedNames ns) _ (aget (.-endOffsets ns) 0)))
+
+    (return (subslice (.-allUnquotedNames ns) (aget (.-endOffsets ns) (- i 1)) (aget (.-endOffsets ns) i)))))
+
+
+
+
+^{:go/end 757} (go/method lastUnquoted "lastUnquoted retrieves the last name in the namespace.\n" ^{:tag (slice byte)} [^{:tag (* objectNamespace)} ns]
+  (.getUnquoted ns (- (.length ns) 1)))
+
+
+
+
+
+^{:go/end 767} (go/method insertQuoted "insertQuoted inserts a name and reports whether it was inserted,\nwhich only occurs if name is not already in the namespace.\nThe provided name must be a valid JSON string.\n" ^bool [^{:tag (* objectNamespace)} ns ^{:tag (slice byte)} name ^bool isVerbatim]
+  (when isVerbatim
+    (set! name (subslice name (len "\"") (- (len name) (len "\"")))))
+
+  (.insert ns name (not isVerbatim)))
+
+^{:go/end 770} (go/method InsertUnquoted ^bool [^{:tag (* objectNamespace)} ns ^{:tag (slice byte)} name]
+  (.insert ns name false))
+
+^{:go/end 814} (go/method insert ^bool [^{:tag (* objectNamespace)} ns ^{:tag (slice byte)} name ^bool quoted]
+  ^{:go/breaks [8]} (let [^{:tag (slice byte)} allNames (zero (slice byte))]
+    (if quoted
+      (set! (values allNames _) (jsonwire/AppendUnquote (.-allUnquotedNames ns) name))
+
+      (set! allNames (append (.-allUnquotedNames ns) (spread name))))
+
+    (set! name (subslice allNames (len (.-allUnquotedNames ns))))
+
+    ;; Switch to a map if the buffer is too large for linear search.
+    ;; This does not add the current name to the map.
+    (when (and (== (.-mapNames ns) nil) ^:go/paren (or (> (.length ns) 64) (> (len (.-allUnquotedNames ns)) 1024)))
+      (set! (.-mapNames ns) (make (map string (struct))))
+      (let [^uint startOffset (zero uint)]
+        (range [_ endOffset (.-endOffsets ns)]
+          (let [name (subslice (.-allUnquotedNames ns) startOffset endOffset)]
+            (aset (.-mapNames ns) (conv string name) (lit (struct))) ; allocates a new string
+            (set! startOffset endOffset)))))
+
+
+
+    (if (== (.-mapNames ns) nil)
+      ;; Perform linear search over the buffer to find matching names.
+      ;; It provides O(n) lookup, but does not require any allocations.
+      (let [^uint startOffset (zero uint)]
+        (range [_ endOffset (.-endOffsets ns)]
+          (when (== (conv string (subslice (.-allUnquotedNames ns) startOffset endOffset)) (conv string name))
+            (return false))
+
+          (set! startOffset endOffset)))
+
+      (do
+        ;; Use the map if it is populated.
+        ;; It provides O(1) lookup, but requires a string allocation per name.
+        (when [(values _ ok) (aget (.-mapNames ns) (conv string name))] ok
+          (return false))
+
+        (aset (.-mapNames ns) (conv string name) (lit (struct))))) ; allocates a new string
+
+
+    (set! (.-allUnquotedNames ns) allNames)
+    (set! (.-endOffsets ns) (append (.-endOffsets ns) (conv uint (len (.-allUnquotedNames ns)))))
+    true))
+
+
+
+^{:go/end 828} (go/method removeLast "removeLast removes the last name in the namespace.\n" [^{:tag (* objectNamespace)} ns]
+  (when (!= (.-mapNames ns) nil)
+    (delete (.-mapNames ns) (conv string (.lastUnquoted ns))))
+
+  (if (== (- (.length ns) 1) 0) (do
+      (set! (.-endOffsets ns) (subslice (.-endOffsets ns) _ 0))
+      (set! (.-allUnquotedNames ns) (subslice (.-allUnquotedNames ns) _ 0)))
+    (do
+      (set! (.-endOffsets ns) (subslice (.-endOffsets ns) _ (- (.length ns) 1)))
+      (set! (.-allUnquotedNames ns) (subslice (.-allUnquotedNames ns) _ (aget (.-endOffsets ns) (- (.length ns) 1)))))))

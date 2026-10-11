@@ -1,0 +1,1317 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.gob) (go/file "decode.go" :directives ["//go:generate go run decgen.go -output dec_helpers.go"] :imports [
+
+
+    ^{:line 10} [encoding "encoding"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [saferio "internal/saferio"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [math "math"]
+    ^{:line 15} [bits "math/bits"]
+    ^{:line 16} [reflect "reflect"]])
+
+
+(go/var
+  ^{:line 20} [errBadUint (errors/New "gob: encoded unsigned integer out of range")]
+  ^{:line 21} [errBadType (errors/New "gob: unknown type id or corrupted data")]
+  ^{:line 22} [errRange (errors/New "gob: bad data: field numbers out of bounds")])
+
+
+(go/type decHelper (func [^{:tag (* decoderState)} state ^reflect/Value v ^int length ^error ovfl] [bool]))
+
+
+
+(go/type decoderState "decoderState is the execution state of an instance of the decoder. A new state\nis created for nested objects.\n" (struct
+    ^{:line 30 :tag (* Decoder)} dec
+
+
+    ^{:line 33 :tag (* decBuffer) :doc "The buffer is stored with an extra indirection because it may be replaced\nif we load a type during decode (when reading an interface value).\n"} b
+    ^{:line 34 :tag int} fieldnum ; the last field number read.
+    ^{:line 35 :tag (* decoderState)} next)) ; for free list
+
+
+
+
+(go/type decBuffer "decBuffer is an extremely simple, fast implementation of a read-only byte buffer.\nIt is initialized by calling Size and then copying the data into the slice returned by Bytes().\n" (struct
+    ^{:line 41 :tag (slice byte)} data
+    ^{:line 42 :tag int} offset)) ; Read offset.
+
+
+^{:go/end 52} (go/method Read [^{:tag (* decBuffer)} d ^{:tag (slice byte)} p] :results [int error]
+  (let [n (copy p (subslice (.-data d) (.-offset d)))]
+    (when (and (== n 0) (!= (len p) 0))
+      (return 0 io/EOF))
+
+    (set! (.-offset d) + n)
+    (return n nil)))
+
+
+^{:go/end 59} (go/method Drop [^{:tag (* decBuffer)} d ^int n]
+  (when (> n (.Len d))
+    (panic "drop"))
+
+  (set! (.-offset d) + n))
+
+
+^{:go/end 68} (go/method ReadByte [^{:tag (* decBuffer)} d] :results [byte error]
+  (when (>= (.-offset d) (len (.-data d)))
+    (return 0 io/EOF))
+
+  (let [c (aget (.-data d) (.-offset d))]
+    (inc! (.-offset d))
+    (return c nil)))
+
+
+^{:go/end 72} (go/method Len ^int [^{:tag (* decBuffer)} d]
+  (- (len (.-data d)) (.-offset d)))
+
+
+^{:go/end 76} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* decBuffer)} d]
+  (subslice (.-data d) (.-offset d)))
+
+
+
+^{:go/end 82} (go/method SetBytes "SetBytes sets the buffer to the bytes, discarding any existing data.\n" [^{:tag (* decBuffer)} d ^{:tag (slice byte)} data]
+  (set! (.-data d) data)
+  (set! (.-offset d) 0))
+
+
+^{:go/end 87} (go/method Reset [^{:tag (* decBuffer)} d]
+  (set! (.-data d) (subslice (.-data d) 0 0))
+  (set! (.-offset d) 0))
+
+
+
+
+^{:go/end 101} (go/method newDecoderState "We pass the bytes.Buffer separately for easier testing of the infrastructure\nwithout requiring a full Decoder.\n" ^{:tag (* decoderState)} [^{:tag (* Decoder)} dec ^{:tag (* decBuffer)} buf]
+  (let [d (.-freeList dec)]
+    (if (== d nil) (do
+        (set! d (new decoderState))
+        (set! (.-dec d) dec))
+
+      (set! (.-freeList dec) (.-next d)))
+
+    (set! (.-b d) buf)
+    ^{:line 100} d))
+
+
+^{:go/end 106} (go/method freeDecoderState [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} d]
+  (set! (.-next d) (.-freeList dec))
+  (set! (.-freeList dec) d))
+
+
+^{:go/end 110} (go/func overflow ^error [^string name]
+  (errors/New (+ "value for \"" name "\" out of range")))
+
+
+
+
+^{:go/end 142} (go/func decodeUintReader "decodeUintReader reads an encoded unsigned integer from an io.Reader.\nUsed only by the Decoder to read the message length.\n" [^io/Reader r ^{:tag (slice byte)} buf] :results [^uint64 x ^int width ^error err]
+  (set! width 1)
+  (let [(values n ^:assign err) (io/ReadFull r (subslice buf 0 width))]
+    (when (== n 0)
+      (return))
+
+    (let [b (aget buf 0)]
+      (when (<= b 0x7f)
+        (return (conv uint64 b) width nil))
+
+      (set! n (- (conv int (conv int8 b))))
+      (when (> n uint64Size)
+        (set! err errBadUint)
+        (return))
+
+      (set! (values width err) (io/ReadFull r (subslice buf 0 n)))
+      (when (!= err nil)
+        (when (== err io/EOF)
+          (set! err io/ErrUnexpectedEOF))
+
+        (return))
+
+      ;; Could check that the high byte is zero but it's not worth it.
+      (range [_ b (subslice buf 0 width)]
+        (set! x (bit-or (<< x 8) (conv uint64 b))))
+
+      (inc! width) ; +1 for length byte
+      (return))))
+
+
+
+
+^{:go/end 169} (go/method decodeUint "decodeUint reads an encoded unsigned integer from state.r.\nDoes not check for overflow.\n" [^{:tag (* decoderState)} state] :results [^uint64 x]
+  (let [(values b err) (.ReadByte (.-b state))]
+    (when (!= err nil)
+      (error_ err))
+
+    (when (<= b 0x7f)
+      (return (conv uint64 b)))
+
+    (let [n (- (conv int (conv int8 b)))]
+      (when (> n uint64Size)
+        (error_ errBadUint))
+
+      (let [buf (.Bytes (.-b state))]
+        (when (< (len buf) n)
+          (errorf "invalid uint data length %d: exceeds input size %d" n (len buf)))
+
+        ;; Don't need to check error; it's safe to loop regardless.
+        ;; Could check that the high byte is zero but it's not worth it.
+        (range [_ b (subslice buf 0 n)]
+          (set! x (bit-or (<< x 8) (conv uint64 b))))
+
+        (.Drop (.-b state) n)
+        ^{:line 168} x))))
+
+
+
+
+^{:go/end 179} (go/method decodeInt "decodeInt reads an encoded signed integer from state.r.\nDoes not check for overflow.\n" ^int64 [^{:tag (* decoderState)} state]
+  (let [x (.decodeUint state)]
+    (when (!= (bit-and x 1) 0)
+      (return (bit-not (conv int64 (>> x 1)))))
+
+    (conv int64 (>> x 1))))
+
+
+
+
+
+^{:go/end 190} (go/method getLength "getLength decodes the next uint and makes sure it is a possible\nsize for a data item that follows, which means it must fit in a\nnon-negative int and fit in the buffer.\n" [^{:tag (* decoderState)} state] :results [int bool]
+  (let [n (conv int (.decodeUint state))]
+    (when (or (< n 0) (< (.Len (.-b state)) n) (<= tooBig n))
+      (return 0 false))
+
+    (return n true)))
+
+
+
+(go/type decOp "decOp is the signature of a decoding operator for a given type.\n" (func [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value v]))
+
+
+(go/type decInstr "The 'instructions' of the decoding machine\n" (struct
+    ^{:line 197 :tag decOp} op
+    ^{:line 198 :tag int} field ; field number of the wire type
+    ^{:line 199 :tag (slice int)} index ; field access indices for destination type
+    ^{:line 200 :tag error} ovfl)) ; error message for overflow/underflow (for arrays, of the elements)
+
+
+
+^{:go/end 206} (go/func ignoreUint "ignoreUint discards a uint value with no destination.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value v]
+  (.decodeUint state))
+
+
+
+
+^{:go/end 213} (go/func ignoreTwoUints "ignoreTwoUints discards a uint value with no destination. It's used to skip\ncomplex values.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value v]
+  (.decodeUint state)
+  (.decodeUint state))
+
+
+;; Since the encoder writes no zeros, if we arrive at a decoder we have
+;; a value to extract and store. The field number has already been read
+;; (it's how we knew to call this decoder).
+;; Each decoder is responsible for handling any indirections associated
+;; with the data structure. If any pointer so reached is nil, allocation must
+;; be done.
+
+
+
+
+
+^{:go/end 234} (go/func decAlloc "decAlloc takes a value and returns a settable value that can\nbe assigned to. If the value is a pointer, decAlloc guarantees it points to storage.\nThe callers to the individual decoders are expected to have used decAlloc.\nThe individual decoders don't need it.\n" ^reflect/Value [^reflect/Value v]
+  (while (== (.Kind v) reflect/Pointer)
+    (when (.IsNil v)
+      (.Set v (reflect/New (.Elem (.Type v)))))
+
+    (set! v (.Elem v)))
+
+  ^{:line 233} v)
+
+
+
+^{:go/end 239} (go/func decBool "decBool decodes a uint and stores it as a boolean in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (.SetBool value (!= (.decodeUint state) 0)))
+
+
+
+^{:go/end 248} (go/func decInt8 "decInt8 decodes an integer and stores it as an int8 in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [v (.decodeInt state)]
+    (when (or (< v math/MinInt8) (< math/MaxInt8 v))
+      (error_ (.-ovfl i)))
+
+    (.SetInt value v)))
+
+
+
+^{:go/end 257} (go/func decUint8 "decUint8 decodes an unsigned integer and stores it as a uint8 in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [v (.decodeUint state)]
+    (when (< math/MaxUint8 v)
+      (error_ (.-ovfl i)))
+
+    (.SetUint value v)))
+
+
+
+^{:go/end 266} (go/func decInt16 "decInt16 decodes an integer and stores it as an int16 in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [v (.decodeInt state)]
+    (when (or (< v math/MinInt16) (< math/MaxInt16 v))
+      (error_ (.-ovfl i)))
+
+    (.SetInt value v)))
+
+
+
+^{:go/end 275} (go/func decUint16 "decUint16 decodes an unsigned integer and stores it as a uint16 in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [v (.decodeUint state)]
+    (when (< math/MaxUint16 v)
+      (error_ (.-ovfl i)))
+
+    (.SetUint value v)))
+
+
+
+^{:go/end 284} (go/func decInt32 "decInt32 decodes an integer and stores it as an int32 in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [v (.decodeInt state)]
+    (when (or (< v math/MinInt32) (< math/MaxInt32 v))
+      (error_ (.-ovfl i)))
+
+    (.SetInt value v)))
+
+
+
+^{:go/end 293} (go/func decUint32 "decUint32 decodes an unsigned integer and stores it as a uint32 in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [v (.decodeUint state)]
+    (when (< math/MaxUint32 v)
+      (error_ (.-ovfl i)))
+
+    (.SetUint value v)))
+
+
+
+^{:go/end 299} (go/func decInt64 "decInt64 decodes an integer and stores it as an int64 in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [v (.decodeInt state)]
+    (.SetInt value v)))
+
+
+
+^{:go/end 305} (go/func decUint64 "decUint64 decodes an unsigned integer and stores it as a uint64 in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [v (.decodeUint state)]
+    (.SetUint value v)))
+
+
+
+
+
+
+
+^{:go/end 315} (go/func float64FromBits "Floating-point numbers are transmitted as uint64s holding the bits\nof the underlying representation. They are sent byte-reversed, with\nthe exponent end coming out first, so integer floating point numbers\n(for example) transmit more compactly. This routine does the\nunswizzling.\n" ^float64 [^uint64 u]
+  (let [v (bits/ReverseBytes64 u)]
+    (math/Float64frombits v)))
+
+
+
+
+
+
+^{:go/end 332} (go/func float32FromBits "float32FromBits decodes an unsigned integer, treats it as a 32-bit floating-point\nnumber, and returns it. It's a helper function for float32 and complex64.\nIt returns a float64 because that's what reflection needs, but its return\nvalue is known to be accurately representable in a float32.\n" ^float64 [^uint64 u ^error ovfl]
+  (let [v (float64FromBits u)
+      ^{:line 323} av v]
+    (when (< av 0)
+      (set! av (- av)))
+
+    ;; +Inf is OK in both 32- and 64-bit floats. Underflow is always OK.
+    (when (and (< math/MaxFloat32 av) (<= av math/MaxFloat64))
+      (error_ ovfl))
+
+    ^{:line 331} v))
+
+
+
+
+^{:go/end 338} (go/func decFloat32 "decFloat32 decodes an unsigned integer, treats it as a 32-bit floating-point\nnumber, and stores it in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (.SetFloat value (float32FromBits (.decodeUint state) (.-ovfl i))))
+
+
+
+
+^{:go/end 344} (go/func decFloat64 "decFloat64 decodes an unsigned integer, treats it as a 64-bit floating-point\nnumber, and stores it in value.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (.SetFloat value (float64FromBits (.decodeUint state))))
+
+
+
+
+
+^{:go/end 353} (go/func decComplex64 "decComplex64 decodes a pair of unsigned integers, treats them as a\npair of floating point numbers, and stores them as a complex64 in value.\nThe real part comes first.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [real (float32FromBits (.decodeUint state) (.-ovfl i))
+      ^{:line 351} imag (float32FromBits (.decodeUint state) (.-ovfl i))]
+    (.SetComplex value (complex real imag))))
+
+
+
+
+
+^{:go/end 362} (go/func decComplex128 "decComplex128 decodes a pair of unsigned integers, treats them as a\npair of floating point numbers, and stores them as a complex128 in value.\nThe real part comes first.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [real (float64FromBits (.decodeUint state))
+      ^{:line 360} imag (float64FromBits (.decodeUint state))]
+    (.SetComplex value (complex real imag))))
+
+
+
+
+
+^{:go/end 408} (go/func decUint8Slice "decUint8Slice decodes a byte slice and stores in value a slice header\ndescribing the data.\nuint8 slices are encoded as an unsigned count followed by the raw bytes.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [(values n ok) (.getLength state)]
+    (when (not ok)
+      (errorf "bad %s slice length: %d" (.Type value) n))
+
+    (if (< (.Cap value) n)
+      (let [safe ((inst saferio/SliceCap byte) (conv uint64 n))]
+        (when (< safe 0)
+          (errorf "%s slice too big: %d elements" (.Type value) n))
+
+        (.Set value (reflect/MakeSlice (.Type value) safe safe))
+        (let [ln safe
+            ^{:line 379} i 0]
+          (while (< i n)
+            (when (>= i ln)
+              ;; We didn't allocate the entire slice,
+              ;; due to using saferio.SliceCap.
+              ;; Grow the slice for one more element.
+              ;; The slice is full, so this should
+              ;; bump up the capacity.
+              (.Grow value 1))
+
+            ;; Copy into s up to the capacity or n,
+            ;; whichever is less.
+            (set! ln (.Cap value))
+            (when (> ln n)
+              (set! ln n))
+
+            (.SetLen value ln)
+            (let [sub (.Slice value i ln)]
+              (when [(values _ err) (.Read (.-b state) (.Bytes sub))] (!= err nil)
+                (errorf "error decoding []byte at %d: %s" i err))
+
+              (set! i ln)))))
+
+      (do
+        (.SetLen value n)
+        (when [(values _ err) (.Read (.-b state) (.Bytes value))] (!= err nil)
+          (errorf "error decoding []byte: %s" err))))))
+
+
+
+
+
+
+
+^{:go/end 426} (go/func decString "decString decodes byte array and stores in value a string header\ndescribing the data.\nStrings are encoded as an unsigned count followed by the raw bytes.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [(values n ok) (.getLength state)]
+    (when (not ok)
+      (errorf "bad %s slice length: %d" (.Type value) n))
+
+    ;; Read the data.
+    (let [data (.Bytes (.-b state))]
+      (when (< (len data) n)
+        (errorf "invalid string length %d: exceeds input size %d" n (len data)))
+
+      (let [s (conv string (subslice data _ n))]
+        (.Drop (.-b state) n)
+        (.SetString value s)))))
+
+
+
+^{:go/end 439} (go/func ignoreUint8Array "ignoreUint8Array skips over the data for a byte slice value with no destination.\n" [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+  (let [(values n ok) (.getLength state)]
+    (when (not ok)
+      (errorf "slice length too large"))
+
+    (let [bn (.Len (.-b state))]
+      (when (< bn n)
+        (errorf "invalid slice length %d: exceeds input size %d" n bn))
+
+      (.Drop (.-b state) n))))
+
+
+;; Execution engine
+
+
+
+(go/type decEngine "The encoder engine is an array of instructions indexed by field number of the incoming\ndecoder. It is executed with random access according to field number.\n" (struct
+    ^{:line 446 :tag (slice decInstr)} instr
+    ^{:line 447 :tag int} numInstr)) ; the number of active instructions
+
+
+
+
+
+^{:go/end 462} (go/method decodeSingle "decodeSingle decodes a top-level value that is not a struct and stores it in value.\nSuch values are preceded by a zero, making them have the memory layout of a\nstruct field (although with an illegal field number).\n" [^{:tag (* Decoder)} dec ^{:tag (* decEngine)} engine ^reflect/Value value]
+  (let [state (.newDecoderState dec (addr (.-buf dec)))]
+    (defer (.freeDecoderState dec state))
+    (set! (.-fieldnum state) singletonField)
+    (when (!= (.decodeUint state) 0)
+      (errorf "decode: corrupted data: non-zero delta for singleton"))
+
+    (let [instr (addr (aget (.-instr engine) singletonField))]
+      ((.-op instr) instr state value))))
+
+
+
+
+
+
+
+^{:go/end 497} (go/method decodeStruct "decodeStruct decodes a top-level struct and stores it in value.\nIndir is for the value, not the type. At the time of the call it may\ndiffer from ut.indir, which was computed when the engine was built.\nThis state cannot arise for decodeSingle, which is called directly\nfrom the user's value, not from the innards of an engine.\n" [^{:tag (* Decoder)} dec ^{:tag (* decEngine)} engine ^reflect/Value value]
+  (let [state (.newDecoderState dec (addr (.-buf dec)))]
+    (defer (.freeDecoderState dec state))
+    (set! (.-fieldnum state) -1)
+    (while (> (.Len (.-b state)) 0)
+      (let [delta (conv int (.decodeUint state))]
+        (when (< delta 0)
+          (errorf "decode: corrupted data: negative delta"))
+
+        (when (== delta 0) ; struct terminator is zero delta fieldnum
+          (break))
+
+        (when (>= (.-fieldnum state) (- (len (.-instr engine)) delta)) ; subtract to compare without overflow
+          (error_ errRange))
+
+        (let [fieldnum (+ (.-fieldnum state) delta)
+            ^{:line 485} instr (addr (aget (.-instr engine) fieldnum))
+            ^{:line 486 :tag reflect/Value} field (zero reflect/Value)]
+          (when (!= (.-index instr) nil)
+            ;; Otherwise the field is unknown to us and instr.op is an ignore op.
+            (set! field (.FieldByIndex value (.-index instr)))
+            (when (== (.Kind field) reflect/Pointer)
+              (set! field (decAlloc field))))
+
+
+          ((.-op instr) instr state field)
+          (set! (.-fieldnum state) fieldnum))))))
+
+
+
+(go/var ^reflect/Value noValue)
+
+
+^{:go/end 522} (go/method ignoreStruct "ignoreStruct discards the data for a struct with no destination.\n" [^{:tag (* Decoder)} dec ^{:tag (* decEngine)} engine]
+  (let [state (.newDecoderState dec (addr (.-buf dec)))]
+    (defer (.freeDecoderState dec state))
+    (set! (.-fieldnum state) -1)
+    (while (> (.Len (.-b state)) 0)
+      (let [delta (conv int (.decodeUint state))]
+        (when (< delta 0)
+          (errorf "ignore decode: corrupted data: negative delta"))
+
+        (when (== delta 0) ; struct terminator is zero delta fieldnum
+          (break))
+
+        (let [fieldnum (+ (.-fieldnum state) delta)]
+          (when (>= fieldnum (len (.-instr engine)))
+            (error_ errRange))
+
+          (let [instr (addr (aget (.-instr engine) fieldnum))]
+            ((.-op instr) instr state noValue)
+            (set! (.-fieldnum state) fieldnum)))))))
+
+
+
+
+
+^{:go/end 536} (go/method ignoreSingle "ignoreSingle discards the data for a top-level non-struct value with no\ndestination. It's used when calling Decode with a nil value.\n" [^{:tag (* Decoder)} dec ^{:tag (* decEngine)} engine]
+  (let [state (.newDecoderState dec (addr (.-buf dec)))]
+    (defer (.freeDecoderState dec state))
+    (set! (.-fieldnum state) singletonField)
+    (let [delta (conv int (.decodeUint state))]
+      (when (!= delta 0)
+        (errorf "decode: corrupted data: non-zero delta for singleton"))
+
+      (let [instr (addr (aget (.-instr engine) singletonField))]
+        ((.-op instr) instr state noValue)))))
+
+
+
+^{:go/end 567} (go/method decodeArrayHelper "decodeArrayHelper does the work for decoding arrays and slices.\n" [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} state ^reflect/Value value ^decOp elemOp ^int length ^error ovfl ^decHelper helper]
+  (when (and (!= helper nil) (helper state value length ovfl))
+    (return))
+
+  (let [instr (addr (lit decInstr elemOp 0 nil ovfl))
+      ^{:line 544} isPtr (== (.Kind (.Elem (.Type value))) reflect/Pointer)
+      ^{:line 545} ln (.Len value)]
+    (for [i 0] (< i length) (inc! i)
+      (when (== (.Len (.-b state)) 0)
+        (errorf "decoding array or slice: length exceeds input size (%d elements)" length))
+
+      (when (>= i ln)
+        ;; This is a slice that we only partially allocated.
+        ;; Grow it up to length.
+        (.Grow value 1)
+        (let [cp (.Cap value)]
+          (when (> cp length)
+            (set! cp length))
+
+          (.SetLen value cp)
+          (set! ln cp)))
+
+      (let [v (.Index value i)]
+        (when isPtr
+          (set! v (decAlloc v)))
+
+        (elemOp instr state v)))))
+
+
+
+
+
+
+^{:go/end 577} (go/method decodeArray "decodeArray decodes an array and stores it in value.\nThe length is an unsigned integer preceding the elements. Even though the length is redundant\n(it's part of the type), it's a useful check and is included in the encoding.\n" [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} state ^reflect/Value value ^decOp elemOp ^int length ^error ovfl ^decHelper helper]
+  (when [n (.decodeUint state)] (!= n (conv uint64 length))
+    (errorf "length mismatch in decodeArray"))
+
+  (.decodeArrayHelper dec state value elemOp length ovfl helper))
+
+
+
+^{:go/end 588} (go/func decodeIntoValue "decodeIntoValue is a helper for map decoding.\n" ^reflect/Value [^{:tag (* decoderState)} state ^decOp op ^bool isPtr ^reflect/Value value ^{:tag (* decInstr)} instr]
+  (let [v value]
+    (when isPtr
+      (set! v (decAlloc value)))
+
+
+    (op instr state v)
+    ^{:line 587} value))
+
+
+
+
+
+
+^{:go/end 618} (go/method decodeMap "decodeMap decodes a map and stores it in value.\nMaps are encoded as a length followed by key:value pairs.\nBecause the internals of maps are not visible to us, we must\nuse reflection rather than pointer magic.\n" [^{:tag (* Decoder)} dec ^reflect/Type mtyp ^{:tag (* decoderState)} state ^reflect/Value value ^decOp keyOp ^decOp elemOp ^error ovfl]
+  (let [n (conv int (.decodeUint state))]
+    (when (.IsNil value)
+      ;; This is a map, not a slice, but capping the
+      ;; size works either way.
+      (let [safe (saferio/SliceCapWithSize (conv uint64 (.Size (.Elem mtyp))) (conv uint64 n))]
+        (when (< safe 0)
+          (set! safe 1))
+
+        (.Set value (reflect/MakeMapWithSize mtyp safe))))
+
+    (let [keyIsPtr (== (.Kind (.Key mtyp)) reflect/Pointer)
+        ^{:line 606} elemIsPtr (== (.Kind (.Elem mtyp)) reflect/Pointer)
+        ^{:line 607} keyInstr (addr (lit decInstr keyOp 0 nil ovfl))
+        ^{:line 608} elemInstr (addr (lit decInstr elemOp 0 nil ovfl))
+        ^{:line 609} keyP (reflect/New (.Key mtyp))
+        ^{:line 610} elemP (reflect/New (.Elem mtyp))]
+      (for [i 0] (< i n) (inc! i)
+        (let [key (decodeIntoValue state keyOp keyIsPtr (.Elem keyP) keyInstr)
+            ^{:line 613} elem (decodeIntoValue state elemOp elemIsPtr (.Elem elemP) elemInstr)]
+          (.SetMapIndex value key elem)
+          (.SetZero (.Elem keyP))
+          (.SetZero (.Elem elemP)))))))
+
+
+
+
+^{:go/end 629} (go/method ignoreArrayHelper "ignoreArrayHelper does the work for discarding arrays and slices.\n" [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} state ^decOp elemOp ^int length]
+  (let [instr (addr (lit decInstr elemOp 0 nil (errors/New "no error")))]
+    (for [i 0] (< i length) (inc! i)
+      (when (== (.Len (.-b state)) 0)
+        (errorf "decoding array or slice: length exceeds input size (%d elements)" length))
+
+      (elemOp instr state noValue))))
+
+
+
+
+^{:go/end 637} (go/method ignoreArray "ignoreArray discards the data for an array value with no destination.\n" [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} state ^decOp elemOp ^int length]
+  (when [n (.decodeUint state)] (!= n (conv uint64 length))
+    (errorf "length mismatch in ignoreArray"))
+
+  (.ignoreArrayHelper dec state elemOp length))
+
+
+
+^{:go/end 648} (go/method ignoreMap "ignoreMap discards the data for a map value with no destination.\n" [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} state ^decOp keyOp ^decOp elemOp]
+  (let [n (conv int (.decodeUint state))
+      ^{:line 642} keyInstr (addr (lit decInstr keyOp 0 nil (errors/New "no error")))
+      ^{:line 643} elemInstr (addr (lit decInstr elemOp 0 nil (errors/New "no error")))]
+    (for [i 0] (< i n) (inc! i)
+      (keyOp keyInstr state noValue)
+      (elemOp elemInstr state noValue))))
+
+
+
+
+
+^{:go/end 674} (go/method decodeSlice "decodeSlice decodes a slice and stores it in value.\nSlices are encoded as an unsigned length followed by the elements.\n" [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} state ^reflect/Value value ^decOp elemOp ^error ovfl ^decHelper helper]
+  (let [u (.decodeUint state)
+      ^{:line 654} typ (.Type value)
+      ^{:line 655} size (conv uint64 (.Size (.Elem typ)))
+      ^{:line 656} nBytes (* u size)
+      ^{:line 657} n (conv int u)]
+    ;; Take care with overflow in this calculation.
+    (when (or (< n 0) (!= (conv uint64 n) u) (> nBytes tooBig) ^:go/paren (and (> size 0) (!= (/ nBytes size) u)))
+      ;; We don't check n against buffer length here because if it's a slice
+      ;; of interfaces, there will be buffer reloads.
+      (errorf "%s slice too big: %d elements of %d bytes" (.Elem typ) u size))
+
+    (if (< (.Cap value) n)
+      (let [safe (saferio/SliceCapWithSize size (conv uint64 n))]
+        (when (< safe 0)
+          (errorf "%s slice too big: %d elements of %d bytes" (.Elem typ) u size))
+
+        (.Set value (reflect/MakeSlice typ safe safe)))
+
+      (.SetLen value n))
+
+    (.decodeArrayHelper dec state value elemOp n ovfl helper)))
+
+
+
+^{:go/end 679} (go/method ignoreSlice "ignoreSlice skips over the data for a slice value with no destination.\n" [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} state ^decOp elemOp]
+  (.ignoreArrayHelper dec state elemOp (conv int (.decodeUint state))))
+
+
+
+
+
+^{:go/end 733} (go/method decodeInterface "decodeInterface decodes an interface value and stores it in value.\nInterfaces are encoded as the name of a concrete type followed by a value.\nIf the name is empty, the value is nil and no value is sent.\n" [^{:tag (* Decoder)} dec ^reflect/Type ityp ^{:tag (* decoderState)} state ^reflect/Value value]
+  ;; Read the name of the concrete type.
+  (let [nr (.decodeUint state)]
+    (when (> nr (<< 1 31)) ; zero is permissible for anonymous types
+      (errorf "invalid type name length %d" nr))
+
+    (when (> nr (conv uint64 (.Len (.-b state))))
+      (errorf "invalid type name length %d: exceeds input size" nr))
+
+    (let [n (conv int nr)
+        ^{:line 694} name (subslice (.Bytes (.-b state)) _ n)]
+      (.Drop (.-b state) n)
+      ;; Allocate the destination interface value.
+      (when (== (len name) 0)
+        ;; Copy the nil interface value to the target.
+        (.SetZero value)
+        (return))
+
+      (when (> (len name) 1024)
+        (errorf "name too long (%d bytes): %.20q..." (len name) name))
+
+      ;; The concrete type must be registered.
+      (let [(values typi ok) (.Load nameToConcreteType (conv string name))]
+        (when (not ok)
+          (errorf "name not registered for interface: %q" name))
+
+        (let [typ (assert reflect/Type typi)
+
+            ;; Read the type id of the concrete value.
+            ^{:line 713} concreteId (.decodeTypeSequence dec true)]
+          (when (< concreteId 0)
+            (error_ (.-err dec)))
+
+          ;; Byte count of value is next; we don't care what it is (it's there
+          ;; in case we want to ignore the value by skipping it completely).
+          (.decodeUint state)
+          ;; Read the concrete value.
+          (let [v (allocValue typ)]
+            (.decodeValue dec concreteId v)
+            (when (!= (.-err dec) nil)
+              (error_ (.-err dec)))
+
+            ;; Assign the concrete value to the interface.
+            ;; Tread carefully; it might not satisfy the interface.
+            (when (not (.AssignableTo typ ityp))
+              (errorf "%s is not assignable to type %s" typ ityp))
+
+            ;; Copy the interface value to the target.
+            (.Set value v)))))))
+
+
+
+^{:go/end 757} (go/method ignoreInterface "ignoreInterface discards the data for an interface value with no destination.\n" [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} state]
+  ;; Read the name of the concrete type.
+  (let [(values n ok) (.getLength state)]
+    (when (not ok)
+      (errorf "bad interface encoding: name too large for buffer"))
+
+    (let [bn (.Len (.-b state))]
+      (when (< bn n)
+        (errorf "invalid interface value length %d: exceeds input size %d" n bn))
+
+      (.Drop (.-b state) n)
+      (let [id (.decodeTypeSequence dec true)]
+        (when (< id 0)
+          (error_ (.-err dec)))
+
+        ;; At this point, the decoder buffer contains a delimited value. Just toss it.
+        (set! (values n ok) (.getLength state))
+        (when (not ok)
+          (errorf "bad interface encoding: data length too large for buffer"))
+
+        (.Drop (.-b state) n)))))
+
+
+
+
+^{:go/end 789} (go/method decodeGobDecoder "decodeGobDecoder decodes something implementing the GobDecoder interface.\nThe data is encoded as a byte slice.\n" [^{:tag (* Decoder)} dec ^{:tag (* userTypeInfo)} ut ^{:tag (* decoderState)} state ^reflect/Value value]
+  ;; Read the bytes for the value.
+  (let [(values n ok) (.getLength state)]
+    (when (not ok)
+      (errorf "GobDecoder: length too large for buffer"))
+
+    (let [b (.Bytes (.-b state))]
+      (when (< (len b) n)
+        (errorf "GobDecoder: invalid data length %d: exceeds input size %d" n (len b)))
+
+      (set! b (subslice b _ n))
+      (.Drop (.-b state) n)
+      (let [^error err (zero error)]
+        ;; We know it's one of these.
+        (switch (.-externalDec ut)
+          (case [xGob]
+            (let [(values gobDecoder _) ((inst reflect/TypeAssert GobDecoder) value)]
+              (set! err (.GobDecode gobDecoder b))))
+          (case [xBinary]
+            (let [(values binaryUnmarshaler _) ((inst reflect/TypeAssert encoding/BinaryUnmarshaler) value)]
+              (set! err (.UnmarshalBinary binaryUnmarshaler b))))
+          (case [xText]
+            (let [(values textUnmarshaler _) ((inst reflect/TypeAssert encoding/TextUnmarshaler) value)]
+              (set! err (.UnmarshalText textUnmarshaler b)))))
+
+        (when (!= err nil)
+          (error_ err))))))
+
+
+
+
+^{:go/end 803} (go/method ignoreGobDecoder "ignoreGobDecoder discards the data for a GobDecoder value with no destination.\n" [^{:tag (* Decoder)} dec ^{:tag (* decoderState)} state]
+  ;; Read the bytes for the value.
+  (let [(values n ok) (.getLength state)]
+    (when (not ok)
+      (errorf "GobDecoder: length too large for buffer"))
+
+    (let [bn (.Len (.-b state))]
+      (when (< bn n)
+        (errorf "GobDecoder: invalid data length %d: exceeds input size %d" n bn))
+
+      (.Drop (.-b state) n))))
+
+
+
+(go/var ^{:doc "Index by Go types.\n"} decOpTable (lit (array ... decOp)
+    ^{:line 807} [reflect/Bool decBool]
+    ^{:line 808} [reflect/Int8 decInt8]
+    ^{:line 809} [reflect/Int16 decInt16]
+    ^{:line 810} [reflect/Int32 decInt32]
+    ^{:line 811} [reflect/Int64 decInt64]
+    ^{:line 812} [reflect/Uint8 decUint8]
+    ^{:line 813} [reflect/Uint16 decUint16]
+    ^{:line 814} [reflect/Uint32 decUint32]
+    ^{:line 815} [reflect/Uint64 decUint64]
+    ^{:line 816} [reflect/Float32 decFloat32]
+    ^{:line 817} [reflect/Float64 decFloat64]
+    ^{:line 818} [reflect/Complex64 decComplex64]
+    ^{:line 819} [reflect/Complex128 decComplex128]
+    ^{:line 820} [reflect/String decString]))
+
+
+
+(go/var ^{:doc "Indexed by gob types.  tComplex will be added during type.init().\n"} decIgnoreOpMap (lit (map typeId decOp)
+    ^{:line 825} [tBool ignoreUint]
+    ^{:line 826} [tInt ignoreUint]
+    ^{:line 827} [tUint ignoreUint]
+    ^{:line 828} [tFloat ignoreUint]
+    ^{:line 829} [tBytes ignoreUint8Array]
+    ^{:line 830} [tString ignoreUint8Array]
+    ^{:line 831} [tComplex ignoreTwoUints]))
+
+
+
+
+^{:go/end 918} (go/method decOpFor "decOpFor returns the decoding op for the base type under rt and\nthe indirection count to reach it.\n" ^{:tag (* decOp)} [^{:tag (* Decoder)} dec ^typeId wireId ^reflect/Type rt ^string name ^{:tag (map reflect/Type (* decOp))} inProgress]
+  (let [ut (userType rt)]
+    ;; If the type implements GobEncoder, we handle it without further processing.
+    (when (!= (.-externalDec ut) 0)
+      (return (.gobDecodeOpFor dec ut)))
+
+
+    ;; If this type is already in progress, it's a recursive type (e.g. map[string]*T).
+    ;; Return the pointer to the op we're already building.
+    (when [opPtr (aget inProgress rt)] (!= opPtr nil)
+      (return opPtr))
+
+    (let [typ (.-base ut)
+        ^{:line 849 :tag decOp} op (zero decOp)
+        ^{:line 850} k (.Kind typ)]
+      (when (< (conv int k) (len decOpTable))
+        (set! op (aget decOpTable k)))
+
+      (when (== op nil)
+        (aset inProgress rt (addr op))
+        ;; Special cases
+        (switch [t typ] (.Kind t)
+          (case [reflect/Array]
+            (set! name (+ "element of " name))
+            (let [elemId (.-Elem (.-ArrayT (aget (.-wireType dec) wireId)))
+                ^{:line 861} elemOp (.decOpFor dec elemId (.Elem t) name inProgress)
+                ^{:line 862} ovfl (overflow name)
+                ^{:line 863} helper (aget decArrayHelper (.Kind (.Elem t)))]
+              (set! op ^{:go/end 866} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                  (.decodeArray (.-dec state) state value @elemOp (.Len t) ovfl helper)))))
+
+
+          (case [reflect/Map]
+            (let [keyId (.-Key (.-MapT (aget (.-wireType dec) wireId)))
+                ^{:line 870} elemId (.-Elem (.-MapT (aget (.-wireType dec) wireId)))
+                ^{:line 871} keyOp (.decOpFor dec keyId (.Key t) (+ "key of " name) inProgress)
+                ^{:line 872} elemOp (.decOpFor dec elemId (.Elem t) (+ "element of " name) inProgress)
+                ^{:line 873} ovfl (overflow name)]
+              (set! op ^{:go/end 876} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                  (.decodeMap (.-dec state) t state value @keyOp @elemOp ovfl)))))
+
+
+          (case [reflect/Slice]
+            (set! name (+ "element of " name))
+            (when (== (.Kind (.Elem t)) reflect/Uint8)
+              (set! op decUint8Slice)
+              (break))
+
+            (let [^typeId elemId (zero typeId)]
+              (if [tt (builtinIdToType wireId)] (!= tt nil)
+                (set! elemId (.-Elem (assert (* sliceType) tt)))
+
+                (set! elemId (.-Elem (.-SliceT (aget (.-wireType dec) wireId)))))
+
+              (let [elemOp (.decOpFor dec elemId (.Elem t) name inProgress)
+                  ^{:line 891} ovfl (overflow name)
+                  ^{:line 892} helper (aget decSliceHelper (.Kind (.Elem t)))]
+                (set! op ^{:go/end 895} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                    (.decodeSlice (.-dec state) state value @elemOp ovfl helper))))))
+
+
+          (case [reflect/Struct]
+            ;; Generate a closure that calls out to the engine for the nested type.
+            (let [ut (userType typ)
+                (values enginePtr err) (.getDecEnginePtr dec wireId ut)]
+              (when (!= err nil)
+                (error_ err))
+
+              (set! op ^{:go/end 907} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                  ;; indirect through enginePtr to delay evaluation for recursive structs.
+                  (.decodeStruct dec @enginePtr value)))))
+
+          (case [reflect/Interface]
+            (set! op ^{:go/end 911} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                (.decodeInterface (.-dec state) t state value))))))
+
+
+
+      (when (== op nil)
+        (errorf "decode can't handle type %s" rt))
+
+      (addr op))))
+
+
+(go/var maxIgnoreNestingDepth 10000)
+
+
+^{:go/end 995} (go/method decIgnoreOpFor "decIgnoreOpFor returns the decoding op for a field that has no destination.\n" ^{:tag (* decOp)} [^{:tag (* Decoder)} dec ^typeId wireId ^{:tag (map typeId (* decOp))} inProgress]
+  ;; Track how deep we've recursed trying to skip nested ignored fields.
+  (inc! (.-ignoreDepth dec))
+  (defer (^{:go/end 926} (fn [] (dec! (.-ignoreDepth dec)))))
+  (when (> (.-ignoreDepth dec) maxIgnoreNestingDepth)
+    (error_ (errors/New "invalid nesting depth")))
+
+  ;; If this type is already in progress, it's a recursive type (e.g. map[string]*T).
+  ;; Return the pointer to the op we're already building.
+  (when [opPtr (aget inProgress wireId)] (!= opPtr nil)
+    (return opPtr))
+
+  (let [(values op ok) (aget decIgnoreOpMap wireId)]
+    (when (not ok)
+      (aset inProgress wireId (addr op))
+      (when (== wireId tInterface)
+        ;; Special case because it's a method: the ignored item might
+        ;; define types and we need to record their state in the decoder.
+        (set! op ^{:go/end 943} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+            (.ignoreInterface (.-dec state) state)))
+
+        (return (addr op)))
+
+      ;; Special cases
+      (let [wire (aget (.-wireType dec) wireId)]
+        (switch
+          (case [(== wire nil)]
+            (errorf "bad data: undefined type %s" (.string wireId)))
+          (case [(!= (.-ArrayT wire) nil)]
+            (let [elemId (.-Elem (.-ArrayT wire))
+                ^{:line 953} elemOp (.decIgnoreOpFor dec elemId inProgress)]
+              (set! op ^{:go/end 956} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                  (.ignoreArray (.-dec state) state @elemOp (.-Len (.-ArrayT wire)))))))
+
+
+          (case [(!= (.-MapT wire) nil)]
+            (let [keyId (.-Key (.-MapT (aget (.-wireType dec) wireId)))
+                ^{:line 960} elemId (.-Elem (.-MapT (aget (.-wireType dec) wireId)))
+                ^{:line 961} keyOp (.decIgnoreOpFor dec keyId inProgress)
+                ^{:line 962} elemOp (.decIgnoreOpFor dec elemId inProgress)]
+              (set! op ^{:go/end 965} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                  (.ignoreMap (.-dec state) state @keyOp @elemOp)))))
+
+
+          (case [(!= (.-SliceT wire) nil)]
+            (let [elemId (.-Elem (.-SliceT wire))
+                ^{:line 969} elemOp (.decIgnoreOpFor dec elemId inProgress)]
+              (set! op ^{:go/end 972} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                  (.ignoreSlice (.-dec state) state @elemOp)))))
+
+
+          (case [(!= (.-StructT wire) nil)]
+            ;; Generate a closure that calls out to the engine for the nested type.
+            (let [(values enginePtr err) (.getIgnoreEnginePtr dec wireId)]
+              (when (!= err nil)
+                (error_ err))
+
+              (set! op ^{:go/end 983} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                  ;; indirect through enginePtr to delay evaluation for recursive structs
+                  (.ignoreStruct (.-dec state) @enginePtr)))))
+
+
+          (case [(!= (.-GobEncoderT wire) nil) (!= (.-BinaryMarshalerT wire) nil) (!= (.-TextMarshalerT wire) nil)]
+            (set! op ^{:go/end 988} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+                (.ignoreGobDecoder (.-dec state) state)))))))
+
+
+
+    (when (== op nil)
+      (errorf "bad data: ignore can't handle type %s" (.string wireId)))
+
+    (addr op)))
+
+
+
+
+^{:go/end 1017} (go/method gobDecodeOpFor "gobDecodeOpFor returns the op for a type that is known to implement\nGobDecoder.\n" ^{:tag (* decOp)} [^{:tag (* Decoder)} dec ^{:tag (* userTypeInfo)} ut]
+  (let [rcvrType (.-user ut)]
+    (cond (== (.-decIndir ut) -1)
+      (set! rcvrType (reflect/PointerTo rcvrType))
+      (> (.-decIndir ut) 0)
+      (for [i (conv int8 0)] (< i (.-decIndir ut)) (inc! i)
+        (set! rcvrType (.Elem rcvrType))))
+
+
+    (let [^decOp op (zero decOp)]
+      (set! op ^{:go/end 1015} (fn [^{:tag (* decInstr)} i ^{:tag (* decoderState)} state ^reflect/Value value]
+          ;; We now have the base type. We need its address if the receiver is a pointer.
+          (when (and (!= (.Kind value) reflect/Pointer) (== (.Kind rcvrType) reflect/Pointer))
+            (set! value (.Addr value)))
+
+          (.decodeGobDecoder (.-dec state) ut state value)))
+
+      (addr op))))
+
+
+
+
+
+
+^{:go/end 1091} (go/method compatibleType "compatibleType asks: Are these two gob Types compatible?\nAnswers the question for basic types, arrays, maps and slices, plus\nGobEncoder/Decoder pairs.\nStructs are considered ok; fields will be checked later.\n" ^bool [^{:tag (* Decoder)} dec ^reflect/Type fr ^typeId fw ^{:tag (map reflect/Type typeId)} inProgress]
+  (when [(values rhs ok) (aget inProgress fr)] ok
+    (return (== rhs fw)))
+
+  (aset inProgress fr fw)
+  (let [ut (userType fr)
+      (values wire ok) (aget (.-wireType dec) fw)]
+    ;; If wire was encoded with an encoding method, fr must have that method.
+    ;; And if not, it must not.
+    ;; At most one of the booleans in ut is set.
+    ;; We could possibly relax this constraint in the future in order to
+    ;; choose the decoding method using the data in the wireType.
+    ;; The parentheses look odd but are correct.
+    (when (or (!= (== (.-externalDec ut) xGob) (and ok (!= (.-GobEncoderT wire) nil)))
+        (!= (== (.-externalDec ut) xBinary) (and ok (!= (.-BinaryMarshalerT wire) nil)))
+        (!= (== (.-externalDec ut) xText) (and ok (!= (.-TextMarshalerT wire) nil))))
+      (return false))
+
+    (when (!= (.-externalDec ut) 0) ; This test trumps all others.
+      (return true))
+
+    (switch [t (.-base ut)] (.Kind t)
+      (default
+        ;; chan, etc: cannot handle.
+        (return false))
+      (case [reflect/Bool]
+        (return (== fw tBool)))
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+        (return (== fw tInt)))
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+        (return (== fw tUint)))
+      (case [reflect/Float32 reflect/Float64]
+        (return (== fw tFloat)))
+      (case [reflect/Complex64 reflect/Complex128]
+        (return (== fw tComplex)))
+      (case [reflect/String]
+        (return (== fw tString)))
+      (case [reflect/Interface]
+        (return (== fw tInterface)))
+      (case [reflect/Array]
+        (when (or (not ok) (== (.-ArrayT wire) nil))
+          (return false))
+
+        (let [array (.-ArrayT wire)]
+          (return (and (== (.Len t) (.-Len array)) (.compatibleType dec (.Elem t) (.-Elem array) inProgress)))))
+      (case [reflect/Map]
+        (when (or (not ok) (== (.-MapT wire) nil))
+          (return false))
+
+        (let [MapType (.-MapT wire)]
+          (return (and (.compatibleType dec (.Key t) (.-Key MapType) inProgress) (.compatibleType dec (.Elem t) (.-Elem MapType) inProgress)))))
+      (case [reflect/Slice]
+        ;; Is it an array of bytes?
+        (when (== (.Kind (.Elem t)) reflect/Uint8)
+          (return (== fw tBytes)))
+
+        ;; Extract and compare element types.
+        (let [^{:tag (* sliceType)} sw (zero (* sliceType))]
+          (if [tt (builtinIdToType fw)] (!= tt nil)
+            (set! (values sw _) (assert (* sliceType) tt))
+            (when (!= wire nil)
+              (set! sw (.-SliceT wire))))
+
+          (let [elem (.-base (userType (.Elem t)))]
+            (return (and (!= sw nil) (.compatibleType dec elem (.-Elem sw) inProgress))))))
+      (case [reflect/Struct]
+        (return true)))))
+
+
+
+
+^{:go/end 1102} (go/method typeString "typeString returns a human-readable description of the type identified by remoteId.\n" ^string [^{:tag (* Decoder)} dec ^typeId remoteId]
+  (.Lock typeLock)
+  (defer (.Unlock typeLock))
+  (when [t (idToType remoteId)] (!= t nil)
+    ;; globally known type.
+    (return (.string t)))
+
+  (.string (aget (.-wireType dec) remoteId)))
+
+
+
+
+^{:go/end 1124} (go/method compileSingle "compileSingle compiles the decoder engine for a non-struct top-level value, including\nGobDecoders.\n" [^{:tag (* Decoder)} dec ^typeId remoteId ^{:tag (* userTypeInfo)} ut] :results [^{:tag (* decEngine)} engine ^error err]
+  (let [rt (.-user ut)]
+    (set! engine (new decEngine))
+    (set! (.-instr engine) (make (slice decInstr) 1)) ; one item
+    (let [name (.String rt)] ; best we can do
+      (when (not (.compatibleType dec rt remoteId (make (map reflect/Type typeId))))
+        (let [remoteType (.typeString dec remoteId)]
+          ;; Common confusing case: local interface type, remote concrete type.
+          (when (and (== (.Kind (.-base ut)) reflect/Interface) (!= remoteId tInterface))
+            (return nil (errors/New (+ "gob: local interface type " name " can only be decoded from remote interface type; received concrete type " remoteType))))
+
+          (return nil (errors/New (+ "gob: decoding into local type " name ", received remote type " remoteType)))))
+
+      (let [op (.decOpFor dec remoteId rt name (make (map reflect/Type (* decOp))))
+          ^{:line 1120} ovfl (errors/New (+ "value for \"" name "\" out of range"))]
+        (aset (.-instr engine) singletonField (lit decInstr @op singletonField nil ovfl))
+        (set! (.-numInstr engine) 1)
+        (return)))))
+
+
+
+^{:go/end 1135} (go/method compileIgnoreSingle "compileIgnoreSingle compiles the decoder engine for a non-struct top-level value that will be discarded.\n" ^{:tag (* decEngine)} [^{:tag (* Decoder)} dec ^typeId remoteId]
+  (let [engine (new decEngine)]
+    (set! (.-instr engine) (make (slice decInstr) 1)) ; one item
+    (let [op (.decIgnoreOpFor dec remoteId (make (map typeId (* decOp))))
+        ^{:line 1131} ovfl (overflow (.typeString dec remoteId))]
+      (aset (.-instr engine) 0 (lit decInstr @op 0 nil ovfl))
+      (set! (.-numInstr engine) 1)
+      ^{:line 1134} engine)))
+
+
+
+
+^{:go/end 1187} (go/method compileDec "compileDec compiles the decoder engine for a value. If the value is not a struct,\nit calls out to compileSingle.\n" [^{:tag (* Decoder)} dec ^typeId remoteId ^{:tag (* userTypeInfo)} ut] :results [^{:tag (* decEngine)} engine ^error err]
+  (defer (catchError (addr err)))
+  (let [rt (.-base ut)
+      ^{:line 1142} srt rt]
+    (when (or (!= (.Kind srt) reflect/Struct) (!= (.-externalDec ut) 0))
+      (return (.compileSingle dec remoteId ut)))
+
+    (let [^{:tag (* structType)} wireStruct (zero (* structType))]
+      ;; Builtin types can come from global pool; the rest must be defined by the decoder.
+      ;; Also we know we're decoding a struct now, so the client must have sent one.
+      (if [t (builtinIdToType remoteId)] (!= t nil)
+        (set! (values wireStruct _) (assert (* structType) t))
+
+        (let [wire (aget (.-wireType dec) remoteId)]
+          (when (== wire nil)
+            (error_ errBadType))
+
+          (set! wireStruct (.-StructT wire))))
+
+      (when (== wireStruct nil)
+        (errorf "type mismatch in decoder: want struct type %s; got non-struct" rt))
+
+      (set! engine (new decEngine))
+      (set! (.-instr engine) (make (slice decInstr) (len (.-Field wireStruct))))
+      (let [seen (make (map reflect/Type (* decOp)))]
+        ;; Loop over the fields of the wire type.
+        (for [fieldnum 0] (< fieldnum (len (.-Field wireStruct))) (inc! fieldnum)
+          (let [wireField (aget (.-Field wireStruct) fieldnum)]
+            (when (== (.-Name wireField) "")
+              (errorf "empty name for remote field of type %s" ^{:go/via [CommonType]} (.-Name wireStruct)))
+
+            (let [ovfl (overflow (.-Name wireField))
+                ;; Find the field of the local type with the same name.
+                (values localField present) (.FieldByName srt (.-Name wireField))]
+              ;; TODO(r): anonymous names
+              (when (or (not present) (not (isExported (.-Name wireField))))
+                (let [op (.decIgnoreOpFor dec (.-Id wireField) (make (map typeId (* decOp))))]
+                  (aset (.-instr engine) fieldnum (lit decInstr @op fieldnum nil ovfl))
+                  (continue)))
+
+              (when (not (.compatibleType dec (.-Type localField) (.-Id wireField) (make (map reflect/Type typeId))))
+                (errorf "wrong type (%s) for received field %s.%s" (.-Type localField) ^{:go/via [CommonType]} (.-Name wireStruct) (.-Name wireField)))
+
+              (let [op (.decOpFor dec (.-Id wireField) (.-Type localField) (.-Name localField) seen)]
+                (aset (.-instr engine) fieldnum (lit decInstr @op fieldnum (.-Index localField) ovfl))
+                (inc! (.-numInstr engine))))))
+
+        (return)))))
+
+
+
+^{:go/end 1207} (go/method getDecEnginePtr "getDecEnginePtr returns the engine for the specified type.\n" [^{:tag (* Decoder)} dec ^typeId remoteId ^{:tag (* userTypeInfo)} ut] :results [^{:tag (* (* decEngine))} enginePtr ^error err]
+  (let [rt (.-user ut)
+      (values decoderMap ok) (aget (.-decoderCache dec) rt)]
+    (when (not ok)
+      (set! decoderMap (make (map typeId (* (* decEngine)))))
+      (aset (.-decoderCache dec) rt decoderMap))
+
+    (when [(set! (values enginePtr ok) (aget decoderMap remoteId))] (not ok)
+      ;; To handle recursive types, mark this engine as underway before compiling.
+      (set! enginePtr (new (* decEngine)))
+      (aset decoderMap remoteId enginePtr)
+      (set! (values @enginePtr err) (.compileDec dec remoteId ut))
+      (when (!= err nil)
+        (delete decoderMap remoteId)))
+
+
+    (return)))
+
+
+
+(go/type emptyStruct "emptyStruct is the type we compile into when ignoring a struct value.\n" (struct))
+
+(go/var emptyStructType ((inst reflect/TypeFor emptyStruct)))
+
+
+^{:go/end 1232} (go/method getIgnoreEnginePtr "getIgnoreEnginePtr returns the engine for the specified type when the value is to be discarded.\n" [^{:tag (* Decoder)} dec ^typeId wireId] :results [^{:tag (* (* decEngine))} enginePtr ^error err]
+  (let [^bool ok (zero bool)]
+    (when [(set! (values enginePtr ok) (aget (.-ignorerCache dec) wireId))] (not ok)
+      ;; To handle recursive types, mark this engine as underway before compiling.
+      (set! enginePtr (new (* decEngine)))
+      (aset (.-ignorerCache dec) wireId enginePtr)
+      (let [wire (aget (.-wireType dec) wireId)]
+        (if (and (!= wire nil) (!= (.-StructT wire) nil))
+          (set! (values @enginePtr err) (.compileDec dec wireId (userType emptyStructType)))
+
+          (set! @enginePtr (.compileIgnoreSingle dec wireId)))
+
+        (when (!= err nil)
+          (delete (.-ignorerCache dec) wireId))))
+
+
+    (return)))
+
+
+
+^{:go/end 1263} (go/method decodeValue "decodeValue decodes the data stream representing a value and stores it in value.\n" [^{:tag (* Decoder)} dec ^typeId wireId ^reflect/Value value]
+  (defer (catchError (addr (.-err dec))))
+  ;; If the value is nil, it means we should just ignore this item.
+  (when (not (.IsValid value))
+    (.decodeIgnoredValue dec wireId)
+    (return))
+
+  ;; Dereference down to the underlying type.
+  (let [ut (userType (.Type value))
+      ^{:line 1244} base (.-base ut)
+      ^{:line 1245 :tag (* (* decEngine))} enginePtr (zero (* (* decEngine)))]
+    (set! (values enginePtr (.-err dec)) (.getDecEnginePtr dec wireId ut))
+    (when (!= (.-err dec) nil)
+      (return))
+
+    (set! value (decAlloc value))
+    (let [engine @enginePtr]
+      (if [st base] (and (== (.Kind st) reflect/Struct) (== (.-externalDec ut) 0))
+        (let [wt (aget (.-wireType dec) wireId)]
+          (when (and (== (.-numInstr engine) 0) (> (.NumField st) 0)
+              (!= wt nil) (> (len (.-Field (.-StructT wt))) 0))
+            (let [name (.Name base)]
+              (errorf "type mismatch: no fields matched compiling decoder for %s" name)))
+
+          (.decodeStruct dec engine value))
+
+        (.decodeSingle dec engine value)))))
+
+
+
+
+^{:go/end 1278} (go/method decodeIgnoredValue "decodeIgnoredValue decodes the data stream representing a value of the specified type and discards it.\n" [^{:tag (* Decoder)} dec ^typeId wireId]
+  (let [^{:tag (* (* decEngine))} enginePtr (zero (* (* decEngine)))]
+    (set! (values enginePtr (.-err dec)) (.getIgnoreEnginePtr dec wireId))
+    (when (!= (.-err dec) nil)
+      (return))
+
+    (let [wire (aget (.-wireType dec) wireId)]
+      (if (and (!= wire nil) (!= (.-StructT wire) nil))
+        (.ignoreStruct dec @enginePtr)
+
+        (.ignoreSingle dec @enginePtr)))))
+
+
+
+(go/const
+  ^{:line 1281} [^{:val 64} intBits (<< 32 (>> (bit-not (conv uint 0)) 63))]
+  ^{:line 1282} [^{:val 64} uintptrBits (<< 32 (>> (bit-not (conv uintptr 0)) 63))])
+
+
+^{:go/end 1310} (go/func init []
+  (let [(values ^decOp iop ^decOp uop) (zero decOp)]
+    (switch intBits
+      (case [32]
+        (set! iop decInt32)
+        (set! uop decUint32))
+      (case [64]
+        (set! iop decInt64)
+        (set! uop decUint64))
+      (default
+        (panic "gob: unknown size of int/uint")))
+
+    (aset decOpTable reflect/Int iop)
+    (aset decOpTable reflect/Uint uop)
+
+    ;; Finally uintptr
+    (switch uintptrBits
+      (case [32]
+        (set! uop decUint32))
+      (case [64]
+        (set! uop decUint64))
+      (default
+        (panic "gob: unknown size of uintptr")))
+
+    (aset decOpTable reflect/Uintptr uop)))
+
+
+
+
+
+
+^{:go/end 1318} (go/func allocValue "Gob depends on being able to take the address\nof zeroed Values it creates, so use this wrapper instead\nof the standard reflect.Zero.\nEach call allocates once.\n" ^reflect/Value [^reflect/Type t]
+  (.Elem (reflect/New t)))

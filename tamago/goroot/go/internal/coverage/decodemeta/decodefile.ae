@@ -1,0 +1,224 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.coverage.decodemeta) (go/file "decodefile.go" :imports [
+
+    ;; This package contains APIs and helpers for reading and decoding
+    ;; meta-data output files emitted by the runtime when a
+    ;; coverage-instrumented binary executes. A meta-data file contains
+    ;; top-level info (counter mode, number of packages) and then a
+    ;; separate self-contained meta-data section for each Go package.
+
+
+    ^{:line 14} [bufio "bufio"]
+    ^{:line 15} [binary "encoding/binary"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [fnv "hash/fnv"]
+    ^{:line 18} [coverage "internal/coverage"]
+    ^{:line 19} [slicereader "internal/coverage/slicereader"]
+    ^{:line 20} [stringtab "internal/coverage/stringtab"]
+    ^{:line 21} [io "io"]
+    ^{:line 22} [os "os"]])
+
+
+
+
+(go/type CoverageMetaFileReader "CoverageMetaFileReader provides state and methods for reading\na meta-data file from a code coverage run.\n" (struct
+    ^{:line 28 :tag (* os/File)} f
+    ^{:line 29 :tag coverage/MetaFileHeader} hdr
+    ^{:line 30 :tag (slice byte)} tmp
+    ^{:line 31 :tag (slice uint64)} pkgOffsets
+    ^{:line 32 :tag (slice uint64)} pkgLengths
+    ^{:line 33 :tag (* stringtab/Reader)} strtab
+    ^{:line 34 :tag (* bufio/Reader)} fileRdr
+    ^{:line 35 :tag (slice byte)} fileView
+    ^{:line 36 :tag bool} debug))
+
+
+
+
+
+
+
+
+^{:go/end 56} (go/func NewCoverageMetaFileReader "NewCoverageMetaFileReader returns a new helper object for reading\nthe coverage meta-data output file 'f'. The param 'fileView' is a\nread-only slice containing the contents of 'f' obtained by mmap'ing\nthe file read-only; 'fileView' may be nil, in which case the helper\nwill read the contents of the file using regular file Read\noperations.\n" [^{:tag (* os/File)} f ^{:tag (slice byte)} fileView] :results [(* CoverageMetaFileReader) error]
+  (let [r (addr ^{:go/breaks [2 4 6]} (lit CoverageMetaFileReader
+          :f f
+          :fileView fileView
+          :tmp (make (slice byte) 256)))]
+
+
+    (when [err (.readFileHeader r)] (!= err nil)
+      (return nil err))
+
+    (return r nil)))
+
+
+^{:go/end 121} (go/method readFileHeader ^error [^{:tag (* CoverageMetaFileReader)} r]
+  (let [^error err (zero error)]
+
+    (set! (.-fileRdr r) (bufio/NewReader (.-f r)))
+
+    ;; Read file header.
+    (when [err (binary/Read (.-fileRdr r) binary/LittleEndian (addr (.-hdr r)))] (!= err nil)
+      (return err))
+
+
+    ;; Verify magic string
+    (let [m (.-Magic (.-hdr r))
+        ^{:line 70} g coverage/CovMetaMagic]
+      (when (or (!= (aget m 0) (aget g 0)) (!= (aget m 1) (aget g 1)) (!= (aget m 2) (aget g 2)) (!= (aget m 3) (aget g 3)))
+        (return (fmt/Errorf "invalid meta-data file magic string")))
+
+
+      ;; Vet the version. If this is a meta-data file from the future,
+      ;; we won't be able to read it.
+      (when (> (.-Version (.-hdr r)) coverage/MetaFileVersion)
+        (return (fmt/Errorf "meta-data file with an unknown version %d (expected %d)" (.-Version (.-hdr r)) coverage/MetaFileVersion)))
+
+
+      ;; Read package offsets for good measure
+      (set! (.-pkgOffsets r) (make (slice uint64) (.-Entries (.-hdr r))))
+      (for [i (conv uint64 0)] (< i (.-Entries (.-hdr r))) (inc! i)
+        (when [(set! (values (aget (.-pkgOffsets r) i) err) (.rdUint64 r))] (!= err nil)
+          (return err))
+
+        (when (> (aget (.-pkgOffsets r) i) (.-TotalLength (.-hdr r)))
+          (return (fmt/Errorf "insane pkg offset %d: %d > totlen %d"
+              ^{:line 89} i (aget (.-pkgOffsets r) i) (.-TotalLength (.-hdr r))))))
+
+
+      (set! (.-pkgLengths r) (make (slice uint64) (.-Entries (.-hdr r))))
+      (for [i (conv uint64 0)] (< i (.-Entries (.-hdr r))) (inc! i)
+        (when [(set! (values (aget (.-pkgLengths r) i) err) (.rdUint64 r))] (!= err nil)
+          (return err))
+
+        (when (> (aget (.-pkgLengths r) i) (.-TotalLength (.-hdr r)))
+          (return (fmt/Errorf "insane pkg length %d: %d > totlen %d"
+              ^{:line 99} i (aget (.-pkgLengths r) i) (.-TotalLength (.-hdr r))))))
+
+
+
+      ;; Read string table.
+      (let [b (make (slice byte) (.-StrTabLength (.-hdr r)))
+          (values nr ^:assign err) (.Read (.-fileRdr r) b)]
+        (when (!= err nil)
+          (return err))
+
+        (when (!= nr (conv int (.-StrTabLength (.-hdr r))))
+          (return (fmt/Errorf "error: short read on string table")))
+
+        ^{:go/breaks [[5 120]]} (let [slr (slicereader/NewReader b false)] ; /* not readonly */
+          (set! (.-strtab r) (stringtab/NewReader slr))
+          (.Read (.-strtab r))
+
+          (when (.-debug r)
+            (fmt/Fprintf os/Stderr "=-= read-in header is: %+v\n" @r))
+
+
+          nil)))))
+
+
+^{:go/end 135} (go/method rdUint64 [^{:tag (* CoverageMetaFileReader)} r] :results [uint64 error]
+  (set! (.-tmp r) (subslice (.-tmp r) _ 0))
+  (set! (.-tmp r) (append (.-tmp r) (spread (make (slice byte) 8))))
+  (let [(values n err) (.Read (.-fileRdr r) (.-tmp r))]
+    (when (!= err nil)
+      (return 0 err))
+
+    (when (!= n 8)
+      (return 0 (fmt/Errorf "premature end of file on read")))
+
+    (let [v (.Uint64 binary/LittleEndian (.-tmp r))]
+      (return v nil))))
+
+
+
+
+^{:go/end 141} (go/method NumPackages "NumPackages returns the number of packages for which this file\ncontains meta-data.\n" ^uint64 [^{:tag (* CoverageMetaFileReader)} r]
+  (.-Entries (.-hdr r)))
+
+
+
+
+
+^{:go/end 148} (go/method CounterMode "CounterMode returns the counter mode (set, count, atomic) used\nwhen building for coverage for the program that produce this\nmeta-data file.\n" ^coverage/CounterMode [^{:tag (* CoverageMetaFileReader)} r]
+  (.-CMode (.-hdr r)))
+
+
+
+
+
+^{:go/end 155} (go/method CounterGranularity "CounterGranularity returns the counter granularity (single counter per\nfunction, or counter per block) selected when building for coverage\nfor the program that produce this meta-data file.\n" ^coverage/CounterGranularity [^{:tag (* CoverageMetaFileReader)} r]
+  (.-CGranularity (.-hdr r)))
+
+
+
+
+
+^{:go/end 162} (go/method FileHash "FileHash returns the hash computed for all of the package meta-data\nblobs. Coverage counter data files refer to this hash, and the\nhash will be encoded into the meta-data file name.\n" ^{:tag (array 16 byte)} [^{:tag (* CoverageMetaFileReader)} r]
+  (.-MetaFileHash (.-hdr r)))
+
+
+
+
+
+
+
+
+
+^{:go/end 187} (go/method GetPackageDecoder "GetPackageDecoder requests a decoder object for the package within\nthe meta-data file whose index is 'pkIdx'. If the\nCoverageMetaFileReader was set up with a read-only file view, a\npointer into that file view will be returned, otherwise the buffer\n'payloadbuf' will be written to (or if it is not of sufficient\nsize, a new buffer will be allocated). Return value is the decoder,\na byte slice with the encoded meta-data, and an error.\n" [^{:tag (* CoverageMetaFileReader)} r ^uint32 pkIdx ^{:tag (slice byte)} payloadbuf] :results [(* CoverageMetaDataDecoder) (slice byte) error]
+  (let [(values pp err) (.GetPackagePayload r pkIdx payloadbuf)]
+    (when (.-debug r)
+      (let [h (fnv/New128a)]
+        (.Write h pp)
+        (fmt/Fprintf os/Stderr "=-= pkidx=%d payload length is %d hash=%s\n"
+          ^{:line 177} pkIdx (len pp) (fmt/Sprintf "%x" (.Sum h nil)))))
+
+    (when (!= err nil)
+      (return nil nil err))
+
+    (let [(values mdd ^:assign err) (NewCoverageMetaDataDecoder pp (!= (.-fileView r) nil))]
+      (when (!= err nil)
+        (return nil nil err))
+
+      (return mdd pp nil))))
+
+
+
+
+
+
+
+
+
+^{:go/end 225} (go/method GetPackagePayload "GetPackagePayload returns the raw (encoded) meta-data payload for the\npackage with index 'pkIdx'. As with GetPackageDecoder, if the\nCoverageMetaFileReader was set up with a read-only file view, a\npointer into that file view will be returned, otherwise the buffer\n'payloadbuf' will be written to (or if it is not of sufficient\nsize, a new buffer will be allocated). Return value is the decoder,\na byte slice with the encoded meta-data, and an error.\n" [^{:tag (* CoverageMetaFileReader)} r ^uint32 pkIdx ^{:tag (slice byte)} payloadbuf] :results [(slice byte) error]
+
+  ;; Determine correct offset/length.
+  (when (>= (conv uint64 pkIdx) (.-Entries (.-hdr r)))
+    (return nil (fmt/Errorf "GetPackagePayload: illegal pkg index %d" pkIdx)))
+
+  (let [off (aget (.-pkgOffsets r) pkIdx)
+      ^{:line 203} len (aget (.-pkgLengths r) pkIdx)]
+
+    (when (.-debug r)
+      (fmt/Fprintf os/Stderr "=-= for pk %d, off=%d len=%d\n" pkIdx off len))
+
+
+    (when (!= (.-fileView r) nil)
+      (return (subslice (.-fileView r) off (+ off len)) nil))
+
+
+    (let [payload (subslice payloadbuf _ 0)]
+      (when (< (cap payload) (conv int len))
+        (set! payload (make (slice byte) 0 len)))
+
+      (set! payload (append payload (spread (make (slice byte) len))))
+      (when [(values _ err) (.Seek (.-f r) (conv int64 off) io/SeekStart)] (!= err nil)
+        (return nil err))
+
+      (when [(values _ err) (io/ReadFull (.-f r) payload)] (!= err nil)
+        (return nil err))
+
+      (return payload nil))))

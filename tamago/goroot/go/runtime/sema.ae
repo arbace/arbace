@@ -1,0 +1,734 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Semaphore implementation exposed to Go.
+;; Intended use is provide a sleep and wakeup
+;; primitive that can be used in the contended case
+;; of other synchronization primitives.
+;; Thus it targets the same goal as Linux's futex,
+;; but it has much simpler semantics.
+;;
+;; That is, don't think of these as semaphores.
+;; Think of them as a way to implement sleep and wakeup
+;; such that every sleep is paired with a single wakeup,
+;; even if, due to races, the wakeup happens before the sleep.
+;;
+;; See Mullender and Cox, ``Semaphores in Plan 9,''
+;; https://swtch.com/semaphore.pdf
+
+(in-ns 'go.runtime) (go/file "sema.go" :imports [
+
+
+    ^{:line 23} [cpu "internal/cpu"]
+    ^{:line 24} [atomic "internal/runtime/atomic"]
+    ^{:line 25} [unsafe "unsafe"]])
+
+
+;; Asynchronous semaphore for sync.Mutex.
+
+
+
+
+
+
+
+
+
+
+
+(go/type semaRoot "A semaRoot holds a balanced tree of sudog with distinct addresses (s.elem).\nEach of those sudog may in turn point (through s.waitlink) to a list\nof other sudogs waiting on the same address.\nThe operations on the inner lists of sudogs with the same address\nare all O(1). The scanning of the top-level semaRoot list is O(log n),\nwhere n is the number of distinct addresses with goroutines blocked\non them that hash to the given semaRoot.\nSee golang.org/issue/17953 for a program that worked badly\nbefore we introduced the second level of list, and\nBenchmarkSemTable/OneAddrCollision/* for a benchmark that exercises this.\n" (struct
+    ^{:line 41 :tag mutex} lock
+    ^{:line 42 :tag (* sudog)} treap ; root of balanced tree of unique waiters.
+    ^{:line 43 :tag atomic/Uint32} nwait)) ; Number of waiters. Read w/o the lock.
+
+
+(go/var ^semTable semtable)
+
+
+(go/const ^{:val 251 :doc "Prime to not correlate with any user patterns.\n"} semTabSize 251)
+
+(go/type semTable (array semTabSize (struct
+      ^{:line 52 :tag semaRoot} root
+      ^{:line 53 :tag (array (- cpu/CacheLinePadSize (unsafe/Sizeof (lit semaRoot))) byte)} pad)))
+
+
+^{:go/end 58} (go/method rootFor ^{:tag (* semaRoot)} [^{:tag (* semTable)} t ^{:tag (* uint32)} addr]
+  (addr (.-root (aget t (% (>> (conv uintptr (conv unsafe/Pointer addr)) 3) semTabSize)))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 72} (go/func ^{:go/linkname "sync_runtime_Semacquire sync.runtime_Semacquire"} sync_runtime_Semacquire "sync_runtime_Semacquire should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - gvisor.dev/gvisor\n  - github.com/sagernet/gvisor\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^{:tag (* uint32)} addr]
+  (semacquire1 addr false semaBlockProfile 0 waitReasonSemacquire))
+
+
+
+^{:go/end 77} (go/func ^{:go/linkname "poll_runtime_Semacquire internal/poll.runtime_Semacquire"} poll_runtime_Semacquire [^{:tag (* uint32)} addr]
+  (semacquire1 addr false semaBlockProfile 0 waitReasonSemacquire))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 91} (go/func ^{:go/linkname "sync_runtime_Semrelease sync.runtime_Semrelease"} sync_runtime_Semrelease "sync_runtime_Semrelease should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - gvisor.dev/gvisor\n  - github.com/sagernet/gvisor\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^{:tag (* uint32)} addr ^bool handoff ^int skipframes]
+  (semrelease1 addr handoff skipframes))
+
+
+
+^{:go/end 96} (go/func ^{:go/linkname "internal_sync_runtime_SemacquireMutex internal/sync.runtime_SemacquireMutex"} internal_sync_runtime_SemacquireMutex [^{:tag (* uint32)} addr ^bool lifo ^int skipframes]
+  (semacquire1 addr lifo (bit-or semaBlockProfile semaMutexProfile) skipframes waitReasonSyncMutexLock))
+
+
+
+^{:go/end 101} (go/func ^{:go/linkname "sync_runtime_SemacquireRWMutexR sync.runtime_SemacquireRWMutexR"} sync_runtime_SemacquireRWMutexR [^{:tag (* uint32)} addr ^bool lifo ^int skipframes]
+  (semacquire1 addr lifo (bit-or semaBlockProfile semaMutexProfile) skipframes waitReasonSyncRWMutexRLock))
+
+
+
+^{:go/end 106} (go/func ^{:go/linkname "sync_runtime_SemacquireRWMutex sync.runtime_SemacquireRWMutex"} sync_runtime_SemacquireRWMutex [^{:tag (* uint32)} addr ^bool lifo ^int skipframes]
+  (semacquire1 addr lifo (bit-or semaBlockProfile semaMutexProfile) skipframes waitReasonSyncRWMutexLock))
+
+
+
+^{:go/end 115} (go/func ^{:go/linkname "sync_runtime_SemacquireWaitGroup sync.runtime_SemacquireWaitGroup"} sync_runtime_SemacquireWaitGroup [^{:tag (* uint32)} addr ^bool synctestDurable]
+  (let [reason waitReasonSyncWaitGroupWait]
+    (when synctestDurable
+      (set! reason waitReasonSynctestWaitGroupWait))
+
+    (semacquire1 addr false semaBlockProfile 0 reason)))
+
+
+
+^{:go/end 120} (go/func ^{:go/linkname "poll_runtime_Semrelease internal/poll.runtime_Semrelease"} poll_runtime_Semrelease [^{:tag (* uint32)} addr]
+  (semrelease addr))
+
+
+
+^{:go/end 125} (go/func ^{:go/linkname "internal_sync_runtime_Semrelease internal/sync.runtime_Semrelease"} internal_sync_runtime_Semrelease [^{:tag (* uint32)} addr ^bool handoff ^int skipframes]
+  (semrelease1 addr handoff skipframes))
+
+
+^{:go/end 132} (go/func readyWithTime [^{:tag (* sudog)} s ^int traceskip]
+  (when (!= (.-releasetime s) 0)
+    (set! (.-releasetime s) (cputicks)))
+
+  (goready (.-g s) traceskip))
+
+
+(go/type semaProfileFlags int)
+
+(go/const
+  ^{:line 137} [^{:tag semaProfileFlags :val 1} semaBlockProfile (<< 1 iota)]
+  ^{:line 138} [^{:val 2} semaMutexProfile])
+
+
+
+^{:go/end 144} (go/func semacquire "Called from runtime.\n" [^{:tag (* uint32)} addr]
+  (semacquire1 addr false 0 0 waitReasonSemacquire))
+
+
+^{:go/end 201} (go/func semacquire1 [^{:tag (* uint32)} addr ^bool lifo ^semaProfileFlags profile ^int skipframes ^waitReason reason]
+  (let [gp (getg)]
+    (when (!= gp (.-curg (.-m gp)))
+      (throw "semacquire not on the G stack"))
+
+
+    ;; Easy case.
+    (when (cansemacquire addr)
+      (return))
+
+
+    ;; Harder case:
+    ;;	increment waiter count
+    ;;	try cansemacquire one more time, return if succeeded
+    ;;	enqueue itself as a waiter
+    ;;	sleep
+    ;;	(waiter descriptor is dequeued by signaler)
+    (let [s (acquireSudog)
+        ^{:line 164} root (.rootFor semtable addr)
+        ^{:line 165} t0 (conv int64 0)]
+      (set! (.-releasetime s) 0)
+      (set! (.-acquiretime s) 0)
+      (set! (.-ticket s) 0)
+      (when (and (!= (bit-and profile semaBlockProfile) 0) (> blockprofilerate 0))
+        (set! t0 (cputicks))
+        (set! (.-releasetime s) -1))
+
+      (when (and (!= (bit-and profile semaMutexProfile) 0) (> mutexprofilerate 0))
+        (when (== t0 0)
+          (set! t0 (cputicks)))
+
+        (set! (.-acquiretime s) t0))
+
+      (while true
+        (lockWithRank (addr (.-lock root)) lockRankRoot)
+        ;; Add ourselves to nwait to disable "easy case" in semrelease.
+        (.Add (.-nwait root) 1)
+        ;; Check cansemacquire to avoid missed wakeup.
+        (when (cansemacquire addr)
+          (.Add (.-nwait root) -1)
+          (unlock (addr (.-lock root)))
+          (break))
+
+        ;; Any semrelease after the cansemacquire knows we're waiting
+        ;; (we set nwait above), so go to sleep.
+        (.queue root addr s lifo)
+        (goparkunlock (addr (.-lock root)) reason traceBlockSync (+ 4 skipframes))
+        (when (or (!= (.-ticket s) 0) (cansemacquire addr))
+          (break)))
+
+
+      (when (> (.-releasetime s) 0)
+        (blockevent (- (.-releasetime s) t0) (+ 3 skipframes)))
+
+      (releaseSudog s))))
+
+
+^{:go/end 205} (go/func semrelease [^{:tag (* uint32)} addr]
+  (semrelease1 addr false 0))
+
+
+^{:go/end 289} (go/func semrelease1 [^{:tag (* uint32)} addr ^bool handoff ^int skipframes]
+  (let [root (.rootFor semtable addr)]
+    (atomic/Xadd addr 1)
+
+    ;; Easy case: no waiters?
+    ;; This check must happen after the xadd, to avoid a missed wakeup
+    ;; (see loop in semacquire).
+    (when (== (.Load (.-nwait root)) 0)
+      (return))
+
+
+    ;; Harder case: search for a waiter and wake it.
+    (lockWithRank (addr (.-lock root)) lockRankRoot)
+    (when (== (.Load (.-nwait root)) 0)
+      ;; The count is already consumed by another goroutine,
+      ;; so no need to wake up another goroutine.
+      (unlock (addr (.-lock root)))
+      (return))
+
+    (let [(values s t0 tailtime) (.dequeue root addr)]
+      (when (!= s nil)
+        (.Add (.-nwait root) -1))
+
+      (unlock (addr (.-lock root)))
+      (when (!= s nil) ; May be slow or even yield, so unlock first
+        (let [acquiretime (.-acquiretime s)]
+          (when (!= acquiretime 0)
+            ;; Charge contention that this (delayed) unlock caused.
+            ;; If there are N more goroutines waiting beyond the
+            ;; one that's waking up, charge their delay as well, so that
+            ;; contention holding up many goroutines shows up as
+            ;; more costly than contention holding up a single goroutine.
+            ;; It would take O(N) time to calculate how long each goroutine
+            ;; has been waiting, so instead we charge avg(head-wait, tail-wait)*N.
+            ;; head-wait is the longest wait and tail-wait is the shortest.
+            ;; (When we do a lifo insertion, we preserve this property by
+            ;; copying the old head's acquiretime into the inserted new head.
+            ;; In that case the overall average may be slightly high, but that's fine:
+            ;; the average of the ends is only an approximation to the actual
+            ;; average anyway.)
+            ;; The root.dequeue above changed the head and tail acquiretime
+            ;; to the current time, so the next unlock will not re-count this contention.
+            (let [dt0 (- t0 acquiretime)
+                ^{:line 250} dt dt0]
+              (when (!= (.-waiters s) 0)
+                (let [dtail (- t0 tailtime)]
+                  (set! dt + (* (/ (+ dtail dt0) 2) (conv int64 (.-waiters s))))))
+
+              (mutexevent dt (+ 3 skipframes))))
+
+          (when (!= (.-ticket s) 0)
+            (throw "corrupted semaphore ticket"))
+
+          (when (and handoff (cansemacquire addr))
+            (set! (.-ticket s) 1))
+
+          (readyWithTime s (+ 5 skipframes))
+          (when (and (== (.-ticket s) 1) (== (.-locks (.-m (getg))) 0) (!= (getg) (.-g0 (.-m (getg)))))
+            ;; Direct G handoff
+            ;;
+            ;; readyWithTime has added the waiter G as runnext in the
+            ;; current P; we now call the scheduler so that we start running
+            ;; the waiter G immediately.
+            ;;
+            ;; Note that waiter inherits our time slice: this is desirable
+            ;; to avoid having a highly contended semaphore hog the P
+            ;; indefinitely. goyield is like Gosched, but it emits a
+            ;; "preempted" trace event instead and, more importantly, puts
+            ;; the current G on the local runq instead of the global one.
+            ;; We only do this in the starving regime (handoff=true), as in
+            ;; the non-starving case it is possible for a different waiter
+            ;; to acquire the semaphore while we are yielding/scheduling,
+            ;; and this would be wasteful. We wait instead to enter starving
+            ;; regime, and then we start to do direct handoffs of ticket and P.
+            ;;
+            ;; See issue 33747 for discussion.
+            ;;
+            ;; We don't handoff directly if we're holding locks or on the
+            ;; system stack, since it's not safe to enter the scheduler.
+            (goyield)))))))
+
+
+
+
+^{:go/end 301} (go/func cansemacquire ^bool [^{:tag (* uint32)} addr]
+  (while true
+    (let [v (atomic/Load addr)]
+      (when (== v 0)
+        (return false))
+
+      (when (atomic/Cas addr v (- v 1))
+        (return true)))))
+
+
+
+
+
+^{:go/end 396} (go/method queue "queue adds s to the blocked goroutines in semaRoot.\n" [^{:tag (* semaRoot)} root ^{:tag (* uint32)} addr ^{:tag (* sudog)} s ^bool lifo]
+  (set! (.-g s) (getg))
+  (.set (.-elem s) (conv unsafe/Pointer addr))
+  ;; Storing this pointer so that we can trace the semaphore address
+  ;; from the blocked goroutine when checking for goroutine leaks.
+  (set! (.-waiting (.-g s)) s)
+  (set! (.-next s) nil)
+  (set! (.-prev s) nil)
+  (set! (.-waiters s) 0)
+
+  (let [^{:tag (* sudog)} last (zero (* sudog))
+      ^{:line 315} pt (addr (.-treap root))]
+    (for [t @pt] (!= t nil) (set! t @pt)
+      (when (== (conv uintptr (conv unsafe/Pointer addr)) (.uintptr (.-elem t)))
+        ;; Already have addr in list.
+        (if lifo (do
+            ;; Substitute s in t's place in treap.
+            (set! @pt s)
+            (set! (.-ticket s) (.-ticket t))
+            (set! (.-acquiretime s) (.-acquiretime t)) ; preserve head acquiretime as oldest time
+            (set! (.-parent s) (.-parent t))
+            (set! (.-prev s) (.-prev t))
+            (set! (.-next s) (.-next t))
+            (when (!= (.-prev s) nil)
+              (set! (.-parent (.-prev s)) s))
+
+            (when (!= (.-next s) nil)
+              (set! (.-parent (.-next s)) s))
+
+            ;; Add t first in s's wait list.
+            (set! (.-waitlink s) t)
+            (set! (.-waittail s) (.-waittail t))
+            (when (== (.-waittail s) nil)
+              (set! (.-waittail s) t))
+
+            (set! (.-waiters s) (.-waiters t))
+            (when (!= (+ (.-waiters s) 1) 0)
+              (inc! (.-waiters s)))
+
+            (set! (.-parent t) nil)
+            (set! (.-prev t) nil)
+            (set! (.-next t) nil)
+            (set! (.-waittail t) nil))
+          (do
+            ;; Add s to end of t's wait list.
+            (if (== (.-waittail t) nil)
+              (set! (.-waitlink t) s)
+
+              (set! (.-waitlink (.-waittail t)) s))
+
+            (set! (.-waittail t) s)
+            (set! (.-waitlink s) nil)
+            (when (!= (+ (.-waiters t) 1) 0)
+              (inc! (.-waiters t)))))
+
+
+        (return))
+
+      (set! last t)
+      (if (< (conv uintptr (conv unsafe/Pointer addr)) (.uintptr (.-elem t)))
+        (set! pt (addr (.-prev t)))
+
+        (set! pt (addr (.-next t)))))
+
+
+
+    ;; Add s as new leaf in tree of unique addrs.
+    ;; The balanced tree is a treap using ticket as the random heap priority.
+    ;; That is, it is a binary tree ordered according to the elem addresses,
+    ;; but then among the space of possible binary trees respecting those
+    ;; addresses, it is kept balanced on average by maintaining a heap ordering
+    ;; on the ticket: s.ticket <= both s.prev.ticket and s.next.ticket.
+    ;; https://en.wikipedia.org/wiki/Treap
+    ;; https://faculty.washington.edu/aragon/pubs/rst89.pdf
+    ;;
+    ;; s.ticket compared with zero in couple of places, therefore set lowest bit.
+    ;; It will not affect treap's quality noticeably.
+    (set! (.-ticket s) (bit-or (cheaprand) 1))
+    (set! (.-parent s) last)
+    (set! @pt s)
+
+    ;; Rotate up into tree according to ticket (priority).
+    (while (and (!= (.-parent s) nil) (> (.-ticket (.-parent s)) (.-ticket s)))
+      (if (== (.-prev (.-parent s)) s)
+        (.rotateRight root (.-parent s))
+        (do
+          (when (!= (.-next (.-parent s)) s)
+            (panic "semaRoot queue"))
+
+          (.rotateLeft root (.-parent s)))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 486} (go/method dequeue "dequeue searches for and finds the first goroutine\nin semaRoot blocked on addr.\nIf the sudog was being profiled, dequeue returns the time\nat which it was woken up as now. Otherwise now is 0.\nIf there are additional entries in the wait list, dequeue\nreturns tailtime set to the last entry's acquiretime.\nOtherwise tailtime is found.acquiretime.\n" [^{:tag (* semaRoot)} root ^{:tag (* uint32)} addr] :results [^{:tag (* sudog)} found ^int64 now ^int64 tailtime]
+  (let [ps (addr (.-treap root))
+      ^{:line 407} s @ps]
+
+    (for [] (!= s nil) (set! s @ps)
+      (when (== (conv uintptr (conv unsafe/Pointer addr)) (.uintptr (.-elem s)))
+        (goto :Found))
+
+
+      (if (< (conv uintptr (conv unsafe/Pointer addr)) (.uintptr (.-elem s)))
+        (set! ps (addr (.-prev s)))
+
+        (set! ps (addr (.-next s)))))
+
+
+    (return nil 0 0)
+
+    (label :Found
+      (set! now (conv int64 0)))
+    (when (!= (.-acquiretime s) 0)
+      (set! now (cputicks)))
+
+    (if [t (.-waitlink s)] (!= t nil) (do
+        ;; Substitute t, also waiting on addr, for s in root tree of unique addrs.
+        (set! @ps t)
+        (set! (.-ticket t) (.-ticket s))
+        (set! (.-parent t) (.-parent s))
+        (set! (.-prev t) (.-prev s))
+        (when (!= (.-prev t) nil)
+          (set! (.-parent (.-prev t)) t))
+
+        (set! (.-next t) (.-next s))
+        (when (!= (.-next t) nil)
+          (set! (.-parent (.-next t)) t))
+
+        (if (!= (.-waitlink t) nil)
+          (set! (.-waittail t) (.-waittail s))
+
+          (set! (.-waittail t) nil))
+
+        (set! (.-waiters t) (.-waiters s))
+        (when (> (.-waiters t) 1)
+          (dec! (.-waiters t)))
+
+        ;; Set head and tail acquire time to 'now',
+        ;; because the caller will take care of charging
+        ;; the delays before now for all entries in the list.
+        (set! (.-acquiretime t) now)
+        (set! tailtime (.-acquiretime (.-waittail s)))
+        (set! (.-acquiretime (.-waittail s)) now)
+        (set! (.-waitlink s) nil)
+        (set! (.-waittail s) nil))
+      (do
+        ;; Rotate s down to be leaf of tree for removal, respecting priorities.
+        (while (or (!= (.-next s) nil) (!= (.-prev s) nil))
+          (if (or (== (.-next s) nil) (and (!= (.-prev s) nil) (< (.-ticket (.-prev s)) (.-ticket (.-next s)))))
+            (.rotateRight root s)
+
+            (.rotateLeft root s)))
+
+
+        ;; Remove s, now a leaf.
+        (if (!= (.-parent s) nil)
+          (if (== (.-prev (.-parent s)) s)
+            (set! (.-prev (.-parent s)) nil)
+
+            (set! (.-next (.-parent s)) nil))
+
+
+          (set! (.-treap root) nil))
+
+        (set! tailtime (.-acquiretime s))))
+
+    ;; Goroutine is no longer blocked. Clear the waiting pointer.
+    (set! (.-waiting (.-g s)) nil)
+    (set! (.-parent s) nil)
+    (.set (.-elem s) nil)
+    (set! (.-next s) nil)
+    (set! (.-prev s) nil)
+    (set! (.-ticket s) 0)
+    (return s now tailtime)))
+
+
+
+
+^{:go/end 514} (go/method rotateLeft "rotateLeft rotates the tree rooted at node x.\nturning (x a (y b c)) into (y (x a b) c).\n" [^{:tag (* semaRoot)} root ^{:tag (* sudog)} x]
+  ;; p -> (x a (y b c))
+  (let [p (.-parent x)
+      ^{:line 493} y (.-next x)
+      ^{:line 494} b (.-prev y)]
+
+    (set! (.-prev y) x)
+    (set! (.-parent x) y)
+    (set! (.-next x) b)
+    (when (!= b nil)
+      (set! (.-parent b) x))
+
+
+    (set! (.-parent y) p)
+    (cond (== p nil)
+      (set! (.-treap root) y)
+      (== (.-prev p) x)
+      (set! (.-prev p) y) :else
+      (do
+        (when (!= (.-next p) x)
+          (throw "semaRoot rotateLeft"))
+
+        (set! (.-next p) y)))))
+
+
+
+
+
+^{:go/end 542} (go/method rotateRight "rotateRight rotates the tree rooted at node y.\nturning (y (x a b) c) into (x a (y b c)).\n" [^{:tag (* semaRoot)} root ^{:tag (* sudog)} y]
+  ;; p -> (y (x a b) c)
+  (let [p (.-parent y)
+      ^{:line 521} x (.-prev y)
+      ^{:line 522} b (.-next x)]
+
+    (set! (.-next x) y)
+    (set! (.-parent y) x)
+    (set! (.-prev y) b)
+    (when (!= b nil)
+      (set! (.-parent b) y))
+
+
+    (set! (.-parent x) p)
+    (cond (== p nil)
+      (set! (.-treap root) x)
+      (== (.-prev p) y)
+      (set! (.-prev p) x) :else
+      (do
+        (when (!= (.-next p) y)
+          (throw "semaRoot rotateRight"))
+
+        (set! (.-next p) x)))))
+
+
+
+
+
+
+(go/type notifyList "notifyList is a ticket-based notification list used to implement sync.Cond.\n\nIt must be kept in sync with the sync package.\n" (struct
+
+
+    ^{:line 550 :tag atomic/Uint32 :doc "wait is the ticket number of the next waiter. It is atomically\nincremented outside the lock.\n"} wait
+
+
+
+
+
+
+
+
+    ^{:line 559 :tag uint32 :doc "notify is the ticket number of the next waiter to be notified. It can\nbe read outside the lock, but is only written to with lock held.\n\nBoth wait & notify can wrap around, and such cases will be correctly\nhandled as long as their \"unwrapped\" difference is bounded by 2^31.\nFor this not to be the case, we'd need to have 2^31+ goroutines\nblocked on the same condvar, which is currently not possible.\n"} notify
+
+
+    ^{:line 562 :tag mutex :doc "List of parked waiters.\n"} lock
+    ^{:line 563 :tag (* sudog)} head
+    ^{:line 564 :tag (* sudog)} tail))
+
+
+
+
+^{:go/end 571} (go/func less "less checks if a < b, considering a & b running counts that may overflow the\n32-bit range, and that their \"unwrapped\" difference is always less than 2^31.\n" ^bool [^uint32 a ^uint32 b]
+  (< (conv int32 (- a b)) 0))
+
+
+
+
+
+
+
+^{:go/end 582} (go/func ^{:go/linkname "notifyListAdd sync.runtime_notifyListAdd"} notifyListAdd "notifyListAdd adds the caller to a notify list such that it can receive\nnotifications. The caller must eventually call notifyListWait to wait for\nsuch a notification, passing the returned ticket number.\n" ^uint32 [^{:tag (* notifyList)} l]
+  ;; This may be called concurrently, for example, when called from
+  ;; sync.Cond.Wait while holding a RWMutex in read mode.
+  (- (.Add (.-wait l) 1) 1))
+
+
+
+
+
+
+^{:go/end 626} (go/func ^{:go/linkname "notifyListWait sync.runtime_notifyListWait"} notifyListWait "notifyListWait waits for a notification. If one has been sent since\nnotifyListAdd was called, it returns immediately. Otherwise, it blocks.\n" [^{:tag (* notifyList)} l ^uint32 t]
+  (lockWithRank (addr (.-lock l)) lockRankNotifyList)
+
+  ;; Return right away if this ticket has already been notified.
+  (when (less t (.-notify l))
+    (unlock (addr (.-lock l)))
+    (return))
+
+
+  ;; Enqueue itself.
+  (let [s (acquireSudog)]
+    (set! (.-g s) (getg))
+    ;; Storing this pointer so that we can trace the condvar address
+    ;; from the blocked goroutine when checking for goroutine leaks.
+    (.set (.-elem s) (conv unsafe/Pointer l))
+    (set! (.-waiting (.-g s)) s)
+    (set! (.-ticket s) t)
+    (set! (.-releasetime s) 0)
+    (let [t0 (conv int64 0)]
+      (when (> blockprofilerate 0)
+        (set! t0 (cputicks))
+        (set! (.-releasetime s) -1))
+
+      (if (== (.-tail l) nil)
+        (set! (.-head l) s)
+
+        (set! (.-next (.-tail l)) s))
+
+      (set! (.-tail l) s)
+      (goparkunlock (addr (.-lock l)) waitReasonSyncCondWait traceBlockCondWait 3)
+      (when (!= t0 0)
+        (blockevent (- (.-releasetime s) t0) 2))
+
+      ;; Goroutine is no longer blocked. Clear up its waiting pointer,
+      ;; and clean up the sudog before releasing it.
+      (set! (.-waiting (.-g s)) nil)
+      (.set (.-elem s) nil)
+      (releaseSudog s))))
+
+
+
+
+
+^{:go/end 663} (go/func ^{:go/linkname "notifyListNotifyAll sync.runtime_notifyListNotifyAll"} notifyListNotifyAll "notifyListNotifyAll notifies all entries in the list.\n" [^{:tag (* notifyList)} l]
+  ;; Fast-path: if there are no new waiters since the last notification
+  ;; we don't need to acquire the lock.
+  (when (== (.Load (.-wait l)) (atomic/Load (addr (.-notify l))))
+    (return))
+
+
+  ;; Pull the list out into a local variable, waiters will be readied
+  ;; outside the lock.
+  (lockWithRank (addr (.-lock l)) lockRankNotifyList)
+  (let [s (.-head l)]
+    (set! (.-head l) nil)
+    (set! (.-tail l) nil)
+
+    ;; Update the next ticket to be notified. We can set it to the current
+    ;; value of wait because any previous waiters are already in the list
+    ;; or will notice that they have already been notified when trying to
+    ;; add themselves to the list.
+    (atomic/Store (addr (.-notify l)) (.Load (.-wait l)))
+    (unlock (addr (.-lock l)))
+
+    ;; Go through the local list and ready all waiters.
+    (while (!= s nil)
+      (let [next (.-next s)]
+        (set! (.-next s) nil)
+        (when (and (!= (.-bubble (.-g s)) nil) (!= (.-bubble (getg)) (.-bubble (.-g s))))
+          (println "semaphore wake of synctest goroutine" (.-goid (.-g s)) "from outside bubble")
+          (fatal "semaphore wake of synctest goroutine from outside bubble"))
+
+        (readyWithTime s 4)
+        (set! s next)))))
+
+
+
+
+
+
+^{:go/end 722} (go/func ^{:go/linkname "notifyListNotifyOne sync.runtime_notifyListNotifyOne"} notifyListNotifyOne "notifyListNotifyOne notifies one entry in the list.\n" [^{:tag (* notifyList)} l]
+  ;; Fast-path: if there are no new waiters since the last notification
+  ;; we don't need to acquire the lock at all.
+  (when (== (.Load (.-wait l)) (atomic/Load (addr (.-notify l))))
+    (return))
+
+
+  (lockWithRank (addr (.-lock l)) lockRankNotifyList)
+
+  ;; Re-check under the lock if we need to do anything.
+  (let [t (.-notify l)]
+    (when (== t (.Load (.-wait l)))
+      (unlock (addr (.-lock l)))
+      (return))
+
+
+    ;; Update the next notify ticket number.
+    (atomic/Store (addr (.-notify l)) (+ t 1))
+
+    ;; Try to find the g that needs to be notified.
+    ;; If it hasn't made it to the list yet we won't find it,
+    ;; but it won't park itself once it sees the new notify number.
+    ;;
+    ;; This scan looks linear but essentially always stops quickly.
+    ;; Because g's queue separately from taking numbers,
+    ;; there may be minor reorderings in the list, but we
+    ;; expect the g we're looking for to be near the front.
+    ;; The g has others in front of it on the list only to the
+    ;; extent that it lost the race, so the iteration will not
+    ;; be too long. This applies even when the g is missing:
+    ;; it hasn't yet gotten to sleep and has lost the race to
+    ;; the (few) other g's that we find on the list.
+    (for [(values p s) (values (conv (* sudog) nil) (.-head l))] (!= s nil) (set! (values p s) (values s (.-next s)))
+      (when (== (.-ticket s) t)
+        (let [n (.-next s)]
+          (if (!= p nil)
+            (set! (.-next p) n)
+
+            (set! (.-head l) n))
+
+          (when (== n nil)
+            (set! (.-tail l) p))
+
+          (unlock (addr (.-lock l)))
+          (set! (.-next s) nil)
+          (when (and (!= (.-bubble (.-g s)) nil) (!= (.-bubble (getg)) (.-bubble (.-g s))))
+            (println "semaphore wake of synctest goroutine" (.-goid (.-g s)) "from outside bubble")
+            (fatal "semaphore wake of synctest goroutine from outside bubble"))
+
+          (readyWithTime s 4)
+          (return))))
+
+
+    (unlock (addr (.-lock l)))))
+
+
+
+^{:go/end 730} (go/func ^{:go/linkname "notifyListCheck sync.runtime_notifyListCheck"} notifyListCheck [^uintptr sz]
+  (when (!= sz (unsafe/Sizeof (lit notifyList)))
+    (print "runtime: bad notifyList size - sync=" sz " runtime=" (unsafe/Sizeof (lit notifyList)) "\n")
+    (throw "bad notifyList size")))
+
+
+
+
+^{:go/end 735} (go/func ^{:go/linkname "internal_sync_nanotime internal/sync.runtime_nanotime"} internal_sync_nanotime ^int64 []
+  (nanotime))

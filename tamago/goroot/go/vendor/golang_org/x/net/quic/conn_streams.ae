@@ -1,0 +1,481 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "conn_streams.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [sync "sync"]
+    ^{:line 10} [atomic "sync/atomic"]
+    ^{:line 11} [time "time"]])
+
+
+(go/type streamsState (struct
+    ^{:line 15 :tag (queue (* Stream))} queue ; new, peer-created streams
+
+
+
+
+
+
+
+
+    ^{:line 24 :tag (map streamID maybeStream) :doc "All peer-created streams.\n\nImplicitly created streams are included as an empty entry in the map.\n(For example, if we receive a frame for stream 4, we implicitly create stream 0 and\ninsert an empty entry for it to the map.)\n\nThe map value is maybeStream rather than *Stream as a reminder that values can be nil.\n"} streams
+
+
+    ^{:line 27 :tag (array streamTypeCount localStreamLimits) :doc "Limits on the number of streams, indexed by streamType.\n"} localLimit
+    ^{:line 28 :tag (array streamTypeCount remoteStreamLimits)} remoteLimit
+
+
+    ^{:line 31 :tag (array streamTypeCount int64) :doc "Peer configuration provided in transport parameters.\n"} peerInitialMaxStreamDataRemote ; streams opened by us
+    ^{:line 32 :tag int64} peerInitialMaxStreamDataBidiLocal ; streams opened by them
+
+
+    ^{:line 35 :tag connInflow :doc "Connection-level flow control.\n"} inflow
+    ^{:line 36 :tag connOutflow} outflow
+
+
+
+    ^{:line 40 :tag atomic/Bool :doc "Streams with frames to send are stored in one of two circular linked lists,\ndepending on whether they require connection-level flow control.\n"} needSend
+    ^{:line 41 :tag sync/Mutex} sendMu
+    ^{:line 42 :tag streamRing} queueMeta ; streams with any non-flow-controlled frames
+    ^{:line 43 :tag streamRing} queueData)) ; streams with only flow-controlled frames
+
+
+
+(go/type maybeStream "maybeStream is a possibly nil *Stream. See streamsState.streams.\n" (struct
+    ^{:line 48 :tag (* Stream)} s))
+
+
+^{:go/end 59} (go/method streamsInit [^{:tag (* Conn)} c]
+  (set! (.-streams (.-streams c)) (make (map streamID maybeStream)))
+  (set! (.-queue (.-streams c)) ((inst newQueue (* Stream))))
+  (.init (aget (.-localLimit (.-streams c)) bidiStream))
+  (.init (aget (.-localLimit (.-streams c)) uniStream))
+  (.init (aget (.-remoteLimit (.-streams c)) bidiStream) (.maxBidiRemoteStreams (.-config c)))
+  (.init (aget (.-remoteLimit (.-streams c)) uniStream) (.maxUniRemoteStreams (.-config c)))
+  (.inflowInit c))
+
+
+^{:go/end 70} (go/method streamsCleanup [^{:tag (* Conn)} c]
+  (.close (.-queue (.-streams c)) errConnClosed)
+  (.connHasClosed (aget (.-localLimit (.-streams c)) bidiStream))
+  (.connHasClosed (aget (.-localLimit (.-streams c)) uniStream))
+  (range [_ s (.-streams (.-streams c))]
+    (when (!= (.-s s) nil)
+      (.connHasClosed (.-s s)))))
+
+
+
+
+
+^{:go/end 75} (go/method AcceptStream "AcceptStream waits for and returns the next stream created by the peer.\n" [^{:tag (* Conn)} c ^context/Context ctx] :results [(* Stream) error]
+  (.get (.-queue (.-streams c)) ctx))
+
+
+
+
+
+
+^{:go/end 83} (go/method NewStream "NewStream creates a stream.\n\nIf the peer's maximum stream limit for the connection has been reached,\nNewStream blocks until the limit is increased or the context expires.\n" [^{:tag (* Conn)} c ^context/Context ctx] :results [(* Stream) error]
+  (.newLocalStream c ctx bidiStream))
+
+
+
+
+
+
+^{:go/end 91} (go/method NewSendOnlyStream "NewSendOnlyStream creates a unidirectional, send-only stream.\n\nIf the peer's maximum stream limit for the connection has been reached,\nNewSendOnlyStream blocks until the limit is increased or the context expires.\n" [^{:tag (* Conn)} c ^context/Context ctx] :results [(* Stream) error]
+  (.newLocalStream c ctx uniStream))
+
+
+^{:go/end 116} (go/method newLocalStream [^{:tag (* Conn)} c ^context/Context ctx ^streamType styp] :results [(* Stream) error]
+  (let [(values num err) (.open (aget (.-localLimit (.-streams c)) styp) ctx c)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [s (newStream c (newStreamID (.-side c) styp num))]
+      (set! (.-outmaxbuf s) (.maxStreamWriteBufferSize (.-config c)))
+      (set! (.-outwin s) (aget (.-peerInitialMaxStreamDataRemote (.-streams c)) styp))
+      (when (== styp bidiStream)
+        (set! (.-inmaxbuf s) (.maxStreamReadBufferSize (.-config c)))
+        (set! (.-inwin s) (.maxStreamReadBufferSize (.-config c))))
+
+      (.inUnlock s)
+      (.outUnlock s)
+
+      ;; Modify c.streams on the conn's loop.
+      (when [err (.runOnLoop c ctx ^{:go/end 112} (fn [^time/Time now ^{:tag (* Conn)} c]
+              (aset (.-streams (.-streams c)) (.-id s) (lit maybeStream s))))]
+        (!= err nil)
+        (return nil err))
+
+      (return s nil))))
+
+
+
+
+
+
+
+(go/type streamFrameType "streamFrameType identifies which direction of a stream,\nfrom the local perspective, a frame is associated with.\n\nFor example, STREAM is a recvStream frame,\nbecause it carries data from the peer to us.\n" uint8)
+
+(go/const
+  ^{:line 126} [^{:val 0} sendStream (conv streamFrameType iota)] ; for example, MAX_DATA
+  ^{:line 127} [^{:val 1} recvStream]) ; for example, STREAM_DATA_BLOCKED
+
+
+
+
+^{:go/end 134} (go/method streamForID "streamForID returns the stream with the given id.\nIf the stream does not exist, it returns nil.\n" ^{:tag (* Stream)} [^{:tag (* Conn)} c ^streamID id]
+  (.-s (aget (.-streams (.-streams c)) id)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 213} (go/method streamForFrame "streamForFrame returns the stream with the given id.\nIf the stream does not exist, it may be created.\n\nstreamForFrame aborts the connection if the stream id, state, and frame type don't align.\nFor example, it aborts the connection with a STREAM_STATE error if a MAX_DATA frame\nis received for a receive-only stream, or if the peer attempts to create a stream that\nshould be originated locally.\n\nstreamForFrame returns nil if the stream no longer exists or if an error occurred.\n" ^{:tag (* Stream)} [^{:tag (* Conn)} c ^time/Time now ^streamID id ^streamFrameType ftype]
+  (when (== (.streamType id) uniStream)
+    (when (!= (== (.initiator id) (.-side c)) (== ftype sendStream))
+      ;; Received an invalid frame for unidirectional stream.
+      ;; For example, a RESET_STREAM frame for a send-only stream.
+      (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+          :code errStreamState
+          :reason "invalid frame for unidirectional stream"))
+
+      (return nil)))
+
+
+
+  (let [(values ms isOpen) (aget (.-streams (.-streams c)) id)]
+    (when (!= (.-s ms) nil)
+      (return (.-s ms)))
+
+
+    (let [num (.num id)
+        ^{:line 164} styp (.streamType id)]
+      (if (== (.initiator id) (.-side c)) (do
+          ;; This stream was created by us, and has been closed.
+          (when (.wasOpened (aget (.-localLimit (.-streams c)) styp) num)
+            (return nil))
+
+          ;; Received a frame for a stream that should be originated by us,
+          ;; but which we never created.
+          (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+              :code errStreamState
+              :reason "received frame for unknown stream"))
+
+          (return nil))
+        (do
+          ;; if isOpen, this is a stream that was implicitly opened by a
+          ;; previous frame for a larger-numbered stream, but we haven't
+          ;; actually created it yet.
+          (when (and (not isOpen) (< num (.-opened (aget (.-remoteLimit (.-streams c)) styp))))
+            ;; This stream was created by the peer, and has been closed.
+            (return nil))))
+
+
+
+      (let [prevOpened (.-opened (aget (.-remoteLimit (.-streams c)) styp))]
+        (when [err (.open (aget (.-remoteLimit (.-streams c)) styp) id)] (!= err nil)
+          (.abort c now err)
+          (return nil))
+
+
+        ;; Receiving a frame for a stream implicitly creates all streams
+        ;; with the same initiator and type and a lower number.
+        ;; Add a nil entry to the streams map for each implicitly created stream.
+        (for [n (newStreamID (.initiator id) (.streamType id) prevOpened)] (< n id) (set! n + 4)
+          (aset (.-streams (.-streams c)) n (lit maybeStream)))
+
+
+        (let [s (newStream c id)]
+          (set! (.-inmaxbuf s) (.maxStreamReadBufferSize (.-config c)))
+          (set! (.-inwin s) (.maxStreamReadBufferSize (.-config c)))
+          (when (== (.streamType id) bidiStream)
+            (set! (.-outmaxbuf s) (.maxStreamWriteBufferSize (.-config c)))
+            (set! (.-outwin s) (.-peerInitialMaxStreamDataBidiLocal (.-streams c))))
+
+          (.inUnlock s)
+          (.outUnlock s)
+
+          (aset (.-streams (.-streams c)) id (lit maybeStream s))
+          (.put (.-queue (.-streams c)) s)
+          ^{:line 212} s)))))
+
+
+
+^{:go/end 227} (go/method maybeQueueStreamForSend "maybeQueueStreamForSend marks a stream as containing frames that need sending.\n" [^{:tag (* Conn)} c ^{:tag (* Stream)} s ^streamState state]
+  (when (== (.wantQueue state) (.inQueue state))
+    (return)) ; already on the right queue
+
+  (.Lock (.-sendMu (.-streams c)))
+  (defer (.Unlock (.-sendMu (.-streams c))))
+  (set! state (.load (.-state s))) ; may have changed while waiting
+  (.queueStreamForSendLocked c s state)
+
+  (.Store (.-needSend (.-streams c)) true)
+  (.wake c))
+
+
+
+
+
+
+^{:go/end 274} (go/method queueStreamForSendLocked "queueStreamForSendLocked moves a stream to the correct send queue,\nor removes it from all queues.\n\nstate is the last known stream state.\n" [^{:tag (* Conn)} c ^{:tag (* Stream)} s ^streamState state]
+  (while true
+    (let [wantQueue (.wantQueue state)
+        ^{:line 236} inQueue (.inQueue state)]
+      (when (== inQueue wantQueue)
+        (return)) ; already on the right queue
+
+
+      (switch inQueue
+        (case [metaQueue]
+          (.remove (.-queueMeta (.-streams c)) s))
+        (case [dataQueue]
+          (.remove (.-queueData (.-streams c)) s)))
+
+
+      (switch wantQueue
+        (case [metaQueue]
+          (.append (.-queueMeta (.-streams c)) s)
+          (set! state (.set (.-state s) streamQueueMeta (bit-or streamQueueMeta streamQueueData))))
+        (case [dataQueue]
+          (.append (.-queueData (.-streams c)) s)
+          (set! state (.set (.-state s) streamQueueData (bit-or streamQueueMeta streamQueueData))))
+        (case [noQueue]
+          (set! state (.set (.-state s) 0 (bit-or streamQueueMeta streamQueueData))))))))
+
+
+;; If the stream state changed while we were moving the stream,
+;; we might now be on the wrong queue.
+;;
+;; For example:
+;;   - stream has data to send: streamOutSendData|streamQueueData
+;;   - appendStreamFrames sends all the data: streamQueueData
+;;   - concurrently, more data is written: streamOutSendData|streamQueueData
+;;   - appendStreamFrames calls us with the last state it observed
+;;     (streamQueueData).
+;;   - We remove the stream from the queue and observe the updated state:
+;;     streamOutSendData
+;;   - We realize that the stream needs to go back on the data queue.
+;;
+;; Go back around the loop to confirm we're on the correct queue.
+
+
+
+
+
+
+
+^{:go/breaks [[13 403]] :go/end 404} (go/method appendStreamFrames "appendStreamFrames writes stream-related frames to the current packet.\n\nIt returns true if no more frames need appending,\nfalse if not everything fit in the current packet.\n" ^bool [^{:tag (* Conn)} c ^{:tag (* packetWriter)} w ^packetNumber pnum ^bool pto]
+  ;; MAX_DATA
+  (when (not (.appendMaxDataFrame c w pnum pto))
+    (return false))
+
+
+  (when pto
+    (return (.appendStreamFramesPTO c w pnum)))
+
+  (when (not (.Load (.-needSend (.-streams c))))
+    ;; If queueMeta includes newly-finished streams, we may extend the peer's
+    ;; stream limits. When there are no streams to process, add MAX_STREAMS
+    ;; frames here. Otherwise, wait until after we've processed queueMeta.
+    (return (.appendMaxStreams c w pnum pto)))
+
+  (.Lock (.-sendMu (.-streams c)))
+  (defer (.Unlock (.-sendMu (.-streams c))))
+  ;; queueMeta contains streams with non-flow-controlled frames to send.
+  (while (!= (.-head (.-queueMeta (.-streams c))) nil)
+    (let [s (.-head (.-queueMeta (.-streams c)))
+        ^{:line 300} state (.load (.-state s))]
+      (when (!= (bit-and state (bit-or streamQueueMeta streamConnRemoved)) streamQueueMeta)
+        (panic "BUG: queueMeta stream is not streamQueueMeta"))
+
+      (when (!= (bit-and state streamInSendMeta) 0)
+        (.lock (.-ingate s))
+        (let [ok (.appendInFramesLocked s w pnum pto)]
+          (set! state (.inUnlockNoQueue s))
+          (when (not ok)
+            (return false))
+
+          (when (!= (bit-and state streamInSendMeta) 0)
+            (panic "BUG: streamInSendMeta set after successfully appending frames"))))
+
+
+      (when (!= (bit-and state streamOutSendMeta) 0)
+        (.lock (.-outgate s))
+        ;; This might also append flow-controlled frames if we have any
+        ;; and available conn-level quota. That's fine.
+        (let [ok (.appendOutFramesLocked s w pnum pto)]
+          (set! state (.outUnlockNoQueue s))
+          ;; We're checking both ok and state, because appendOutFramesLocked
+          ;; might have filled up the packet with flow-controlled data.
+          ;; If so, we want to move the stream to queueData for any remaining frames.
+          (when (and (not ok) (!= (bit-and state streamOutSendMeta) 0))
+            (return false))
+
+          (when (!= (bit-and state streamOutSendMeta) 0)
+            (panic "BUG: streamOutSendMeta set after successfully appending frames"))))
+
+
+      ;; We've sent all frames for this stream, so remove it from the send queue.
+      (.remove (.-queueMeta (.-streams c)) s)
+      (if (== (bit-and state (bit-or streamInDone streamOutDone)) (bit-or streamInDone streamOutDone)) (do
+          ;; Stream is finished, remove it from the conn.
+          (set! state (.set (.-state s) streamConnRemoved (bit-or streamQueueMeta streamConnRemoved)))
+          (delete (.-streams (.-streams c)) (.-id s))
+
+          ;; Record finalization of remote streams, to know when
+          ;; to extend the peer's stream limit.
+          (when (!= (.initiator (.-id s)) (.-side c))
+            (.close (aget (.-remoteLimit (.-streams c)) (.streamType (.-id s))))))
+
+
+        (set! state (.set (.-state s) 0 (bit-or streamQueueMeta streamConnRemoved))))
+
+      ;; The stream may have flow-controlled data to send,
+      ;; or something might have added non-flow-controlled frames after we
+      ;; unlocked the stream.
+      ;; If so, put the stream back on a queue.
+      (.queueStreamForSendLocked c s state)))
+
+
+  ;; MAX_STREAMS (possibly triggered by finalization of remote streams above).
+  (when (not (.appendMaxStreams c w pnum pto))
+    (return false))
+
+
+  ;; queueData contains streams with flow-controlled frames.
+  (while (!= (.-head (.-queueData (.-streams c))) nil)
+    (let [avail (.avail (.-outflow (.-streams c)))]
+      (when (== avail 0)
+        (break)) ; no flow control quota available
+
+      (let [s (.-head (.-queueData (.-streams c)))]
+        (.lock (.-outgate s))
+        (let [ok (.appendOutFramesLocked s w pnum pto)
+            ^{:line 367} state (.outUnlockNoQueue s)]
+          (when (not ok)
+            ;; We've sent some data for this stream, but it still has more to send.
+            ;; If the stream got a reasonable chance to put data in a packet,
+            ;; advance sendHead to the next stream in line, to avoid starvation.
+            ;; We'll come back to this stream after going through the others.
+            ;;
+            ;; If the packet was already mostly out of space, leave sendHead alone
+            ;; and come back to this stream again on the next packet.
+            (when (> avail 512)
+              (set! (.-head (.-queueData (.-streams c))) (.-next s)))
+
+            (return false))
+
+          (when (== (bit-and state streamQueueData) 0)
+            (panic "BUG: queueData stream is not streamQueueData"))
+
+          (when (!= (bit-and state streamOutSendData) 0)
+            ;; We must have run out of connection-level flow control:
+            ;; appendOutFramesLocked says it wrote all it can, but there's
+            ;; still data to send.
+            ;;
+            ;; Advance sendHead to the next stream in line to avoid starvation.
+            (when (!= (.avail (.-outflow (.-streams c))) 0)
+              (panic "BUG: streamOutSendData set and flow control available after send"))
+
+            (set! (.-head (.-queueData (.-streams c))) (.-next s))
+            (return true))
+
+          (.remove (.-queueData (.-streams c)) s)
+          (set! state (.set (.-state s) 0 streamQueueData))
+          (.queueStreamForSendLocked c s state)))))
+
+  (when (and (== (.-head (.-queueMeta (.-streams c))) nil) (== (.-head (.-queueData (.-streams c))) nil))
+    (.Store (.-needSend (.-streams c)) false))
+
+  true)
+
+
+
+
+
+
+
+^{:go/end 439} (go/method appendStreamFramesPTO "appendStreamFramesPTO writes stream-related frames to the current packet\nfor a PTO probe.\n\nIt returns true if no more frames need appending,\nfalse if not everything fit in the current packet.\n" ^bool [^{:tag (* Conn)} c ^{:tag (* packetWriter)} w ^packetNumber pnum]
+  ^{:go/breaks [[6 438]]} (let [^:const ^{:val true} pto true]
+    (when (not (.appendMaxStreams c w pnum pto))
+      (return false))
+
+    (.Lock (.-sendMu (.-streams c)))
+    (defer (.Unlock (.-sendMu (.-streams c))))
+    (range [_ ms (.-streams (.-streams c))]
+      (let [s (.-s ms)]
+        (when (== s nil)
+          (continue))
+
+        (let [^:const ^{:val true} pto true]
+          (.lock (.-ingate s))
+          (let [inOK (.appendInFramesLocked s w pnum pto)]
+            (.inUnlockNoQueue s)
+            (when (not inOK)
+              (return false))
+
+
+            (.lock (.-outgate s))
+            (let [outOK (.appendOutFramesLocked s w pnum pto)]
+              (.outUnlockNoQueue s)
+              (when (not outOK)
+                (return false)))))))
+
+
+    true))
+
+
+^{:go/breaks [[5 448]] :go/end 449} (go/method appendMaxStreams ^bool [^{:tag (* Conn)} c ^{:tag (* packetWriter)} w ^packetNumber pnum ^bool pto]
+  (when (not (.appendFrame (aget (.-remoteLimit (.-streams c)) uniStream) w uniStream pnum pto))
+    (return false))
+
+  (when (not (.appendFrame (aget (.-remoteLimit (.-streams c)) bidiStream) w bidiStream pnum pto))
+    (return false))
+
+  true)
+
+
+
+(go/type streamRing "A streamRing is a circular linked list of streams.\n" (struct
+    ^{:line 453 :tag (* Stream)} head))
+
+
+
+
+^{:go/end 468} (go/method remove "remove removes s from the ring.\ns must be on the ring.\n" [^{:tag (* streamRing)} r ^{:tag (* Stream)} s]
+  (if (== (.-next s) s)
+    (set! (.-head r) nil) ; s was the last stream in the ring
+    (do
+      (set! (.-next (.-prev s)) (.-next s))
+      (set! (.-prev (.-next s)) (.-prev s))
+      (when (== (.-head r) s)
+        (set! (.-head r) (.-next s))))))
+
+
+
+
+
+
+^{:go/end 483} (go/method append "append places s at the last position in the ring.\ns must not be attached to any ring.\n" [^{:tag (* streamRing)} r ^{:tag (* Stream)} s]
+  (if (== (.-head r) nil) (do
+      (set! (.-head r) s)
+      (set! (.-next s) s)
+      (set! (.-prev s) s))
+    (do
+      (set! (.-prev s) (.-prev (.-head r)))
+      (set! (.-next s) (.-head r))
+      (set! (.-next (.-prev s)) s)
+      (set! (.-prev (.-next s)) s))))

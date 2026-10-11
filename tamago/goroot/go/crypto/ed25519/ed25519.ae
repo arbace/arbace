@@ -1,0 +1,268 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package ed25519 implements the Ed25519 signature algorithm. See
+;; https://ed25519.cr.yp.to/.
+;;
+;; These functions are also compatible with the “Ed25519” function defined in
+;; RFC 8032. However, unlike RFC 8032's formulation, this package's private key
+;; representation includes a public key suffix to make multiple signing
+;; operations with the same key more efficient. This package refers to the RFC
+;; 8032 private key as the “seed”.
+;;
+;; Operations involving private keys are implemented using constant-time
+;; algorithms.
+(in-ns 'go.crypto.ed25519) (go/file "ed25519.go" :doc "Package ed25519 implements the Ed25519 signature algorithm. See\nhttps://ed25519.cr.yp.to/.\n\nThese functions are also compatible with the “Ed25519” function defined in\nRFC 8032. However, unlike RFC 8032's formulation, this package's private key\nrepresentation includes a public key suffix to make multiple signing\noperations with the same key more efficient. This package refers to the RFC\n8032 private key as the “seed”.\n\nOperations involving private keys are implemented using constant-time\nalgorithms.\n" :imports [
+
+
+    ^{:line 19} [crypto "crypto"]
+    ^{:line 20} [ed25519 "crypto/internal/fips140/ed25519"]
+    ^{:line 21} [fips140cache "crypto/internal/fips140cache"]
+    ^{:line 22} [fips140only "crypto/internal/fips140only"]
+    ^{:line 23} [rand "crypto/internal/rand"]
+    ^:alias ^{:line 24} [cryptorand "crypto/rand"]
+    ^{:line 25} [subtle "crypto/subtle"]
+    ^{:line 26} [errors "errors"]
+    ^{:line 27} [godebug "internal/godebug"]
+    ^{:line 28} [io "io"]
+    ^{:line 29} [strconv "strconv"]])
+
+
+(go/const
+
+  ^{:line 34} [^{:val 32 :doc "PublicKeySize is the size, in bytes, of public keys as used in this package.\n"} PublicKeySize 32]
+
+  ^{:line 36} [^{:val 64 :doc "PrivateKeySize is the size, in bytes, of private keys as used in this package.\n"} PrivateKeySize 64]
+
+  ^{:line 38} [^{:val 64 :doc "SignatureSize is the size, in bytes, of signatures generated and verified by this package.\n"} SignatureSize 64]
+
+  ^{:line 40} [^{:val 32 :doc "SeedSize is the size, in bytes, of private key seeds. These are the private key representations used by RFC 8032.\n"} SeedSize 32])
+
+
+
+(go/type PublicKey "PublicKey is the type of Ed25519 public keys.\n" (slice byte))
+
+;; Any methods implemented on PublicKey might need to also be implemented on
+;; PrivateKey, as the latter embeds the former and will expose its methods.
+
+
+^{:go/end 56} (go/method Equal "Equal reports whether pub and x have the same value.\n" ^bool [^PublicKey pub ^crypto/PublicKey x]
+  (let [(values xx ok) (assert PublicKey x)]
+    (when (not ok)
+      (return false))
+
+    (== (subtle/ConstantTimeCompare pub xx) 1)))
+
+
+
+(go/type PrivateKey "PrivateKey is the type of Ed25519 private keys. It implements [crypto.Signer].\n" (slice byte))
+
+
+^{:go/end 66} (go/method Public "Public returns the [PublicKey] corresponding to priv.\n" ^crypto/PublicKey [^PrivateKey priv]
+  (let [publicKey (make (slice byte) PublicKeySize)]
+    (copy publicKey (subslice priv 32))
+    (conv PublicKey publicKey)))
+
+
+
+^{:go/end 75} (go/method Equal "Equal reports whether priv and x have the same value.\n" ^bool [^PrivateKey priv ^crypto/PrivateKey x]
+  (let [(values xx ok) (assert PrivateKey x)]
+    (when (not ok)
+      (return false))
+
+    (== (subtle/ConstantTimeCompare priv xx) 1)))
+
+
+
+
+
+^{:go/end 82} (go/method Seed "Seed returns the private key seed corresponding to priv. It is provided for\ninteroperability with RFC 8032. RFC 8032's private keys correspond to seeds\nin this package.\n" ^{:tag (slice byte)} [^PrivateKey priv]
+  (append (make (slice byte) 0 SeedSize) (spread (subslice priv _ SeedSize))))
+
+
+
+
+(go/var ^{:tag (fips140cache/Cache byte ed25519/PrivateKey) :doc "privateKeyCache uses a pointer to the first byte of underlying storage as a\nkey, because [PrivateKey] is a slice header passed around by value.\n"} privateKeyCache)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 124} (go/method Sign "Sign signs the given message with priv. rand is ignored and can be nil.\n\nIf opts.HashFunc() is [crypto.SHA512], the pre-hashed variant Ed25519ph is used\nand message is expected to be a SHA-512 hash, otherwise opts.HashFunc() must\nbe [crypto.Hash](0) and the message must not be hashed, as Ed25519 performs two\npasses over messages to be signed.\n\nA value of type [Options] can be used as opts, or crypto.Hash(0) or\ncrypto.SHA512 directly to select plain Ed25519 or Ed25519ph, respectively.\n" [^PrivateKey priv ^io/Reader rand ^{:tag (slice byte)} message ^crypto/SignerOpts opts] :results [^{:tag (slice byte)} signature ^error err]
+  (let [(values k ^:assign err) (.Get privateKeyCache (addr (aget priv 0)) ^{:go/end 100} (fn [] :results [(* ed25519/PrivateKey) error]
+          (ed25519/NewPrivateKey priv))
+        ^{:go/end 102} (fn ^bool [^{:tag (* ed25519/PrivateKey)} k]
+          (== (subtle/ConstantTimeCompare priv (.Bytes k)) 1)))]
+
+    (when (!= err nil)
+      (return nil err))
+
+    (let [hash (.HashFunc opts)
+        ^{:line 107} context ""]
+      (when [(values opts ok) (assert (* Options) opts)] ok
+        (set! context (.-Context opts)))
+
+      (switch
+        (case [(== hash crypto/SHA512)] ; Ed25519ph
+          (return (ed25519/SignPH k message context)))
+        (case [(and (== hash (conv crypto/Hash 0)) (!= context ""))] ; Ed25519ctx
+          (when (fips140only/Enforced)
+            (return nil (errors/New "crypto/ed25519: use of Ed25519ctx is not allowed in FIPS 140-only mode")))
+
+          (return (ed25519/SignCtx k message context)))
+        (case [(== hash (conv crypto/Hash 0))] ; Ed25519
+          (return (ed25519/Sign k message) nil))
+        (default
+          (return nil (errors/New "ed25519: expected opts.HashFunc() zero (unhashed message, for standard Ed25519) or SHA-512 (for Ed25519ph)")))))))
+
+
+
+
+
+(go/type Options "Options can be used with [PrivateKey.Sign] or [VerifyWithOptions]\nto select Ed25519 variants.\n" (struct
+
+    ^{:line 130 :tag crypto/Hash :doc "Hash can be zero for regular Ed25519, or crypto.SHA512 for Ed25519ph.\n"} Hash
+
+
+
+    ^{:line 134 :tag string :doc "Context, if not empty, selects Ed25519ctx or provides the context string\nfor Ed25519ph. It can be at most 255 bytes in length.\n"} Context))
+
+
+
+^{:go/end 138} (go/method HashFunc "HashFunc returns o.Hash.\n" ^crypto/Hash [^{:tag (* Options)} o] (.-Hash o))
+
+(go/var cryptocustomrand (godebug/New "cryptocustomrand"))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 184} (go/func GenerateKey "GenerateKey generates a public/private key pair using entropy from random.\n\nIf random is nil, a secure random source is used. (Before Go 1.26, a custom\n[crypto/rand.Reader] was used if set by the application. That behavior can be\nrestored with GODEBUG=cryptocustomrand=1. This setting will be removed in a\nfuture Go release. Instead, use [testing/cryptotest.SetGlobalRandom].)\n\nThe output of this function is deterministic, and equivalent to reading\n[SeedSize] bytes from random, and passing them to [NewKeyFromSeed].\n" [^io/Reader random] :results [PublicKey PrivateKey error]
+  (when (== random nil)
+    (if (== (.Value cryptocustomrand) "1") (do
+        (set! random cryptorand/Reader)
+        (when (not (rand/IsDefaultReader random))
+          (.IncNonDefault cryptocustomrand)))
+
+
+      (set! random rand/Reader)))
+
+
+
+  (when (and (fips140only/Enforced) (not (fips140only/ApprovedRandomReader random)))
+    (return nil nil (errors/New "crypto/ed25519: only crypto/rand.Reader is allowed in FIPS 140-only mode")))
+
+
+  (when (rand/IsDefaultReader random)
+    (let [(values privateKey err) (ed25519/GenerateKey)]
+      (when (!= err nil)
+        (return nil nil err))
+
+      (let [publicKey (conv PublicKey (.PublicKey privateKey))]
+        (return publicKey (conv PrivateKey (.Bytes privateKey)) nil))))
+
+
+  (let [seed (make (slice byte) SeedSize)]
+    (when [(values _ err) (io/ReadFull random seed)] (!= err nil)
+      (return nil nil err))
+
+
+    (let [privateKey (NewKeyFromSeed seed)
+        ^{:line 182} publicKey (assert PublicKey (.Public privateKey))]
+      (return publicKey privateKey nil))))
+
+
+
+
+
+
+^{:go/end 195} (go/func NewKeyFromSeed "NewKeyFromSeed calculates a private key from a seed. It will panic if\nlen(seed) is not [SeedSize]. This function is provided for interoperability\nwith RFC 8032. RFC 8032's private keys correspond to seeds in this\npackage.\n" ^PrivateKey [^{:tag (slice byte)} seed]
+  ;; Outline the function body so that the returned key can be stack-allocated.
+  (let [privateKey (make (slice byte) PrivateKeySize)]
+    (newKeyFromSeed privateKey seed)
+    ^{:line 194} privateKey))
+
+
+^{:go/end 204} (go/func newKeyFromSeed [^{:tag (slice byte)} privateKey ^{:tag (slice byte)} seed]
+  (let [(values k err) (ed25519/NewPrivateKeyFromSeed seed)]
+    (when (!= err nil)
+      ;; NewPrivateKeyFromSeed only returns an error if the seed length is incorrect.
+      (panic (+ "ed25519: bad seed length: " (strconv/Itoa (len seed)))))
+
+    (copy privateKey (.Bytes k))))
+
+
+
+
+^{:go/end 214} (go/func Sign "Sign signs the message with privateKey and returns a signature. It will\npanic if len(privateKey) is not [PrivateKeySize].\n" ^{:tag (slice byte)} [^PrivateKey privateKey ^{:tag (slice byte)} message]
+  ;; Outline the function body so that the returned signature can be
+  ;; stack-allocated.
+  (let [signature (make (slice byte) SignatureSize)]
+    (sign signature privateKey message)
+    ^{:line 213} signature))
+
+
+^{:go/end 227} (go/func sign [^{:tag (slice byte)} signature ^PrivateKey privateKey ^{:tag (slice byte)} message]
+  (let [(values k err) (.Get privateKeyCache (addr (aget privateKey 0)) ^{:go/end 219} (fn [] :results [(* ed25519/PrivateKey) error]
+          (ed25519/NewPrivateKey privateKey))
+        ^{:go/end 221} (fn ^bool [^{:tag (* ed25519/PrivateKey)} k]
+          (== (subtle/ConstantTimeCompare privateKey (.Bytes k)) 1)))]
+
+    (when (!= err nil)
+      (panic (+ "ed25519: bad private key: " (.Error err))))
+
+    (let [sig (ed25519/Sign k message)]
+      (copy signature sig))))
+
+
+
+
+
+
+
+^{:go/end 236} (go/func Verify "Verify reports whether sig is a valid signature of message by publicKey. It\nwill panic if len(publicKey) is not [PublicKeySize].\n\nThe inputs are not considered confidential, and may leak through timing side\nchannels, or if an attacker has control of part of the inputs.\n" ^bool [^PublicKey publicKey ^{:tag (slice byte)} message ^{:tag (slice byte)} sig]
+  (== (VerifyWithOptions publicKey message sig (addr (lit Options :Hash (conv crypto/Hash 0)))) nil))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 270} (go/func VerifyWithOptions "VerifyWithOptions reports whether sig is a valid signature of message by\npublicKey. A valid signature is indicated by returning a nil error. It will\npanic if len(publicKey) is not [PublicKeySize].\n\nIf opts.Hash is [crypto.SHA512], the pre-hashed variant Ed25519ph is used and\nmessage is expected to be a SHA-512 hash, otherwise opts.Hash must be\n[crypto.Hash](0) and the message must not be hashed, as Ed25519 performs two\npasses over messages to be signed.\n\nThe inputs are not considered confidential, and may leak through timing side\nchannels, or if an attacker has control of part of the inputs.\n" ^error [^PublicKey publicKey ^{:tag (slice byte)} message ^{:tag (slice byte)} sig ^{:tag (* Options)} opts]
+  (when [l (len publicKey)] (!= l PublicKeySize)
+    (panic (+ "ed25519: bad public key length: " (strconv/Itoa l))))
+
+  (let [(values k err) (ed25519/NewPublicKey publicKey)]
+    (when (!= err nil)
+      (return err))
+
+    (switch
+      (case [(== (.-Hash opts) crypto/SHA512)] ; Ed25519ph
+        (return (ed25519/VerifyPH k message sig (.-Context opts))))
+      (case [(and (== (.-Hash opts) (conv crypto/Hash 0)) (!= (.-Context opts) ""))] ; Ed25519ctx
+        (when (fips140only/Enforced)
+          (return (errors/New "crypto/ed25519: use of Ed25519ctx is not allowed in FIPS 140-only mode")))
+
+        (return (ed25519/VerifyCtx k message sig (.-Context opts))))
+      (case [(== (.-Hash opts) (conv crypto/Hash 0))] ; Ed25519
+        (return (ed25519/Verify k message sig)))
+      (default
+        (return (errors/New "ed25519: expected opts.Hash zero (unhashed message, for standard Ed25519) or SHA-512 (for Ed25519ph)"))))))

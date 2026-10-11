@@ -1,0 +1,128 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.io.fs) (go/file "glob.go" :imports [
+
+
+    ^{:line 8} [path "path"]])
+
+
+
+(go/type GlobFS "A GlobFS is a file system with a Glob method.\n" (interface
+    ^{:line 13} FS
+
+
+
+
+    (^{:doc "Glob returns the names of all files matching pattern,\nproviding an implementation of the top-level\nGlob function.\n"} Glob [^string pattern] :results [(slice string) error])))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 35} (go/func Glob "Glob returns the names of all files matching pattern or nil\nif there is no matching file. The syntax of patterns is the same\nas in [path.Match]. The pattern may describe hierarchical names such as\nusr/*/bin/ed.\n\nGlob ignores file system errors such as I/O errors reading directories.\nThe only possible returned error is [path.ErrBadPattern], reporting that\nthe pattern is malformed.\n\nIf fsys implements [GlobFS], Glob calls fsys.Glob.\nOtherwise, Glob uses [ReadDir] to traverse the directory tree\nand look for matches for the pattern.\n" [^FS fsys ^string pattern] :results [^{:tag (slice string)} matches ^error err]
+  (globWithLimit fsys pattern 0))
+
+
+^{:go/end 83} (go/func globWithLimit [^FS fsys ^string pattern ^int depth] :results [^{:tag (slice string)} matches ^error err]
+  ;; This limit is added to prevent stack exhaustion issues. See
+  ;; CVE-2022-30630.
+  (let [^:const ^{:val 10000} pathSeparatorsLimit 10000]
+    (when (> depth pathSeparatorsLimit)
+      (return nil path/ErrBadPattern))
+
+    (when [(values fsys ok) (assert GlobFS fsys)] ok
+      (return (.Glob fsys pattern)))
+
+
+    ;; Check pattern is well-formed.
+    (when [(values _ err) (path/Match pattern "")] (!= err nil)
+      (return nil err))
+
+    (when (not (hasMeta pattern))
+      (when [(set! (values _ err) (Stat fsys pattern))] (!= err nil)
+        (return nil nil))
+
+      (return (lit (slice string) pattern) nil))
+
+
+    (let [(values dir file) (path/Split pattern)]
+      (set! dir (cleanGlobPath dir))
+
+      (when (not (hasMeta dir))
+        (return (glob fsys dir file nil)))
+
+
+      ;; Prevent infinite recursion. See issue 15879.
+      (when (== dir pattern)
+        (return nil path/ErrBadPattern))
+
+
+      (let [^{:tag (slice string)} m (zero (slice string))]
+        (set! (values m err) (globWithLimit fsys dir (+ depth 1)))
+        (when (!= err nil)
+          (return nil err))
+
+        (range [_ d m]
+          (set! (values matches err) (glob fsys d file matches))
+          (when (!= err nil)
+            (return)))
+
+
+        (return)))))
+
+
+
+^{:go/end 93} (go/func cleanGlobPath "cleanGlobPath prepares path for glob matching.\n" ^string [^string path]
+  (switch path
+    (case [""]
+      (return "."))
+    (default
+      (return (subslice path 0 (- (len path) 1)))))) ; chop off trailing separator
+
+
+
+
+
+
+
+^{:go/end 117} (go/func glob "glob searches for files matching pattern in the directory dir\nand appends them to matches, returning the updated slice.\nIf the directory cannot be opened, glob returns the existing matches.\nNew matches are added in lexicographical order.\n" [^FS fs ^string dir ^string pattern ^{:tag (slice string)} matches] :results [^{:tag (slice string)} m ^error e]
+  (set! m matches)
+  (let [(values infos err) (ReadDir fs dir)]
+    (when (!= err nil)
+      (return)) ; ignore I/O error
+
+
+    (range [_ info infos]
+      (let [n (.Name info)
+          (values matched err) (path/Match pattern n)]
+        (when (!= err nil)
+          (return m err))
+
+        (when matched
+          (set! m (append m (path/Join dir n))))))
+
+
+    (return)))
+
+
+
+
+^{:go/breaks [[5 128]] :go/end 129} (go/func hasMeta "hasMeta reports whether path contains any of the magic characters\nrecognized by path.Match.\n" ^bool [^string path]
+  (for [i 0] (< i (len path)) (inc! i)
+    (switch (aget path i)
+      (case [\* \? \[ \\]
+        (return true))))
+
+
+  false)

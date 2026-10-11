@@ -1,0 +1,155 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json) (go/file "v2_inject.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [reflect "reflect"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [strings "strings"]
+
+    ^{:line 15} [internal "encoding/json/internal"]
+    ^{:line 16} [jsontext "encoding/json/jsontext"]
+    ^:alias ^{:line 17} [jsonv2 "encoding/json/v2"]])
+
+
+
+^{:go/end 30} (go/func init "Inject functionality into v2 to properly handle v1 types.\n" []
+  (set! internal/TransformMarshalError transformMarshalError)
+  (set! internal/TransformUnmarshalError transformUnmarshalError)
+  (set! internal/NewMarshalerError ^{:go/end 26} (fn ^error [^any val ^error err ^string funcName]
+      (addr (lit MarshalerError (reflect/TypeOf val) err funcName))))
+
+
+  (set! internal/NewRawNumber ^{:go/end 28} (fn ^any [] (new Number)))
+  (set! internal/RawNumberOf ^{:go/end 29} (fn ^any [^{:tag (slice byte)} b] (conv Number b))))
+
+
+^{:go/end 64} (go/func transformMarshalError ^error [^any root ^error err]
+  ;; Historically, errors returned from Marshal methods were wrapped
+  ;; in a [MarshalerError]. This is directly performed by the v2 package
+  ;; via the injected [internal.NewMarshalerError] constructor
+  ;; while operating under [ReportErrorsWithLegacySemantics].
+  ;; Note that errors from a Marshal method were always wrapped,
+  ;; even if wrapped for multiple layers.
+  (if [(values err ok) (assert (* jsonv2/SemanticError) err)] (!= err nil)
+    (if (== (.-Err err) nil)
+      ;; Historically, this was only reported for unserializable types
+      ;; like complex numbers, channels, functions, and unsafe.Pointers.
+      (return (addr (lit UnsupportedTypeError :Type (.-GoType err))))
+
+      ;; Historically, this was only reported for NaN or ±Inf values
+      ;; and cycles detected in the value.
+      ;; The Value field used to be populated with the reflect.Value,
+      ;; but this is no longer supported.
+      (let [errStr (.Error (.-Err err))]
+        (when (and (== (.-Err err) internal/ErrCycle) (!= (.-GoType err) nil))
+          (set! errStr + (+ " via " (.String (.-GoType err)))))
+
+        (set! errStr (strings/TrimPrefix errStr "unsupported value: "))
+        (return (addr (lit UnsupportedValueError :Str errStr)))))
+
+    (when ok
+      (return (conv (* UnsupportedValueError) nil))))
+
+  (when [(values err _) (assert (* MarshalerError) err)] (!= err nil)
+    (set! (.-Err err) (transformSyntacticError (.-Err err)))
+    (return err))
+
+  (transformSyntacticError err))
+
+
+^{:go/end 156} (go/func transformUnmarshalError ^error [^any root ^error err]
+  ;; Historically, errors from Unmarshal methods were never wrapped and
+  ;; returned verbatim while operating under [ReportErrorsWithLegacySemantics].
+  (if [(values err ok) (assert (* jsonv2/SemanticError) err)] (!= err nil) (do
+      (when (== (.-Err err) internal/ErrNonNilReference)
+        (return (addr (lit InvalidUnmarshalError (.-GoType err)))))
+
+      (when (== (.-Err err) jsonv2/ErrUnknownName)
+        (return (fmt/Errorf "json: unknown field %q" (.LastToken (.-JSONPointer err)))))
+
+      (when (== (.-Err err) internal/ErrNilInterface)
+        (set! (.-Err err) nil)) ; non-descriptive for historical reasons
+
+
+      ;; Historically, UnmarshalTypeError has always been inconsistent
+      ;; about how it reported position information.
+      ;;
+      ;; The Struct field now points to the root type,
+      ;; rather than some intermediate struct in the path.
+      ;; This better matches the original intent of the field based
+      ;; on how the Error message was formatted.
+      ;;
+      ;; For a representation closer to the historical representation,
+      ;; we switch the '/'-delimited representation of a JSON pointer
+      ;; to use a '.'-delimited representation. This may be ambiguous,
+      ;; but the prior representation was always ambiguous as well.
+      ;; Users that care about precise positions should use v2 errors
+      ;; by disabling [ReportErrorsWithLegacySemantics].
+      ;;
+      ;; The introduction of an Err field is new to the v1-to-v2 migration
+      ;; and allows us to preserve stronger error information
+      ;; that may be surfaced by the v2 package.
+      ;;
+      ;; See https://go.dev/issue/43126
+      (let [^string value (zero string)]
+        (switch (.-JSONKind err)
+          (case [\n \" \0]
+            (set! value (.String (.-JSONKind err))))
+          (case [\f \t]
+            (set! value "bool"))
+          (case [\[ \]]
+            (set! value "array"))
+          (case [\{ \}]
+            (set! value "object")))
+
+        (when (> (len (.-JSONValue err)) 0)
+          (let [isStrconvError (or (== (.-Err err) strconv/ErrRange) (== (.-Err err) strconv/ErrSyntax))
+              ^{:line 113} isNumericKind ^{:go/breaks [[4 123]] :go/end 124} (fn ^bool [^reflect/Type t]
+                (when (== t nil)
+                  (return false))
+
+                (switch (.Kind t)
+                  (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64
+                      ^{:line 119} reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr
+                      ^{:line 120} reflect/Float32 reflect/Float64]
+                    (return true)))
+
+                false)]
+
+            (when (and isStrconvError (isNumericKind (.-GoType err)))
+              (set! value "number")
+              (when (== (.-JSONKind err) \")
+                (set! (values (.-JSONValue err) _) (^{:inst [jsontext/Value]} jsontext/AppendUnquote nil (.-JSONValue err))))
+
+              (set! (.-Err err) nil))
+
+            (set! value + (+ " " (conv string (.-JSONValue err))))))
+
+        (let [^string rootName (zero string)]
+          (when [t (reflect/TypeOf root)] (and (!= t nil) (!= (.-JSONPointer err) ""))
+            (when (== (.Kind t) reflect/Pointer)
+              (set! t (.Elem t)))
+
+            (set! rootName (.Name t)))
+
+          (let [fieldPath (conv string (.-JSONPointer err))]
+            (set! fieldPath (strings/TrimPrefix fieldPath "/"))
+            (set! fieldPath (strings/ReplaceAll fieldPath "/" "."))
+            (return (addr ^{:go/breaks [2 4 6 8 10 12]} (lit UnmarshalTypeError
+                  :Value value
+                  :Type (.-GoType err)
+                  :Offset (.-ByteOffset err)
+                  :Struct rootName
+                  :Field fieldPath
+                  :Err (transformSyntacticError (.-Err err)))))))))
+
+    (when ok
+      (return (conv (* UnmarshalTypeError) nil))))
+
+  (transformSyntacticError err))

@@ -1,0 +1,199 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.types) (go/file "union.go" :imports [
+
+
+    ^{:line 8} [ast "go/ast"]
+    ^{:line 9} [token "go/token"]
+    ^{:line 10} [. "internal/types/errors"]])
+
+
+;; ----------------------------------------------------------------------------
+;; API
+
+
+(go/type Union "A Union represents a union of terms embedded in an interface.\n" (struct
+    ^{:line 18 :tag (slice (* Term))} terms)) ; list of syntactical terms (not a canonicalized termlist)
+
+
+
+
+^{:go/end 28} (go/func NewUnion "NewUnion returns a new [Union] type with the given terms.\nIt is an error to create an empty union; they are syntactically not possible.\n" ^{:tag (* Union)} [^{:tag (slice (* Term))} terms]
+  (when (== (len terms) 0)
+    (panic "empty union"))
+
+  (addr (lit Union terms)))
+
+
+^{:go/end 30} (go/method Len ^int [^{:tag (* Union)} u] (len (.-terms u)))
+^{:go/end 31} (go/method Term ^{:tag (* Term)} [^{:tag (* Union)} u ^int i] (aget (.-terms u) i))
+
+^{:go/end 33} (go/method Underlying ^Type [^{:tag (* Union)} u] u)
+^{:go/end 34} (go/method String ^string [^{:tag (* Union)} u] (TypeString u nil))
+
+
+(go/type Term "A Term represents a term in a [Union].\n" term)
+
+
+^{:go/end 40} (go/func NewTerm "NewTerm returns a new union term.\n" ^{:tag (* Term)} [^bool tilde ^Type typ] (addr (lit Term tilde typ)))
+
+^{:go/end 42} (go/method Tilde ^bool [^{:tag (* Term)} t] (.-tilde t))
+^{:go/end 43} (go/method Type ^Type [^{:tag (* Term)} t] (.-typ t))
+^{:go/end 44} (go/method String ^string [^{:tag (* Term)} t] (.String (conv (* term) t)))
+
+;; ----------------------------------------------------------------------------
+;; Implementation
+
+
+(go/const ^{:val 100 :doc "Avoid excessive type-checking times due to quadratic termlist operations.\n"} maxTermCount 100)
+
+
+
+^{:go/end 137} (go/func parseUnion "parseUnion parses uexpr as a union of expressions.\nThe result is a Union type, or Typ[Invalid] for some errors.\n" ^Type [^{:tag (* Checker)} check ^ast/Expr uexpr]
+  (let [(values blist tlist) (flattenUnion nil uexpr)]
+    (go/call assert (== (len blist) (- (len tlist) 1)))
+
+    (let [^{:tag (slice (* Term))} terms (zero (slice (* Term)))
+
+        ^{:line 60 :tag Type} u (zero Type)]
+      (range [i x tlist]
+        (let [term (parseTilde check x)]
+          (when (and (== (len tlist) 1) (not (.-tilde term)))
+            ;; Single type. Ok to return early because all relevant
+            ;; checks have been performed in parseTilde (no need to
+            ;; run through term validity check below).
+            (return (.-typ term))) ; typ already recorded through check.typ in parseTilde
+
+          (if (>= (len terms) maxTermCount)
+            (when (isValid u)
+              (.errorf check x InvalidUnion "cannot handle more than %d union terms (implementation limitation)" maxTermCount)
+              (set! u (aget Typ Invalid)))
+
+            (do
+              (set! terms (append terms term))
+              (set! u (addr (lit Union terms)))))
+
+
+          (when (> i 0)
+            (.recordTypeAndValue check (aget blist (- i 1)) typexpr u nil))))
+
+
+
+      (when (not (isValid u))
+        (return u))
+
+
+      ;; Check validity of terms.
+      ;; Do this check later because it requires types to be set up.
+      ;; Note: This is a quadratic algorithm, but unions tend to be short.
+      (.describef (.later check ^{:go/end 134} (fn []
+            (range [i t terms]
+              (when (not (isValid (.-typ t)))
+                (continue))
+
+
+              (let [u (.Underlying (.-typ t))
+                  (values f _) (assert (* Interface) u)]
+                (when (.-tilde t)
+                  (when (!= f nil)
+                    (.errorf check (aget tlist i) InvalidUnion "invalid use of ~ (%s is an interface)" (.-typ t))
+                    (continue)) ; don't report another error for t
+
+
+                  (when (not (Identical u (.-typ t)))
+                    (.errorf check (aget tlist i) InvalidUnion "invalid use of ~ (underlying type of %s is %s)" (.-typ t) u)
+                    (continue)))
+
+
+
+                ;; Stand-alone embedded interfaces are ok and are handled by the single-type case
+                ;; in the beginning. Embedded interfaces with tilde are excluded above. If we reach
+                ;; here, we must have at least two terms in the syntactic term list (but not necessarily
+                ;; in the term list of the union's type set).
+                (when (!= f nil)
+                  (let [tset (.typeSet f)]
+                    (switch
+                      (case [(!= (.NumMethods tset) 0)]
+                        (.errorf check (aget tlist i) InvalidUnion "cannot use %s in union (%s contains methods)" t t))
+                      (case [(== (.-typ t) (.Type universeComparable))]
+                        (.error check (aget tlist i) InvalidUnion "cannot use comparable in union"))
+                      (case [(.-comparable tset)]
+                        (.errorf check (aget tlist i) InvalidUnion "cannot use %s in union (%s embeds comparable)" t t)))
+
+                    (continue))) ; terms with interface types are not subject to the no-overlap rule
+
+
+                ;; Report overlapping (non-disjoint) terms such as
+                ;; a|a, a|~a, ~a|~a, and ~a|A (where under(A) == a).
+                (when [j (overlappingTerm (subslice terms _ i) t)] (>= j 0)
+                  (.softErrorf check (aget tlist i) InvalidUnion "overlapping terms %s and %s" t (aget terms j)))))))
+
+
+        ^{:line 134} uexpr "check term validity %s" uexpr)
+
+      ^{:line 136} u)))
+
+
+^{:go/end 165} (go/func parseTilde ^{:tag (* Term)} [^{:tag (* Checker)} check ^ast/Expr tx]
+  (let [x tx
+      ^{:line 141 :tag bool} tilde (zero bool)]
+    (when [(values op _) (assert (* ast/UnaryExpr) x)] (and (!= op nil) (== (.-Op op) token/TILDE))
+      (set! x (.-X op))
+      (set! tilde true))
+
+    (let [typ (.typ check x)]
+      ;; Embedding stand-alone type parameters is not permitted (go.dev/issue/47127).
+      ;; We don't need this restriction anymore if we make the underlying type of a type
+      ;; parameter its constraint interface: if we embed a lone type parameter, we will
+      ;; simply use its underlying type (like we do for other named, embedded interfaces),
+      ;; and since the underlying type is an interface the embedding is well defined.
+      (when (isTypeParam typ)
+        (if tilde
+          (.errorf check x MisplacedTypeParam "type in term %s cannot be a type parameter" tx)
+
+          (.error check x MisplacedTypeParam "term cannot be a type parameter"))
+
+        (set! typ (aget Typ Invalid)))
+
+      (let [term (NewTerm tilde typ)]
+        (when tilde
+          (.recordTypeAndValue check tx typexpr (addr (lit Union (lit (slice (* Term)) term))) nil))
+
+        ^{:line 164} term))))
+
+
+
+
+
+
+^{:go/breaks [[6 188]] :go/end 189} (go/func overlappingTerm "overlappingTerm reports the index of the term x in terms which is\noverlapping (not disjoint) from y. The result is < 0 if there is no\nsuch term. The type of term y must not be an interface, and terms\nwith an interface type are ignored in the terms list.\n" ^int [^{:tag (slice (* Term))} terms ^{:tag (* Term)} y]
+  (go/call assert (not (IsInterface (.-typ y))))
+  (range [i x terms]
+    (when (IsInterface (.-typ x))
+      (continue))
+
+    ;; disjoint requires non-nil, non-top arguments,
+    ;; and non-interface types as term types.
+    (when debug
+      (when (or (== x nil) (== (.-typ x) nil) (== y nil) (== (.-typ y) nil))
+        (panic "empty or top union term")))
+
+
+    (when (not (.disjoint (conv (* term) x) (conv (* term) y)))
+      (return i)))
+
+
+  -1)
+
+
+
+
+^{:go/end 200} (go/func flattenUnion "flattenUnion walks a union type expression of the form A | B | C | ...,\nextracting both the binary exprs (blist) and leaf types (tlist).\n" [^{:tag (slice ast/Expr)} list ^ast/Expr x] :results [^{:tag (slice ast/Expr)} blist ^{:tag (slice ast/Expr)} tlist]
+  (when [(values o _) (assert (* ast/BinaryExpr) x)] (and (!= o nil) (== (.-Op o) token/OR))
+    (set! (values blist tlist) (flattenUnion list (.-X o)))
+    (set! blist (append blist o))
+    (set! x (.-Y o)))
+
+  (return blist (append tlist x)))

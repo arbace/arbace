@@ -1,0 +1,209 @@
+;; VirtIO over MMIO driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.virtio) (go/file "mmio.go" :imports [
+
+
+    ^{:line 12} [errors "errors"]
+
+    ^{:line 14} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 15} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 16} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "VirtIO MMIO Device Registers\n"
+  ^{:line 21} [^{:val 0} Magic 0x000]
+  ^{:line 22} [^{:val 4} Version 0x004]
+  ^{:line 23} [^{:val 8} DeviceID 0x008]
+  ^{:line 24} [^{:val 12} VendorID 0x00c]
+  ^{:line 25} [^{:val 16} DeviceFeatures 0x010]
+  ^{:line 26} [^{:val 20} DeviceFeaturesSel 0x014]
+  ^{:line 27} [^{:val 32} DriverFeatures 0x020]
+  ^{:line 28} [^{:val 36} DriverFeaturesSel 0x024]
+  ^{:line 29} [^{:val 48} QueueSel 0x030]
+  ^{:line 30} [^{:val 52} QueueNumMax 0x034]
+  ^{:line 31} [^{:val 56} QueueNum 0x038]
+  ^{:line 32} [^{:val 68} QueueReady 0x044]
+  ^{:line 33} [^{:val 80} QueueNotify 0x050]
+  ^{:line 34} [^{:val 96} InterruptStatus 0x060]
+  ^{:line 35} [^{:val 100} InterruptACK 0x064]
+  ^{:line 36} [^{:val 112} Status 0x070]
+  ^{:line 37} [^{:val 128} QueueDesc 0x080]
+  ^{:line 38} [^{:val 144} QueueDriver 0x090]
+  ^{:line 39} [^{:val 160} QueueDevice 0x0a0]
+  ^{:line 40} [^{:val 252} ConfigGeneration 0x0fc]
+  ^{:line 41} [^{:val 256} Config 0x100])
+
+
+
+(go/type MMIO "MMIO represents a VirtIO over MMIO device.\n" (struct
+
+    ^{:line 47 :tag uint32 :doc "Base address\n"} Base
+
+    ^{:line 49 :tag uint64} features
+
+
+    ^{:line 52 :tag (slice byte) :doc "DMA buffer\n"} config))
+
+
+^{:go/end 66} (go/method negotiate [^{:tag (* MMIO)} io ^uint64 driverFeatures] :results [^error err]
+  (set! (.-features io) (negotiate (.DeviceFeatures io) driverFeatures))
+  (.SetDriverFeatures io (.-features io))
+
+  (reg/Set (+ (.-Base io) Status) FeaturesOk)
+
+  (when (not (reg/Get (+ (.-Base io) Status) FeaturesOk))
+    (return (errors/New "could not set features")))
+
+
+  (return))
+
+
+
+^{:go/end 86} (go/method Init "Init initializes a VirtIO over MMIO device instance.\n" [^{:tag (* MMIO)} io ^uint64 features] :results [^error err]
+  (when (or (== (.-Base io) 0) (!= (reg/Read (+ (.-Base io) Magic)) MAGIC))
+    (return (errors/New "invalid VirtIO instance")))
+
+
+  (when (!= (reg/Read (+ (.-Base io) Version)) VERSION)
+    (return (errors/New "unsupported VirtIO interface")))
+
+
+  ;; reset
+  (reg/Write (+ (.-Base io) Status) 0x0)
+
+  ;; initialize driver
+  (reg/Set (+ (.-Base io) Status) Acknowledge)
+  (reg/Set (+ (.-Base io) Status) Driver)
+
+  (.negotiate io features))
+
+
+
+^{:go/end 104} (go/method Config "Config returns the device configuration layout.\n" [^{:tag (* MMIO)} io ^int size] :results [^{:tag (slice byte)} config]
+  (when (== (.-config io) nil)
+    (let [(values r err) (dma/NewRegion (conv uint (+ (.-Base io) Config)) size false)]
+
+      (when (!= err nil)
+        (return))
+
+
+      (set! (values _ (.-config io)) (.Reserve r size 0))))
+
+
+  (set! config (make (slice byte) size))
+  (copy config (.-config io))
+
+  (return))
+
+
+
+^{:go/end 109} (go/method DeviceID "DeviceID returns the VirtIO subsystem device ID\n" ^uint32 [^{:tag (* MMIO)} io]
+  (reg/Read (+ (.-Base io) DeviceID)))
+
+
+
+^{:go/end 119} (go/method DeviceFeatures "DeviceFeatures returns the device feature bits.\n" [^{:tag (* MMIO)} io] :results [^uint64 features]
+  (for [i (conv uint32 0)] (<= i 1) (inc! i)
+    (reg/Write (+ (.-Base io) DeviceFeaturesSel) i)
+    (set! features bit-or (<< (conv uint64 (reg/Read (+ (.-Base io) DeviceFeatures))) (* i 32))))
+
+
+  (return))
+
+
+
+^{:go/end 129} (go/method DriverFeatures "DriverFeatures returns the driver feature bits.\n" [^{:tag (* MMIO)} io] :results [^uint64 features]
+  (for [i (conv uint32 0)] (<= i 1) (inc! i)
+    (reg/Write (+ (.-Base io) DriverFeaturesSel) i)
+    (set! features bit-or (<< (conv uint64 (reg/Read (+ (.-Base io) DriverFeatures))) (* i 32))))
+
+
+  (return))
+
+
+
+^{:go/end 139} (go/method SetDriverFeatures "SetDriverFeatures sets the driver feature bits.\n" [^{:tag (* MMIO)} io ^uint64 features]
+  (for [i (conv uint32 0)] (<= i 1) (inc! i)
+    (reg/Write (+ (.-Base io) DriverFeaturesSel) i)
+    (reg/Write (+ (.-Base io) DriverFeatures) (conv uint32 (>> features (* i 32)))))
+
+
+  (return))
+
+
+
+^{:go/end 144} (go/method NegotiatedFeatures "NegotiatedFeatures returns the set of negotiated feature bits.\n" [^{:tag (* MMIO)} io] :results [^uint64 features]
+  (.-features io))
+
+
+
+^{:go/end 151} (go/method QueueReady "QueueReady returns whether a queue is ready for use.\n" [^{:tag (* MMIO)} io ^int index] :results [^bool ready]
+  (reg/Write (+ (.-Base io) QueueSel) (conv uint32 index))
+  (set! ready (!= (reg/Read (+ (.-Base io) QueueReady)) 0))
+  (return))
+
+
+
+^{:go/end 157} (go/method MaxQueueSize "MaxQueueSize returns the maximum virtual queue size.\n" ^int [^{:tag (* MMIO)} io ^int index]
+  (reg/Write (+ (.-Base io) QueueSel) (conv uint32 index))
+  (conv int (reg/Read (+ (.-Base io) QueueNumMax))))
+
+
+
+^{:go/end 163} (go/method SetQueueSize "SetQueueSize sets the virtual queue size.\n" [^{:tag (* MMIO)} io ^int index ^int n]
+  (reg/Write (+ (.-Base io) QueueSel) (conv uint32 index))
+  (reg/Write (+ (.-Base io) QueueNum) (conv uint32 n)))
+
+
+
+^{:go/end 173} (go/method InterruptStatus "InterruptStatus returns the interrupt status and reason.\n" [^{:tag (* MMIO)} io] :results [^bool buffer ^bool config]
+  (let [s (reg/Read (+ (.-Base io) InterruptStatus))]
+
+    (set! buffer (bits/Get (addr s) 0))
+    (set! config (bits/Get (addr s) 1))
+
+    (return)))
+
+
+
+^{:go/end 178} (go/method Status "Status returns the device status.\n" ^uint32 [^{:tag (* MMIO)} io]
+  (reg/Read (+ (.-Base io) Status)))
+
+
+
+^{:go/end 189} (go/method SetQueue "SetQueue registers the indexed virtual queue for device access.\n" [^{:tag (* MMIO)} io ^int index ^{:tag (* VirtualQueue)} queue]
+  (let [(values desc driver device) (.Address queue)]
+
+    (reg/Write (+ (.-Base io) QueueSel) (conv uint32 index))
+    (reg/Write (+ (.-Base io) QueueDesc) (conv uint32 desc))
+    (reg/Write (+ (.-Base io) QueueDriver) (conv uint32 driver))
+    (reg/Write (+ (.-Base io) QueueDevice) (conv uint32 device))
+    (reg/Write (+ (.-Base io) QueueReady) 1)))
+
+
+
+^{:go/end 194} (go/method SetReady "SetReady indicates that the driver is set up and ready to drive the device.\n" [^{:tag (* MMIO)} io]
+  (reg/Set (+ (.-Base io) Status) DriverOk))
+
+
+
+^{:go/end 199} (go/method QueueNotify "QueueNotify notifies the device that a queue can be processed.\n" [^{:tag (* MMIO)} io ^int index]
+  (reg/Write (+ (.-Base io) QueueNotify) (conv uint32 index)))
+
+
+
+^{:go/end 204} (go/method ConfigVersion "ConfigVersion returns the device configuration (see Config field) version.\n" ^uint32 [^{:tag (* MMIO)} io]
+  (reg/Read (+ (.-Base io) ConfigGeneration)))
+
+
+
+
+^{:go/end 210} (go/method EnableInterrupt "EnableInterrupt is not currently implemented for MMIO, it is defined only to\nimplement the [VirtIO] interface and always returns an error.\n" [^{:tag (* MMIO)} io ^int _ ^int _] :results [^error err]
+  (errors/New "unimplemented"))

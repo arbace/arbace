@@ -1,0 +1,415 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.flate) (go/file "huffman_code.go" :imports [
+
+
+    ^{:line 8} [math "math"]
+    ^{:line 9} [bits "math/bits"]
+    ^{:line 10} [slices "slices"]
+    ^{:line 11} [sync "sync"]])
+
+
+(go/const
+  ^{:line 15} [^{:val 16} maxBitsLimit 16]
+
+  ^{:line 17} [^{:val 286 :doc "number of valid literals\n"} literalCount 286])
+
+
+
+(go/type hcode "hcode is a huffman code with a bit code and bit length.\n" uint32)
+
+
+^{:go/end 26} (go/method len "len returns the length of the code in bits.\n" ^uint8 [^hcode h]
+  (conv uint8 h))
+
+
+
+^{:go/end 31} (go/method code64 "code64 returns the code as a uint64.\n" ^uint64 [^hcode h]
+  (conv uint64 (>> h 8)))
+
+
+
+^{:go/end 36} (go/method zero "zero returns true if the code is unset.\n" ^bool [^hcode h]
+  (== h 0))
+
+
+
+^{:go/end 41} (go/method set "set sets the code and length of an hcode.\n" [^{:tag (* hcode)} h ^uint16 code ^uint8 length]
+  (set! @h (newhcode code length)))
+
+
+
+^{:go/end 46} (go/func newhcode "newhcode combines a code and length into an hcode.\n" ^hcode [^uint16 code ^uint8 length]
+  (bit-or (conv hcode length) (<< (conv hcode code) 8)))
+
+
+
+
+
+(go/type huffmanEncoder "huffmanEncoder provides a fast way to generate Huffman codes for a given\nfrequency table.  It is based on the algorithm described in RFC 1951,\nsection 3.2.2.\n" (struct
+    ^{:line 52 :tag (slice hcode)} codes
+    ^{:line 53 :tag (array 17 int32)} bitCount
+
+
+
+
+    ^{:line 58 :tag (array (+ literalCount 1) literalNode) :doc "freqcache is a reusable buffer with the longest possible frequency table.\nPossible lengths are codegenCodeCount, offsetCodeCount and literalCount.\nThe largest of these is literalCount, so we allocate for that case.\n"} freqcache))
+
+
+
+^{:go/end 66} (go/func newHuffmanEncoder "newHuffmanEncoder returns a new huffmanEncoder with the given size.\n" ^{:tag (* huffmanEncoder)} [^int size]
+  ;; Make capacity to next power of two.
+  (let [c (conv uint (bits/Len32 (conv uint32 (- size 1))))]
+    (addr (lit huffmanEncoder :codes (make (slice hcode) size ^int (<< 1 c))))))
+
+
+
+(go/type literalNode "literalNode represents a literal node in the huffman tree.\n" (struct
+    ^{:line 70 :tag uint16} literal
+    ^{:line 71 :tag uint16} freq))
+
+
+
+^{:go/end 75} (go/func maxNode "maxNode returns a literalNode with the maximum possible literal and frequency.\n" ^literalNode [] (lit literalNode math/MaxUint16 math/MaxUint16))
+
+
+(go/type levelInfo "A levelInfo describes the state of the constructed tree for a given depth.\n" (struct
+
+    ^{:line 80 :tag int32 :doc "Our level.  for better printing\n"} level
+
+
+    ^{:line 83 :tag int32 :doc "The frequency of the last node at this level\n"} lastFreq
+
+
+    ^{:line 86 :tag int32 :doc "The frequency of the next character to add to this level\n"} nextCharFreq
+
+
+
+    ^{:line 90 :tag int32 :doc "The frequency of the next pair (from level below) to add to this level.\nOnly valid if the \"needed\" value of the next lower level is 0.\n"} nextPairFreq
+
+
+
+    ^{:line 94 :tag int32 :doc "The number of chains remaining to generate for this level before moving\nup to the next level\n"} needed))
+
+
+
+
+^{:go/end 101} (go/func reverseBits "reverseBits returns the b-bit reversal of x.\nIt shifts x into the top b bits, reverses all 16, leaving the result in the low b bits.\n" ^uint16 [^uint16 x ^byte b]
+  (bits/Reverse16 (<< x (bit-and (- 16 b) 15))))
+
+
+
+^{:go/end 132} (go/func generateFixedLiteralEncoding "generateFixedLiteralEncoding returns the encoder for the fixed literal table.\n" ^{:tag (* huffmanEncoder)} []
+  (let [h (newHuffmanEncoder literalCount)
+      ^{:line 106} codes (.-codes h)
+      ^{:line 107 :tag uint16} ch (zero uint16)]
+    ^:assign (range [ch (conv uint16 literalCount)]
+      (let [^uint16 bits (zero uint16)
+          ^{:line 110 :tag uint8} size (zero uint8)]
+        (switch
+          (case [(< ch 144)]
+            ;; size 8, 000110000  .. 10111111
+            (set! bits (+ ch 48))
+            (set! size 8))
+          (case [(< ch 256)]
+            ;; size 9, 110010000 .. 111111111
+            (set! bits (- (+ ch 400) 144))
+            (set! size 9))
+          (case [(< ch 280)]
+            ;; size 7, 0000000 .. 0010111
+            (set! bits (- ch 256))
+            (set! size 7))
+          (default
+            ;; size 8, 11000000 .. 11000111
+            (set! bits (- (+ ch 192) 280))
+            (set! size 8)))
+
+        (aset codes ch (newhcode (reverseBits bits size) size))))
+
+    ^{:line 131} h))
+
+
+^{:go/end 141} (go/func generateFixedOffsetEncoding ^{:tag (* huffmanEncoder)} []
+  (let [h (newHuffmanEncoder 30)
+      ^{:line 136} codes (.-codes h)]
+    (range [ch codes]
+      (aset codes ch (newhcode (reverseBits (conv uint16 ch) 5) 5)))
+
+    ^{:line 140} h))
+
+
+(go/var
+  ^{:line 144} [fixedLiteralEncoding (^{:inst [(* huffmanEncoder)]} sync/OnceValue generateFixedLiteralEncoding)]
+  ^{:line 145} [fixedOffsetEncoding (^{:inst [(* huffmanEncoder)]} sync/OnceValue generateFixedOffsetEncoding)])
+
+
+
+^{:go/end 157} (go/method bitLength "bitLength returns the number of bits needed to encode freq.\n" ^int [^{:tag (* huffmanEncoder)} h ^{:tag (slice uint16)} freq]
+  (let [^int total (zero int)]
+    (range [i f freq]
+      (when (!= f 0)
+        (set! total + (* (conv int f) (conv int (.len (aget (.-codes h) i)))))))
+
+
+    ^{:line 156} total))
+
+
+
+
+^{:go/end 167} (go/method bitLengthRaw "bitLengthRaw will return the number of bits needed to encode b.\nFor unset codes 1 bit/entry will be added.\n" ^int [^{:tag (* huffmanEncoder)} h ^{:tag (slice byte)} b]
+  (let [^int total (zero int)]
+    (range [_ f b]
+      (set! total + (max 1 (conv int (.len (aget (.-codes h) f))))))
+
+    ^{:line 166} total))
+
+
+
+
+^{:go/end 183} (go/method canEncodeLen "canEncodeLen returns the number of bits to encode freq.\nIt returns math.MaxInt32 if freq cannot be encoded.\n" ^int [^{:tag (* huffmanEncoder)} h ^{:tag (slice uint16)} freq]
+  (let [^int total (zero int)]
+    (range [i f freq]
+      (when (!= f 0)
+        (let [code (aget (.-codes h) i)]
+          (when (.zero code)
+            (return math/MaxInt32))
+
+          (set! total + (* (conv int f) (conv int (.len code)))))))
+
+
+    ^{:line 182} total))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 316} (go/method bitCounts "bitCounts returns an integer slice in which slice[i] is the number\nof literals that should be encoded using i bits.\n\nThis method is only called when len(list) >= 3.\nThe cases of 0, 1, and 2 literals are handled by special case code.\n\nlist is an array of the literals with non-zero frequencies\nand their associated frequencies. The array is in order of increasing\nfrequency and has as its last element a special element with frequency\nMaxInt32.\n\nmaxBits is the maximum number of bits that should be used to encode any literal.\nIt must be less than 16.\n" ^{:tag (slice int32)} [^{:tag (* huffmanEncoder)} h ^{:tag (slice literalNode)} list ^int32 maxBits]
+  (when (>= maxBits maxBitsLimit)
+    (panic "flate: maxBits too large"))
+
+  (let [n (conv int32 (len list))]
+    (set! list (subslice list 0 (+ n 1)))
+    (aset list n (maxNode))
+
+    ;; The tree can't have greater depth than n - 1, no matter what. This
+    ;; saves a little bit of work in some small cases
+    (when (> maxBits (- n 1))
+      (set! maxBits (- n 1)))
+
+
+    ;; Create information about each of the levels.
+    ;; A bogus "Level 0" whose sole purpose is so that
+    ;; level1.prev.needed==0.  This makes level1.nextPairFreq
+    ;; be a legitimate value that never gets chosen.
+    (let [^{:tag (array maxBitsLimit levelInfo)} levels (zero (array maxBitsLimit levelInfo))
+        ;; leafCounts[i] counts the number of literals at the left
+        ;; of ancestors of the rightmost node at level i.
+        ;; leafCounts[i][j] is the number of literals at the left
+        ;; of the level j ancestor.
+        ^{:line 221 :tag (array maxBitsLimit (array maxBitsLimit int32))} leafCounts (zero (array maxBitsLimit (array maxBitsLimit int32)))]
+
+      (set! _ (aget list 2)) ; check bounds here instead of in loop
+      (for [level (conv int32 1)] (<= level maxBits) (inc! level)
+        ;; For every level, the first two items are the first two characters.
+        ;; We initialize the levels as if we had already figured this out.
+        (aset levels level ^{:go/breaks [2 4 6 8]} (lit levelInfo
+            :level level
+            :lastFreq (conv int32 (.-freq (aget list 1)))
+            :nextCharFreq (conv int32 (.-freq (aget list 2)))
+            :nextPairFreq (+ (conv int32 (.-freq (aget list 0))) (conv int32 (.-freq (aget list 1))))))
+
+        (aset (aget leafCounts level) level 2)
+        (when (== level 1)
+          (set! (.-nextPairFreq (aget levels level)) math/MaxInt32)))
+
+
+
+      ;; We need a total of 2*n - 2 items at top level and have already generated 2.
+      (set! (.-needed (aget levels maxBits)) (- (* 2 n) 4))
+
+      (let [level (conv uint32 maxBits)]
+        (while (< level 16)
+          (let [l (addr (aget levels level))]
+            (when (and (== (.-nextPairFreq l) math/MaxInt32) (== (.-nextCharFreq l) math/MaxInt32))
+              ;; We've run out of both leafs and pairs.
+              ;; End all calculations for this level.
+              ;; To make sure we never come back to this level or any lower level,
+              ;; set nextPairFreq impossibly large.
+              (set! (.-needed l) 0)
+              (set! (.-nextPairFreq (aget levels (+ level 1))) math/MaxInt32)
+              (inc! level)
+              (continue))
+
+
+            (let [prevFreq (.-lastFreq l)]
+              (if (< (.-nextCharFreq l) (.-nextPairFreq l))
+                ;; The next item on this row is a leaf node.
+                (let [n (+ (aget (aget leafCounts level) level) 1)]
+                  (set! (.-lastFreq l) (.-nextCharFreq l))
+                  ;; Lower leafCounts are the same of the previous node.
+                  (aset (aget leafCounts level) level n)
+                  (let [e (aget list n)]
+                    (if (< (.-literal e) math/MaxUint16)
+                      (set! (.-nextCharFreq l) (conv int32 (.-freq e)))
+
+                      (set! (.-nextCharFreq l) math/MaxInt32))))
+
+                (do
+                  ;; The next item on this row is a pair from the previous row.
+                  ;; nextPairFreq isn't valid until we generate two
+                  ;; more values in the level below
+                  (set! (.-lastFreq l) (.-nextPairFreq l))
+                  ;; Take leaf counts from the lower level, except counts[level] remains the same.
+                  (let [save (aget (aget leafCounts level) level)]
+                    (aset leafCounts level (aget leafCounts (- level 1)))
+                    (aset (aget leafCounts level) level save)
+                    (set! (.-needed (aget levels (- (.-level l) 1))) 2))))
+
+
+              (if [(dec! (.-needed l))] (== (.-needed l) 0) (do
+                  ;; We've done everything we need to do for this level.
+                  ;; Continue calculating one level up. Fill in nextPairFreq
+                  ;; of that level with the sum of the two nodes we've just calculated on
+                  ;; this level.
+                  (when (== (.-level l) maxBits)
+                    ;; All done!
+                    (break))
+
+                  (set! (.-nextPairFreq (aget levels (+ (.-level l) 1))) (+ prevFreq (.-lastFreq l)))
+                  (inc! level))
+
+                ;; If we stole from below, move down temporarily to replenish it.
+                (while (> (.-needed (aget levels (- level 1))) 0)
+                  (dec! level))))))
+
+
+
+
+        ;; Somethings is wrong if at the end, the top level is null or hasn't used
+        ;; all of the leaves.
+        (when (!= (aget (aget leafCounts maxBits) maxBits) n)
+          (panic "leafCounts[maxBits][maxBits] != n"))
+
+
+        (let [bitCount (subslice (.-bitCount h) _ (+ maxBits 1))
+            ^{:line 307} bits 1
+            ^{:line 308} counts (addr (aget leafCounts maxBits))]
+          (for [level maxBits] (> level 0) (dec! level)
+            ;; chain.leafCount gives the number of literals requiring at least "bits"
+            ;; bits to encode.
+            (aset bitCount bits (- (aget counts level) (aget counts (- level 1))))
+            (inc! bits))
+
+          ^{:line 315} bitCount)))))
+
+
+
+
+^{:go/end 342} (go/method assignEncodingAndSize "assignEncodingAndSize assigns bit counts and encodings to the leaves\nas specified in RFC 1951 3.2.2.\n" [^{:tag (* huffmanEncoder)} h ^{:tag (slice int32)} bitCount ^{:tag (slice literalNode)} list]
+  (let [code (conv uint16 0)]
+    (range [n bits bitCount]
+      (set! code << 1)
+      (when (or (== n 0) (== bits 0))
+        (continue))
+
+      ;; The literals list[len(list)-bits] .. list[len(list)-bits]
+      ;; are encoded using "bits" bits, and get the values
+      ;; code, code + 1, ....  The code values are
+      ;; assigned in literal order (not frequency order).
+      (let [chunk (subslice list (- (len list) (conv int bits)))]
+
+        (^{:inst [(slice literalNode) literalNode]} slices/SortFunc chunk ^{:go/end 335} (fn ^int [^literalNode a ^literalNode b]
+            (- (conv int (.-literal a)) (conv int (.-literal b)))))
+
+        (range [_ node chunk]
+          (aset (.-codes h) (.-literal node) (newhcode (reverseBits code (conv uint8 n)) (conv uint8 n)))
+          (inc! code))
+
+        (set! list (subslice list 0 (- (len list) (conv int bits))))))))
+
+
+
+
+
+
+^{:go/end 382} (go/method generate "generate rewrites h to be the Huffman code for the given frequency count.\nfreq[i] is the frequency of literal i, and maxBits is the maximum number\nof bits to use for any literal.\n" [^{:tag (* huffmanEncoder)} h ^{:tag (slice uint16)} freq ^int32 maxBits]
+  (let [list (subslice (.-freqcache h) _ (+ (len freq) 1))
+      ^{:line 349} codes (subslice (.-codes h) _ (len freq))
+      ;; Number of non-zero literals
+      ^{:line 351} count 0]
+    ;; Set list to be the set of all non-zero literals and their frequencies
+    (range [i f freq]
+      (if (!= f 0) (do
+          (aset list count (lit literalNode (conv uint16 i) f))
+          (inc! count))
+
+        (aset codes i 0)))
+
+
+    (aset list count (lit literalNode))
+
+    (set! list (subslice list _ count))
+    (when (<= count 2)
+      ;; Handle the small cases here, because they are awkward for the general case code. With
+      ;; two or fewer literals, everything has bit length 1.
+      (range [i node list]
+        ;; "list" is in order of increasing literal value.
+        (.set (aget (.-codes h) (.-literal node)) (conv uint16 i) 1))
+
+      (return))
+
+    (^{:inst [(slice literalNode) literalNode]} slices/SortFunc list ^{:go/end 376} (fn ^int [^literalNode a ^literalNode b]
+        ;; Literals can be contained in 9 bits, so we shift freq to be branchless.
+        (- (+ (<< (conv int (.-freq a)) 10) (conv int (.-literal a))) (+ (<< (conv int (.-freq b)) 10) (conv int (.-literal b))))))
+
+
+    ;; Get the number of literals for each bit count
+    (let [bitCount (.bitCounts h list maxBits)]
+      ;; And do the assignment
+      (.assignEncodingAndSize h bitCount list))))
+
+
+^{:go/end 393} (go/func histogram [^{:tag (slice byte)} b ^{:tag (slice uint16)} h]
+  (when (>= (len b) (<< 8 10))
+    (histogramSplit b h)
+    (return))
+
+  (set! h (subslice h _ 256))
+  (range [_ t b]
+    (inc! (aget h t))))
+
+
+
+^{:go/end 417} (go/func histogramSplit [^{:tag (slice byte)} b ^{:tag (slice uint16)} h]
+  ;; Walk four quarters in parallel.
+  ;; Tested to be faster than walking halves.
+  (set! h (subslice h _ 256))
+  ;; Make size divisible by 4
+  (while (!= (bit-and (len b) 3) 0)
+    (inc! (aget h (aget b 0)))
+    (set! b (subslice b 1)))
+
+  (let [n (/ (len b) 4)
+      (values x y z w) (values (subslice b _ n) (subslice b n) (subslice b (+ n n)) (subslice b (+ n n n)))]
+    (set! (values y z w) (values (subslice y _ (len x)) (subslice z _ (len x)) (subslice w _ (len x))))
+    (range [i t x]
+      (let [v0 (addr (aget h t))
+          ^{:line 409} v1 (addr (aget h (aget y i)))
+          ^{:line 410} v2 (addr (aget h (aget z i)))
+          ^{:line 411} v3 (addr (aget h (aget w i)))]
+        (inc! @v0)
+        (inc! @v1)
+        (inc! @v2)
+        (inc! @v3)))))

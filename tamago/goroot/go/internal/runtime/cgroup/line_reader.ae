@@ -1,0 +1,178 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.runtime.cgroup) (go/file "line_reader.go" :imports [
+
+
+    ^{:line 8} [bytealg "internal/bytealg"]])
+
+
+
+
+(go/type stringError "stringError is a trival implementation of error, equivalent to errors.New,\nwhich cannot be imported from a runtime package.\n" string)
+
+^{:go/end 17} (go/method Error ^string [^stringError e]
+  (conv string e))
+
+
+;; All errors are explicit converted to type error in global initialization to
+;; ensure that the linker allocates a static interface value. This is necessary
+;; because these errors may be used before the allocator is available.
+
+(go/var
+
+  ^{:line 25} [^{:tag error :doc "The entire line did not fit into the scratch buffer.\n"} errIncompleteLine (conv stringError "incomplete line")]
+
+
+  ^{:line 28} [^{:tag error :doc "A system call failed.\n"} errSyscallFailed (conv stringError "syscall failed")]
+
+
+  ^{:line 31} [^{:tag error :doc "Reached EOF.\n"} errEOF (conv stringError "end of file")])
+
+
+
+
+
+
+(go/type lineReader "lineReader reads line-by-line using only a single fixed scratch buffer.\n\nWhen a single line is too long for the scratch buffer, the remainder of the\nline will be skipped.\n" (struct
+    ^{:line 39 :tag (func [^int fd ^{:tag (slice byte)} b] [int uintptr])} read
+    ^{:line 40 :tag int} fd
+    ^{:line 41 :tag (slice byte)} scratch
+
+    ^{:line 43 :tag int} n ; bytes of scratch in use.
+    ^{:line 44 :tag int} newline ; index of the first newline in scratch.
+
+    ^{:line 46 :tag bool} eof)) ; read reached EOF.
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 68} (go/func newLineReader "newLineReader returns a lineReader which reads lines from fd.\n\nfd is the file descriptor to read from.\n\nscratch is the scratch buffer to read into. Note that len(scratch) is the\nlongest line that can be read. Lines longer than len(scratch) will have the\nremainder of the line skipped. See next for more details.\n\nread is the function used to read more bytes from fd. This is usually\ninternal/runtime/syscall/linux.Read. Note that this follows syscall semantics (not\nio.Reader), so EOF is indicated with n=0, errno=0.\n" ^{:tag (* lineReader)} [^int fd ^{:tag (slice byte)} scratch ^{:tag (func [^int fd ^{:tag (slice byte)} b] [^int n ^uintptr errno])} read]
+  (addr ^{:go/breaks [2 4 6 8 10]} (lit lineReader
+      :read read
+      :fd fd
+      :scratch scratch
+      :n 0
+      :newline -1)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 162} (go/method next "next advances to the next line.\n\nMay return errIncompleteLine if the scratch buffer is too small to hold the\nentire line, in which case [r.line] will return the beginning of the line. A\nsubsequent call to next will skip the remainder of the incomplete line.\n\nN.B. this behavior is important for /proc/self/mountinfo. Some lines\n(mounts), such as overlayfs, may be extremely long due to long super-block\noptions, but we don't care about those. The mount type will appear early in\nthe line.\n\nReturns errEOF when there are no more lines.\n" ^error [^{:tag (* lineReader)} r]
+  ;; Three cases:
+  ;;
+  ;; 1. First call, no data read.
+  ;; 2. Previous call had a complete line. Drop it and look for the end
+  ;;    of the next line.
+  ;; 3. Previous call had an incomplete line. Find the end of that line
+  ;;    (start of the next line), and the end of the next line.
+
+  (let [prevComplete (>= (.-newline r) 0)
+      ^{:line 92} firstCall (== (.-n r) 0)]
+
+    (while true
+      (when prevComplete
+        ;; Drop the previous line.
+        (copy (.-scratch r) (subslice (.-scratch r) (+ (.-newline r) 1) (.-n r)))
+        (set! (.-n r) - (+ (.-newline r) 1))
+
+        (set! (.-newline r) (bytealg/IndexByte (subslice (.-scratch r) _ (.-n r)) \newline))
+        (when (>= (.-newline r) 0)
+          ;; We have another line already in scratch. Done.
+          (return nil)))
+
+
+
+      ;; No newline available.
+
+      (when (not prevComplete)
+        ;; If the previous line was incomplete, we are
+        ;; searching for the end of that line and have no need
+        ;; for any buffered data.
+        (set! (.-n r) 0))
+
+
+      (let [(values n errno) ((.-read r) (.-fd r) (subslice (.-scratch r) (.-n r) (len (.-scratch r))))]
+        (when (!= errno 0)
+          (return errSyscallFailed))
+
+        (set! (.-n r) + n)
+
+        (when (== (.-n r) 0)
+          ;; Nothing left.
+          ;;
+          ;; N.B. we can't immediately return EOF when read
+          ;; returns 0 as we may still need to return an
+          ;; incomplete line.
+          (return errEOF))
+
+
+        (set! (.-newline r) (bytealg/IndexByte (subslice (.-scratch r) _ (.-n r)) \newline))
+        (if (or prevComplete firstCall) (do
+            ;; Already have the start of the line, just need to find the end.
+
+            (when (< (.-newline r) 0)
+              ;; We filled the entire buffer or hit EOF, but
+              ;; still no newline.
+              (return errIncompleteLine))
+
+
+            ;; Found the end of the line. Done.
+            (return nil))
+          (do
+            ;; Don't have the start of the line. We are currently
+            ;; looking for the end of the previous line.
+
+            (when (< (.-newline r) 0)
+              ;; Not there yet.
+              (when (== n 0)
+                ;; No more to read.
+                (return errEOF))
+
+              (continue))
+
+
+            ;; Found the end of the previous line. The next
+            ;; iteration will drop the remainder of the previous
+            ;; line and look for the next line.
+            (set! prevComplete true)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 179} (go/method line "line returns a view of the current line, excluding the trailing newline.\n\nIf [r.next] returned errIncompleteLine, then this returns only the beginning\nof the line.\n\nPreconditions: [r.next] is called prior to the first call to line.\n\nPostconditions: The caller must not keep a reference to the returned slice.\n" ^{:tag (slice byte)} [^{:tag (* lineReader)} r]
+  (when (< (.-newline r) 0)
+    ;; Incomplete line
+    (return (subslice (.-scratch r) _ (.-n r))))
+
+  ;; Complete line.
+  (subslice (.-scratch r) _ (.-newline r)))

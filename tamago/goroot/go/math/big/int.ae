@@ -1,0 +1,1392 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements signed multi-precision integers.
+
+(in-ns 'go.math.big) (go/file "int.go" :imports [
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [rand "math/rand"]
+    ^{:line 13} [strings "strings"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Int "An Int represents a signed multi-precision integer.\nThe zero value for an Int represents the value 0.\n\nOperations always take pointer arguments (*Int) rather\nthan Int values, and each unique Int value requires\nits own unique *Int pointer. To \"copy\" an Int value,\nan existing (or newly allocated) Int must be set to\na new value using the [Int.Set] method; shallow copies\nof Ints are not supported and may lead to errors.\n\nNote that methods may leak the Int's value through timing side-channels.\nBecause of this and because of the scope and complexity of the\nimplementation, Int is not well-suited to implement cryptographic operations.\nThe standard library avoids exposing non-trivial Int methods to\nattacker-controlled inputs and the determination of whether a bug in math/big\nis considered a security vulnerability might depend on the impact on the\nstandard library.\n" (struct
+    ^{:line 34 :tag bool} neg ; sign
+    ^{:line 35 :tag nat} abs)) ; absolute value of the integer
+
+
+(go/var intOne (addr (lit Int false natOne)))
+
+
+
+
+
+^{:go/breaks [[6 54]] :go/end 55} (go/method Sign "Sign returns:\n  - -1 if x < 0;\n  - 0 if x == 0;\n  - +1 if x > 0.\n" ^int [^{:tag (* Int)} x]
+  ;; This function is used in cryptographic operations. It must not leak
+  ;; anything but the Int's sign and bit size through side-channels. Any
+  ;; changes must be reviewed by a security expert.
+  (when (== (len (.-abs x)) 0)
+    (return 0))
+
+  (when (.-neg x)
+    (return -1))
+
+  1)
+
+
+
+^{:go/end 67} (go/method SetInt64 "SetInt64 sets z to x and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^int64 x]
+  (let [neg false]
+    (when (< x 0)
+      (set! neg true)
+      (set! x (- x)))
+
+    (set! (.-abs z) (.setUint64 (.-abs z) (conv uint64 x)))
+    (set! (.-neg z) neg)
+    ^{:line 66} z))
+
+
+
+^{:go/end 74} (go/method SetUint64 "SetUint64 sets z to x and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^uint64 x]
+  (set! (.-abs z) (.setUint64 (.-abs z) x))
+  (set! (.-neg z) false)
+  ^{:line 73} z)
+
+
+
+^{:go/end 92} (go/func NewInt "NewInt allocates and returns a new [Int] set to x.\n" ^{:tag (* Int)} [^int64 x]
+  ;; This code is arranged to be inlineable and produce
+  ;; zero allocations when inlined. See issue 29951.
+  (let [u (conv uint64 x)]
+    (when (< x 0)
+      (set! u (- u)))
+
+    (let [^{:tag (slice Word)} abs (zero (slice Word))]
+      (cond (== x 0) (do)
+        (and (== _W 32) (!= (>> u 32) 0))
+        (set! abs (lit (slice Word) (conv Word u) (conv Word (>> u 32)))) :else
+
+        (set! abs (lit (slice Word) (conv Word u))))
+
+      (addr (lit Int :neg (< x 0) :abs abs)))))
+
+
+
+^{:go/end 101} (go/method Set "Set sets z to x and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x]
+  (when (!= z x)
+    (set! (.-abs z) (.set (.-abs z) (.-abs x)))
+    (set! (.-neg z) (.-neg x)))
+
+  ^{:line 100} z)
+
+
+
+
+
+
+
+^{:go/end 113} (go/method Bits "Bits provides raw (unchecked but fast) access to x by returning its\nabsolute value as a little-endian [Word] slice. The result and x share\nthe same underlying array.\nBits is intended to support implementation of missing low-level [Int]\nfunctionality outside this package; it should be avoided otherwise.\n" ^{:tag (slice Word)} [^{:tag (* Int)} x]
+  ;; This function is used in cryptographic operations. It must not leak
+  ;; anything but the Int's sign and bit size through side-channels. Any
+  ;; changes must be reviewed by a security expert.
+  (.-abs x))
+
+
+
+
+
+
+
+^{:go/end 124} (go/method SetBits "SetBits provides raw (unchecked but fast) access to z by setting its\nvalue to abs, interpreted as a little-endian [Word] slice, and returning\nz. The result and abs share the same underlying array.\nSetBits is intended to support implementation of missing low-level [Int]\nfunctionality outside this package; it should be avoided otherwise.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (slice Word)} abs]
+  (set! (.-abs z) (.norm (conv nat abs)))
+  (set! (.-neg z) false)
+  ^{:line 123} z)
+
+
+
+^{:go/end 131} (go/method Abs "Abs sets z to |x| (the absolute value of x) and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x]
+  (.Set z x)
+  (set! (.-neg z) false)
+  ^{:line 130} z)
+
+
+
+^{:go/end 138} (go/method Neg "Neg sets z to -x and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x]
+  (.Set z x)
+  (set! (.-neg z) (and (> (len (.-abs z)) 0) (not (.-neg z)))) ; 0 has no sign
+  ^{:line 137} z)
+
+
+
+^{:go/end 159} (go/method Add "Add sets z to the sum x+y and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (let [neg (.-neg x)]
+    (if (== (.-neg x) (.-neg y))
+      ;; x + y == x + y
+      ;; (-x) + (-y) == -(x + y)
+      (set! (.-abs z) (.add (.-abs z) (.-abs x) (.-abs y)))
+      (do
+        ;; x + (-y) == x - y == -(y - x)
+        ;; (-x) + y == y - x == -(x - y)
+        (if (>= (.cmp (.-abs x) (.-abs y)) 0)
+          (set! (.-abs z) (.sub (.-abs z) (.-abs x) (.-abs y)))
+          (do
+            (set! neg (not neg))
+            (set! (.-abs z) (.sub (.-abs z) (.-abs y) (.-abs x)))))))
+
+
+    (set! (.-neg z) (and (> (len (.-abs z)) 0) neg)) ; 0 has no sign
+    ^{:line 158} z))
+
+
+
+^{:go/end 180} (go/method Sub "Sub sets z to the difference x-y and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (let [neg (.-neg x)]
+    (if (!= (.-neg x) (.-neg y))
+      ;; x - (-y) == x + y
+      ;; (-x) - y == -(x + y)
+      (set! (.-abs z) (.add (.-abs z) (.-abs x) (.-abs y)))
+      (do
+        ;; x - y == x - y == -(y - x)
+        ;; (-x) - (-y) == y - x == -(x - y)
+        (if (>= (.cmp (.-abs x) (.-abs y)) 0)
+          (set! (.-abs z) (.sub (.-abs z) (.-abs x) (.-abs y)))
+          (do
+            (set! neg (not neg))
+            (set! (.-abs z) (.sub (.-abs z) (.-abs y) (.-abs x)))))))
+
+
+    (set! (.-neg z) (and (> (len (.-abs z)) 0) neg)) ; 0 has no sign
+    ^{:line 179} z))
+
+
+
+^{:go/end 186} (go/method Mul "Mul sets z to the product x*y and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (.mul z nil x y)
+  ^{:line 185} z)
+
+
+
+
+
+^{:go/end 203} (go/method mul "mul is like Mul but takes an explicit stack to use, for internal use.\nIt does not return a *Int because doing so makes the stack-allocated Ints\nused in natmul.go escape to the heap (even though the result is unused).\n" [^{:tag (* Int)} z ^{:tag (* stack)} stk ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  ;; x * y == x * y
+  ;; x * (-y) == -(x * y)
+  ;; (-x) * y == -(x * y)
+  ;; (-x) * (-y) == x * y
+  (when (== x y)
+    (set! (.-abs z) (.sqr (.-abs z) stk (.-abs x)))
+    (set! (.-neg z) false)
+    (return))
+
+  (set! (.-abs z) (.mul (.-abs z) stk (.-abs x) (.-abs y)))
+  (set! (.-neg z) (and (> (len (.-abs z)) 0) (!= (.-neg x) (.-neg y))))) ; 0 has no sign
+
+
+
+
+
+^{:go/end 226} (go/method MulRange "MulRange sets z to the product of all integers\nin the range [a, b] inclusively and returns z.\nIf a > b (empty range), the result is 1.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^int64 a ^int64 b]
+  (switch
+    (case [(> a b)]
+      (return (.SetInt64 z 1))) ; empty range
+    (case [(and (<= a 0) (>= b 0))]
+      (return (.SetInt64 z 0)))) ; range includes 0
+
+  ;; a <= b && (b < 0 || a > 0)
+
+  (let [neg false]
+    (when (< a 0)
+      (set! neg (== (bit-and (- b a) 1) 0))
+      (set! (values a b) (values (- b) (- a))))
+
+
+    (set! (.-abs z) (.mulRange (.-abs z) nil (conv uint64 a) (conv uint64 b)))
+    (set! (.-neg z) neg)
+    ^{:line 225} z))
+
+
+
+^{:go/end 268} (go/method Binomial "Binomial sets z to the binomial coefficient C(n, k) and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^int64 n ^int64 k]
+  (when (or (> k n) (< k 0))
+    (return (.SetInt64 z 0)))
+
+  ;; reduce the number of multiplications by reducing k
+  (when (> k (- n k))
+    (set! k (- n k))) ; C(n, k) == C(n, n-k)
+
+  ;; C(n, k) == n * (n-1) * ... * (n-k+1) / k * (k-1) * ... * 1
+  ;;         == n * (n-1) * ... * (n-k+1) / 1 * (1+1) * ... * k
+  ;;
+  ;; Using the multiplicative formula produces smaller values
+  ;; at each step, requiring fewer allocations and computations:
+  ;;
+  ;; z = 1
+  ;; for i := 0; i < k; i = i+1 {
+  ;;     z *= n-i
+  ;;     z /= i+1
+  ;; }
+  ;;
+  ;; finally to avoid computing i+1 twice per loop:
+  ;;
+  ;; z = 1
+  ;; i := 0
+  ;; for i < k {
+  ;;     z *= n-i
+  ;;     i++
+  ;;     z /= i
+  ;; }
+  (let [(values ^Int N ^Int K ^Int i ^Int t) (zero Int)]
+    (.SetInt64 N n)
+    (.SetInt64 K k)
+    (.Set z intOne)
+    (while (< (.Cmp i (addr K)) 0)
+      (.Mul z z (.Sub t (addr N) (addr i)))
+      (.Add i (addr i) intOne)
+      (.Quo z z (addr i)))
+
+    ^{:line 267} z))
+
+
+
+
+
+^{:go/end 277} (go/method Quo "Quo sets z to the quotient x/y for y != 0 and returns z.\nIf y == 0, a division-by-zero run-time panic occurs.\nQuo implements truncated division (like Go); see [Int.QuoRem] for more details.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (set! (values (.-abs z) _) (.div (.-abs z) nil nil (.-abs x) (.-abs y)))
+  (set! (.-neg z) (and (> (len (.-abs z)) 0) (!= (.-neg x) (.-neg y)))) ; 0 has no sign
+  ^{:line 276} z)
+
+
+
+
+
+^{:go/end 286} (go/method Rem "Rem sets z to the remainder x%y for y != 0 and returns z.\nIf y == 0, a division-by-zero run-time panic occurs.\nRem implements truncated modulus (like Go); see [Int.QuoRem] for more details.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (set! (values _ (.-abs z)) (.div (conv nat nil) nil (.-abs z) (.-abs x) (.-abs y)))
+  (set! (.-neg z) (and (> (len (.-abs z)) 0) (.-neg x))) ; 0 has no sign
+  ^{:line 285} z)
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 303} (go/method QuoRem "QuoRem sets z to the quotient x/y and r to the remainder x%y\nand returns the pair (z, r) for y != 0.\nIf y == 0, a division-by-zero run-time panic occurs.\n\nQuoRem implements T-division and modulus (like Go):\n\n\tq = x/y      with the result truncated to zero\n\tr = x - y*q\n\n(See Daan Leijen, “Division and Modulus for Computer Scientists”.)\nSee [Int.DivMod] for Euclidean division and modulus (unlike Go).\n" [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y ^{:tag (* Int)} r] :results [(* Int) (* Int)]
+  (set! (values (.-abs z) (.-abs r)) (.div (.-abs z) nil (.-abs r) (.-abs x) (.-abs y)))
+  (set! (values (.-neg z) (.-neg r)) (values (and (> (len (.-abs z)) 0) (!= (.-neg x) (.-neg y))) (and (> (len (.-abs r)) 0) (.-neg x)))) ; 0 has no sign
+  (return z r))
+
+
+
+
+
+^{:go/end 320} (go/method Div "Div sets z to the quotient x/y for y != 0 and returns z.\nIf y == 0, a division-by-zero run-time panic occurs.\nDiv implements Euclidean division (unlike Go); see [Int.DivMod] for more details.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (let [y_neg (.-neg y) ; z may be an alias for y
+      ^{:line 310 :tag Int} r (zero Int)]
+    (.QuoRem z x y (addr r))
+    (when (.-neg r)
+      (if y_neg
+        (.Add z z intOne)
+
+        (.Sub z z intOne)))
+
+
+    ^{:line 319} z))
+
+
+
+
+
+^{:go/end 340} (go/method Mod "Mod sets z to the modulus x%y for y != 0 and returns z.\nIf y == 0, a division-by-zero run-time panic occurs.\nMod implements Euclidean modulus (unlike Go); see [Int.DivMod] for more details.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (let [y0 y] ; save y
+    (when (or (== z y) (alias (.-abs z) (.-abs y)))
+      (set! y0 (.Set (new Int) y)))
+
+    (let [^Int q (zero Int)]
+      (.QuoRem q x y z)
+      (when (.-neg z)
+        (if (.-neg y0)
+          (.Sub z z y0)
+
+          (.Add z z y0)))
+
+
+      ^{:line 339} z)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 372} (go/method DivMod "DivMod sets z to the quotient x div y and m to the modulus x mod y\nand returns the pair (z, m) for y != 0.\nIf y == 0, a division-by-zero run-time panic occurs.\n\nDivMod implements Euclidean division and modulus (unlike Go):\n\n\tq = x div y  such that\n\tm = x - y*q  with 0 <= m < |y|\n\n(See Raymond T. Boute, “The Euclidean definition of the functions\ndiv and mod”. ACM Transactions on Programming Languages and\nSystems (TOPLAS), 14(2):127-144, New York, NY, USA, 4/1992.\nACM press.)\nSee [Int.QuoRem] for T-division and modulus (like Go).\n" [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y ^{:tag (* Int)} m] :results [(* Int) (* Int)]
+  (let [y0 y] ; save y
+    (when (or (== z y) (alias (.-abs z) (.-abs y)))
+      (set! y0 (.Set (new Int) y)))
+
+    (.QuoRem z x y m)
+    (when (.-neg m)
+      (if (.-neg y0) (do
+          (.Add z z intOne)
+          (.Sub m m y0))
+        (do
+          (.Sub z z intOne)
+          (.Add m m y0))))
+
+
+    (return z m)))
+
+
+
+
+(go/const "Rounding modes that determine how the integer quotient is adjusted in an integer division.\nSee Daan Leijen, “Division and Modulus for Computer Scientists”, for details.\n"
+  ^{:line 377} [^{:val 2} Trunc ToZero] ; T-division (same as Go division)
+  ^{:line 378} [^{:val 4} Floor ToNegativeInf] ; F-division
+  ^{:line 379} [^{:val 0} Round ToNearestEven] ; R-division
+  ^{:line 380} [^{:val 5} Ceil ToPositiveInf]) ; C-division
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 455} (go/method Divide "Divide computes the integer quotient q and remainder r such that\n\n\tq = f(x/y)\n\tr = x - y*q\n\nwhere f is described by the rounding mode,\nwhich must be one of [Trunc], [Floor], [Round] or [Ceil].\nDivide sets z to q if z != nil, updates r if r != nil,\nand returns the pair (z, r) if y != 0.\nIf y == 0, a division-by-zero run-time panic occurs.\n" [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y ^{:tag (* Int)} r ^RoundingMode mode] :results [(* Int) (* Int)]
+  ;; TODO: optimize the code where z or r is nil
+  (let [^nat z_abs (zero nat)]
+    (when (!= z nil)
+      (set! z_abs (.-abs z)))
+
+    (let [^bool r_neg (zero bool)
+        ^{:line 400 :tag nat} r_abs (zero nat)]
+      (when (!= r nil)
+        (set! r_abs (.-abs r)))
+
+      (let [y_abs (.-abs y)] ; save y
+        (when (or (== z y) (alias z_abs (.-abs y)))
+          (set! y_abs (.set (conv nat nil) (.-abs y))))
+
+        (let [neg (!= (.-neg x) (.-neg y))]
+          (set! (values z_abs r_abs) (.div z_abs nil r_abs (.-abs x) (.-abs y)))
+          (when (> (len r_abs) 0)
+            (switch mode
+              (case [Trunc]
+                (set! r_neg (.-neg x)))
+              (case [Floor]
+                (set! r_neg (.-neg y))
+                (when neg
+                  (set! z_abs (.add z_abs z_abs natOne))
+                  (set! r_abs (.sub r_abs y_abs r_abs))))
+
+              (case [Ceil]
+                (set! r_neg (not (.-neg y)))
+                (when (not neg)
+                  (set! z_abs (.add z_abs z_abs natOne))
+                  (set! r_abs (.sub r_abs y_abs r_abs))))
+
+              (case [Round]
+                (switch (.cmp (.mul (conv nat nil) nil r_abs natTwo) y_abs)
+                  (case [-1]
+                    (set! r_neg (.-neg x)))
+                  (case [0]
+                    (let [even (or (== (len z_abs) 0) (== (bit-and (aget z_abs 0) 1) 0))]
+                      (when even
+                        (set! r_neg (.-neg x))
+                        (break))
+
+                      (fallthrough)))
+                  (case [1]
+                    (set! r_neg (not (.-neg x)))
+                    (set! z_abs (.add z_abs z_abs natOne))
+                    (set! r_abs (.sub r_abs y_abs r_abs)))))
+
+              (default
+                (panic "unsupported rounding mode"))))
+
+
+          (when (!= z nil)
+            (set! (.-abs z) z_abs)
+            (set! (.-neg z) (and neg (> (len z_abs) 0)))) ; 0 has no sign
+
+          (when (!= r nil)
+            (set! (.-abs r) r_abs)
+            (set! (.-neg r) r_neg))
+
+          (return z r))))))
+
+
+
+
+
+
+^{:go/end 480} (go/method Cmp "Cmp compares x and y and returns:\n  - -1 if x < y;\n  - 0 if x == y;\n  - +1 if x > y.\n" [^{:tag (* Int)} x ^{:tag (* Int)} y] :results [^int r]
+  ;; x cmp y == x cmp y
+  ;; x cmp (-y) == x
+  ;; (-x) cmp y == y
+  ;; (-x) cmp (-y) == -(x cmp y)
+  (switch
+    (case [(== x y)])
+    ;; nothing to do
+    (case [(== (.-neg x) (.-neg y))]
+      (set! r (.cmp (.-abs x) (.-abs y)))
+      (when (.-neg x)
+        (set! r (- r))))
+
+    (case [(.-neg x)]
+      (set! r -1))
+    (default
+      (set! r 1)))
+
+  (return))
+
+
+
+
+
+
+^{:go/end 488} (go/method CmpAbs "CmpAbs compares the absolute values of x and y and returns:\n  - -1 if |x| < |y|;\n  - 0 if |x| == |y|;\n  - +1 if |x| > |y|.\n" ^int [^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (.cmp (.-abs x) (.-abs y)))
+
+
+
+^{:go/end 496} (go/func low32 "low32 returns the least significant 32 bits of x.\n" ^uint32 [^nat x]
+  (when (== (len x) 0)
+    (return 0))
+
+  (conv uint32 (aget x 0)))
+
+
+
+^{:go/end 508} (go/func low64 "low64 returns the least significant 64 bits of x.\n" ^uint64 [^nat x]
+  (when (== (len x) 0)
+    (return 0))
+
+  (let [v (conv uint64 (aget x 0))]
+    (when (and (== _W 32) (> (len x) 1))
+      (return (bit-or (<< (conv uint64 (aget x 1)) 32) v)))
+
+    ^{:line 507} v))
+
+
+
+
+^{:go/end 518} (go/method Int64 "Int64 returns the int64 representation of x.\nIf x cannot be represented in an int64, the result is undefined.\n" ^int64 [^{:tag (* Int)} x]
+  (let [v (conv int64 (low64 (.-abs x)))]
+    (when (.-neg x)
+      (set! v (- v)))
+
+    ^{:line 517} v))
+
+
+
+
+^{:go/end 524} (go/method Uint64 "Uint64 returns the uint64 representation of x.\nIf x cannot be represented in a uint64, the result is undefined.\n" ^uint64 [^{:tag (* Int)} x]
+  (low64 (.-abs x)))
+
+
+
+^{:go/breaks [[5 532]] :go/end 533} (go/method IsInt64 "IsInt64 reports whether x can be represented as an int64.\n" ^bool [^{:tag (* Int)} x]
+  (when (<= (len (.-abs x)) (/ 64 _W))
+    (let [w (conv int64 (low64 (.-abs x)))]
+      (return (or (>= w 0) (and (.-neg x) (== w (- w)))))))
+
+  false)
+
+
+
+^{:go/end 538} (go/method IsUint64 "IsUint64 reports whether x can be represented as a uint64.\n" ^bool [^{:tag (* Int)} x]
+  (and (not (.-neg x)) (<= (len (.-abs x)) (/ 64 _W))))
+
+
+
+
+^{:go/end 558} (go/method Float64 "Float64 returns the float64 value nearest x,\nand an indication of any rounding that occurred.\n" [^{:tag (* Int)} x] :results [float64 Accuracy]
+  (let [n (.bitLen (.-abs x))] ; NB: still uses slow crypto impl!
+    (when (== n 0)
+      (return 0.0 Exact))
+
+
+    ;; Fast path: no more than 53 significant bits.
+    (when (or (<= n 53) (and (< n 64) (<= (- n (conv int (.trailingZeroBits (.-abs x)))) 53)))
+      (let [f (conv float64 (low64 (.-abs x)))]
+        (when (.-neg x)
+          (set! f (- f)))
+
+        (return f Exact)))
+
+
+    (.Float64 (.SetInt (new Float) x))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 584} (go/method SetString "SetString sets z to the value of s, interpreted in the given base,\nand returns z and a boolean indicating success. The entire string\n(not just a prefix) must be valid for success. If SetString fails,\nthe value of z is undefined but the returned value is nil.\n\nThe base argument must be 0 or a value between 2 and [MaxBase].\nFor base 0, the number prefix determines the actual base: A prefix of\n“0b” or “0B” selects base 2, “0”, “0o” or “0O” selects base 8,\nand “0x” or “0X” selects base 16. Otherwise, the selected base is 10\nand no prefix is accepted.\n\nFor bases <= 36, lower and upper case letters are considered the same:\nThe letters 'a' to 'z' and 'A' to 'Z' represent digit values 10 to 35.\nFor bases > 36, the upper case letters 'A' to 'Z' represent the digit\nvalues 36 to 61.\n\nFor base 0, an underscore character “_” may appear between a base\nprefix and an adjacent digit, and between successive digits; such\nunderscores do not change the value of the number.\nIncorrect placement of underscores is reported as an error if there\nare no other errors. If base != 0, underscores are not recognized\nand act like any other character that is not a valid digit.\n" [^{:tag (* Int)} z ^string s ^int base] :results [(* Int) bool]
+  (.setFromScanner z (strings/NewReader s) base))
+
+
+
+
+^{:go/end 597} (go/method setFromScanner "setFromScanner implements SetString given an io.ByteScanner.\nFor documentation see comments of SetString.\n" [^{:tag (* Int)} z ^io/ByteScanner r ^int base] :results [(* Int) bool]
+  (when [(values _ _ err) (.scan z r base)] (!= err nil)
+    (return nil false))
+
+  ;; entire content must have been consumed
+  (when [(values _ err) (.ReadByte r)] (!= err io/EOF)
+    (return nil false))
+
+  (return z true)) ; err == io.EOF => scan consumed all content of r
+
+
+
+
+^{:go/end 605} (go/method SetBytes "SetBytes interprets buf as the bytes of a big-endian unsigned\ninteger, sets z to that value, and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (slice byte)} buf]
+  (set! (.-abs z) (.setBytes (.-abs z) buf))
+  (set! (.-neg z) false)
+  ^{:line 604} z)
+
+
+
+
+
+^{:go/end 616} (go/method Bytes "Bytes returns the absolute value of x as a big-endian byte slice.\n\nTo use a fixed length slice, or a preallocated one, use [Int.FillBytes].\n" ^{:tag (slice byte)} [^{:tag (* Int)} x]
+  ;; This function is used in cryptographic operations. It must not leak
+  ;; anything but the Int's sign and bit size through side-channels. Any
+  ;; changes must be reviewed by a security expert.
+  (let [buf (make (slice byte) (* (len (.-abs x)) _S))]
+    (subslice buf (.bytes (.-abs x) buf))))
+
+
+
+
+
+
+^{:go/end 627} (go/method FillBytes "FillBytes sets buf to the absolute value of x, storing it as a zero-extended\nbig-endian byte slice, and returns buf.\n\nIf the absolute value of x doesn't fit in buf, FillBytes will panic.\n" ^{:tag (slice byte)} [^{:tag (* Int)} x ^{:tag (slice byte)} buf]
+  ;; Clear whole buffer.
+  (clear buf)
+  (.bytes (.-abs x) buf)
+  ^{:line 626} buf)
+
+
+
+
+^{:go/end 636} (go/method BitLen "BitLen returns the length of the absolute value of x in bits.\nThe bit length of 0 is 0.\n" ^int [^{:tag (* Int)} x]
+  ;; This function is used in cryptographic operations. It must not leak
+  ;; anything but the Int's sign and bit size through side-channels. Any
+  ;; changes must be reviewed by a security expert.
+  (.bitLen (.-abs x)))
+
+
+
+
+^{:go/end 642} (go/method TrailingZeroBits "TrailingZeroBits returns the number of consecutive least significant zero\nbits of |x|.\n" ^uint [^{:tag (* Int)} x]
+  (.trailingZeroBits (.-abs x)))
+
+
+
+
+
+
+
+
+^{:go/end 652} (go/method Exp "Exp sets z = x**y mod |m| (i.e. the sign of m is ignored), and returns z.\nIf m == nil or m == 0, z = x**y unless y <= 0 then z = 1. If m != 0, y < 0,\nand x and m are not relatively prime, z is unchanged and nil is returned.\n\nModular exponentiation of inputs of a particular size is not a\ncryptographically constant-time operation.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y ^{:tag (* Int)} m]
+  (.exp z x y m false))
+
+
+^{:go/end 656} (go/method expSlow ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y ^{:tag (* Int)} m]
+  (.exp z x y m true))
+
+
+^{:go/end 691} (go/method exp ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y ^{:tag (* Int)} m ^bool slow]
+  ;; See Knuth, volume 2, section 4.6.3.
+  (let [xWords (.-abs x)]
+    (when (.-neg y)
+      (when (or (== m nil) (== (len (.-abs m)) 0))
+        (return (.SetInt64 z 1)))
+
+      ;; for y < 0: x**y mod m == (x**(-1))**|y| mod m
+      (let [inverse (.ModInverse (new Int) x m)]
+        (when (== inverse nil)
+          (return nil))
+
+        (set! xWords (.-abs inverse))))
+
+    (let [yWords (.-abs y)
+
+        ^{:line 674 :tag nat} mWords (zero nat)]
+      (when (!= m nil)
+        (when (or (== z m) (alias (.-abs z) (.-abs m)))
+          (set! m (.Set (new Int) m)))
+
+        (set! mWords (.-abs m))) ; m.abs may be nil for m == 0
+
+
+      (set! (.-abs z) (.expNN (.-abs z) nil xWords yWords mWords slow))
+      (set! (.-neg z) (and (> (len (.-abs z)) 0) (.-neg x) (> (len yWords) 0) (== (bit-and (aget yWords 0) 1) 1))) ; 0 has no sign
+      (when (and (.-neg z) (> (len mWords) 0))
+        ;; make modulus result positive
+        (set! (.-abs z) (.sub (.-abs z) mWords (.-abs z))) ; z == x**y mod |m| && 0 <= z < |m|
+        (set! (.-neg z) false))
+
+
+      ^{:line 690} z)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 733} (go/method GCD "GCD sets z to the greatest common divisor of a and b and returns z.\nIf x or y are not nil, GCD sets their value such that z = a*x + b*y.\n\na and b may be positive, zero or negative. (Before Go 1.14 both had\nto be > 0.) Regardless of the signs of a and b, z is always >= 0.\n\nIf a == b == 0, GCD sets z = x = y = 0.\n\nIf a == 0 and b != 0, GCD sets z = |b|, x = 0, y = sign(b) * 1.\n\nIf a != 0 and b == 0, GCD sets z = |a|, x = sign(a) * 1, y = 0.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y ^{:tag (* Int)} a ^{:tag (* Int)} b]
+  (when (or (== (len (.-abs a)) 0) (== (len (.-abs b)) 0))
+    (let [(values lenA lenB negA negB) (values (len (.-abs a)) (len (.-abs b)) (.-neg a) (.-neg b))]
+      (if (== lenA 0)
+        (.Set z b)
+
+        (.Set z a))
+
+      (set! (.-neg z) false)
+      (when (!= x nil)
+        (if (== lenA 0)
+          (.SetUint64 x 0)
+          (do
+            (.SetUint64 x 1)
+            (set! (.-neg x) negA))))
+
+
+      (when (!= y nil)
+        (if (== lenB 0)
+          (.SetUint64 y 0)
+          (do
+            (.SetUint64 y 1)
+            (set! (.-neg y) negB))))
+
+
+      (return z)))
+
+
+  (.lehmerGCD z x y a b))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 789} (go/func lehmerSimulate "lehmerSimulate attempts to simulate several Euclidean update steps\nusing the leading digits of A and B.  It returns u0, u1, v0, v1\nsuch that A and B can be updated as:\n\n\tA = u0*A + v0*B\n\tB = u1*A + v1*B\n\nRequirements: A >= B and len(B.abs) >= 2\nSince we are calculating with full words to avoid overflow,\nwe use 'even' to track the sign of the cosequences.\nFor even iterations: u0, v1 >= 0 && u1, v0 <= 0\nFor odd  iterations: u0, v1 <= 0 && u1, v0 >= 0\n" [^{:tag (* Int)} A ^{:tag (* Int)} B] :results [^Word u0 ^Word u1 ^Word v0 ^Word v1 ^bool even]
+  ;; initialize the digits
+  (let [(values ^Word a1 ^Word a2 ^Word u2 ^Word v2) (zero Word)
+
+      ^{:line 751} m (len (.-abs B)) ; m >= 2
+      ^{:line 752} n (len (.-abs A)) ; n >= m >= 2
+
+      ;; extract the top Word of bits from A and B
+      ^{:line 755} h (nlz (aget (.-abs A) (- n 1)))]
+    (set! a1 (bit-or (<< (aget (.-abs A) (- n 1)) h) (>> (aget (.-abs A) (- n 2)) (- _W h))))
+    ;; B may have implicit zero words in the high bits if the lengths differ
+    (switch
+      (case [(== n m)]
+        (set! a2 (bit-or (<< (aget (.-abs B) (- n 1)) h) (>> (aget (.-abs B) (- n 2)) (- _W h)))))
+      (case [(== n (+ m 1))]
+        (set! a2 (>> (aget (.-abs B) (- n 2)) (- _W h))))
+      (default
+        (set! a2 0)))
+
+
+    ;; Since we are calculating with full words to avoid overflow,
+    ;; we use 'even' to track the sign of the cosequences.
+    ;; For even iterations: u0, v1 >= 0 && u1, v0 <= 0
+    ;; For odd  iterations: u0, v1 <= 0 && u1, v0 >= 0
+    ;; The first iteration starts with k=1 (odd).
+    (set! even false)
+    ;; variables to track the cosequences
+    (set! (values u0 u1 u2) (values 0 1 0))
+    (set! (values v0 v1 v2) (values 0 0 1))
+
+    ;; Calculate the quotient and cosequences using Collins' stopping condition.
+    ;; Note that overflow of a Word is not possible when computing the remainder
+    ;; sequence and cosequences since the cosequence size is bounded by the input size.
+    ;; See section 4.2 of Jebelean for details.
+    (while (and (>= a2 v2) (>= (- a1 a2) (+ v1 v2)))
+      (let [(values q r) (values (/ a1 a2) (% a1 a2))]
+        (set! (values a1 a2) (values a2 r))
+        (set! (values u0 u1 u2) (values u1 u2 (+ u1 (* q u2))))
+        (set! (values v0 v1 v2) (values v1 v2 (+ v1 (* q v2))))
+        (set! even (not even))))
+
+    (return)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 807} (go/func lehmerUpdate "lehmerUpdate updates the inputs A and B such that:\n\n\tA = u0*A + v0*B\n\tB = u1*A + v1*B\n\nwhere the signs of u0, u1, v0, v1 are given by even\nFor even == true: u0, v1 >= 0 && u1, v0 <= 0\nFor even == false: u0, v1 <= 0 && u1, v0 >= 0\nq, r, s, t are temporary variables to avoid allocations in the multiplication.\n" [^{:tag (* Int)} A ^{:tag (* Int)} B ^{:tag (* Int)} q ^{:tag (* Int)} r ^Word u0 ^Word u1 ^Word v0 ^Word v1 ^bool even]
+  (mulW q B even v0)
+  (mulW r A even u1)
+  (mulW A A (not even) u0)
+  (mulW B B (not even) v1)
+  (.Add A A q)
+  (.Add B B r))
+
+
+
+
+^{:go/end 814} (go/func mulW "mulW sets z = x * (-?)w\nwhere the minus sign is present when neg is true.\n" [^{:tag (* Int)} z ^{:tag (* Int)} x ^bool neg ^Word w]
+  (set! (.-abs z) (.mulAddWW (.-abs z) (.-abs x) w 0))
+  (set! (.-neg z) (!= (.-neg x) neg)))
+
+
+
+
+
+^{:go/end 830} (go/func euclidUpdate "euclidUpdate performs a single step of the Euclidean GCD algorithm\nif extended is true, it also updates the cosequence Ua, Ub.\nq and r are used as temporaries; the initial values are ignored.\n" [^{:tag (* Int)} A ^{:tag (* Int)} B ^{:tag (* Int)} Ua ^{:tag (* Int)} Ub ^{:tag (* Int)} q ^{:tag (* Int)} r ^bool extended] :results [^{:tag (* Int)} nA ^{:tag (* Int)} nB ^{:tag (* Int)} nr ^{:tag (* Int)} nUa ^{:tag (* Int)} nUb]
+  (.QuoRem q A B r)
+
+  (when extended
+    ;; Ua, Ub = Ub, Ua-q*Ub
+    (.Mul q q Ub)
+    (set! (values Ua Ub) (values Ub Ua))
+    (.Sub Ub Ub q))
+
+
+  (return B r A Ua Ub))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 951} (go/method lehmerGCD "lehmerGCD sets z to the greatest common divisor of a and b,\nwhich both must be != 0, and returns z.\nIf x or y are not nil, their values are set such that z = a*x + b*y.\nSee Knuth, The Art of Computer Programming, Vol. 2, Section 4.5.2, Algorithm L.\nThis implementation uses the improved condition by Collins requiring only one\nquotient and avoiding the possibility of single Word overflow.\nSee Jebelean, \"Improving the multiprecision Euclidean algorithm\",\nDesign and Implementation of Symbolic Computation Systems, pp 45-58.\nThe cosequences are updated according to Algorithm 10.45 from\nCohen et al. \"Handbook of Elliptic and Hyperelliptic Curve Cryptography\" pp 192.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y ^{:tag (* Int)} a ^{:tag (* Int)} b]
+  (let [(values ^{:tag (* Int)} A ^{:tag (* Int)} B ^{:tag (* Int)} Ua ^{:tag (* Int)} Ub) (zero (* Int))]
+
+    (set! A (.Abs (new Int) a))
+    (set! B (.Abs (new Int) b))
+
+    (let [extended (or (!= x nil) (!= y nil))]
+
+      (when extended
+        ;; Ua (Ub) tracks how many times input a has been accumulated into A (B).
+        (set! Ua (.SetInt64 (new Int) 1))
+        (set! Ub (new Int)))
+
+
+      ;; temp variables for multiprecision update
+      (let [q (new Int)
+          ^{:line 858} r (new Int)]
+
+        ;; ensure A >= B
+        (when (< (.cmp (.-abs A) (.-abs B)) 0)
+          (set! (values A B) (values B A))
+          (set! (values Ub Ua) (values Ua Ub)))
+
+
+        ;; loop invariant A >= B
+        (while (> (len (.-abs B)) 1)
+          ;; Attempt to calculate in single-precision using leading words of A and B.
+          (let [(values u0 u1 v0 v1 even) (lehmerSimulate A B)]
+
+            ;; multiprecision Step
+            (if (!= v0 0) (do
+                ;; Simulate the effect of the single-precision steps using the cosequences.
+                ;; A = u0*A + v0*B
+                ;; B = u1*A + v1*B
+                (lehmerUpdate A B q r u0 u1 v0 v1 even)
+
+                (when extended
+                  ;; Ua = u0*Ua + v0*Ub
+                  ;; Ub = u1*Ua + v1*Ub
+                  (lehmerUpdate Ua Ub q r u0 u1 v0 v1 even)))
+
+
+
+              ;; Single-digit calculations failed to simulate any quotients.
+              ;; Do a standard Euclidean step.
+              (set! (values A B r Ua Ub) (euclidUpdate A B Ua Ub q r extended)))))
+
+
+
+        (when (> (len (.-abs B)) 0)
+          ;; extended Euclidean algorithm base case if B is a single Word
+          (when (> (len (.-abs A)) 1)
+            ;; A is longer than a single Word, so one update is needed.
+            (set! (values A B r Ua Ub) (euclidUpdate A B Ua Ub q r extended)))
+
+          (when (> (len (.-abs B)) 0)
+            ;; A and B are both a single Word.
+            (let [(values aWord bWord) (values (aget (.-abs A) 0) (aget (.-abs B) 0))]
+              (if extended
+                (let [(values ^Word ua ^Word ub ^Word va ^Word vb) (zero Word)]
+                  (set! (values ua ub) (values 1 0))
+                  (set! (values va vb) (values 0 1))
+                  (let [even true]
+                    (while (!= bWord 0)
+                      (let [(values q r) (values (/ aWord bWord) (% aWord bWord))]
+                        (set! (values aWord bWord) (values bWord r))
+                        (set! (values ua ub) (values ub (+ ua (* q ub))))
+                        (set! (values va vb) (values vb (+ va (* q vb))))
+                        (set! even (not even))))
+
+
+                    (mulW Ua Ua (not even) ua)
+                    (mulW Ub Ub even va)
+                    (.Add Ua Ua Ub)))
+
+                (while (!= bWord 0)
+                  (set! (values aWord bWord) (values bWord (% aWord bWord)))))
+
+
+              (aset (.-abs A) 0 aWord))))
+
+
+        (let [negA (.-neg a)]
+          (when (!= y nil)
+            ;; avoid aliasing b needed in the division below
+            (if (== y b)
+              (.Set B b)
+
+              (set! B b))
+
+            ;; y = (z - a*x)/b
+            (.Mul y a Ua) ; y can safely alias a
+            (when negA
+              (set! (.-neg y) (not (.-neg y))))
+
+            (.Sub y A y)
+            (.Div y y B))
+
+
+          (when (!= x nil)
+            (.Set x Ua)
+            (when negA
+              (set! (.-neg x) (not (.-neg x)))))
+
+
+
+          (.Set z A)
+
+          ^{:line 950} z)))))
+
+
+
+
+
+
+^{:go/end 967} (go/method Rand "Rand sets z to a pseudo-random number in [0, n) and returns z.\n\nAs this uses the [math/rand] package, it must not be used for\nsecurity-sensitive work. Use [crypto/rand.Int] instead.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* rand/Rand)} rnd ^{:tag (* Int)} n]
+  ;; z.neg is not modified before the if check, because z and n might alias.
+  (when (or (.-neg n) (== (len (.-abs n)) 0))
+    (set! (.-neg z) false)
+    (set! (.-abs z) nil)
+    (return z))
+
+  (set! (.-neg z) false)
+  (set! (.-abs z) (.random (.-abs z) rnd (.-abs n) (.bitLen (.-abs n))))
+  ^{:line 966} z)
+
+
+
+
+
+
+^{:go/end 999} (go/method ModInverse "ModInverse sets z to the multiplicative inverse of g in the ring ℤ/nℤ\nand returns z. If g and n are not relatively prime, g has no multiplicative\ninverse in the ring ℤ/nℤ.  In this case, z is unchanged and the return value\nis nil. If n == 0, a division-by-zero run-time panic occurs.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} g ^{:tag (* Int)} n]
+  ;; GCD expects parameters a and b to be > 0.
+  (when (.-neg n)
+    (let [^Int n2 (zero Int)]
+      (set! n (.Neg n2 n))))
+
+  (when (.-neg g)
+    (let [^Int g2 (zero Int)]
+      (set! g (.Mod g2 g n))))
+
+  (let [(values ^Int d ^Int x) (zero Int)]
+    (.GCD d (addr x) nil g n)
+
+    ;; if and only if d==1, g and n are relatively prime
+    (when (!= (.Cmp d intOne) 0)
+      (return nil))
+
+
+    ;; x and y are such that g*x + n*y = 1, therefore x is the inverse element,
+    ;; but it may be negative, so convert to the range 0 <= z < |n|
+    (if (.-neg x)
+      (.Add z (addr x) n)
+
+      (.Set z (addr x)))
+
+    ^{:line 998} z))
+
+
+^{:go/end 1004} (go/method modInverse ^nat [^nat z ^nat g ^nat n]
+  ;; TODO(rsc): ModInverse should be implemented in terms of this function.
+  (.-abs (.ModInverse (addr (lit Int :abs z)) (addr (lit Int :abs g)) (addr (lit Int :abs n)))))
+
+
+
+
+^{:go/end 1059} (go/func Jacobi "Jacobi returns the Jacobi symbol (x/y), either +1, -1, or 0.\nThe y argument must be an odd integer.\n" ^int [^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (when (or (== (len (.-abs y)) 0) (== (bit-and (aget (.-abs y) 0) 1) 0))
+    (panic (fmt/Sprintf "big: invalid 2nd argument to Int.Jacobi: need odd integer but got %s" (.String y))))
+
+
+  ;; We use the formulation described in chapter 2, section 2.4,
+  ;; "The Yacas Book of Algorithms":
+  ;; http://yacas.sourceforge.net/Algo.book.pdf
+
+  (let [(values ^Int a ^Int b ^Int c) (zero Int)]
+    (.Set a x)
+    (.Set b y)
+    (let [j 1]
+
+      (when (.-neg b)
+        (when (.-neg a)
+          (set! j -1))
+
+        (set! (.-neg b) false))
+
+
+      (while true
+        (when (== (.Cmp b intOne) 0)
+          (return j))
+
+        (when (== (len (.-abs a)) 0)
+          (return 0))
+
+        (.Mod a (addr a) (addr b))
+        (when (== (len (.-abs a)) 0)
+          (return 0))
+
+        ;; a > 0
+
+        ;; handle factors of 2 in 'a'
+        (let [s (.trailingZeroBits (.-abs a))]
+          (when (!= (bit-and s 1) 0)
+            (let [bmod8 (bit-and (aget (.-abs b) 0) 7)]
+              (when (or (== bmod8 3) (== bmod8 5))
+                (set! j (- j)))))
+
+
+          (.Rsh c (addr a) s) ; a = 2^s*c
+
+          ;; swap numerator and denominator
+          (when (and (== (bit-and (aget (.-abs b) 0) 3) 3) (== (bit-and (aget (.-abs c) 0) 3) 3))
+            (set! j (- j)))
+
+          (.Set a (addr b))
+          (.Set b (addr c)))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1074} (go/method modSqrt3Mod4Prime "modSqrt3Mod4 uses the identity\n\n\t   (a^((p+1)/4))^2  mod p\n\t== u^(p+1)          mod p\n\t== u^2              mod p\n\nto calculate the square root of any quadratic residue mod p quickly for 3\nmod 4 primes.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} p]
+  (let [e (.Add (new Int) p intOne)] ; e = p + 1
+    (.Rsh e e 2) ; e = (p + 1) / 4
+    (.Exp z x e p) ; z = x^e mod p
+    ^{:line 1073} z))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1100} (go/method modSqrt5Mod8Prime "modSqrt5Mod8Prime uses Atkin's observation that 2 is not a square mod p\n\n\talpha ==  (2*a)^((p-5)/8)    mod p\n\tbeta  ==  2*a*alpha^2        mod p  is a square root of -1\n\tb     ==  a*alpha*(beta-1)   mod p  is a square root of a\n\nto calculate the square root of any quadratic residue mod p quickly for 5\nmod 8 primes.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} p]
+  ;; p == 5 mod 8 implies p = e*8 + 5
+  ;; e is the quotient and 5 the remainder on division by 8
+  (let [e (.Rsh (new Int) p 3) ; e = (p - 5) / 8
+      ^{:line 1088} tx (.Lsh (new Int) x 1) ; tx = 2*x
+      ^{:line 1089} alpha (.Exp (new Int) tx e p)
+      ^{:line 1090} beta (.Mul (new Int) alpha alpha)]
+    (.Mod beta beta p)
+    (.Mul beta beta tx)
+    (.Mod beta beta p)
+    (.Sub beta beta intOne)
+    (.Mul beta beta x)
+    (.Mod beta beta p)
+    (.Mul beta beta alpha)
+    (.Mod z beta p)
+    ^{:line 1099} z))
+
+
+
+
+^{:go/end 1149} (go/method modSqrtTonelliShanks "modSqrtTonelliShanks uses the Tonelli-Shanks algorithm to find the square\nroot of a quadratic residue modulo any prime.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} p]
+  ;; Break p-1 into s*2^e such that s is odd.
+  (let [^Int s (zero Int)]
+    (.Sub s p intOne)
+    (let [e (.trailingZeroBits (.-abs s))]
+      (.Rsh s (addr s) e)
+
+      ;; find some non-square n
+      (let [^Int n (zero Int)]
+        (.SetInt64 n 2)
+        (while (!= (Jacobi (addr n) p) -1)
+          (.Add n (addr n) intOne))
+
+
+        ;; Core of the Tonelli-Shanks algorithm. Follows the description in
+        ;; section 6 of "Square roots from 1; 24, 51, 10 to Dan Shanks" by Ezra
+        ;; Brown:
+        ;; https://www.maa.org/sites/default/files/pdf/upload_library/22/Polya/07468342.di020786.02p0470a.pdf
+        (let [(values ^Int y ^Int b ^Int g ^Int t) (zero Int)]
+          (.Add y (addr s) intOne)
+          (.Rsh y (addr y) 1)
+          (.Exp y x (addr y) p) ; y = x^((s+1)/2)
+          (.Exp b x (addr s) p) ; b = x^s
+          (.Exp g (addr n) (addr s) p) ; g = n^s
+          (let [r e]
+            (while true
+              ;; find the least m such that ord_p(b) = 2^m
+              (let [^uint m (zero uint)]
+                (.Set t (addr b))
+                (while (!= (.Cmp t intOne) 0)
+                  (.Mod (.Mul t (addr t) (addr t)) (addr t) p)
+                  (inc! m))
+
+
+                (when (== m 0)
+                  (return (.Set z (addr y))))
+
+
+                (.Exp (.SetBit (.SetInt64 t 0) (addr t) (conv int (- r m 1)) 1) (addr g) (addr t) p)
+                ;; t = g^(2^(r-m-1)) mod p
+                (.Mod (.Mul g (addr t) (addr t)) (addr g) p) ; g = g^(2^(r-m)) mod p
+                (.Mod (.Mul y (addr y) (addr t)) (addr y) p)
+                (.Mod (.Mul b (addr b) (addr g)) (addr b) p)
+                (set! r m)))))))))
+
+
+
+
+
+
+
+^{:go/end 1179} (go/method ModSqrt "ModSqrt sets z to a square root of x mod p if such a square root exists, and\nreturns z. The modulus p must be an odd prime. If x is not a square mod p,\nModSqrt leaves z unchanged and returns nil. This function panics if p is\nnot an odd integer, its behavior is undefined if p is odd but not prime.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} p]
+  (switch (Jacobi x p)
+    (case [-1]
+      (return nil)) ; x is not a square mod p
+    (case [0]
+      (return (.SetInt64 z 0))) ; sqrt(0) mod p = 0
+    (case [1]
+      (break)))
+
+  (when (or (.-neg x) (>= (.Cmp x p) 0)) ; ensure 0 <= x < p
+    (set! x (.Mod (new Int) x p)))
+
+
+  (switch
+    (case [(== (% (aget (.-abs p) 0) 4) 3)]
+      ;; Check whether p is 3 mod 4, and if so, use the faster algorithm.
+      (return (.modSqrt3Mod4Prime z x p)))
+    (case [(== (% (aget (.-abs p) 0) 8) 5)]
+      ;; Check whether p is 5 mod 8, use Atkin's algorithm.
+      (return (.modSqrt5Mod8Prime z x p)))
+    (default
+      ;; Otherwise, use Tonelli-Shanks.
+      (return (.modSqrtTonelliShanks z x p)))))
+
+
+
+
+^{:go/end 1186} (go/method Lsh "Lsh sets z = x << n and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^uint n]
+  (set! (.-abs z) (.lsh (.-abs z) (.-abs x) n))
+  (set! (.-neg z) (.-neg x))
+  ^{:line 1185} z)
+
+
+
+^{:go/end 1202} (go/method Rsh "Rsh sets z = x >> n and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^uint n]
+  (when (.-neg x)
+    ;; (-x) >> s == ^(x-1) >> s == ^((x-1) >> s) == -(((x-1) >> s) + 1)
+    (let [t (.sub (.-abs z) (.-abs x) natOne)] ; no underflow because |x| > 0
+      (set! t (.rsh t t n))
+      (set! (.-abs z) (.add t t natOne))
+      (set! (.-neg z) true) ; z cannot be zero if x is negative
+      (return z)))
+
+
+  (set! (.-abs z) (.rsh (.-abs z) (.-abs x) n))
+  (set! (.-neg z) false)
+  ^{:line 1201} z)
+
+
+
+
+^{:go/end 1223} (go/method Bit "Bit returns the value of the i'th bit of x. That is, it\nreturns (x>>i)&1. The bit index i must be >= 0.\n" ^uint [^{:tag (* Int)} x ^int i]
+  (when (== i 0)
+    ;; optimization for common case: odd/even test of x
+    (when (> (len (.-abs x)) 0)
+      (return (conv uint (bit-and (aget (.-abs x) 0) 1)))) ; bit 0 is same for -x
+
+    (return 0))
+
+  (when (< i 0)
+    (panic "negative bit index"))
+
+  (when (.-neg x)
+    (let [t (.sub (conv nat nil) (.-abs x) natOne)]
+      (return (bit-xor (.bit t (conv uint i)) 1))))
+
+
+  (.bit (.-abs x) (conv uint i)))
+
+
+
+
+
+
+
+^{:go/end 1244} (go/method SetBit "SetBit sets z to x, with x's i'th bit set to b (0 or 1).\nThat is,\n  - if b is 1, SetBit sets z = x | (1 << i);\n  - if b is 0, SetBit sets z = x &^ (1 << i);\n  - if b is not 0 or 1, SetBit will panic.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^int i ^uint b]
+  (when (< i 0)
+    (panic "negative bit index"))
+
+  (when (.-neg x)
+    (let [t (.sub (.-abs z) (.-abs x) natOne)]
+      (set! t (.setBit t t (conv uint i) (bit-xor b 1)))
+      (set! (.-abs z) (.add t t natOne))
+      (set! (.-neg z) (> (len (.-abs z)) 0))
+      (return z)))
+
+  (set! (.-abs z) (.setBit (.-abs z) (.-abs x) (conv uint i) b))
+  (set! (.-neg z) false)
+  ^{:line 1243} z)
+
+
+
+^{:go/end 1274} (go/method And "And sets z = x & y and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (when (== (.-neg x) (.-neg y))
+    (when (.-neg x)
+      ;; (-x) & (-y) == ^(x-1) & ^(y-1) == ^((x-1) | (y-1)) == -(((x-1) | (y-1)) + 1)
+      (let [x1 (.sub (conv nat nil) (.-abs x) natOne)
+          ^{:line 1252} y1 (.sub (conv nat nil) (.-abs y) natOne)]
+        (set! (.-abs z) (.add (.-abs z) (.or (.-abs z) x1 y1) natOne))
+        (set! (.-neg z) true) ; z cannot be zero if x and y are negative
+        (return z)))
+
+
+    ;; x & y == x & y
+    (set! (.-abs z) (.and (.-abs z) (.-abs x) (.-abs y)))
+    (set! (.-neg z) false)
+    (return z))
+
+
+  ;; x.neg != y.neg
+  (when (.-neg x)
+    (set! (values x y) (values y x))) ; & is symmetric
+
+
+  ;; x & (-y) == x & ^(y-1) == x &^ (y-1)
+  (let [y1 (.sub (conv nat nil) (.-abs y) natOne)]
+    (set! (.-abs z) (.andNot (.-abs z) (.-abs x) y1))
+    (set! (.-neg z) false)
+    ^{:line 1273} z))
+
+
+
+^{:go/end 1307} (go/method AndNot "AndNot sets z = x &^ y and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (when (== (.-neg x) (.-neg y))
+    (when (.-neg x)
+      ;; (-x) &^ (-y) == ^(x-1) &^ ^(y-1) == ^(x-1) & (y-1) == (y-1) &^ (x-1)
+      (let [x1 (.sub (conv nat nil) (.-abs x) natOne)
+          ^{:line 1282} y1 (.sub (conv nat nil) (.-abs y) natOne)]
+        (set! (.-abs z) (.andNot (.-abs z) y1 x1))
+        (set! (.-neg z) false)
+        (return z)))
+
+
+    ;; x &^ y == x &^ y
+    (set! (.-abs z) (.andNot (.-abs z) (.-abs x) (.-abs y)))
+    (set! (.-neg z) false)
+    (return z))
+
+
+  (when (.-neg x)
+    ;; (-x) &^ y == ^(x-1) &^ y == ^(x-1) & ^y == ^((x-1) | y) == -(((x-1) | y) + 1)
+    (let [x1 (.sub (conv nat nil) (.-abs x) natOne)]
+      (set! (.-abs z) (.add (.-abs z) (.or (.-abs z) x1 (.-abs y)) natOne))
+      (set! (.-neg z) true) ; z cannot be zero if x is negative and y is positive
+      (return z)))
+
+
+  ;; x &^ (-y) == x &^ ^(y-1) == x & (y-1)
+  (let [y1 (.sub (conv nat nil) (.-abs y) natOne)]
+    (set! (.-abs z) (.and (.-abs z) (.-abs x) y1))
+    (set! (.-neg z) false)
+    ^{:line 1306} z))
+
+
+
+^{:go/end 1337} (go/method Or "Or sets z = x | y and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (when (== (.-neg x) (.-neg y))
+    (when (.-neg x)
+      ;; (-x) | (-y) == ^(x-1) | ^(y-1) == ^((x-1) & (y-1)) == -(((x-1) & (y-1)) + 1)
+      (let [x1 (.sub (conv nat nil) (.-abs x) natOne)
+          ^{:line 1315} y1 (.sub (conv nat nil) (.-abs y) natOne)]
+        (set! (.-abs z) (.add (.-abs z) (.and (.-abs z) x1 y1) natOne))
+        (set! (.-neg z) true) ; z cannot be zero if x and y are negative
+        (return z)))
+
+
+    ;; x | y == x | y
+    (set! (.-abs z) (.or (.-abs z) (.-abs x) (.-abs y)))
+    (set! (.-neg z) false)
+    (return z))
+
+
+  ;; x.neg != y.neg
+  (when (.-neg x)
+    (set! (values x y) (values y x))) ; | is symmetric
+
+
+  ;; x | (-y) == x | ^(y-1) == ^((y-1) &^ x) == -(^((y-1) &^ x) + 1)
+  (let [y1 (.sub (conv nat nil) (.-abs y) natOne)]
+    (set! (.-abs z) (.add (.-abs z) (.andNot (.-abs z) y1 (.-abs x)) natOne))
+    (set! (.-neg z) true) ; z cannot be zero if one of x or y is negative
+    ^{:line 1336} z))
+
+
+
+^{:go/end 1367} (go/method Xor "Xor sets z = x ^ y and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x ^{:tag (* Int)} y]
+  (when (== (.-neg x) (.-neg y))
+    (when (.-neg x)
+      ;; (-x) ^ (-y) == ^(x-1) ^ ^(y-1) == (x-1) ^ (y-1)
+      (let [x1 (.sub (conv nat nil) (.-abs x) natOne)
+          ^{:line 1345} y1 (.sub (conv nat nil) (.-abs y) natOne)]
+        (set! (.-abs z) (.xor (.-abs z) x1 y1))
+        (set! (.-neg z) false)
+        (return z)))
+
+
+    ;; x ^ y == x ^ y
+    (set! (.-abs z) (.xor (.-abs z) (.-abs x) (.-abs y)))
+    (set! (.-neg z) false)
+    (return z))
+
+
+  ;; x.neg != y.neg
+  (when (.-neg x)
+    (set! (values x y) (values y x))) ; ^ is symmetric
+
+
+  ;; x ^ (-y) == x ^ ^(y-1) == ^(x ^ (y-1)) == -((x ^ (y-1)) + 1)
+  (let [y1 (.sub (conv nat nil) (.-abs y) natOne)]
+    (set! (.-abs z) (.add (.-abs z) (.xor (.-abs z) (.-abs x) y1) natOne))
+    (set! (.-neg z) true) ; z cannot be zero if only one of x or y is negative
+    ^{:line 1366} z))
+
+
+
+^{:go/end 1382} (go/method Not "Not sets z = ^x and returns z.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x]
+  (when (.-neg x)
+    ;; ^(-x) == ^(^(x-1)) == x-1
+    (set! (.-abs z) (.sub (.-abs z) (.-abs x) natOne))
+    (set! (.-neg z) false)
+    (return z))
+
+
+  ;; ^x == -x-1 == -(x+1)
+  (set! (.-abs z) (.add (.-abs z) (.-abs x) natOne))
+  (set! (.-neg z) true) ; z cannot be zero if x is positive
+  ^{:line 1381} z)
+
+
+
+
+^{:go/end 1393} (go/method Sqrt "Sqrt sets z to ⌊√x⌋, the largest integer such that z² ≤ x, and returns z.\nIt panics if x is negative.\n" ^{:tag (* Int)} [^{:tag (* Int)} z ^{:tag (* Int)} x]
+  (when (.-neg x)
+    (panic "square root of negative number"))
+
+  (set! (.-neg z) false)
+  (set! (.-abs z) (.sqrt (.-abs z) nil (.-abs x)))
+  ^{:line 1392} z)

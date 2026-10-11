@@ -1,0 +1,148 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.os) (go/file "getwd.go" :imports [
+
+
+    ^{:line 8} [runtime "runtime"]
+    ^{:line 9} [sync "sync"]
+    ^{:line 10} [syscall "syscall"]])
+
+
+(go/var ^{:tag (struct sync/Mutex ^string dir)} getwdCache)
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 149} (go/func Getwd "Getwd returns an absolute path name corresponding to the\ncurrent directory. If the current directory can be\nreached via multiple paths (due to symbolic links),\nGetwd may return any one of them.\n\nOn Unix platforms, if the environment variable PWD\nprovides an absolute name, and it is a name of the\ncurrent directory, it is returned.\n" [] :results [^string dir ^error err]
+  (when (or (== runtime/GOOS "windows") (== runtime/GOOS "plan9"))
+    ;; Use syscall.Getwd directly for
+    ;;   - plan9: see reasons in CL 89575;
+    ;;   - windows: syscall implementation is sufficient,
+    ;;     and we should not rely on $PWD.
+    (set! (values dir err) (syscall/Getwd))
+    (return dir (NewSyscallError "getwd" err)))
+
+
+  ;; Clumsy but widespread kludge:
+  ;; if $PWD is set and matches ".", use it.
+  (let [^FileInfo dot (zero FileInfo)]
+    (set! dir (Getenv "PWD"))
+    (when (and (> (len dir) 0) (== (aget dir 0) \/))
+      (set! (values dot err) (statNolog "."))
+      (when (!= err nil)
+        (return "" err))
+
+      (let [(values d err) (statNolog dir)]
+        (when (and (== err nil) (SameFile dot d))
+          (return dir nil))))
+
+    ;; If err is ENAMETOOLONG here, the syscall.Getwd below will
+    ;; fail with the same error, too, but let's give it a try
+    ;; anyway as the fallback code is much slower.
+
+
+    ;; If the operating system provides a Getwd call, use it.
+    (when syscall/ImplementsGetwd
+      (set! (values dir err) (^{:inst [string]} ignoringEINTR2 syscall/Getwd))
+      ;; Linux returns ENAMETOOLONG if the result is too long.
+      ;; Some BSD systems appear to return EINVAL.
+      ;; FreeBSD systems appear to use ENOMEM
+      ;; Solaris appears to use ERANGE.
+      (when (and (!= err syscall/ENAMETOOLONG) (!= err syscall/EINVAL) (!= err errERANGE) (!= err errENOMEM))
+        (return dir (NewSyscallError "getwd" err))))
+
+
+
+    ;; We're trying to find our way back to ".".
+    (when (== dot nil)
+      (set! (values dot err) (statNolog "."))
+      (when (!= err nil)
+        (return "" err)))
+
+
+    ;; Apply same kludge but to cached dir instead of $PWD.
+    ^{:go/via [Mutex]} (.Lock getwdCache)
+    (set! dir (.-dir getwdCache))
+    ^{:go/via [Mutex]} (.Unlock getwdCache)
+    (when (> (len dir) 0)
+      (let [(values d err) (statNolog dir)]
+        (when (and (== err nil) (SameFile dot d))
+          (return dir nil))))
+
+
+
+    ;; Root is a special case because it has no parent
+    ;; and ends in a slash.
+    (let [(values root ^:assign err) (statNolog "/")]
+      (when (!= err nil)
+        ;; Can't stat root - no hope.
+        (return "" err))
+
+      (when (SameFile root dot)
+        (return "/" nil))
+
+
+      ;; General algorithm: find name in parent
+      ;; and then find name of parent. Each iteration
+      ;; adds /name to the beginning of dir.
+      (set! dir "")
+      (for [parent ".."] _ (set! parent (+ "../" parent))
+        (when (>= (len parent) 1024) ; Sanity check
+          (return "" (NewSyscallError "getwd" syscall/ENAMETOOLONG)))
+
+        (let [(values fd err) (openDirNolog parent)]
+          (when (!= err nil)
+            (return "" err))
+
+
+          (while true
+            (let [(values names err) (.Readdirnames fd 100)]
+              (when (!= err nil)
+                (.Close fd)
+                ;; Readdirnames can return io.EOF or other error.
+                ;; In any case, we're here because syscall.Getwd
+                ;; is not implemented or failed with ENAMETOOLONG,
+                ;; so return the most sensible error.
+                (when syscall/ImplementsGetwd
+                  (return "" (NewSyscallError "getwd" syscall/ENAMETOOLONG)))
+
+                (return "" (NewSyscallError "getwd" errENOSYS)))
+
+              (range [_ name names]
+                (let [(values d _) (lstatNolog (+ parent "/" name))]
+                  (when (SameFile d dot)
+                    (set! dir (+ "/" name dir))
+                    (goto :Found))))))
+
+
+
+
+          (let [
+              ^{:go/label :Found} (values pd ^:assign err) (.Stat fd)]
+            (.Close fd)
+            (when (!= err nil)
+              (return "" err))
+
+            (when (SameFile pd root)
+              (break))
+
+            ;; Set up for next round.
+            (set! dot pd))))
+
+
+      ;; Save answer as hint to avoid the expensive path next time.
+      ^{:go/via [Mutex]} (.Lock getwdCache)
+      (set! (.-dir getwdCache) dir)
+      ^{:go/via [Mutex]} (.Unlock getwdCache)
+
+      (return dir nil))))

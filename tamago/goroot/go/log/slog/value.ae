@@ -1,0 +1,539 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.log.slog) (go/file "value.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [math "math"]
+    ^{:line 10} [runtime "runtime"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [time "time"]
+    ^{:line 15} [unsafe "unsafe"]])
+
+
+
+
+
+(go/type Value "A Value can represent any Go value, but unlike type any,\nit can represent most small values without an allocation.\nThe zero Value corresponds to nil.\n" (struct
+    ^{:line 22 :tag (array 0 (func []))} _ ; disallow ==
+
+
+    ^{:line 25 :tag uint64 :doc "num holds the value for Kinds Int64, Uint64, Float64, Bool and Duration,\nthe string length for KindString, and nanoseconds since the epoch for KindTime.\n"} num
+
+
+
+
+
+
+
+
+
+    ^{:line 35 :tag any :doc "If any is of type Kind, then the value is in num as described above.\nIf any is of type *time.Location, then the Kind is Time and time.Time value\ncan be constructed from the Unix nanos in num and the location (monotonic time\nis not preserved).\nIf any is of type stringptr, then the Kind is String and the string value\nconsists of the length in num and the pointer in any.\nOtherwise, the Kind is Any and any is the value.\n(This implies that Attrs cannot store values of type Kind, *time.Location\nor stringptr.)\n"} any))
+
+
+(go/type
+  ^{:line 39} [stringptr (* byte)] ; used in Value.any when the Value is a string
+  ^{:line 40} [groupptr (* Attr)]) ; used in Value.any when the Value is a []Attr
+
+
+
+(go/type Kind "Kind is the kind of a [Value].\n" int)
+
+;; The following list is sorted alphabetically, but it's also important that
+;; KindAny is 0 so that a zero Value represents nil.
+
+(go/const
+  ^{:line 50} [^{:tag Kind :val 0} KindAny iota]
+  ^{:line 51} [^{:val 1} KindBool]
+  ^{:line 52} [^{:val 2} KindDuration]
+  ^{:line 53} [^{:val 3} KindFloat64]
+  ^{:line 54} [^{:val 4} KindInt64]
+  ^{:line 55} [^{:val 5} KindString]
+  ^{:line 56} [^{:val 6} KindTime]
+  ^{:line 57} [^{:val 7} KindUint64]
+  ^{:line 58} [^{:val 8} KindGroup]
+  ^{:line 59} [^{:val 9} KindLogValuer])
+
+
+(go/var kindStrings ^{:go/breaks [2 3 4 5 6 7 8 9 10 11]} (lit (slice string)
+    "Any"
+    "Bool"
+    "Duration"
+    "Float64"
+    "Int64"
+    "String"
+    "Time"
+    "Uint64"
+    "Group"
+    "LogValuer"))
+
+
+^{:go/breaks [[4 79]] :go/end 80} (go/method String ^string [^Kind k]
+  (when (and (>= k 0) (< (conv int k) (len kindStrings)))
+    (return (aget kindStrings k)))
+
+  "<unknown slog.Kind>")
+
+
+
+
+(go/type kind "Unexported version of Kind, just so we can store Kinds in Values.\n(No user-provided value has this type.)\n" Kind)
+
+
+^{:go/end 104} (go/method Kind "Kind returns v's Kind.\n" ^Kind [^Value v]
+  (type-switch [x (.-any v)]
+    (case [Kind]
+      (return x))
+    (case [stringptr]
+      (return KindString))
+    (case [timeLocation timeTime]
+      (return KindTime))
+    (case [groupptr]
+      (return KindGroup))
+    (case [LogValuer]
+      (return KindLogValuer))
+    (case [kind] ; a kind is just a wrapper for a Kind
+      (return KindAny))
+    (default
+      (return KindAny))))
+
+
+
+;;////////////// Constructors
+
+
+^{:go/end 111} (go/func StringValue "StringValue returns a new [Value] for a string.\n" ^Value [^string value]
+  (lit Value :num (conv uint64 (len value)) :any (conv stringptr (unsafe/StringData value))))
+
+
+
+^{:go/end 116} (go/func IntValue "IntValue returns a [Value] for an int.\n" ^Value [^int v]
+  (Int64Value (conv int64 v)))
+
+
+
+^{:go/end 121} (go/func Int64Value "Int64Value returns a [Value] for an int64.\n" ^Value [^int64 v]
+  (lit Value :num (conv uint64 v) :any KindInt64))
+
+
+
+^{:go/end 126} (go/func Uint64Value "Uint64Value returns a [Value] for a uint64.\n" ^Value [^uint64 v]
+  (lit Value :num v :any KindUint64))
+
+
+
+^{:go/end 131} (go/func Float64Value "Float64Value returns a [Value] for a floating-point number.\n" ^Value [^float64 v]
+  (lit Value :num (math/Float64bits v) :any KindFloat64))
+
+
+
+^{:go/end 140} (go/func BoolValue "BoolValue returns a [Value] for a bool.\n" ^Value [^bool v]
+  (let [u (conv uint64 0)]
+    (when v
+      (set! u 1))
+
+    (lit Value :num u :any KindBool)))
+
+
+(go/type
+
+
+  ^{:line 145} [^{:doc "Unexported version of *time.Location, just so we can store *time.Locations in\nValues. (No user-provided value has this type.)\n"} timeLocation (* time/Location)]
+
+
+  ^{:line 148} [^{:doc "timeTime is for times where UnixNano is undefined.\n"} timeTime time/Time])
+
+
+
+
+^{:go/end 170} (go/func TimeValue "TimeValue returns a [Value] for a [time.Time].\nIt discards the monotonic portion.\n" ^Value [^time/Time v]
+  (when (.IsZero v)
+    ;; UnixNano on the zero time is undefined, so represent the zero time
+    ;; with a nil *time.Location instead. time.Time.Location method never
+    ;; returns nil, so a Value with any == timeLocation(nil) cannot be
+    ;; mistaken for any other Value, time.Time or otherwise.
+    (return (lit Value :any (conv timeLocation nil))))
+
+  (let [nsec (.UnixNano v)
+      ^{:line 162} t (time/Unix 0 nsec)]
+    (when (.Equal v t)
+      ;; UnixNano correctly represents the time, so use a zero-alloc representation.
+      (return (lit Value :num (conv uint64 nsec) :any (conv timeLocation (.Location v)))))
+
+    ;; Fall back to the general form.
+    ;; Strip the monotonic portion to match the other representation.
+    (lit Value :any (conv timeTime (.Round v 0)))))
+
+
+
+^{:go/end 175} (go/func DurationValue "DurationValue returns a [Value] for a [time.Duration].\n" ^Value [^time/Duration v]
+  (lit Value :num (conv uint64 (.Nanoseconds v)) :any KindDuration))
+
+
+
+
+^{:go/end 193} (go/func GroupValue "GroupValue returns a new [Value] for a list of Attrs.\nThe caller must not subsequently mutate the argument slice.\n" ^Value [& ^{:tag (slice Attr)} as]
+  ;; Remove empty groups.
+  ;; It is simpler overall to do this at construction than
+  ;; to check each Group recursively for emptiness.
+  (when [n (countEmptyGroups as)] (> n 0)
+    (let [as2 (make (slice Attr) 0 (- (len as) n))]
+      (range [_ a as]
+        (when (not (.isEmptyGroup (.-Value a)))
+          (set! as2 (append as2 a))))
+
+
+      (set! as as2)))
+
+  (lit Value :num (conv uint64 (len as)) :any (conv groupptr (unsafe/SliceData as))))
+
+
+
+^{:go/end 204} (go/func countEmptyGroups "countEmptyGroups returns the number of empty group values in its argument.\n" ^int [^{:tag (slice Attr)} as]
+  (let [n 0]
+    (range [_ a as]
+      (when (.isEmptyGroup (.-Value a))
+        (inc! n)))
+
+
+    ^{:line 203} n))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 266} (go/func AnyValue "AnyValue returns a [Value] for the supplied value.\n\nIf the supplied value is of type Value, it is returned\nunmodified.\n\nGiven a value of one of Go's predeclared string, bool, or\n(non-complex) numeric types, AnyValue returns a Value of kind\n[KindString], [KindBool], [KindUint64], [KindInt64], or [KindFloat64].\nThe width of the original numeric type is not preserved.\n\nGiven a [time.Time] or [time.Duration] value, AnyValue returns a Value of kind\n[KindTime] or [KindDuration]. The monotonic time is not preserved.\n\nFor nil, or values of all other types, including named types whose\nunderlying type is numeric, AnyValue returns a value of kind [KindAny].\n" ^Value [^any v]
+  (type-switch [v v]
+    (case [string]
+      (return (StringValue v)))
+    (case [int]
+      (return (Int64Value (conv int64 v))))
+    (case [uint]
+      (return (Uint64Value (conv uint64 v))))
+    (case [int64]
+      (return (Int64Value v)))
+    (case [uint64]
+      (return (Uint64Value v)))
+    (case [bool]
+      (return (BoolValue v)))
+    (case [time/Duration]
+      (return (DurationValue v)))
+    (case [time/Time]
+      (return (TimeValue v)))
+    (case [uint8]
+      (return (Uint64Value (conv uint64 v))))
+    (case [uint16]
+      (return (Uint64Value (conv uint64 v))))
+    (case [uint32]
+      (return (Uint64Value (conv uint64 v))))
+    (case [uintptr]
+      (return (Uint64Value (conv uint64 v))))
+    (case [int8]
+      (return (Int64Value (conv int64 v))))
+    (case [int16]
+      (return (Int64Value (conv int64 v))))
+    (case [int32]
+      (return (Int64Value (conv int64 v))))
+    (case [float64]
+      (return (Float64Value v)))
+    (case [float32]
+      (return (Float64Value (conv float64 v))))
+    (case [(slice Attr)]
+      (return (GroupValue (spread v))))
+    (case [Kind]
+      (return (lit Value :any (conv kind v))))
+    (case [Value]
+      (return v))
+    (default
+      (return (lit Value :any v)))))
+
+
+
+;;////////////// Accessors
+
+
+^{:go/end 299} (go/method Any "Any returns v's value as an any.\n" ^any [^Value v]
+  (switch (.Kind v)
+    (case [KindAny]
+      (when [(values k ok) (assert kind (.-any v))] ok
+        (return (conv Kind k)))
+
+      (return (.-any v)))
+    (case [KindLogValuer]
+      (return (.-any v)))
+    (case [KindGroup]
+      (return (.group v)))
+    (case [KindInt64]
+      (return (conv int64 (.-num v))))
+    (case [KindUint64]
+      (return (.-num v)))
+    (case [KindFloat64]
+      (return (.float v)))
+    (case [KindString]
+      (return (.str v)))
+    (case [KindBool]
+      (return (.bool v)))
+    (case [KindDuration]
+      (return (.duration v)))
+    (case [KindTime]
+      (return (.time v)))
+    (default
+      (panic (fmt/Sprintf "bad kind: %s" (.Kind v))))))
+
+
+
+
+
+
+^{:go/end 310} (go/method String "String returns Value's value as a string, formatted like [fmt.Sprint]. Unlike\nthe methods Int64, Float64, and so on, which panic if v is of the\nwrong kind, String never panics.\n" ^string [^Value v]
+  (when [(values sp ok) (assert stringptr (.-any v))] ok
+    (return (unsafe/String sp (.-num v))))
+
+  (let [^{:tag (slice byte)} buf (zero (slice byte))]
+    (conv string (.append v buf))))
+
+
+^{:go/end 314} (go/method str ^string [^Value v]
+  (unsafe/String (assert stringptr (.-any v)) (.-num v)))
+
+
+
+
+^{:go/end 323} (go/method Int64 "Int64 returns v's value as an int64. It panics\nif v is not a signed integer.\n" ^int64 [^Value v]
+  (when [(values g w) (values (.Kind v) KindInt64)] (!= g w)
+    (panic (fmt/Sprintf "Value kind is %s, not %s" g w)))
+
+  (conv int64 (.-num v)))
+
+
+
+
+^{:go/end 332} (go/method Uint64 "Uint64 returns v's value as a uint64. It panics\nif v is not an unsigned integer.\n" ^uint64 [^Value v]
+  (when [(values g w) (values (.Kind v) KindUint64)] (!= g w)
+    (panic (fmt/Sprintf "Value kind is %s, not %s" g w)))
+
+  (.-num v))
+
+
+
+
+^{:go/end 341} (go/method Bool "Bool returns v's value as a bool. It panics\nif v is not a bool.\n" ^bool [^Value v]
+  (when [(values g w) (values (.Kind v) KindBool)] (!= g w)
+    (panic (fmt/Sprintf "Value kind is %s, not %s" g w)))
+
+  (.bool v))
+
+
+^{:go/end 345} (go/method bool ^bool [^Value v]
+  (== (.-num v) 1))
+
+
+
+
+^{:go/end 355} (go/method Duration "Duration returns v's value as a [time.Duration]. It panics\nif v is not a time.Duration.\n" ^time/Duration [^Value v]
+  (when [(values g w) (values (.Kind v) KindDuration)] (!= g w)
+    (panic (fmt/Sprintf "Value kind is %s, not %s" g w)))
+
+
+  (.duration v))
+
+
+^{:go/end 359} (go/method duration ^time/Duration [^Value v]
+  (conv time/Duration (conv int64 (.-num v))))
+
+
+
+
+^{:go/end 369} (go/method Float64 "Float64 returns v's value as a float64. It panics\nif v is not a float64.\n" ^float64 [^Value v]
+  (when [(values g w) (values (.Kind v) KindFloat64)] (!= g w)
+    (panic (fmt/Sprintf "Value kind is %s, not %s" g w)))
+
+
+  (.float v))
+
+
+^{:go/end 373} (go/method float ^float64 [^Value v]
+  (math/Float64frombits (.-num v)))
+
+
+
+
+^{:go/end 382} (go/method Time "Time returns v's value as a [time.Time]. It panics\nif v is not a time.Time.\n" ^time/Time [^Value v]
+  (when [(values g w) (values (.Kind v) KindTime)] (!= g w)
+    (panic (fmt/Sprintf "Value kind is %s, not %s" g w)))
+
+  (.time v))
+
+
+
+^{:go/end 397} (go/method time "See TimeValue to understand how times are represented.\n" ^time/Time [^Value v]
+  (type-switch [a (.-any v)]
+    (case [timeLocation]
+      (when (== a nil)
+        (return (lit time/Time)))
+
+      (return (.In (time/Unix 0 (conv int64 (.-num v))) a)))
+    (case [timeTime]
+      (return (conv time/Time a)))
+    (default
+      (panic (fmt/Sprintf "bad time type %T" (.-any v))))))
+
+
+
+
+
+^{:go/end 403} (go/method LogValuer "LogValuer returns v's value as a LogValuer. It panics\nif v is not a LogValuer.\n" ^LogValuer [^Value v]
+  (assert LogValuer (.-any v)))
+
+
+
+
+^{:go/end 412} (go/method Group "Group returns v's value as a []Attr.\nIt panics if v's [Kind] is not [KindGroup].\n" ^{:tag (slice Attr)} [^Value v]
+  (when [(values sp ok) (assert groupptr (.-any v))] ok
+    (return (unsafe/Slice (conv (* Attr) sp) (.-num v))))
+
+  (panic "Group: bad kind"))
+
+
+^{:go/end 416} (go/method group ^{:tag (slice Attr)} [^Value v]
+  (unsafe/Slice (conv (* Attr) (assert groupptr (.-any v))) (.-num v)))
+
+
+;;////////////// Other
+
+
+^{:go/end 443} (go/method Equal "Equal reports whether v and w represent the same Go value.\n" ^bool [^Value v ^Value w]
+  (let [k1 (.Kind v)
+      ^{:line 423} k2 (.Kind w)]
+    (when (!= k1 k2)
+      (return false))
+
+    (switch k1
+      (case [KindInt64 KindUint64 KindBool KindDuration]
+        (return (== (.-num v) (.-num w))))
+      (case [KindString]
+        (return (== (.str v) (.str w))))
+      (case [KindFloat64]
+        (return (== (.float v) (.float w))))
+      (case [KindTime]
+        (return (.Equal (.time v) (.time w))))
+      (case [KindAny KindLogValuer]
+        (return (== (.-any v) (.-any w)))) ; may panic if non-comparable
+      (case [KindGroup]
+        (return (^{:inst [(slice Attr) (slice Attr) Attr Attr]} slices/EqualFunc (.group v) (.group w) (method-expr Attr Equal))))
+      (default
+        (panic (fmt/Sprintf "bad kind: %s" k1))))))
+
+
+
+
+^{:go/end 454} (go/method isEmptyGroup "isEmptyGroup reports whether v is a group that has no attributes.\n" ^bool [^Value v]
+  (when (!= (.Kind v) KindGroup)
+    (return false))
+
+  ;; We do not need to recursively examine the group's Attrs for emptiness,
+  ;; because GroupValue removed them when the group was constructed, and
+  ;; groups are immutable.
+  (== (len (.group v)) 0))
+
+
+
+
+^{:go/end 481} (go/method append "append appends a text representation of v to dst.\nv is formatted as with fmt.Sprint.\n" ^{:tag (slice byte)} [^Value v ^{:tag (slice byte)} dst]
+  (switch (.Kind v)
+    (case [KindString]
+      (return (append dst (spread (.str v)))))
+    (case [KindInt64]
+      (return (strconv/AppendInt dst (conv int64 (.-num v)) 10)))
+    (case [KindUint64]
+      (return (strconv/AppendUint dst (.-num v) 10)))
+    (case [KindFloat64]
+      (return (strconv/AppendFloat dst (.float v) \g -1 64)))
+    (case [KindBool]
+      (return (strconv/AppendBool dst (.bool v))))
+    (case [KindDuration]
+      (return (append dst (spread (.String (.duration v))))))
+    (case [KindTime]
+      (return (.AppendFormat (.time v) dst "2006-01-02 15:04:05.999999999 -0700 MST")))
+    (case [KindGroup]
+      (return (fmt/Append dst (.group v))))
+    (case [KindAny KindLogValuer]
+      (return (fmt/Append dst (.-any v))))
+    (default
+      (panic (fmt/Sprintf "bad kind: %s" (.Kind v))))))
+
+
+
+
+
+
+
+(go/type LogValuer "A LogValuer is any Go value that can convert itself into a Value for logging.\n\nThis mechanism may be used to defer expensive operations until they are\nneeded, or to expand a single value into a sequence of components.\n" (interface
+    (LogValue ^Value [])))
+
+
+(go/const ^{:val 100} maxLogValues 100)
+
+
+
+
+
+
+
+
+^{:go/end 516} (go/method Resolve "Resolve repeatedly calls LogValue on v while it implements [LogValuer],\nand returns the result.\nIf v resolves to a group, the group's attributes' values are not recursively\nresolved.\nIf the number of LogValue calls exceeds a threshold, a Value containing an\nerror is returned.\nResolve's return value is guaranteed not to be of Kind [KindLogValuer].\n" [^Value v] :results [^Value rv]
+  (let [orig v]
+    (defer (^{:go/end 506} (fn []
+          (when [r (recover)] (!= r nil)
+            (set! rv (AnyValue (fmt/Errorf "LogValue panicked\n%s" (stack 3 5))))))))
+
+
+
+    (for [i 0] (< i maxLogValues) (inc! i)
+      (when (!= (.Kind v) KindLogValuer)
+        (return v))
+
+      (set! v (.LogValue (.LogValuer v))))
+
+    (let [err (fmt/Errorf "LogValue called too many times on Value of type %T" (.Any orig))]
+      (AnyValue err))))
+
+
+^{:go/end 540} (go/func stack ^string [^int skip ^int nFrames]
+  (let [pcs (make (slice uintptr) (+ nFrames 1))
+      ^{:line 520} n (runtime/Callers (+ skip 1) pcs)]
+    (when (== n 0)
+      (return "(no stack)"))
+
+    (let [frames (runtime/CallersFrames (subslice pcs _ n))
+        ^{:line 525 :tag strings/Builder} b (zero strings/Builder)
+        ^{:line 526} i 0]
+      (while true
+        (let [(values frame more) (.Next frames)]
+          (fmt/Fprintf (addr b) "called from %s (%s:%d)\n" (.-Function frame) (.-File frame) (.-Line frame))
+          (when (not more)
+            (break))
+
+          (inc! i)
+          (when (>= i nFrames)
+            (fmt/Fprintf (addr b) "(rest of stack elided)\n")
+            (break))))
+
+
+      (.String b))))

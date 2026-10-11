@@ -1,0 +1,595 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package constraint implements parsing and evaluation of build constraint lines.
+;; See https://golang.org/cmd/go/#hdr-Build_constraints for documentation about build constraints themselves.
+;;
+;; This package parses both the original “// +build” syntax and the “//go:build” syntax that was added in Go 1.17.
+;; See https://golang.org/design/draft-gobuild for details about the “//go:build” syntax.
+(in-ns 'go.go.build.constraint) (go/file "expr.go" :doc "Package constraint implements parsing and evaluation of build constraint lines.\nSee https://golang.org/cmd/go/#hdr-Build_constraints for documentation about build constraints themselves.\n\nThis package parses both the original “// +build” syntax and the “//go:build” syntax that was added in Go 1.17.\nSee https://golang.org/design/draft-gobuild for details about the “//go:build” syntax.\n" :imports [
+
+
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [strings "strings"]
+    ^{:line 15} [unicode "unicode"]
+    ^{:line 16} [utf8 "unicode/utf8"]])
+
+
+
+
+(go/const ^{:val 1000 :doc "maxSize is a limit used to control the complexity of expressions, in order\nto prevent stack exhaustion issues due to recursion.\n"} maxSize 1000)
+
+
+
+(go/type Expr "An Expr is a build tag constraint expression.\nThe underlying concrete type is *[AndExpr], *[OrExpr], *[NotExpr], or *[TagExpr].\n" (interface
+
+
+    (^{:doc "String returns the string form of the expression,\nusing the boolean syntax used in //go:build lines.\n"} String ^string [])
+
+
+
+
+    (^{:doc "Eval reports whether the expression evaluates to true.\nIt calls ok(tag) as needed to find out whether a given build tag\nis satisfied by the current build configuration.\n"} Eval ^bool [^{:tag (func [^string tag] [bool])} ok])
+
+
+
+    (^{:doc "The presence of an isExpr method explicitly marks the type as an Expr.\nOnly implementations in this package should be used as Exprs.\n"} isExpr [])))
+
+
+
+(go/type TagExpr "A TagExpr is an [Expr] for the single tag Tag.\n" (struct
+    ^{:line 42 :tag string} Tag)) ; for example, “linux” or “cgo”
+
+
+^{:go/end 45} (go/method isExpr [^{:tag (* TagExpr)} x])
+
+^{:go/end 49} (go/method Eval ^bool [^{:tag (* TagExpr)} x ^{:tag (func [^string tag] [bool])} ok]
+  (ok (.-Tag x)))
+
+
+^{:go/end 53} (go/method String ^string [^{:tag (* TagExpr)} x]
+  (.-Tag x))
+
+
+^{:go/end 55} (go/func tag ^Expr [^string tag] (addr (lit TagExpr tag)))
+
+
+(go/type NotExpr "A NotExpr represents the expression !X (the negation of X).\n" (struct
+    ^{:line 59 :tag Expr} X))
+
+
+^{:go/end 62} (go/method isExpr [^{:tag (* NotExpr)} x])
+
+^{:go/end 66} (go/method Eval ^bool [^{:tag (* NotExpr)} x ^{:tag (func [^string tag] [bool])} ok]
+  (not (.Eval (.-X x) ok)))
+
+
+^{:go/end 75} (go/method String ^string [^{:tag (* NotExpr)} x]
+  (let [s (.String (.-X x))]
+    (type-switch (.-X x)
+      (case [(* AndExpr) (* OrExpr)]
+        (set! s (+ "(" s ")"))))
+
+    (+ "!" s)))
+
+
+^{:go/end 77} (go/func not ^Expr [^Expr x] (addr (lit NotExpr x)))
+
+
+(go/type AndExpr "An AndExpr represents the expression X && Y.\n" (struct
+    ^{:line 81 :tag Expr} X ^Expr Y))
+
+
+^{:go/end 84} (go/method isExpr [^{:tag (* AndExpr)} x])
+
+^{:go/end 91} (go/method Eval ^bool [^{:tag (* AndExpr)} x ^{:tag (func [^string tag] [bool])} ok]
+  ;; Note: Eval both, to make sure ok func observes all tags.
+  (let [xok (.Eval (.-X x) ok)
+      ^{:line 89} yok (.Eval (.-Y x) ok)]
+    (and xok yok)))
+
+
+^{:go/end 95} (go/method String ^string [^{:tag (* AndExpr)} x]
+  (+ (andArg (.-X x)) " && " (andArg (.-Y x))))
+
+
+^{:go/end 103} (go/func andArg ^string [^Expr x]
+  (let [s (.String x)]
+    (when [(values _ ok) (assert (* OrExpr) x)] ok
+      (set! s (+ "(" s ")")))
+
+    ^{:line 102} s))
+
+
+^{:go/end 107} (go/func and ^Expr [^Expr x ^Expr y]
+  (addr (lit AndExpr x y)))
+
+
+
+(go/type OrExpr "An OrExpr represents the expression X || Y.\n" (struct
+    ^{:line 111 :tag Expr} X ^Expr Y))
+
+
+^{:go/end 114} (go/method isExpr [^{:tag (* OrExpr)} x])
+
+^{:go/end 121} (go/method Eval ^bool [^{:tag (* OrExpr)} x ^{:tag (func [^string tag] [bool])} ok]
+  ;; Note: Eval both, to make sure ok func observes all tags.
+  (let [xok (.Eval (.-X x) ok)
+      ^{:line 119} yok (.Eval (.-Y x) ok)]
+    (or xok yok)))
+
+
+^{:go/end 125} (go/method String ^string [^{:tag (* OrExpr)} x]
+  (+ (orArg (.-X x)) " || " (orArg (.-Y x))))
+
+
+^{:go/end 133} (go/func orArg ^string [^Expr x]
+  (let [s (.String x)]
+    (when [(values _ ok) (assert (* AndExpr) x)] ok
+      (set! s (+ "(" s ")")))
+
+    ^{:line 132} s))
+
+
+^{:go/end 137} (go/func or ^Expr [^Expr x ^Expr y]
+  (addr (lit OrExpr x y)))
+
+
+
+(go/type SyntaxError "A SyntaxError reports a syntax error in a parsed build expression.\n" (struct
+    ^{:line 141 :tag int} Offset ; byte offset in input where error was detected
+    ^{:line 142 :tag string} Err)) ; description of error
+
+
+^{:go/end 147} (go/method Error ^string [^{:tag (* SyntaxError)} e]
+  (.-Err e))
+
+
+(go/var errNotConstraint (errors/New "not a build constraint"))
+
+
+
+^{:go/end 161} (go/func Parse "Parse parses a single build constraint line of the form “//go:build ...” or “// +build ...”\nand returns the corresponding boolean expression.\n" [^string line] :results [Expr error]
+  (when [(values text ok) (splitGoBuild line)] ok
+    (return (parseExpr text)))
+
+  (when [(values text ok) (splitPlusBuild line)] ok
+    (return (parsePlusBuildExpr text)))
+
+  (return nil errNotConstraint))
+
+
+
+
+^{:go/end 168} (go/func IsGoBuild "IsGoBuild reports whether the line of text is a “//go:build” constraint.\nIt only checks the prefix of the text, not that the expression itself parses.\n" ^bool [^string line]
+  (let [(values _ ok) (splitGoBuild line)]
+    ^{:line 167} ok))
+
+
+
+
+^{:go/end 198} (go/func splitGoBuild "splitGoBuild splits apart the leading //go:build prefix in line from the build expression itself.\nIt returns \"\", false if the input is not a //go:build line or if the input contains multiple lines.\n" [^string line] :results [^string expr ^bool ok]
+  ;; A single trailing newline is OK; otherwise multiple lines are not.
+  (when (and (> (len line) 0) (== (aget line (- (len line) 1)) \newline))
+    (set! line (subslice line _ (- (len line) 1))))
+
+  (when (strings/Contains line "\n")
+    (return "" false))
+
+
+  (when (not (strings/HasPrefix line "//go:build"))
+    (return "" false))
+
+
+  (set! line (strings/TrimSpace line))
+  (set! line (subslice line (len "//go:build")))
+
+  ;; If strings.TrimSpace finds more to trim after removing the //go:build prefix,
+  ;; it means that the prefix was followed by a space, making this a //go:build line
+  ;; (as opposed to a //go:buildsomethingelse line).
+  ;; If line is empty, we had "//go:build" by itself, which also counts.
+  (let [trim (strings/TrimSpace line)]
+    (when (and (== (len line) (len trim)) (!= line ""))
+      (return "" false))
+
+
+    (return trim true)))
+
+
+
+(go/type exprParser "An exprParser holds state for parsing a build expression.\n" (struct
+    ^{:line 202 :tag string} s ; input string
+    ^{:line 203 :tag int} i ; next read location in s
+
+    ^{:line 205 :tag string} tok ; last token read
+    ^{:line 206 :tag bool} isTag
+    ^{:line 207 :tag int} pos ; position (start) of last token
+
+    ^{:line 209 :tag int} size))
+
+
+
+^{:go/end 230} (go/func parseExpr "parseExpr parses a boolean build tag expression.\n" [^string text] :results [^Expr x ^error err]
+  (defer (^{:go/end 222} (fn []
+        (when [e (recover)] (!= e nil)
+          (when [(values e ok) (assert (* SyntaxError) e)] ok
+            (set! err e)
+            (return))
+
+          (panic e))))) ; unreachable unless parser has a bug
+
+
+
+  (let [p (addr (lit exprParser :s text))]
+    (set! x (.or p))
+    (when (!= (.-tok p) "")
+      (panic (addr (lit SyntaxError :Offset (.-pos p) :Err (+ "unexpected token " (.-tok p))))))
+
+    (return x nil)))
+
+
+
+
+
+^{:go/end 241} (go/method or "or parses a sequence of || expressions.\nOn entry, the next input token has not yet been lexed.\nOn exit, the next input token has been lexed and is in p.tok.\n" ^Expr [^{:tag (* exprParser)} p]
+  (let [x (.and p)]
+    (while (== (.-tok p) "||")
+      (set! x (go/call or x (.and p))))
+
+    ^{:line 240} x))
+
+
+
+
+
+^{:go/end 252} (go/method and "and parses a sequence of && expressions.\nOn entry, the next input token has not yet been lexed.\nOn exit, the next input token has been lexed and is in p.tok.\n" ^Expr [^{:tag (* exprParser)} p]
+  (let [x (.not p)]
+    (while (== (.-tok p) "&&")
+      (set! x (go/call and x (.not p))))
+
+    ^{:line 251} x))
+
+
+
+
+
+^{:go/end 271} (go/method not "not parses a ! expression.\nOn entry, the next input token has not yet been lexed.\nOn exit, the next input token has been lexed and is in p.tok.\n" ^Expr [^{:tag (* exprParser)} p]
+  (inc! (.-size p))
+  (when (> (.-size p) maxSize)
+    (panic (addr (lit SyntaxError :Offset (.-pos p) :Err "build expression too large"))))
+
+  (.lex p)
+  (when (== (.-tok p) "!")
+    (.lex p)
+    (when (== (.-tok p) "!")
+      (panic (addr (lit SyntaxError :Offset (.-pos p) :Err "double negation not allowed"))))
+
+    (return (go/call not (.atom p))))
+
+  (.atom p))
+
+
+
+
+
+^{:go/end 305} (go/method atom "atom parses a tag or a parenthesized expression.\nOn entry, the next input token HAS been lexed.\nOn exit, the next input token has been lexed and is in p.tok.\n" ^Expr [^{:tag (* exprParser)} p]
+  ;; first token already in p.tok
+  (when (== (.-tok p) "(")
+    (let [pos (.-pos p)]
+      (defer (^{:go/end 287} (fn []
+            (when [e (recover)] (!= e nil)
+              (when [(values e ok) (assert (* SyntaxError) e)] (and ok (== (.-Err e) "unexpected end of expression"))
+                (set! (.-Err e) "missing close paren"))
+
+              (panic e)))))
+
+
+      (let [x (.or p)]
+        (when (!= (.-tok p) ")")
+          (panic (addr (lit SyntaxError :Offset pos :Err "missing close paren"))))
+
+        (.lex p)
+        (return x))))
+
+
+  (when (not (.-isTag p))
+    (when (== (.-tok p) "")
+      (panic (addr (lit SyntaxError :Offset (.-pos p) :Err "unexpected end of expression"))))
+
+    (panic (addr (lit SyntaxError :Offset (.-pos p) :Err (+ "unexpected token " (.-tok p))))))
+
+  (let [tok (.-tok p)]
+    (.lex p)
+    (tag tok)))
+
+
+
+
+
+
+
+
+^{:go/end 356} (go/method lex "lex finds and consumes the next token in the input stream.\nOn return, p.tok is set to the token text,\np.isTag reports whether the token was a tag,\nand p.pos records the byte offset of the start of the token in the input stream.\nIf lex reaches the end of the input, p.tok is set to the empty string.\nFor any other syntax error, lex panics with a SyntaxError.\n" [^{:tag (* exprParser)} p]
+  (set! (.-isTag p) false)
+  (while (and (< (.-i p) (len (.-s p))) ^:go/paren (or (== (aget (.-s p) (.-i p)) \space) (== (aget (.-s p) (.-i p)) \tab)))
+    (inc! (.-i p)))
+
+  (when (>= (.-i p) (len (.-s p)))
+    (set! (.-tok p) "")
+    (set! (.-pos p) (.-i p))
+    (return))
+
+  (switch (aget (.-s p) (.-i p))
+    (case [\( \) \!]
+      (set! (.-pos p) (.-i p))
+      (inc! (.-i p))
+      (set! (.-tok p) (subslice (.-s p) (.-pos p) (.-i p)))
+      (return))
+
+    (case [\& \|]
+      (when (or (>= (+ (.-i p) 1) (len (.-s p))) (!= (aget (.-s p) (+ (.-i p) 1)) (aget (.-s p) (.-i p))))
+        (panic (addr (lit SyntaxError :Offset (.-i p) :Err (+ "invalid syntax at " (conv string (conv rune (aget (.-s p) (.-i p)))))))))
+
+      (set! (.-pos p) (.-i p))
+      (set! (.-i p) + 2)
+      (set! (.-tok p) (subslice (.-s p) (.-pos p) (.-i p)))
+      (return)))
+
+
+  (let [tag (subslice (.-s p) (.-i p))]
+    (range [i c tag]
+      (when (and (not (unicode/IsLetter c)) (not (unicode/IsDigit c)) (!= c \_) (!= c \.))
+        (set! tag (subslice tag _ i))
+        (break)))
+
+
+    (when (== tag "")
+      (let [(values c _) (utf8/DecodeRuneInString (subslice (.-s p) (.-i p)))]
+        (panic (addr (lit SyntaxError :Offset (.-i p) :Err (+ "invalid syntax at " (conv string c)))))))
+
+
+    (set! (.-pos p) (.-i p))
+    (set! (.-i p) + (len tag))
+    (set! (.-tok p) (subslice (.-s p) (.-pos p) (.-i p)))
+    (set! (.-isTag p) true)))
+
+
+
+
+^{:go/end 363} (go/func IsPlusBuild "IsPlusBuild reports whether the line of text is a “// +build” constraint.\nIt only checks the prefix of the text, not that the expression itself parses.\n" ^bool [^string line]
+  (let [(values _ ok) (splitPlusBuild line)]
+    ^{:line 362} ok))
+
+
+
+
+^{:go/end 398} (go/func splitPlusBuild "splitPlusBuild splits apart the leading // +build prefix in line from the build expression itself.\nIt returns \"\", false if the input is not a // +build line or if the input contains multiple lines.\n" [^string line] :results [^string expr ^bool ok]
+  ;; A single trailing newline is OK; otherwise multiple lines are not.
+  (when (and (> (len line) 0) (== (aget line (- (len line) 1)) \newline))
+    (set! line (subslice line _ (- (len line) 1))))
+
+  (when (strings/Contains line "\n")
+    (return "" false))
+
+
+  (when (not (strings/HasPrefix line "//"))
+    (return "" false))
+
+  (set! line (subslice line (len "//")))
+  ;; Note the space is optional; "//+build" is recognized too.
+  (set! line (strings/TrimSpace line))
+
+  (when (not (strings/HasPrefix line "+build"))
+    (return "" false))
+
+  (set! line (subslice line (len "+build")))
+
+  ;; If strings.TrimSpace finds more to trim after removing the +build prefix,
+  ;; it means that the prefix was followed by a space, making this a +build line
+  ;; (as opposed to a +buildsomethingelse line).
+  ;; If line is empty, we had "// +build" by itself, which also counts.
+  (let [trim (strings/TrimSpace line)]
+    (when (and (== (len line) (len trim)) (!= line ""))
+      (return "" false))
+
+
+    (return trim true)))
+
+
+
+^{:go/end 452} (go/func parsePlusBuildExpr "parsePlusBuildExpr parses a legacy build tag expression (as used with “// +build”).\n" [^string text] :results [Expr error]
+  ;; Only allow up to 100 AND/OR operators for "old" syntax.
+  ;; This is much less than the limit for "new" syntax,
+  ;; but uses of old syntax were always very simple.
+  (let [^:const ^{:val 100} maxOldSize 100
+      ^{:line 406} size 0
+
+      ^{:line 408 :tag Expr} x (zero Expr)]
+    (range [clause (strings/FieldsSeq text)]
+      (let [^Expr y (zero Expr)]
+        (range [lit (strings/SplitSeq clause ",")]
+          (let [^Expr z (zero Expr)
+              ^{:line 413 :tag bool} neg (zero bool)]
+            (if (or (strings/HasPrefix lit "!!") (== lit "!"))
+              (set! z (tag "ignore"))
+              (do
+                (when (strings/HasPrefix lit "!")
+                  (set! neg true)
+                  (set! lit (subslice lit (len "!"))))
+
+                (if (isValidTag lit)
+                  (set! z (tag lit))
+
+                  (set! z (tag "ignore")))
+
+                (when neg
+                  (set! z (go/call not z)))))
+
+
+            (if (== y nil)
+              (set! y z)
+              (do
+                (when [(inc! size)] (> size maxOldSize)
+                  (return nil errComplex))
+
+                (set! y (go/call and y z))))))
+
+
+        (if (== x nil)
+          (set! x y)
+          (do
+            (when [(inc! size)] (> size maxOldSize)
+              (return nil errComplex))
+
+            (set! x (go/call or x y))))))
+
+
+    (when (== x nil)
+      (set! x (tag "ignore")))
+
+    (return x nil)))
+
+
+
+
+
+^{:go/breaks [[6 466]] :go/end 467} (go/func isValidTag "isValidTag reports whether the word is a valid build tag.\nTags must be letters, digits, underscores or dots.\nUnlike in Go identifiers, all digits are fine (e.g., \"386\").\n" ^bool [^string word]
+  (when (== word "")
+    (return false))
+
+  (range [_ c word]
+    (when (and (not (unicode/IsLetter c)) (not (unicode/IsDigit c)) (!= c \_) (!= c \.))
+      (return false)))
+
+
+  true)
+
+
+(go/var errComplex (errors/New "expression too complex for // +build lines"))
+
+
+
+^{:go/end 533} (go/func PlusBuildLines "PlusBuildLines returns a sequence of “// +build” lines that evaluate to the build expression x.\nIf the expression is too complex to convert directly to “// +build” lines, PlusBuildLines returns an error.\n" [^Expr x] :results [(slice string) error]
+  ;; Push all NOTs to the expression leaves, so that //go:build !(x && y) can be treated as !x || !y.
+  ;; This rewrite is both efficient and commonly needed, so it's worth doing.
+  ;; Essentially all other possible rewrites are too expensive and too rarely needed.
+  (set! x (pushNot x false))
+
+  ;; Split into AND of ORs of ANDs of literals (tag or NOT tag).
+  (let [^{:tag (slice (slice (slice Expr)))} split (zero (slice (slice (slice Expr))))]
+    (range [_ or (appendSplitAnd nil x)]
+      (let [^{:tag (slice (slice Expr))} ands (zero (slice (slice Expr)))]
+        (range [_ and (appendSplitOr nil or)]
+          (let [^{:tag (slice Expr)} lits (zero (slice Expr))]
+            (range [_ lit (appendSplitAnd nil and)]
+              (type-switch lit
+                (case [(* TagExpr) (* NotExpr)]
+                  (set! lits (append lits lit)))
+                (default
+                  (return nil errComplex))))
+
+
+            (set! ands (append ands lits))))
+
+        (set! split (append split ands))))
+
+
+    ;; If all the ORs have length 1 (no actual OR'ing going on),
+    ;; push the top-level ANDs to the bottom level, so that we get
+    ;; one // +build line instead of many.
+    (let [maxOr 0]
+      (range [_ or split]
+        (when (< maxOr (len or))
+          (set! maxOr (len or))))
+
+
+      (when (== maxOr 1)
+        (let [^{:tag (slice Expr)} lits (zero (slice Expr))]
+          (range [_ or split]
+            (set! lits (append lits (spread (aget or 0)))))
+
+          (set! split (lit (slice (slice (slice Expr))) (lit _ lits)))))
+
+
+      ;; Prepare the +build lines.
+      (let [^{:tag (slice string)} lines (zero (slice string))]
+        (range [_ or split]
+          (let [^strings/Builder line (zero strings/Builder)]
+            (.WriteString line "// +build")
+            (range [_ and or]
+              (.WriteString line " ")
+              (range [i lit and]
+                (when (> i 0)
+                  (.WriteString line ","))
+
+                (.WriteString line (.String lit))))
+
+
+            (set! lines (append lines (.String line)))))
+
+
+        (return lines nil)))))
+
+
+
+
+
+^{:go/end 574} (go/func pushNot "pushNot applies DeMorgan's law to push negations down the expression,\nso that only tags are negated in the result.\n(It applies the rewrites !(X && Y) => (!X || !Y) and !(X || Y) => (!X && !Y).)\n" ^Expr [^Expr x ^bool not]
+  (type-switch [x x]
+    (default
+      ;; unreachable
+      (return x))
+    (case [(* NotExpr)]
+      (when [(values _ ok) (assert (* TagExpr) (.-X x))] (and ok (not not))
+        (return x))
+
+      (return (pushNot (.-X x) (not not))))
+    (case [(* TagExpr)]
+      (when not
+        (return (addr (lit NotExpr :X x))))
+
+      (return x))
+    (case [(* AndExpr)]
+      (let [x1 (pushNot (.-X x) not)
+          ^{:line 555} y1 (pushNot (.-Y x) not)]
+        (when not
+          (return (go/call or x1 y1)))
+
+        (when (and (== x1 (.-X x)) (== y1 (.-Y x)))
+          (return x))
+
+        (return (go/call and x1 y1))))
+    (case [(* OrExpr)]
+      (let [x1 (pushNot (.-X x) not)
+          ^{:line 565} y1 (pushNot (.-Y x) not)]
+        (when not
+          (return (go/call and x1 y1)))
+
+        (when (and (== x1 (.-X x)) (== y1 (.-Y x)))
+          (return x))
+
+        (return (go/call or x1 y1))))))
+
+
+
+
+
+^{:go/end 585} (go/func appendSplitAnd "appendSplitAnd appends x to list while splitting apart any top-level && expressions.\nFor example, appendSplitAnd({W}, X && Y && Z) = {W, X, Y, Z}.\n" ^{:tag (slice Expr)} [^{:tag (slice Expr)} list ^Expr x]
+  (when [(values x ok) (assert (* AndExpr) x)] ok
+    (set! list (appendSplitAnd list (.-X x)))
+    (set! list (appendSplitAnd list (.-Y x)))
+    (return list))
+
+  (append list x))
+
+
+
+
+^{:go/end 596} (go/func appendSplitOr "appendSplitOr appends x to list while splitting apart any top-level || expressions.\nFor example, appendSplitOr({W}, X || Y || Z) = {W, X, Y, Z}.\n" ^{:tag (slice Expr)} [^{:tag (slice Expr)} list ^Expr x]
+  (when [(values x ok) (assert (* OrExpr) x)] ok
+    (set! list (appendSplitOr list (.-X x)))
+    (set! list (appendSplitOr list (.-Y x)))
+    (return list))
+
+  (append list x))

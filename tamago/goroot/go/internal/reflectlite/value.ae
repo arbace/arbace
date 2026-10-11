@@ -1,0 +1,466 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.reflectlite) (go/file "value.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goarch "internal/goarch"]
+    ^{:line 10} [unsafeheader "internal/unsafeheader"]
+    ^{:line 11} [runtime "runtime"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Value "Value is the reflection interface to a Go value.\n\nNot all methods apply to all kinds of values. Restrictions,\nif any, are noted in the documentation for each method.\nUse the Kind method to find out the kind of value before\ncalling kind-specific methods. Calling a method\ninappropriate to the kind of type causes a run time panic.\n\nThe zero Value represents no value.\nIts IsValid method returns false, its Kind method returns Invalid,\nits String method returns \"<invalid Value>\", and all other methods panic.\nMost functions and methods never return an invalid value.\nIf one does, its documentation states the conditions explicitly.\n\nA Value can be used concurrently by multiple goroutines provided that\nthe underlying Go value can be used concurrently for the equivalent\ndirect operations.\n\nTo compare two Values, compare the results of the Interface method.\nUsing == on two Values does not compare the underlying values\nthey represent.\n" (struct
+
+
+    ^{:line 39 :tag (* abi/Type) :doc "typ_ holds the type of the value represented by a Value.\nAccess using the typ method to avoid escape of v.\n"} typ_
+
+
+
+    ^{:line 43 :tag unsafe/Pointer :doc "Pointer-valued data or, if flagIndir is set, pointer to data.\nValid when either flagIndir is set or typ.pointers() is true.\n"} ptr
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 59 :doc "flag holds metadata about the value.\n\nThe lowest five bits give the Kind of the value, mirroring typ.Kind().\n\nThe next set of bits are flag bits:\n\t- flagStickyRO: obtained via unexported not embedded field, so read-only\n\t- flagEmbedRO: obtained via unexported embedded field, so read-only\n\t- flagIndir: val holds a pointer to the data\n\t- flagAddr: v.CanAddr is true (implies flagIndir and ptr is non-nil)\n\t- flagMethod: v is a method value.\nIf !typ.IsDirectIface(), code can assume that flagIndir is set.\n\nThe remaining 22+ bits give a method number for method values.\nIf flag.kind() != Func, code can assume that flagMethod is unset.\n"} flag))
+
+;; A method value represents a curried method invocation
+;; like r.Read for some receiver r. The typ+val+flag bits describe
+;; the receiver r, but the flag's Kind bits say Func (methods are
+;; functions), and the top bits of the flag give the method number
+;; in r's type's method table.
+
+
+(go/type flag uintptr)
+
+(go/const
+  ^{:line 71} [^{:val 5} flagKindWidth 5] ; there are 27 kinds
+  ^{:line 72} [^{:tag flag :val 31} flagKindMask (- (<< 1 flagKindWidth) 1)]
+  ^{:line 73} [^{:tag flag :val 32} flagStickyRO (<< 1 5)]
+  ^{:line 74} [^{:tag flag :val 64} flagEmbedRO (<< 1 6)]
+  ^{:line 75} [^{:tag flag :val 128} flagIndir (<< 1 7)]
+  ^{:line 76} [^{:tag flag :val 256} flagAddr (<< 1 8)]
+  ^{:line 77} [^{:tag flag :val 512} flagMethod (<< 1 9)]
+  ^{:line 78} [^{:val 10} flagMethodShift 10]
+  ^{:line 79} [^{:tag flag :val 96} flagRO (bit-or flagStickyRO flagEmbedRO)])
+
+
+^{:go/end 84} (go/method kind ^Kind [^flag f]
+  (conv Kind (bit-and f flagKindMask)))
+
+
+^{:go/breaks [[4 90]] :go/end 91} (go/method ro ^flag [^flag f]
+  (when (!= (bit-and f flagRO) 0)
+    (return flagStickyRO))
+
+  0)
+
+
+^{:go/end 100} (go/method typ ^{:tag (* abi/Type)} [^Value v]
+  ;; Types are either static (for compiler-created types) or
+  ;; heap-allocated but always reachable (for reflection-created
+  ;; types, held in the central map). So there is no need to
+  ;; escape types. noescape here help avoid unnecessary escape
+  ;; of v.
+  (conv (* abi/Type) (abi/NoEscape (conv unsafe/Pointer (.-typ_ v)))))
+
+
+
+
+^{:go/end 112} (go/method pointer "pointer returns the underlying pointer represented by v.\nv.Kind() must be Pointer, Map, Chan, Func, or UnsafePointer\n" ^unsafe/Pointer [^Value v]
+  (when (or (!= (.Size (.typ v)) goarch/PtrSize) (not (.Pointers (.typ v))))
+    (panic "can't call pointer on a non-pointer Value"))
+
+  (when (!= (bit-and (.-flag v) flagIndir) 0)
+    (return @(conv (* unsafe/Pointer) (.-ptr v))))
+
+  (.-ptr v))
+
+
+
+^{:go/end 147} (go/func packEface "packEface converts v to the empty interface.\n" ^any [^Value v]
+  (let [t (.typ v)
+      ^{:line 117 :tag any} i (zero any)
+      ^{:line 118} e (conv (* abi/EmptyInterface) (conv unsafe/Pointer (addr i)))]
+    ;; First, fill in the data portion of the interface.
+    (switch
+      (case [(not (.IsDirectIface t))]
+        (when (== (bit-and (.-flag v) flagIndir) 0)
+          (panic "bad indir"))
+
+        ;; Value is indirect, and so is the interface we're making.
+        (let [ptr (.-ptr v)]
+          (when (!= (bit-and (.-flag v) flagAddr) 0)
+            (let [c (unsafe_New t)]
+              (typedmemmove t c ptr)
+              (set! ptr c)))
+
+          (set! (.-Data e) ptr)))
+      (case [(!= (bit-and (.-flag v) flagIndir) 0)]
+        ;; Value is indirect, but interface is direct. We need
+        ;; to load the data at v.ptr into the interface data word.
+        (set! (.-Data e) @(conv (* unsafe/Pointer) (.-ptr v))))
+      (default
+        ;; Value is direct, and so is the interface.
+        (set! (.-Data e) (.-ptr v))))
+
+    ;; Now, fill in the type portion. We're very careful here not
+    ;; to have any operation between the e.word and e.typ assignments
+    ;; that would let the garbage collector observe the partially-built
+    ;; interface value.
+    (set! (.-Type e) t)
+    ^{:line 146} i))
+
+
+
+^{:go/end 162} (go/func unpackEface "unpackEface converts the empty interface i to a Value.\n" ^Value [^any i]
+  (let [e (conv (* abi/EmptyInterface) (conv unsafe/Pointer (addr i)))
+      ;; NOTE: don't read e.word until we know whether it is really a pointer or not.
+      ^{:line 153} t (.-Type e)]
+    (when (== t nil)
+      (return (lit Value)))
+
+    (let [f (conv flag (.Kind t))]
+      (when (not (.IsDirectIface t))
+        (set! f bit-or flagIndir))
+
+      (lit Value t (.-Data e) f))))
+
+
+
+
+
+(go/type ValueError "A ValueError occurs when a Value method is invoked on\na Value that does not support it. Such cases are documented\nin the description of each method.\n" (struct
+    ^{:line 168 :tag string} Method
+    ^{:line 169 :tag Kind} Kind))
+
+
+^{:go/end 177} (go/method Error ^string [^{:tag (* ValueError)} e]
+  (when (== (.-Kind e) 0)
+    (return (+ "reflect: call of " (.-Method e) " on zero Value")))
+
+  (+ "reflect: call of " (.-Method e) " on " (.String (.-Kind e)) " Value"))
+
+
+
+
+^{:go/end 188} (go/func methodName "methodName returns the name of the calling method,\nassumed to be two stack frames above.\n" ^string []
+  (let [(values pc _ _ _) (runtime/Caller 2)
+      ^{:line 183} f (runtime/FuncForPC pc)]
+    (when (== f nil)
+      (return "unknown method"))
+
+    (.Name f)))
+
+
+
+
+^{:go/end 199} (go/method mustBeExported "mustBeExported panics if f records that the value was obtained using\nan unexported field.\n" [^flag f]
+  (when (== f 0)
+    (panic (addr (lit ValueError (methodName) 0))))
+
+  (when (!= (bit-and f flagRO) 0)
+    (panic (+ "reflect: " (methodName) " using value obtained using unexported field"))))
+
+
+
+
+
+
+^{:go/end 215} (go/method mustBeAssignable "mustBeAssignable panics if f records that the value is not assignable,\nwhich is to say that either it was obtained using an unexported field\nor it is not addressable.\n" [^flag f]
+  (when (== f 0)
+    (panic (addr (lit ValueError (methodName) abi/Invalid))))
+
+  ;; Assignable if addressable and not read-only.
+  (when (!= (bit-and f flagRO) 0)
+    (panic (+ "reflect: " (methodName) " using value obtained using unexported field")))
+
+  (when (== (bit-and f flagAddr) 0)
+    (panic (+ "reflect: " (methodName) " using unaddressable value"))))
+
+
+
+
+
+
+
+
+^{:go/end 224} (go/method CanSet "CanSet reports whether the value of v can be changed.\nA Value can be changed only if it is addressable and was not\nobtained by the use of unexported struct fields.\nIf CanSet returns false, calling Set or any type-specific\nsetter (e.g., SetBool, SetInt) will panic.\n" ^bool [^Value v]
+  (== (bit-and (.-flag v) (bit-or flagAddr flagRO)) flagAddr))
+
+
+
+
+
+
+^{:go/end 263} (go/method Elem "Elem returns the value that the interface v contains\nor that the pointer v points to.\nIt panics if v's Kind is not Interface or Pointer.\nIt returns the zero Value if v is nil.\n" ^Value [^Value v]
+  (let [k ^{:go/via [flag]} (.kind v)]
+    (switch k
+      (case [abi/Interface]
+        (let [^any eface (zero any)]
+          (if (== (.NumMethod (.typ v)) 0)
+            (set! eface @(conv (* any) (.-ptr v)))
+
+            (set! eface (conv any @(conv (* (interface
+                      (M [])))
+                  (.-ptr v)))))
+
+          (let [x (unpackEface eface)]
+            (when (!= (.-flag x) 0)
+              (set! (.-flag x) bit-or (.ro (.-flag v))))
+
+            (return x))))
+      (case [abi/Pointer]
+        (let [ptr (.-ptr v)]
+          (when (!= (bit-and (.-flag v) flagIndir) 0)
+            (set! ptr @(conv (* unsafe/Pointer) ptr)))
+
+          ;; The returned value's address is v's value.
+          (when (== ptr nil)
+            (return (lit Value)))
+
+          (let [tt (conv (* ptrType) (conv unsafe/Pointer (.typ v)))
+              ^{:line 257} typ (.-Elem tt)
+              ^{:line 258} fl (bit-or (bit-and (.-flag v) flagRO) flagIndir flagAddr)]
+            (set! fl bit-or (conv flag (.Kind typ)))
+            (return (lit Value typ ptr fl))))))
+
+    (panic (addr (lit ValueError "reflectlite.Value.Elem" ^{:go/via [flag]} (.kind v))))))
+
+
+^{:go/end 283} (go/func valueInterface ^any [^Value v]
+  (when (== (.-flag v) 0)
+    (panic (addr (lit ValueError "reflectlite.Value.Interface" 0))))
+
+
+  (when (== ^{:go/via [flag]} (.kind v) abi/Interface)
+    ;; Special case: return the element inside the interface.
+    ;; Empty interface has one layout, all interfaces with
+    ;; methods have a second layout.
+    (when (== (.numMethod v) 0)
+      (return @(conv (* any) (.-ptr v))))
+
+    (return @(conv (* (interface
+            (M [])))
+        (.-ptr v))))
+
+
+  (packEface v))
+
+
+
+
+
+
+
+
+
+^{:go/end 310} (go/method IsNil "IsNil reports whether its argument v is nil. The argument must be\na chan, func, interface, map, pointer, or slice value; if it is\nnot, IsNil panics. Note that IsNil is not always equivalent to a\nregular comparison with nil in Go. For example, if v was created\nby calling ValueOf with an uninitialized interface variable i,\ni==nil will be true but v.IsNil will panic as v will be the zero\nValue.\n" ^bool [^Value v]
+  (let [k ^{:go/via [flag]} (.kind v)]
+    (switch k
+      (case [abi/Chan abi/Func abi/Map abi/Pointer abi/UnsafePointer]
+        ;; if v.flag&flagMethod != 0 {
+        ;; 	return false
+        ;; }
+        (let [ptr (.-ptr v)]
+          (when (!= (bit-and (.-flag v) flagIndir) 0)
+            (set! ptr @(conv (* unsafe/Pointer) ptr)))
+
+          (return (== ptr nil))))
+      (case [abi/Interface abi/Slice]
+        ;; Both interface and slice are nil if first word is 0.
+        ;; Both are always bigger than a word; assume flagIndir.
+        (return (== @(conv (* unsafe/Pointer) (.-ptr v)) nil))))
+
+    (panic (addr (lit ValueError "reflectlite.Value.IsNil" ^{:go/via [flag]} (.kind v))))))
+
+
+
+
+
+
+
+^{:go/end 319} (go/method IsValid "IsValid reports whether v represents a value.\nIt returns false if v is the zero Value.\nIf IsValid returns false, all other methods except String panic.\nMost functions and methods never return an invalid Value.\nIf one does, its documentation states the conditions explicitly.\n" ^bool [^Value v]
+  (!= (.-flag v) 0))
+
+
+
+
+^{:go/end 325} (go/method Kind "Kind returns v's Kind.\nIf v is the zero Value (IsValid returns false), Kind returns Invalid.\n" ^Kind [^Value v]
+  ^{:go/via [flag]} (.kind v))
+
+
+;; implemented in runtime:
+
+
+(go/func ^:extern ^:go/noescape chanlen ^int [unsafe/Pointer])
+
+
+(go/func ^:extern ^:go/noescape maplen ^int [unsafe/Pointer])
+
+
+
+^{:go/end 355} (go/method Len "Len returns v's length.\nIt panics if v's Kind is not Array, Chan, Map, Slice, or String.\n" ^int [^Value v]
+  (let [k ^{:go/via [flag]} (.kind v)]
+    (switch k
+      (case [abi/Array]
+        (let [tt (conv (* arrayType) (conv unsafe/Pointer (.typ v)))]
+          (return (conv int (.-Len tt)))))
+      (case [abi/Chan]
+        (return (chanlen (.pointer v))))
+      (case [abi/Map]
+        (return (maplen (.pointer v))))
+      (case [abi/Slice]
+        ;; Slice is bigger than a word; assume flagIndir.
+        (return (.-Len (conv (* unsafeheader/Slice) (.-ptr v)))))
+      (case [abi/String]
+        ;; String is bigger than a word; assume flagIndir.
+        (return (.-Len (conv (* unsafeheader/String) (.-ptr v))))))
+
+    (panic (addr (lit ValueError "reflectlite.Value.Len" ^{:go/via [flag]} (.kind v))))))
+
+
+
+^{:go/end 363} (go/method numMethod "NumMethod returns the number of exported methods in the value's method set.\n" ^int [^Value v]
+  (when (== (.typ v) nil)
+    (panic (addr (lit ValueError "reflectlite.Value.NumMethod" abi/Invalid))))
+
+  (.NumMethod (.typ v)))
+
+
+
+
+
+^{:go/end 381} (go/method Set "Set assigns x to the value v.\nIt panics if CanSet returns false.\nAs in Go, x's value must be assignable to v's type.\n" [^Value v ^Value x]
+  ^{:go/via [flag]} (.mustBeAssignable v)
+  ^{:go/via [flag]} (.mustBeExported x) ; do not let unexported x leak
+  (let [^unsafe/Pointer target (zero unsafe/Pointer)]
+    (when (== ^{:go/via [flag]} (.kind v) abi/Interface)
+      (set! target (.-ptr v)))
+
+    (set! x (.assignTo x "reflectlite.Set" (.typ v) target))
+    (if (!= (bit-and (.-flag x) flagIndir) 0)
+      (typedmemmove (.typ v) (.-ptr v) (.-ptr x))
+
+      (set! @(conv (* unsafe/Pointer) (.-ptr v)) (.-ptr x)))))
+
+
+
+
+^{:go/end 391} (go/method Type "Type returns v's type.\n" ^Type [^Value v]
+  (let [f (.-flag v)]
+    (when (== f 0)
+      (panic (addr (lit ValueError "reflectlite.Value.Type" abi/Invalid))))
+
+    ;; Method values not supported.
+    (toRType (.typ v))))
+
+
+;; /*
+;; * constructors
+;; */
+
+;; implemented in package runtime
+
+
+(go/func ^:extern ^:go/noescape unsafe_New ^unsafe/Pointer [(* abi/Type)])
+
+
+
+^{:go/end 409} (go/func ValueOf "ValueOf returns a new Value initialized to the concrete value\nstored in the interface i. ValueOf(nil) returns the zero Value.\n" ^Value [^any i]
+  (when (== i nil)
+    (return (lit Value)))
+
+  (unpackEface i))
+
+
+
+
+
+^{:go/end 448} (go/method assignTo "assignTo returns a value v that can be assigned directly to typ.\nIt panics if v is not assignable to typ.\nFor a conversion to an interface type, target is a suggested scratch space to use.\n" ^Value [^Value v ^string context ^{:tag (* abi/Type)} dst ^unsafe/Pointer target]
+  ;; if v.flag&flagMethod != 0 {
+  ;; 	v = makeMethodValue(context, v)
+  ;; }
+
+  (switch
+    (case [(directlyAssignable dst (.typ v))]
+      ;; Overwrite type so that they match.
+      ;; Same memory layout, so no harm done.
+      (let [fl (bit-or (bit-and (.-flag v) (bit-or flagAddr flagIndir)) (.ro (.-flag v)))]
+        (set! fl bit-or (conv flag (.Kind dst)))
+        (return (lit Value dst (.-ptr v) fl))))
+
+    (case [(implements dst (.typ v))]
+      (when (== target nil)
+        (set! target (unsafe_New dst)))
+
+      (when (and (== (.Kind v) abi/Interface) (.IsNil v))
+        ;; A nil ReadWriter passed to nil Reader is OK,
+        ;; but using ifaceE2I below will panic.
+        ;; Avoid the panic by returning a nil dst (e.g., Reader) explicitly.
+        (return (lit Value dst nil (conv flag abi/Interface))))
+
+      (let [x (valueInterface v)]
+        (if (== (.NumMethod dst) 0)
+          (set! @(conv (* any) target) x)
+
+          (ifaceE2I dst x target))
+
+        (return (lit Value dst target (bit-or flagIndir (conv flag abi/Interface)))))))
+
+
+  ;; Failed.
+  (panic (+ context ": value of type " (.String (toRType (.typ v))) " is not assignable to type " (.String (toRType dst)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 459} (go/func arrayAt "arrayAt returns the i-th element of p,\nan array whose elements are eltSize bytes wide.\nThe array pointed at by p must have at least i+1 elements:\nit is invalid (but impossible to check here) to pass i >= len,\nbecause then the result will point outside the array.\nwhySafe must explain why i < len. (Passing \"i < len\" is fine;\nthe benefit is to surface this assumption at the call site.)\n" ^unsafe/Pointer [^unsafe/Pointer p ^int i ^uintptr eltSize ^string whySafe]
+  (add p (* (conv uintptr i) eltSize) "i < len"))
+
+
+(go/func ^:extern ifaceE2I [^{:tag (* abi/Type)} t ^any src ^unsafe/Pointer dst])
+
+
+
+
+(go/func ^:extern ^:go/noescape typedmemmove "typedmemmove copies a value of type t to dst from src.\n" [^{:tag (* abi/Type)} t ^unsafe/Pointer dst ^unsafe/Pointer src])

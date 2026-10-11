@@ -1,0 +1,1536 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "mgcpacer.go" :imports [
+
+
+    ^{:line 8} [cpu "internal/cpu"]
+    ^{:line 9} [goexperiment "internal/goexperiment"]
+    ^{:line 10} [atomic "internal/runtime/atomic"]
+    ^{:line 11} [math "internal/runtime/math"]
+    ^{:line 12} [strconv "internal/strconv"]
+    ^{:line 13} [_ "unsafe"]])
+
+
+(go/const
+
+
+
+
+
+
+  ^{:line 23} [^{:val 0.25 :doc "gcGoalUtilization is the goal CPU utilization for\nmarking as a fraction of GOMAXPROCS.\n\nIncreasing the goal utilization will shorten GC cycles as the GC\nhas more resources behind it, lessening costs from the write barrier,\nbut comes at the cost of increasing mutator latency.\n"} gcGoalUtilization gcBackgroundUtilization]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 39} [^{:val 0.25 :doc "gcBackgroundUtilization is the fixed CPU utilization for background\nmarking. It must be <= gcGoalUtilization. The difference between\ngcGoalUtilization and gcBackgroundUtilization will be made up by\nmark assists. The scheduler will aim to use within 50% of this\ngoal.\n\nAs a general rule, there's little reason to set gcBackgroundUtilization\n< gcGoalUtilization. One reason might be in mostly idle applications,\nwhere goroutines are unlikely to assist at all, so the actual\nutilization will be lower than the goal. But this is moot point\nbecause the idle mark workers already soak up idle CPU resources.\nThese two values are still kept separate however because they are\ndistinct conceptually, and in previous iterations of the pacer the\ndistinction was more important.\n"} gcBackgroundUtilization 0.25]
+
+
+
+
+
+
+
+  ^{:line 47} [^{:val 2000 :doc "gcCreditSlack is the amount of scan work credit that can\naccumulate locally before updating gcController.heapScanWork and,\noptionally, gcController.bgScanCredit. Lower values give a more\naccurate assist ratio and make it more likely that assists will\nsuccessfully steal background credit. Higher values reduce memory\ncontention.\n"} gcCreditSlack 2000]
+
+
+
+  ^{:line 51} [^{:val 5000 :doc "gcAssistTimeSlack is the nanoseconds of mutator assist time that\ncan accumulate on a P before updating gcController.assistTime.\n"} gcAssistTimeSlack 5000]
+
+
+
+
+  ^{:line 56} [^{:val 65536 :doc "gcOverAssistWork determines how many extra units of scan work a GC\nassist does when an assist happens. This amortizes the cost of an\nassist by pre-paying for this many bytes of future allocations.\n"} gcOverAssistWork (<< 64 10)]
+
+
+  ^{:line 59} [^{:val 4194304 :doc "defaultHeapMinimum is the value of heapMinimum for GOGC==100.\n"} defaultHeapMinimum (+ (* goexperiment/HeapMinimum512KiBInt (<< 512 10))
+      (* (- 1 goexperiment/HeapMinimum512KiBInt) (<< 4 20)))]
+
+
+
+  ^{:line 64} [^{:val 8192 :doc "maxStackScanSlack is the bytes of stack space allocated or freed\nthat can accumulate on a P before updating gcController.stackSize.\n"} maxStackScanSlack (<< 8 10)]
+
+
+
+
+
+  ^{:line 70} [^{:val 1048576 :doc "memoryLimitMinHeapGoalHeadroom is the minimum amount of headroom the\npacer gives to the heap goal when operating in the memory-limited regime.\nThat is, it'll reduce the heap goal by this many extra bytes off of the\nbase calculation, at minimum.\n"} memoryLimitMinHeapGoalHeadroom (<< 1 20)]
+
+
+
+
+  ^{:line 75} [^{:val 3 :doc "memoryLimitHeapGoalHeadroomPercent is how headroom the memory-limit-based\nheap goal should have as a percent of the maximum possible heap goal allowed\nto maintain the memory limit.\n"} memoryLimitHeapGoalHeadroomPercent 3])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag gcControllerState :doc "gcController implements the GC pacing controller that determines\nwhen to trigger concurrent garbage collection and how much marking\nwork to do in mutator assists and background marking.\n\nIt calculates the ratio between the allocation rate (in terms of CPU\ntime) and the GC scan throughput to determine the heap size at which to\ntrigger a GC cycle such that no GC assists are required to finish on time.\nThis algorithm thus optimizes GC CPU utilization to the dedicated background\nmark utilization of 25% of GOMAXPROCS by minimizing GC assists.\nGOMAXPROCS. The high-level design of this algorithm is documented\nat https://github.com/golang/proposal/blob/master/design/44167-gc-pacer-redesign.md.\nSee https://golang.org/s/go15gcpacing for additional historical context.\n"} gcController)
+
+(go/type gcControllerState (struct
+
+    ^{:line 94 :tag atomic/Int32 :doc "Initialized from GOGC. GOGC=off means no GC.\n"} gcPercent
+
+
+
+
+
+
+
+
+
+    ^{:line 104 :tag atomic/Int64 :doc "memoryLimit is the soft memory limit in bytes.\n\nInitialized from GOMEMLIMIT. GOMEMLIMIT=off is equivalent to MaxInt64\nwhich means no soft memory limit in practice.\n\nThis is an int64 instead of a uint64 to more easily maintain parity with\nthe SetMemoryLimit API, which sets a maximum at MaxInt64. This value\nshould never be negative.\n"} memoryLimit
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 118 :tag uint64 :doc "heapMinimum is the minimum heap size at which to trigger GC.\nFor small heaps, this overrides the usual GOGC*live set rule.\n\nWhen there is a very small live set but a lot of allocation, simply\ncollecting when the heap reaches GOGC*live results in many GC\ncycles and high total per-GC overhead. This minimum amortizes this\nper-GC overhead while keeping the heap reasonably small.\n\nDuring initialization this is set to 4MB*GOGC/100. In the case of\nGOGC==0, this will set heapMinimum to 0, resulting in constant\ncollection even when the heap size is small, which is useful for\ndebugging.\n"} heapMinimum
+
+
+
+
+
+    ^{:line 124 :tag atomic/Uint64 :doc "runway is the amount of runway in heap bytes allocated by the\napplication that we want to give the GC once it starts.\n\nThis is computed from consMark during mark termination.\n"} runway
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 138 :tag float64 :doc "consMark is the estimated per-CPU consMark ratio for the application.\n\nIt represents the ratio between the application's allocation\nrate, as bytes allocated per CPU-time, and the GC's scan rate,\nas bytes scanned per CPU-time.\nThe units of this ratio are (B / cpu-ns) / (B / cpu-ns).\n\nAt a high level, this value is computed as the bytes of memory\nallocated (cons) per unit of scan work completed (mark) in a GC\ncycle, divided by the CPU time spent on each activity.\n\nUpdated at the end of each GC cycle, in endCycle.\n"} consMark
+
+
+
+
+    ^{:line 143 :tag (array 4 float64) :doc "lastConsMark is the computed cons/mark value for the previous 4 GC\ncycles. Note that this is *not* the last value of consMark, but the\nmeasured cons/mark value in endCycle.\n"} lastConsMark
+
+
+
+
+
+    ^{:line 149 :tag atomic/Uint64 :doc "gcPercentHeapGoal is the goal heapLive for when next GC ends derived\nfrom gcPercent.\n\nSet to ^uint64(0) if gcPercent is disabled.\n"} gcPercentHeapGoal
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 162 :tag atomic/Uint64 :doc "sweepDistMinTrigger is the minimum trigger to ensure a minimum\nsweep distance.\n\nThis bound is also special because it applies to both the trigger\n*and* the goal (all other trigger bounds must be based *on* the goal).\n\nIt is computed ahead of time, at commit time. The theory is that,\nabsent a sudden change to a parameter like gcPercent, the trigger\nwill be chosen to always give the sweeper enough headroom. However,\nsuch a change might dramatically and suddenly move up the trigger,\nin which case we need to ensure the sweeper still has enough headroom.\n"} sweepDistMinTrigger
+
+
+
+
+
+    ^{:line 168 :tag uint64 :doc "triggered is the point at which the current GC cycle actually triggered.\nOnly valid during the mark phase of a GC cycle, otherwise set to ^uint64(0).\n\nUpdated while the world is stopped.\n"} triggered
+
+
+
+
+
+
+    ^{:line 175 :tag uint64 :doc "lastHeapGoal is the value of heapGoal at the moment the last GC\nended. Note that this is distinct from the last value heapGoal had,\nbecause it could change if e.g. gcPercent changes.\n\nRead and written with the world stopped or with mheap_.lock held.\n"} lastHeapGoal
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 196 :tag atomic/Uint64 :doc "heapLive is the number of bytes considered live by the GC.\nThat is: retained by the most recent GC plus allocated\nsince then. heapLive ≤ memstats.totalAlloc-memstats.totalFree, since\nheapAlloc includes unmarked objects that have not yet been swept (and\nhence goes up as we allocate and down as we sweep) while heapLive\nexcludes these objects (and hence only goes up between GCs).\n\nTo reduce contention, this is updated only when obtaining a span\nfrom an mcentral and at this point it counts all of the unallocated\nslots in that span (which will be allocated before that mcache\nobtains another span from that mcentral). Hence, it slightly\noverestimates the \"true\" live heap size. It's better to overestimate\nthan to underestimate because 1) this triggers the GC earlier than\nnecessary rather than potentially too late and 2) this leads to a\nconservative GC rate rather than a GC rate that is potentially too\nlow.\n\nWhenever this is updated, call traceHeapAlloc() and\nthis gcControllerState's revise() method.\n"} heapLive
+
+
+
+
+
+
+
+    ^{:line 204 :tag atomic/Uint64 :doc "heapScan is the number of bytes of \"scannable\" heap. This is the\nlive heap (as counted by heapLive), but omitting no-scan objects and\nno-scan tails of objects.\n\nThis value is fixed at the start of a GC cycle. It represents the\nmaximum scannable heap.\n"} heapScan
+
+
+
+
+
+
+    ^{:line 211 :tag uint64 :doc "lastHeapScan is the number of bytes of heap that were scanned\nlast GC cycle. It is the same as heapMarked, but only\nincludes the \"scannable\" parts of objects.\n\nUpdated when the world is stopped.\n"} lastHeapScan
+
+
+
+    ^{:line 215 :tag atomic/Uint64 :doc "lastStackScan is the number of bytes of stack that were scanned\nlast GC cycle.\n"} lastStackScan
+
+
+
+
+
+
+
+
+
+    ^{:line 225 :tag atomic/Uint64 :doc "maxStackScan is the amount of allocated goroutine stack space in\nuse by goroutines.\n\nThis number tracks allocated goroutine stack space rather than used\ngoroutine stack space (i.e. what is actually scanned) because used\ngoroutine stack space is much harder to measure cheaply. By using\nallocated space, we make an overestimate; this is OK, it's better\nto conservatively overcount than undercount.\n"} maxStackScan
+
+
+
+    ^{:line 229 :tag atomic/Uint64 :doc "globalsScan is the total amount of global variable space\nthat is scannable.\n"} globalsScan
+
+
+
+
+
+    ^{:line 235 :tag uint64 :doc "heapMarked is the number of bytes marked by the previous\nGC. After mark termination, heapLive == heapMarked, but\nunlike heapLive, heapMarked does not change until the\nnext mark termination.\n"} heapMarked
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 251 :tag atomic/Int64 :doc "heapScanWork is the total heap scan work performed this cycle.\nstackScanWork is the total stack scan work performed this cycle.\nglobalsScanWork is the total globals scan work performed this cycle.\n\nThese are updated atomically during the cycle. Updates occur in\nbounded batches, since they are both written and read\nthroughout the cycle. At the end of the cycle, heapScanWork is how\nmuch of the retained heap is scannable.\n\nCurrently these are measured in bytes. For most uses, this is an\nopaque unit of work, but for estimation the definition is important.\n\nNote that stackScanWork includes only stack space scanned, not all\nof the allocated stack.\n"} heapScanWork
+    ^{:line 252 :tag atomic/Int64} stackScanWork
+    ^{:line 253 :tag atomic/Int64} globalsScanWork
+
+
+
+
+
+    ^{:line 259 :tag atomic/Int64 :doc "bgScanCredit is the scan work credit accumulated by the concurrent\nbackground scan. This credit is accumulated by the background scan\nand stolen by mutator assists.  Updates occur in bounded batches,\nsince it is both written and read throughout the cycle.\n"} bgScanCredit
+
+
+
+
+
+
+    ^{:line 266 :tag atomic/Int64 :doc "assistTime is the nanoseconds spent in mutator assists\nduring this cycle. This is updated atomically, and must also\nbe updated atomically even during a STW, because it is read\nby sysmon. Updates occur in bounded batches, since it is both\nwritten and read throughout the cycle.\n"} assistTime
+
+
+
+
+    ^{:line 271 :tag atomic/Int64 :doc "dedicatedMarkTime is the nanoseconds spent in dedicated mark workers\nduring this cycle. This is updated at the end of the concurrent mark\nphase.\n"} dedicatedMarkTime
+
+
+
+
+
+    ^{:line 277 :tag atomic/Int64 :doc "fractionalMarkTime is the nanoseconds spent in the fractional mark\nworker during this cycle. This is updated throughout the cycle and\nwill be up-to-date if the fractional mark worker is not currently\nrunning.\n"} fractionalMarkTime
+
+
+
+    ^{:line 281 :tag atomic/Int64 :doc "idleMarkTime is the nanoseconds spent in idle marking during this\ncycle. This is updated throughout the cycle.\n"} idleMarkTime
+
+
+
+    ^{:line 285 :tag int64 :doc "markStartTime is the absolute start time in nanoseconds\nthat assists and background mark workers started.\n"} markStartTime
+
+
+
+
+    ^{:line 290 :tag atomic/Int64 :doc "dedicatedMarkWorkersNeeded is the number of dedicated mark workers\nthat need to be started. This is computed at the beginning of each\ncycle and decremented as dedicated mark workers get started.\n"} dedicatedMarkWorkersNeeded
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 324 :tag atomic/Uint64 :doc "idleMarkWorkers is two packed int32 values in a single uint64.\nThese two values are always updated simultaneously.\n\nThe bottom int32 is the current number of idle mark workers executing.\n\nThe top int32 is the maximum number of idle mark workers allowed to\nexecute concurrently. Normally, this number is just gomaxprocs. However,\nduring periodic GC cycles it is set to 0 because the system is idle\nanyway; there's no need to go full blast on all of GOMAXPROCS.\n\nThe maximum number of idle mark workers is used to prevent new workers\nfrom starting, but it is not a hard maximum. It is possible (but\nexceedingly rare) for the current number of idle mark workers to\ntransiently exceed the maximum. This could happen if the maximum changes\njust after a GC ends, and an M with no P.\n\nNote that if we have no dedicated mark workers, we set this value to\n1 in this case we only have fractional GC workers which aren't scheduled\nstrictly enough to ensure GC progress. As a result, idle-priority mark\nworkers are vital to GC progress in these situations.\n\nFor example, consider a situation in which goroutines block on the GC\n(such as via runtime.GOMAXPROCS) and only fractional mark workers are\nscheduled (e.g. GOMAXPROCS=1). Without idle-priority mark workers, the\nlast running M might skip scheduling a fractional mark worker if its\nutilization goal is met, such that once it goes to sleep (because there's\nnothing to do), there will be nothing else to spin up a new M for the\nfractional worker in the future, stalling GC progress and causing a\ndeadlock. However, idle-priority workers will *always* run when there is\nnothing left to do, ensuring the GC makes progress.\n\nSee github.com/golang/go/issues/44163 for more details.\n"} idleMarkWorkers
+
+
+
+
+
+    ^{:line 330 :tag atomic/Float64 :doc "assistWorkPerByte is the ratio of scan work to allocated\nbytes that should be performed by mutator assists. This is\ncomputed at the beginning of each cycle and updated every\ntime heapScan is updated.\n"} assistWorkPerByte
+
+
+
+
+
+
+    ^{:line 337 :tag atomic/Float64 :doc "assistBytesPerWork is 1/assistWorkPerByte.\n\nNote that because this is read and written independently\nfrom assistWorkPerByte users may notice a skew between\nthe two values, and such a state should be safe.\n"} assistBytesPerWork
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 349 :tag float64 :doc "fractionalUtilizationGoal is the fraction of wall clock\ntime that should be spent in the fractional mark worker on\neach P that isn't running a dedicated worker.\n\nFor example, if the utilization goal is 25% and there are\nno dedicated workers, this will be 0.25. If the goal is\n25%, there is one dedicated worker, and GOMAXPROCS is 5,\nthis will be 0.05 to make up the missing 5%.\n\nIf this is zero, no fractional workers are needed.\n"} fractionalUtilizationGoal
+
+
+
+
+
+
+
+
+    ^{:line 358 :tag sysMemStat :doc "These memory stats are effectively duplicates of fields from\nmemstats.heapStats but are updated atomically or with the world\nstopped and don't provide the same consistency guarantees.\n\nBecause the runtime is responsible for managing a memory limit, it's\nuseful to couple these stats more tightly to the gcController, which\nis intimately connected to how that memory limit is maintained.\n"} heapInUse ; bytes in mSpanInUse spans
+    ^{:line 359 :tag sysMemStat} heapReleased ; bytes released to the OS
+    ^{:line 360 :tag sysMemStat} heapFree ; bytes not in any span, but not released to the OS
+    ^{:line 361 :tag atomic/Uint64} totalAlloc ; total bytes allocated
+    ^{:line 362 :tag atomic/Uint64} totalFree ; total bytes freed
+    ^{:line 363 :tag atomic/Uint64} mappedReady ; total virtual memory in the Ready state (see mem.go).
+
+
+    ^{:line 366 :tag bool :doc "test indicates that this is a test-only copy of gcControllerState.\n"} test
+
+    ^{:line 368 :tag cpu/CacheLinePad} _))
+
+
+^{:go/end 381} (go/method init [^{:tag (* gcControllerState)} c ^int32 gcPercent ^int64 memoryLimit]
+  (set! (.-heapMinimum c) defaultHeapMinimum)
+  (set! (.-triggered c) (bit-not (conv uint64 0)))
+  (.setGCPercent c gcPercent)
+  (.setMemoryLimit c memoryLimit)
+  (.commit c true)) ; No sweep phase in the first GC cycle.
+;; N.B. Don't bother calling traceHeapGoal. Tracing is never enabled at
+;; initialization time.
+;; N.B. No need to call revise; there's no GC enabled during
+;; initialization.
+
+
+
+
+
+^{:go/end 468} (go/method startCycle "startCycle resets the GC controller's state and computes estimates\nfor a new GC cycle. The caller must hold worldsema and the world\nmust be stopped.\n" [^{:tag (* gcControllerState)} c ^int64 markStartTime ^int procs ^gcTrigger trigger]
+  (.Store (.-heapScanWork c) 0)
+  (.Store (.-stackScanWork c) 0)
+  (.Store (.-globalsScanWork c) 0)
+  (.Store (.-bgScanCredit c) 0)
+  (.Store (.-assistTime c) 0)
+  (.Store (.-dedicatedMarkTime c) 0)
+  (.Store (.-fractionalMarkTime c) 0)
+  (.Store (.-idleMarkTime c) 0)
+  (set! (.-markStartTime c) markStartTime)
+  (set! (.-triggered c) (.Load (.-heapLive c)))
+
+  ;; Compute the background mark utilization goal. In general,
+  ;; this may not come out exactly. We round the number of
+  ;; dedicated workers so that the utilization is closest to
+  ;; 25%. For small GOMAXPROCS, this would introduce too much
+  ;; error, so we add fractional workers in that case.
+  (let [totalUtilizationGoal (* (conv float64 procs) gcBackgroundUtilization)
+      ^{:line 404} dedicatedMarkWorkersNeeded (conv int64 (+ totalUtilizationGoal 0.5))
+      ^{:line 405} utilError (- (/ (conv float64 dedicatedMarkWorkersNeeded) totalUtilizationGoal) 1)
+      ^:const ^{:line 406 :val 0.3} maxUtilError 0.3]
+    (if (or (< utilError (- maxUtilError)) (> utilError maxUtilError)) (do
+        ;; Rounding put us more than 30% off our goal. With
+        ;; gcBackgroundUtilization of 25%, this happens for
+        ;; GOMAXPROCS<=3 or GOMAXPROCS=6. Enable fractional
+        ;; workers to compensate.
+        (when (> (conv float64 dedicatedMarkWorkersNeeded) totalUtilizationGoal)
+          ;; Too many dedicated workers.
+          (dec! dedicatedMarkWorkersNeeded))
+
+        (set! (.-fractionalUtilizationGoal c) (/ (- totalUtilizationGoal (conv float64 dedicatedMarkWorkersNeeded)) (conv float64 procs))))
+
+      (set! (.-fractionalUtilizationGoal c) 0))
+
+
+    ;; In STW mode, we just want dedicated workers.
+    (when (> (.-gcstoptheworld debug) 0)
+      (set! dedicatedMarkWorkersNeeded (conv int64 procs))
+      (set! (.-fractionalUtilizationGoal c) 0))
+
+
+    ;; Clear per-P state
+    (range [_ p allp]
+      (set! (.-gcAssistTime p) 0)
+      (.Store (.-gcFractionalMarkTime p) 0))
+
+
+    (if (== (.-kind trigger) gcTriggerTime)
+      ;; During a periodic GC cycle, reduce the number of idle mark workers
+      ;; required. However, we need at least one dedicated mark worker or
+      ;; idle GC worker to ensure GC progress in some scenarios (see comment
+      ;; on maxIdleMarkWorkers).
+      (if (> dedicatedMarkWorkersNeeded 0)
+        (.setMaxIdleMarkWorkers c 0)
+
+        ;; TODO(mknyszek): The fundamental reason why we need this is because
+        ;; we can't count on the fractional mark worker to get scheduled.
+        ;; Fix that by ensuring it gets scheduled according to its quota even
+        ;; if the rest of the application is idle.
+        (.setMaxIdleMarkWorkers c 1))
+
+
+      ;; N.B. gomaxprocs and dedicatedMarkWorkersNeeded are guaranteed not to
+      ;; change during a GC cycle.
+      (.setMaxIdleMarkWorkers c (- (conv int32 procs) (conv int32 dedicatedMarkWorkersNeeded))))
+
+
+    ;; Compute initial values for controls that are updated
+    ;; throughout the cycle.
+    (.Store (.-dedicatedMarkWorkersNeeded c) dedicatedMarkWorkersNeeded)
+    (.revise c)
+
+    (when (> (.-gcpacertrace debug) 0)
+      (let [heapGoal (.heapGoal c)
+          ^{:line 460} assistRatio (.Load (.-assistWorkPerByte c))]
+        ^{:go/breaks [3 10 12]} (print "pacer: assist ratio=" assistRatio
+          " (scan " (>> (.Load (.-heapScan gcController)) 20) " MB in "
+          (>> (.-initialHeapLive work) 20) "->"
+          (>> heapGoal 20) " MB)"
+          " workers=" dedicatedMarkWorkersNeeded
+          "+" (.-fractionalUtilizationGoal c) "\n")))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 595} (go/method revise "revise updates the assist ratio during the GC cycle to account for\nimproved estimates. This should be called whenever gcController.heapScan,\ngcController.heapLive, or if any inputs to gcController.heapGoal are\nupdated. It is safe to call concurrently, but it may race with other\ncalls to revise.\n\nThe result of this race is that the two assist ratio values may not line\nup or may be stale. In practice this is OK because the assist ratio\nmoves slowly throughout a GC cycle, and the assist ratio is a best-effort\nheuristic anyway. Furthermore, no part of the heuristic depends on\nthe two assist ratio values being exact reciprocals of one another, since\nthe two values are used to convert values from different sources.\n\nThe worst case result of this raciness is that we may miss a larger shift\nin the ratio (say, if we decide to pace more aggressively against the\nhard heap goal) but even this \"hard goal\" is best-effort (see #40460).\nThe dedicated GC should ensure we don't exceed the hard goal by too much\nin the rare case we do exceed it.\n\nIt should only be called when gcBlackenEnabled != 0 (because this\nis when assists are enabled and the necessary statistics are\navailable).\n" [^{:tag (* gcControllerState)} c]
+  (let [gcPercent (.Load (.-gcPercent c))]
+    (when (< gcPercent 0)
+      ;; If GC is disabled but we're running a forced GC,
+      ;; act like GOGC is huge for the below calculations.
+      (set! gcPercent 100000))
+
+    (let [live (.Load (.-heapLive c))
+        ^{:line 500} scan (.Load (.-heapScan c))
+        ^{:line 501} work (+ (.Load (.-heapScanWork c)) (.Load (.-stackScanWork c)) (.Load (.-globalsScanWork c)))
+
+        ;; Assume we're under the soft goal. Pace GC to complete at
+        ;; heapGoal assuming the heap is in steady-state.
+        ^{:line 505} heapGoal (conv int64 (.heapGoal c))
+
+        ;; The expected scan work is computed as the amount of bytes scanned last
+        ;; GC cycle (both heap and stack), plus our estimate of globals work for this cycle.
+        ^{:line 509} scanWorkExpected (conv int64 (+ (.-lastHeapScan c) (.Load (.-lastStackScan c)) (.Load (.-globalsScan c))))
+
+        ;; maxScanWork is a worst-case estimate of the amount of scan work that
+        ;; needs to be performed in this GC cycle. Specifically, it represents
+        ;; the case where *all* scannable memory turns out to be live, and
+        ;; *all* allocated stack space is scannable.
+        ^{:line 515} maxStackScan (.Load (.-maxStackScan c))
+        ^{:line 516} maxScanWork (conv int64 (+ scan maxStackScan (.Load (.-globalsScan c))))]
+      (when (> work scanWorkExpected)
+        ;; We've already done more scan work than expected. Because our expectation
+        ;; is based on a steady-state scannable heap size, we assume this means our
+        ;; heap is growing. Compute a new heap goal that takes our existing runway
+        ;; computed for scanWorkExpected and extrapolates it to maxScanWork, the worst-case
+        ;; scan work. This keeps our assist ratio stable if the heap continues to grow.
+        ;;
+        ;; The effect of this mechanism is that assists stay flat in the face of heap
+        ;; growths. It's OK to use more memory this cycle to scan all the live heap,
+        ;; because the next GC cycle is inevitably going to use *at least* that much
+        ;; memory anyway.
+        (let [extHeapGoal (+ (conv int64 (* (/ (conv float64 (- heapGoal (conv int64 (.-triggered c)))) (conv float64 scanWorkExpected)) (conv float64 maxScanWork))) (conv int64 (.-triggered c)))]
+          (set! scanWorkExpected maxScanWork)
+
+          ;; hardGoal is a hard limit on the amount that we're willing to push back the
+          ;; heap goal, and that's twice the heap goal (i.e. if GOGC=100 and the heap and/or
+          ;; stacks and/or globals grow to twice their size, this limits the current GC cycle's
+          ;; growth to 4x the original live heap's size).
+          ;;
+          ;; This maintains the invariant that we use no more memory than the next GC cycle
+          ;; will anyway.
+          (let [hardGoal (conv int64 (* (+ 1.0 (/ (conv float64 gcPercent) 100.0)) (conv float64 heapGoal)))]
+            (when (> extHeapGoal hardGoal)
+              (set! extHeapGoal hardGoal))
+
+            (set! heapGoal extHeapGoal))))
+
+      (when (> (conv int64 live) heapGoal)
+        ;; We're already past our heap goal, even the extrapolated one.
+        ;; Leave ourselves some extra runway, so in the worst case we
+        ;; finish by that point.
+        (let [^:const ^{:val 1.1} maxOvershoot 1.1]
+          (set! heapGoal (conv int64 (* (conv float64 heapGoal) maxOvershoot)))
+
+          ;; Compute the upper bound on the scan work remaining.
+          (set! scanWorkExpected maxScanWork)))
+
+
+      ;; Compute the remaining scan work estimate.
+      ;;
+      ;; Note that we currently count allocations during GC as both
+      ;; scannable heap (heapScan) and scan work completed
+      ;; (scanWork), so allocation will change this difference
+      ;; slowly in the soft regime and not at all in the hard
+      ;; regime.
+      (let [scanWorkRemaining (- scanWorkExpected work)]
+        (when (< scanWorkRemaining 1000)
+          ;; We set a somewhat arbitrary lower bound on
+          ;; remaining scan work since if we aim a little high,
+          ;; we can miss by a little.
+          ;;
+          ;; We *do* need to enforce that this is at least 1,
+          ;; since marking is racy and double-scanning objects
+          ;; may legitimately make the remaining scan work
+          ;; negative, even in the hard goal regime.
+          (set! scanWorkRemaining 1000))
+
+
+        ;; Compute the heap distance remaining.
+        (let [heapRemaining (- heapGoal (conv int64 live))]
+          (when (<= heapRemaining 0)
+            ;; This shouldn't happen, but if it does, avoid
+            ;; dividing by zero or setting the assist negative.
+            (set! heapRemaining 1))
+
+
+          ;; Compute the mutator assist ratio so by the time the mutator
+          ;; allocates the remaining heap bytes up to heapGoal, it will
+          ;; have done (or stolen) the remaining amount of scan work.
+          ;; Note that the assist ratio values are updated atomically
+          ;; but not together. This means there may be some degree of
+          ;; skew between the two values. This is generally OK as the
+          ;; values shift relatively slowly over the course of a GC
+          ;; cycle.
+          (let [assistWorkPerByte (/ (conv float64 scanWorkRemaining) (conv float64 heapRemaining))
+              ^{:line 592} assistBytesPerWork (/ (conv float64 heapRemaining) (conv float64 scanWorkRemaining))]
+            (.Store (.-assistWorkPerByte c) assistWorkPerByte)
+            (.Store (.-assistBytesPerWork c) assistBytesPerWork)))))))
+
+
+
+^{:go/end 684} (go/method endCycle "endCycle computes the consMark estimate for the next cycle.\n" [^{:tag (* gcControllerState)} c ^int64 now ^int procs]
+  ;; Record last heap goal for the scavenger.
+  ;; We'll be updating the heap goal soon.
+  (set! (.-lastHeapGoal gcController) (.heapGoal c))
+
+  ;; Compute the duration of time for which assists were turned on.
+  (let [assistDuration (- now (.-markStartTime c))
+
+      ;; Assume background mark hit its utilization goal.
+      ^{:line 607} utilization gcBackgroundUtilization]
+    ;; Add assist utilization; avoid divide by zero.
+    (when (> assistDuration 0)
+      (set! utilization + (/ (conv float64 (.Load (.-assistTime c))) (conv float64 (* assistDuration (conv int64 procs))))))
+
+
+    (when (<= (.Load (.-heapLive c)) (.-triggered c))
+      ;; Shouldn't happen, but let's be very safe about this in case the
+      ;; GC is somehow extremely short.
+      ;;
+      ;; In this case though, the only reasonable value for c.heapLive-c.triggered
+      ;; would be 0, which isn't really all that useful, i.e. the GC was so short
+      ;; that it didn't matter.
+      ;;
+      ;; Ignore this case and don't update anything.
+      (return))
+
+    (let [idleUtilization 0.0]
+      (when (> assistDuration 0)
+        (set! idleUtilization (/ (conv float64 (.Load (.-idleMarkTime c))) (conv float64 (* assistDuration (conv int64 procs))))))
+
+      ;; Determine the cons/mark ratio.
+      ;;
+      ;; The units we want for the numerator and denominator are both B / cpu-ns.
+      ;; We get this by taking the bytes allocated or scanned, and divide by the amount of
+      ;; CPU time it took for those operations. For allocations, that CPU time is
+      ;;
+      ;;    assistDuration * procs * (1 - utilization)
+      ;;
+      ;; Where utilization includes just background GC workers and assists. It does *not*
+      ;; include idle GC work time, because in theory the mutator is free to take that at
+      ;; any point.
+      ;;
+      ;; For scanning, that CPU time is
+      ;;
+      ;;    assistDuration * procs * (utilization + idleUtilization)
+      ;;
+      ;; In this case, we *include* idle utilization, because that is additional CPU time that
+      ;; the GC had available to it.
+      ;;
+      ;; In effect, idle GC time is sort of double-counted here, but it's very weird compared
+      ;; to other kinds of GC work, because of how fluid it is. Namely, because the mutator is
+      ;; *always* free to take it.
+      ;;
+      ;; So this calculation is really:
+      ;;     (heapLive-trigger) / (assistDuration * procs * (1-utilization)) /
+      ;;         (scanWork) / (assistDuration * procs * (utilization+idleUtilization))
+      ;;
+      ;; Note that because we only care about the ratio, assistDuration and procs cancel out.
+      (let [scanWork (+ (.Load (.-heapScanWork c)) (.Load (.-stackScanWork c)) (.Load (.-globalsScanWork c)))
+          ^{:line 657} currentConsMark (/ (* (conv float64 (- (.Load (.-heapLive c)) (.-triggered c))) (+ utilization idleUtilization))
+            (* (conv float64 scanWork) (- 1 utilization)))
+
+          ;; Update our cons/mark estimate. This is the maximum of the value we just computed and the last
+          ;; 4 cons/mark values we measured. The reason we take the maximum here is to bias a noisy
+          ;; cons/mark measurement toward fewer assists at the expense of additional GC cycles (starting
+          ;; earlier).
+          ^{:line 664} oldConsMark (.-consMark c)]
+        (set! (.-consMark c) currentConsMark)
+        (range [i (.-lastConsMark c)]
+          (when (> (aget (.-lastConsMark c) i) (.-consMark c))
+            (set! (.-consMark c) (aget (.-lastConsMark c) i))))
+
+
+        (copy (subslice (.-lastConsMark c)) (subslice (.-lastConsMark c) 1))
+        (aset (.-lastConsMark c) (- (len (.-lastConsMark c)) 1) currentConsMark)
+
+        (when (> (.-gcpacertrace debug) 0)
+          (printlock)
+          (let [goal (* gcGoalUtilization 100)]
+            (print "pacer: " (conv int (* utilization 100)) "% CPU (" (conv int goal) " exp.) for ")
+            (print (.Load (.-heapScanWork c)) "+" (.Load (.-stackScanWork c)) "+" (.Load (.-globalsScanWork c)) " B work (" (+ (.-lastHeapScan c) (.Load (.-lastStackScan c)) (.Load (.-globalsScan c))) " B exp.) ")
+            (let [live (.Load (.-heapLive c))]
+              (print "in " (.-triggered c) " B -> " live " B (∆goal " (- (conv int64 live) (conv int64 (.-lastHeapGoal c))) ", cons/mark " oldConsMark ")")
+              (println)
+              (printunlock))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 748} (go/method ^:go/nowritebarrier enlistWorker "enlistWorker encourages another dedicated mark worker to start on\nanother P if there are spare worker slots. It is used by putfull\nwhen more work is made available.\n\nIf goexperiment.GreenTeaGC, the caller must not hold a G's scan bit,\notherwise this could cause a deadlock. This is already enforced by\nthe static lock ranking.\n" [^{:tag (* gcControllerState)} c]
+  (let [needDedicated (> (.Load (.-dedicatedMarkWorkersNeeded c)) 0)]
+
+    ;; Create new workers from idle Ps with goexperiment.GreenTeaGC.
+    ;;
+    ;; Note: with Green Tea, this places a requirement on enlistWorker
+    ;; that it must not be called while a G's scan bit is held.
+    (when goexperiment/GreenTeaGC
+      (let [needIdle (.needIdleMarkWorker c)]
+
+        ;; If we're all full on dedicated and idle workers, nothing
+        ;; to do.
+        (when (and (not needDedicated) (not needIdle))
+          (return))
+
+
+        ;; If there are idle Ps, wake one so it will run a worker
+        ;; (the scheduler will already prefer to spin up a new
+        ;; dedicated worker over an idle one).
+        (when (and (!= (.Load (.-npidle sched)) 0) (== (.Load (.-nmspinning sched)) 0))
+          (wakep) ; Likely to consume our worker request.
+          (return))))
+
+
+
+    ;; If we still need more dedicated workers, try to preempt a running P
+    ;; so it will switch to a worker.
+    (when (not needDedicated)
+      (return))
+
+
+    ;; Pick a random other P to preempt.
+    (when (<= gomaxprocs 1)
+      (return))
+
+    (let [gp (getg)]
+      (when (or (== gp nil) (== (.-m gp) nil) (== (.-p (.-m gp)) 0))
+        (return))
+
+      (let [myID (.-id (.ptr (.-p (.-m gp))))]
+        (for [tries 0] (< tries 5) (inc! tries)
+          (let [id (conv int32 (cheaprandn (conv uint32 (- gomaxprocs 1))))]
+            (when (>= id myID)
+              (inc! id))
+
+            (let [p (aget allp id)]
+              (when (!= (.-status p) _Prunning)
+                (continue))
+
+              (when (preemptone p)
+                (return)))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 845} (go/method assignWaitingGCWorker "assignWaitingGCWorker assigns a background mark worker to pp if one should\nbe run.\n\nIf a worker is selected, it is assigned to pp.nextMarkGCWorker and the P is\nwired as a GC mark worker. The G is still in _Gwaiting. If no worker is\nselected, ok returns false.\n\nIf assignedWaitingGCWorker returns true, this P must either:\n- Mark the G as runnable and run it, clearing pp.nextMarkGCWorker.\n- Or, call c.releaseNextGCMarkWorker.\n\nThis must only be called when gcBlackenEnabled != 0.\n" [^{:tag (* gcControllerState)} c ^{:tag (* p)} pp ^int64 now] :results [bool int64]
+  (when (== gcBlackenEnabled 0)
+    (throw "gcControllerState.findRunnable: blackening not enabled"))
+
+
+  (when (== now 0)
+    (set! now (nanotime)))
+
+
+  (when (not (gcShouldScheduleWorker pp))
+    ;; No good reason to schedule a worker. This can happen at
+    ;; the end of the mark phase when there are still
+    ;; assists tapering off. Don't bother running a worker
+    ;; now because it'll just return immediately.
+    (return false now))
+
+
+  (when (and (<= (.Load (.-dedicatedMarkWorkersNeeded c)) 0) (== (.-fractionalUtilizationGoal c) 0))
+    ;; No current need for dedicated workers, and no need at all for
+    ;; fractional workers. Check before trying to acquire a worker; when
+    ;; GOMAXPROCS is large, that can be expensive and is often unnecessary.
+    ;;
+    ;; When a dedicated worker stops running, the gcBgMarkWorker loop notes
+    ;; the need for the worker before returning it to the pool. If we don't
+    ;; see the need now, we wouldn't have found it in the pool anyway.
+    (return false now))
+
+
+  ;; Grab a worker before we commit to running below.
+  (let [node (conv (* gcBgMarkWorkerNode) (.pop gcBgMarkWorkerPool))]
+    (when (== node nil)
+      ;; There is at least one worker per P, so normally there are
+      ;; enough workers to run on all Ps, if necessary. However, once
+      ;; a worker enters gcMarkDone it may park without rejoining the
+      ;; pool, thus freeing a P with no corresponding worker.
+      ;; gcMarkDone never depends on another worker doing work, so it
+      ;; is safe to simply do nothing here.
+      ;;
+      ;; If gcMarkDone bails out without completing the mark phase,
+      ;; it will always do so with queued global work. Thus, that P
+      ;; will be immediately eligible to re-run the worker G it was
+      ;; just using, ensuring work can complete.
+      (return false now))
+
+
+    (let [decIfPositive ^{:go/end 818} (fn ^bool [^{:tag (* atomic/Int64)} val]
+          (while true
+            (let [v (.Load val)]
+              (when (<= v 0)
+                (return false))
+
+
+              (when (.CompareAndSwap val v (- v 1))
+                (return true)))))]
+
+
+
+
+      (cond (decIfPositive (addr (.-dedicatedMarkWorkersNeeded c)))
+        ;; This P is now dedicated to marking until the end of
+        ;; the concurrent mark phase.
+        (set! (.-gcMarkWorkerMode pp) gcMarkWorkerDedicatedMode)
+        (== (.-fractionalUtilizationGoal c) 0) (do
+          ;; No need for fractional workers.
+          (.push gcBgMarkWorkerPool (addr (.-node node)))
+          (return false now)) :else
+
+        ;; Is this P behind on the fractional utilization
+        ;; goal?
+        ;;
+        ;; This should be kept in sync with pollFractionalWorkerExit.
+        (let [delta (- now (.-markStartTime c))]
+          (when (and (> delta 0) (> (/ (conv float64 (.Load (.-gcFractionalMarkTime pp))) (conv float64 delta)) (.-fractionalUtilizationGoal c)))
+            ;; Nope. No need to run a fractional worker.
+            (.push gcBgMarkWorkerPool (addr (.-node node)))
+            (return false now))
+
+          ;; Run a fractional worker.
+          (set! (.-gcMarkWorkerMode pp) gcMarkWorkerFractionalMode)))
+
+
+      (set! (.-nextGCMarkWorker pp) node)
+      (return true now))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 891} (go/method ^:go/yeswritebarrierrec findRunnableGCWorker "findRunnableGCWorker returns a background mark worker for pp if it\nshould be run.\n\nIf findRunnableGCWorker returns a G, this P is wired as a GC mark worker and\nmust run the G.\n\nThis must only be called when gcBlackenEnabled != 0.\n\nThis function is allowed to have write barriers because it is called from\nthe portion of findRunnable that always has a P.\n" [^{:tag (* gcControllerState)} c ^{:tag (* p)} pp ^int64 now] :results [(* g) int64]
+  ;; Since we have the current time, check if the GC CPU limiter
+  ;; hasn't had an update in a while. This check is necessary in
+  ;; case the limiter is on but hasn't been checked in a while and
+  ;; so may have left sufficient headroom to turn off again.
+  (when (== now 0)
+    (set! now (nanotime)))
+
+  (when (.needUpdate gcCPULimiter now)
+    (.update gcCPULimiter now))
+
+
+  ;; If a worker wasn't already assigned by procresize, assign one now.
+  (when (== (.-nextGCMarkWorker pp) nil)
+    (let [(values ok now) (.assignWaitingGCWorker c pp now)]
+      (when (not ok)
+        (return nil now))))
+
+
+
+  (let [node (.-nextGCMarkWorker pp)]
+    (set! (.-nextGCMarkWorker pp) nil)
+
+    ;; Run the background mark worker.
+    (let [gp (.ptr (.-gp node))
+        ^{:line 884} trace (traceAcquire)]
+      (casgstatus gp _Gwaiting _Grunnable)
+      (when (.ok trace)
+        (.GoUnpark trace gp 0)
+        (traceRelease trace))
+
+      (return gp now))))
+
+
+
+
+
+
+
+
+^{:go/end 908} (go/method ^:go/yeswritebarrierrec releaseNextGCMarkWorker "Release an unused pp.nextGCMarkWorker, if any.\n\nThis function is allowed to have write barriers because it is called from\nthe portion of schedule.\n" [^{:tag (* gcControllerState)} c ^{:tag (* p)} pp]
+  (let [node (.-nextGCMarkWorker pp)]
+    (when (== node nil)
+      (return))
+
+
+    (.markWorkerStop c (.-gcMarkWorkerMode pp) 0)
+    (.push gcBgMarkWorkerPool (addr (.-node node)))
+    (set! (.-nextGCMarkWorker pp) nil)))
+
+
+
+
+
+
+
+^{:go/end 929} (go/method resetLive "resetLive sets up the controller state for the next mark phase after the end\nof the previous one. Must be called after endCycle and before commit, before\nthe world is started.\n\nThe world must be stopped.\n" [^{:tag (* gcControllerState)} c ^uint64 bytesMarked]
+  (set! (.-heapMarked c) bytesMarked)
+  (.Store (.-heapLive c) bytesMarked)
+  (.Store (.-heapScan c) (conv uint64 (.Load (.-heapScanWork c))))
+  (set! (.-lastHeapScan c) (conv uint64 (.Load (.-heapScanWork c))))
+  (.Store (.-lastStackScan c) (conv uint64 (.Load (.-stackScanWork c))))
+  (set! (.-triggered c) (bit-not (conv uint64 0))) ; Reset triggered.
+
+  ;; heapLive was updated, so emit a trace event.
+  (let [trace (traceAcquire)]
+    (when (.ok trace)
+      (.HeapAlloc trace bytesMarked)
+      (traceRelease trace))))
+
+
+
+
+
+
+
+
+
+^{:go/end 950} (go/method markWorkerStop "markWorkerStop must be called whenever a mark worker stops executing.\n\nIt updates mark work accounting in the controller by a duration of\nwork in nanoseconds and other bookkeeping.\n\nSafe to execute at any time.\n" [^{:tag (* gcControllerState)} c ^gcMarkWorkerMode mode ^int64 duration]
+  (switch mode
+    (case [gcMarkWorkerDedicatedMode]
+      (.Add (.-dedicatedMarkTime c) duration)
+      (.Add (.-dedicatedMarkWorkersNeeded c) 1))
+    (case [gcMarkWorkerFractionalMode]
+      (.Add (.-fractionalMarkTime c) duration))
+    (case [gcMarkWorkerIdleMode]
+      (.Add (.-idleMarkTime c) duration)
+      (.removeIdleMarkWorker c))
+    (default
+      (throw "markWorkerStop: unknown mark worker mode"))))
+
+
+
+^{:go/end 972} (go/method update [^{:tag (* gcControllerState)} c ^int64 dHeapLive ^int64 dHeapScan]
+  (when (!= dHeapLive 0)
+    (let [trace (traceAcquire)
+        ^{:line 955} live (.Add (.-heapLive gcController) dHeapLive)]
+      (when (.ok trace)
+        ;; gcController.heapLive changed.
+        (.HeapAlloc trace live)
+        (traceRelease trace))))
+
+
+  (if (== gcBlackenEnabled 0)
+    ;; Update heapScan when we're not in a current GC. It is fixed
+    ;; at the beginning of a cycle.
+    (when (!= dHeapScan 0)
+      (.Add (.-heapScan gcController) dHeapScan))
+
+
+    ;; gcController.heapLive changed.
+    (.revise c)))
+
+
+
+^{:go/end 984} (go/method addScannableStack [^{:tag (* gcControllerState)} c ^{:tag (* p)} pp ^int64 amount]
+  (when (== pp nil)
+    (.Add (.-maxStackScan c) amount)
+    (return))
+
+  (set! (.-maxStackScanDelta pp) + amount)
+  (when (or (>= (.-maxStackScanDelta pp) maxStackScanSlack) (<= (.-maxStackScanDelta pp) (- maxStackScanSlack)))
+    (.Add (.-maxStackScan c) (.-maxStackScanDelta pp))
+    (set! (.-maxStackScanDelta pp) 0)))
+
+
+
+^{:go/end 988} (go/method addGlobals [^{:tag (* gcControllerState)} c ^int64 amount]
+  (.Add (.-globalsScan c) amount))
+
+
+
+^{:go/end 994} (go/method heapGoal "heapGoal returns the current heap goal.\n" ^uint64 [^{:tag (* gcControllerState)} c]
+  (let [(values goal _) (.heapGoalInternal c)]
+    ^{:line 993} goal))
+
+
+
+
+
+
+^{:go/end 1043} (go/method heapGoalInternal "heapGoalInternal is the implementation of heapGoal which returns additional\ninformation that is necessary for computing the trigger.\n\nThe returned minTrigger is always <= goal.\n" [^{:tag (* gcControllerState)} c] :results [^uint64 goal ^uint64 minTrigger]
+  ;; Start with the goal calculated for gcPercent.
+  (set! goal (.Load (.-gcPercentHeapGoal c)))
+
+  ;; Check if the memory-limit-based goal is smaller, and if so, pick that.
+  (if [newGoal (.memoryLimitHeapGoal c)] (< newGoal goal)
+    (set! goal newGoal)
+
+    ;; We're not limited by the memory limit goal, so perform a series of
+    ;; adjustments that might move the goal forward in a variety of circumstances.
+
+    (let [sweepDistTrigger (.Load (.-sweepDistMinTrigger c))]
+      (when (> sweepDistTrigger goal)
+        ;; Set the goal to maintain a minimum sweep distance since
+        ;; the last call to commit. Note that we never want to do this
+        ;; if we're in the memory limit regime, because it could push
+        ;; the goal up.
+        (set! goal sweepDistTrigger))
+
+      ;; Since we ignore the sweep distance trigger in the memory
+      ;; limit regime, we need to ensure we don't propagate it to
+      ;; the trigger, because it could cause a violation of the
+      ;; invariant that the trigger < goal.
+      (set! minTrigger sweepDistTrigger)
+
+      ;; Ensure that the heap goal is at least a little larger than
+      ;; the point at which we triggered. This may not be the case if GC
+      ;; start is delayed or if the allocation that pushed gcController.heapLive
+      ;; over trigger is large or if the trigger is really close to
+      ;; GOGC. Assist is proportional to this distance, so enforce a
+      ;; minimum distance, even if it means going over the GOGC goal
+      ;; by a tiny bit.
+      ;;
+      ;; Ignore this if we're in the memory limit regime: we'd prefer to
+      ;; have the GC respond hard about how close we are to the goal than to
+      ;; push the goal back in such a manner that it could cause us to exceed
+      ;; the memory limit.
+      (let [^:const ^{:val 65536} minRunway (<< 64 10)]
+        (when (and (!= (.-triggered c) (bit-not (conv uint64 0))) (< goal (+ (.-triggered c) minRunway)))
+          (set! goal (+ (.-triggered c) minRunway))))))
+
+
+  (return))
+
+
+
+^{:go/end 1158} (go/method memoryLimitHeapGoal "memoryLimitHeapGoal returns a heap goal derived from memoryLimit.\n" ^uint64 [^{:tag (* gcControllerState)} c]
+  ;; Start by pulling out some values we'll need. Be careful about overflow.
+  (let [(values ^uint64 heapFree ^uint64 heapAlloc ^uint64 mappedReady) (zero uint64)]
+    (while true
+      (set! heapFree (.load (.-heapFree c))) ; Free and unscavenged memory.
+      (set! heapAlloc (- (.Load (.-totalAlloc c)) (.Load (.-totalFree c)))) ; Heap object bytes in use.
+      (set! mappedReady (.Load (.-mappedReady c))) ; Total unreleased mapped memory.
+      (when (<= (+ heapFree heapAlloc) mappedReady)
+        (break)))
+
+    ;; It is impossible for total unreleased mapped memory to exceed heap memory, but
+    ;; because these stats are updated independently, we may observe a partial update
+    ;; including only some values. Thus, we appear to break the invariant. However,
+    ;; this condition is necessarily transient, so just try again. In the case of a
+    ;; persistent accounting error, we'll deadlock here.
+
+
+    ;; Below we compute a goal from memoryLimit. There are a few things to be aware of.
+    ;; Firstly, the memoryLimit does not easily compare to the heap goal: the former
+    ;; is total mapped memory by the runtime that hasn't been released, while the latter is
+    ;; only heap object memory. Intuitively, the way we convert from one to the other is to
+    ;; subtract everything from memoryLimit that both contributes to the memory limit (so,
+    ;; ignore scavenged memory) and doesn't contain heap objects. This isn't quite what
+    ;; lines up with reality, but it's a good starting point.
+    ;;
+    ;; In practice this computation looks like the following:
+    ;;
+    ;;    goal := memoryLimit - ((mappedReady - heapFree - heapAlloc) + max(mappedReady - memoryLimit, 0))
+    ;;                    ^1                                    ^2
+    ;;    goal -= goal / 100 * memoryLimitHeapGoalHeadroomPercent
+    ;;    ^3
+    ;;
+    ;; Let's break this down.
+    ;;
+    ;; The first term (marker 1) is everything that contributes to the memory limit and isn't
+    ;; or couldn't become heap objects. It represents, broadly speaking, non-heap overheads.
+    ;; One oddity you may have noticed is that we also subtract out heapFree, i.e. unscavenged
+    ;; memory that may contain heap objects in the future.
+    ;;
+    ;; Let's take a step back. In an ideal world, this term would look something like just
+    ;; the heap goal. That is, we "reserve" enough space for the heap to grow to the heap
+    ;; goal, and subtract out everything else. This is of course impossible; the definition
+    ;; is circular! However, this impossible definition contains a key insight: the amount
+    ;; we're *going* to use matters just as much as whatever we're currently using.
+    ;;
+    ;; Consider if the heap shrinks to 1/10th its size, leaving behind lots of free and
+    ;; unscavenged memory. mappedReady - heapAlloc will be quite large, because of that free
+    ;; and unscavenged memory, pushing the goal down significantly.
+    ;;
+    ;; heapFree is also safe to exclude from the memory limit because in the steady-state, it's
+    ;; just a pool of memory for future heap allocations, and making new allocations from heapFree
+    ;; memory doesn't increase overall memory use. In transient states, the scavenger and the
+    ;; allocator actively manage the pool of heapFree memory to maintain the memory limit.
+    ;;
+    ;; The second term (marker 2) is the amount of memory we've exceeded the limit by, and is
+    ;; intended to help recover from such a situation. By pushing the heap goal down, we also
+    ;; push the trigger down, triggering and finishing a GC sooner in order to make room for
+    ;; other memory sources. Note that since we're effectively reducing the heap goal by X bytes,
+    ;; we're actually giving more than X bytes of headroom back, because the heap goal is in
+    ;; terms of heap objects, but it takes more than X bytes (e.g. due to fragmentation) to store
+    ;; X bytes worth of objects.
+    ;;
+    ;; The final adjustment (marker 3) reduces the maximum possible memory limit heap goal by
+    ;; memoryLimitHeapGoalPercent. As the name implies, this is to provide additional headroom in
+    ;; the face of pacing inaccuracies, and also to leave a buffer of unscavenged memory so the
+    ;; allocator isn't constantly scavenging. The reduction amount also has a fixed minimum
+    ;; (memoryLimitMinHeapGoalHeadroom, not pictured) because the aforementioned pacing inaccuracies
+    ;; disproportionately affect small heaps: as heaps get smaller, the pacer's inputs get fuzzier.
+    ;; Shorter GC cycles and less GC work means noisy external factors like the OS scheduler have a
+    ;; greater impact.
+
+    (let [memoryLimit (conv uint64 (.Load (.-memoryLimit c)))
+
+        ;; Compute term 1.
+        ^{:line 1120} nonHeapMemory (- mappedReady heapFree heapAlloc)
+
+        ;; Compute term 2.
+        ^{:line 1123 :tag uint64} overage (zero uint64)]
+      (when (> mappedReady memoryLimit)
+        (set! overage (- mappedReady memoryLimit)))
+
+
+      (when (>= (+ nonHeapMemory overage) memoryLimit)
+        ;; We're at a point where non-heap memory exceeds the memory limit on its own.
+        ;; There's honestly not much we can do here but just trigger GCs continuously
+        ;; and let the CPU limiter reign that in. Something has to give at this point.
+        ;; Set it to heapMarked, the lowest possible goal.
+        (return (.-heapMarked c)))
+
+
+      ;; Compute the goal.
+      (let [goal (- memoryLimit (+ nonHeapMemory overage))
+
+          ;; Apply some headroom to the goal to account for pacing inaccuracies and to reduce
+          ;; the impact of scavenging at allocation time in response to a high allocation rate
+          ;; when GOGC=off. See issue #57069. Also, be careful about small limits.
+          ^{:line 1142} headroom (* (/ goal 100) memoryLimitHeapGoalHeadroomPercent)]
+        (when (< headroom memoryLimitMinHeapGoalHeadroom)
+          ;; Set a fixed minimum to deal with the particularly large effect pacing inaccuracies
+          ;; have for smaller heaps.
+          (set! headroom memoryLimitMinHeapGoalHeadroom))
+
+        (if (or (< goal headroom) (< (- goal headroom) headroom))
+          (set! goal headroom)
+
+          (set! goal (- goal headroom)))
+
+        ;; Don't let us go below the live heap. A heap goal below the live heap doesn't make sense.
+        (when (< goal (.-heapMarked c))
+          (set! goal (.-heapMarked c)))
+
+        ^{:line 1157} goal))))
+
+
+(go/const
+
+
+
+
+
+
+
+  ^{:line 1168} [^{:val 64 :doc "These constants determine the bounds on the GC trigger as a fraction\nof heap bytes allocated between the start of a GC (heapLive == heapMarked)\nand the end of a GC (heapLive == heapGoal).\n\nThe constants are obscured in this way for efficiency. The denominator\nof the fraction is always a power-of-two for a quick division, so that\nthe numerator is a single constant integer multiplication.\n"} triggerRatioDen 64]
+
+
+
+
+
+  ^{:line 1174} [^{:val 45 :doc "The minimum trigger constant was chosen empirically: given a sufficiently\nfast/scalable allocator with 48 Ps that could drive the trigger ratio\nto <0.05, this constant causes applications to retain the same peak\nRSS compared to not having this allocator.\n"} minTriggerRatioNum 45] ; ~0.7
+
+
+
+  ^{:line 1178} [^{:val 61 :doc "The maximum trigger constant is chosen somewhat arbitrarily, but the\ncurrent constant has served us well over the years.\n"} maxTriggerRatioNum 61]) ; ~0.95
+
+
+
+
+
+
+
+
+
+^{:go/end 1255} (go/method trigger "trigger returns the current point at which a GC should trigger along with\nthe heap goal.\n\nThe returned value may be compared against heapLive to determine whether\nthe GC should trigger. Thus, the GC trigger condition should be (but may\nnot be, in the case of small movements for efficiency) checked whenever\nthe heap goal may change.\n" [^{:tag (* gcControllerState)} c] :results [uint64 uint64]
+  (let [(values goal minTrigger) (.heapGoalInternal c)]
+
+    ;; Invariant: the trigger must always be less than the heap goal.
+    ;;
+    ;; Note that the memory limit sets a hard maximum on our heap goal,
+    ;; but the live heap may grow beyond it.
+
+    (when (>= (.-heapMarked c) goal)
+      ;; The goal should never be smaller than heapMarked, but let's be
+      ;; defensive about it. The only reasonable trigger here is one that
+      ;; causes a continuous GC cycle at heapMarked, but respect the goal
+      ;; if it came out as smaller than that.
+      (return goal goal))
+
+
+    ;; Below this point, c.heapMarked < goal.
+
+    ;; heapMarked is our absolute minimum, and it's possible the trigger
+    ;; bound we get from heapGoalinternal is less than that.
+    (when (< minTrigger (.-heapMarked c))
+      (set! minTrigger (.-heapMarked c)))
+
+
+    ;; If we let the trigger go too low, then if the application
+    ;; is allocating very rapidly we might end up in a situation
+    ;; where we're allocating black during a nearly always-on GC.
+    ;; The result of this is a growing heap and ultimately an
+    ;; increase in RSS. By capping us at a point >0, we're essentially
+    ;; saying that we're OK using more CPU during the GC to prevent
+    ;; this growth in RSS.
+    (let [triggerLowerBound (+ (* (/ (- goal (.-heapMarked c)) triggerRatioDen) minTriggerRatioNum) (.-heapMarked c))]
+      (when (< minTrigger triggerLowerBound)
+        (set! minTrigger triggerLowerBound))
+
+
+      ;; For small heaps, set the max trigger point at maxTriggerRatio of the way
+      ;; from the live heap to the heap goal. This ensures we always have *some*
+      ;; headroom when the GC actually starts. For larger heaps, set the max trigger
+      ;; point at the goal, minus the minimum heap size.
+      ;;
+      ;; This choice follows from the fact that the minimum heap size is chosen
+      ;; to reflect the costs of a GC with no work to do. With a large heap but
+      ;; very little scan work to perform, this gives us exactly as much runway
+      ;; as we would need, in the worst case.
+      (let [maxTrigger (+ (* (/ (- goal (.-heapMarked c)) triggerRatioDen) maxTriggerRatioNum) (.-heapMarked c))]
+        (when (and (> goal defaultHeapMinimum) (> (- goal defaultHeapMinimum) maxTrigger))
+          (set! maxTrigger (- goal defaultHeapMinimum)))
+
+        (set! maxTrigger (max maxTrigger minTrigger))
+
+        ;; Compute the trigger from our bounds and the runway stored by commit.
+        (let [^uint64 trigger (zero uint64)
+            ^{:line 1241} runway (.Load (.-runway c))]
+          (if (> runway goal)
+            (set! trigger minTrigger)
+
+            (set! trigger (- goal runway)))
+
+          (set! trigger (max trigger minTrigger))
+          (set! trigger (min trigger maxTrigger))
+          (when (> trigger goal)
+            (print "trigger=" trigger " heapGoal=" goal "\n")
+            (print "minTrigger=" minTrigger " maxTrigger=" maxTrigger "\n")
+            (throw "produced a trigger greater than the heap goal"))
+
+          (return trigger goal))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1328} (go/method commit "commit recomputes all pacing parameters needed to derive the\ntrigger and the heap goal. Namely, the gcPercent-based heap goal,\nand the amount of runway we want to give the GC this cycle.\n\nThis can be called any time. If GC is the in the middle of a\nconcurrent phase, it will adjust the pacing of that phase.\n\nisSweepDone should be the result of calling isSweepDone(),\nunless we're testing or we know we're executing during a GC cycle.\n\nThis depends on gcPercent, gcController.heapMarked, and\ngcController.heapLive. These must be up to date.\n\nCallers must call gcControllerState.revise after calling this\nfunction if the GC is enabled.\n\nmheap_.lock must be held or the world must be stopped.\n" [^{:tag (* gcControllerState)} c ^bool isSweepDone]
+  (when (not (.-test c))
+    (assertWorldStoppedOrLockHeld (addr (.-lock mheap_))))
+
+
+  (if isSweepDone
+    ;; The sweep is done, so there aren't any restrictions on the trigger
+    ;; we need to think about.
+    (.Store (.-sweepDistMinTrigger c) 0)
+
+    ;; Concurrent sweep happens in the heap growth
+    ;; from gcController.heapLive to trigger. Make sure we
+    ;; give the sweeper some runway if it doesn't have enough.
+    (.Store (.-sweepDistMinTrigger c) (+ (.Load (.-heapLive c)) sweepMinHeapDistance)))
+
+
+  ;; Compute the next GC goal, which is when the allocated heap
+  ;; has grown by GOGC/100 over where it started the last cycle,
+  ;; plus additional runway for non-heap sources of GC work.
+  (let [gcPercentHeapGoal (bit-not (conv uint64 0))]
+    (when [gcPercent (.Load (.-gcPercent c))] (>= gcPercent 0)
+      (set! gcPercentHeapGoal (+ (.-heapMarked c) (/ (* (+ (.-heapMarked c) (.Load (.-lastStackScan c)) (.Load (.-globalsScan c))) (conv uint64 gcPercent)) 100))))
+
+    ;; Apply the minimum heap size here. It's defined in terms of gcPercent
+    ;; and is only updated by functions that call commit.
+    (when (< gcPercentHeapGoal (.-heapMinimum c))
+      (set! gcPercentHeapGoal (.-heapMinimum c)))
+
+    (.Store (.-gcPercentHeapGoal c) gcPercentHeapGoal)
+
+    ;; Compute the amount of runway we want the GC to have by using our
+    ;; estimate of the cons/mark ratio.
+    ;;
+    ;; The idea is to take our expected scan work, and multiply it by
+    ;; the cons/mark ratio to determine how long it'll take to complete
+    ;; that scan work in terms of bytes allocated. This gives us our GC's
+    ;; runway.
+    ;;
+    ;; However, the cons/mark ratio is a ratio of rates per CPU-second, but
+    ;; here we care about the relative rates for some division of CPU
+    ;; resources among the mutator and the GC.
+    ;;
+    ;; To summarize, we have B / cpu-ns, and we want B / ns. We get that
+    ;; by multiplying by our desired division of CPU resources. We choose
+    ;; to express CPU resources as GOMAPROCS*fraction. Note that because
+    ;; we're working with a ratio here, we can omit the number of CPU cores,
+    ;; because they'll appear in the numerator and denominator and cancel out.
+    ;; As a result, this is basically just "weighing" the cons/mark ratio by
+    ;; our desired division of resources.
+    ;;
+    ;; Furthermore, by setting the runway so that CPU resources are divided
+    ;; this way, assuming that the cons/mark ratio is correct, we make that
+    ;; division a reality.
+    (.Store (.-runway c) (conv uint64 (* (/ (* (.-consMark c) (- 1 gcGoalUtilization)) gcGoalUtilization) (conv float64 (+ (.-lastHeapScan c) (.Load (.-lastStackScan c)) (.Load (.-globalsScan c)))))))))
+
+
+
+
+
+
+^{:go/end 1347} (go/method setGCPercent "setGCPercent updates gcPercent. commit must be called after.\nReturns the old value of gcPercent.\n\nThe world must be stopped, or mheap_.lock must be held.\n" ^int32 [^{:tag (* gcControllerState)} c ^int32 in]
+  (when (not (.-test c))
+    (assertWorldStoppedOrLockHeld (addr (.-lock mheap_))))
+
+
+  (let [out (.Load (.-gcPercent c))]
+    (when (< in 0)
+      (set! in -1))
+
+    (set! (.-heapMinimum c) (/ (* defaultHeapMinimum (conv uint64 in)) 100))
+    (.Store (.-gcPercent c) in)
+
+    ^{:line 1346} out))
+
+
+
+^{:go/end 1366} (go/func ^{:go/linkname "setGCPercent runtime/debug.setGCPercent"} setGCPercent [^int32 in] :results [^int32 out]
+  ;; Run on the system stack since we grab the heap lock.
+  (systemstack ^{:go/end 1357} (fn []
+      (lock (addr (.-lock mheap_)))
+      (set! out (.setGCPercent gcController in))
+      (gcControllerCommit)
+      (unlock (addr (.-lock mheap_)))))
+
+
+  ;; If we just disabled GC, wait for any concurrent GC mark to
+  ;; finish so we always return with no GC running.
+  (when (< in 0)
+    (gcWaitOnMark (.Load (.-cycles work))))
+
+
+  ^{:line 1365} out)
+
+
+^{:go/end 1377} (go/func readGOGC ^int32 []
+  ^{:go/breaks [[4 1376]]} (let [p (gogetenv "GOGC")]
+    (when (== p "off")
+      (return -1))
+
+    (when [(values n err) (strconv/ParseInt p 10 32)] (== err nil)
+      (return (conv int32 n)))
+
+    100))
+
+
+
+
+
+
+^{:go/end 1394} (go/method setMemoryLimit "setMemoryLimit updates memoryLimit. commit must be called after\nReturns the old value of memoryLimit.\n\nThe world must be stopped, or mheap_.lock must be held.\n" ^int64 [^{:tag (* gcControllerState)} c ^int64 in]
+  (when (not (.-test c))
+    (assertWorldStoppedOrLockHeld (addr (.-lock mheap_))))
+
+
+  (let [out (.Load (.-memoryLimit c))]
+    (when (>= in 0)
+      (.Store (.-memoryLimit c) in))
+
+
+    ^{:line 1393} out))
+
+
+
+^{:go/end 1412} (go/func ^{:go/linkname "setMemoryLimit runtime/debug.setMemoryLimit"} setMemoryLimit [^int64 in] :results [^int64 out]
+  ;; Run on the system stack since we grab the heap lock.
+  (systemstack ^{:go/end 1410} (fn []
+      (lock (addr (.-lock mheap_)))
+      (set! out (.setMemoryLimit gcController in))
+      (when (or (< in 0) (== out in))
+        ;; If we're just checking the value or not changing
+        ;; it, there's no point in doing the rest.
+        (unlock (addr (.-lock mheap_)))
+        (return))
+
+      (gcControllerCommit)
+      (unlock (addr (.-lock mheap_)))))
+
+  ^{:line 1411} out)
+
+
+^{:go/end 1425} (go/func readGOMEMLIMIT ^int64 []
+  (let [p (gogetenv "GOMEMLIMIT")]
+    (when (or (== p "") (== p "off"))
+      (return math/MaxInt64))
+
+    (let [(values n ok) (parseByteCount p)]
+      (when (not ok)
+        (print "GOMEMLIMIT=" p "\n")
+        (throw "malformed GOMEMLIMIT; see `go doc runtime/debug.SetMemoryLimit`"))
+
+      ^{:line 1424} n)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1455} (go/method ^:go/nosplit addIdleMarkWorker "addIdleMarkWorker attempts to add a new idle mark worker.\n\nIf this returns true, the caller must become an idle mark worker unless\nthere's no background mark worker goroutines in the pool. This case is\nharmless because there are already background mark workers running.\nIf this returns false, the caller must NOT become an idle mark worker.\n\nnosplit because it may be called without a P.\n" ^bool [^{:tag (* gcControllerState)} c]
+  (while true
+    (let [old (.Load (.-idleMarkWorkers c))
+        (values n max) (values (conv int32 (bit-and old (conv uint64 (bit-not (conv uint32 0))))) (conv int32 (>> old 32)))]
+      (when (>= n max)
+        ;; See the comment on idleMarkWorkers for why
+        ;; n > max is tolerated.
+        (return false))
+
+      (when (< n 0)
+        (print "n=" n " max=" max "\n")
+        (throw "negative idle mark workers"))
+
+      (let [new (bit-or (conv uint64 (conv uint32 (+ n 1))) (<< (conv uint64 max) 32))]
+        (when (.CompareAndSwap (.-idleMarkWorkers c) old new)
+          (return true))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1469} (go/method ^:go/nosplit needIdleMarkWorker "needIdleMarkWorker is a hint as to whether another idle mark worker is needed.\n\nThe caller must still call addIdleMarkWorker to become one. This is mainly\nuseful for a quick check before an expensive operation.\n\nnosplit because it may be called without a P.\n" ^bool [^{:tag (* gcControllerState)} c]
+  (let [p (.Load (.-idleMarkWorkers c))
+      (values n max) (values (conv int32 (bit-and p (conv uint64 (bit-not (conv uint32 0))))) (conv int32 (>> p 32)))]
+    (< n max)))
+
+
+
+^{:go/end 1485} (go/method removeIdleMarkWorker "removeIdleMarkWorker must be called when a new idle mark worker stops executing.\n" [^{:tag (* gcControllerState)} c]
+  (while true
+    (let [old (.Load (.-idleMarkWorkers c))
+        (values n max) (values (conv int32 (bit-and old (conv uint64 (bit-not (conv uint32 0))))) (conv int32 (>> old 32)))]
+      (when (< (- n 1) 0)
+        (print "n=" n " max=" max "\n")
+        (throw "negative idle mark workers"))
+
+      (let [new (bit-or (conv uint64 (conv uint32 (- n 1))) (<< (conv uint64 max) 32))]
+        (when (.CompareAndSwap (.-idleMarkWorkers c) old new)
+          (return))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1505} (go/method setMaxIdleMarkWorkers "setMaxIdleMarkWorkers sets the maximum number of idle mark workers allowed.\n\nThis method is optimistic in that it does not wait for the number of\nidle mark workers to reduce to max before returning; it assumes the workers\nwill deschedule themselves.\n" [^{:tag (* gcControllerState)} c ^int32 max]
+  (while true
+    (let [old (.Load (.-idleMarkWorkers c))
+        ^{:line 1495} n (conv int32 (bit-and old (conv uint64 (bit-not (conv uint32 0)))))]
+      (when (< n 0)
+        (print "n=" n " max=" max "\n")
+        (throw "negative idle mark workers"))
+
+      (let [new (bit-or (conv uint64 (conv uint32 n)) (<< (conv uint64 max) 32))]
+        (when (.CompareAndSwap (.-idleMarkWorkers c) old new)
+          (return))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1537} (go/func ^:go/systemstack gcControllerCommit "gcControllerCommit is gcController.commit, but passes arguments from live\n(non-test) data. It also updates any consumers of the GC pacing, such as\nsweep pacing and the background scavenger.\n\nCalls gcController.commit.\n\nThe heap lock must be held, so this must be executed on the system stack.\n" []
+  (assertWorldStoppedOrLockHeld (addr (.-lock mheap_)))
+
+  (.commit gcController (isSweepDone))
+
+  ;; Update mark pacing.
+  (when (!= gcphase _GCoff)
+    (.revise gcController))
+
+
+  ;; TODO(mknyszek): This isn't really accurate any longer because the heap
+  ;; goal is computed dynamically. Still useful to snapshot, but not as useful.
+  (let [trace (traceAcquire)]
+    (when (.ok trace)
+      (.HeapGoal trace)
+      (traceRelease trace))
+
+
+    (let [(values trigger heapGoal) (.trigger gcController)]
+      (gcPaceSweeper trigger)
+      (gcPaceScavenger (.Load (.-memoryLimit gcController)) heapGoal (.-lastHeapGoal gcController)))))

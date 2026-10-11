@@ -1,0 +1,416 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package expvar provides a standardized interface to public variables, such
+;; as operation counters in servers. It exposes these variables via HTTP at
+;; /debug/vars in JSON format. As of Go 1.22, the /debug/vars request must
+;; use GET.
+;;
+;; Operations to set or modify these public variables are atomic.
+;;
+;; In addition to adding the HTTP handler, this package registers the
+;; following variables:
+;;
+;;	cmdline   os.Args
+;;	memstats  runtime.Memstats
+;;
+;; The package is sometimes only imported for the side effect of
+;; registering its HTTP handler and the above variables. To use it
+;; this way, link this package into your program:
+;;
+;;	import _ "expvar"
+(in-ns 'go.expvar) (go/file "expvar.go" :doc "Package expvar provides a standardized interface to public variables, such\nas operation counters in servers. It exposes these variables via HTTP at\n/debug/vars in JSON format. As of Go 1.22, the /debug/vars request must\nuse GET.\n\nOperations to set or modify these public variables are atomic.\n\nIn addition to adding the HTTP handler, this package registers the\nfollowing variables:\n\n\tcmdline   os.Args\n\tmemstats  runtime.Memstats\n\nThe package is sometimes only imported for the side effect of\nregistering its HTTP handler and the above variables. To use it\nthis way, link this package into your program:\n\n\timport _ \"expvar\"\n" :imports [
+
+
+    ^{:line 26} [json "encoding/json"]
+    ^{:line 27} [godebug "internal/godebug"]
+    ^{:line 28} [log "log"]
+    ^{:line 29} [math "math"]
+    ^{:line 30} [http "net/http"]
+    ^{:line 31} [os "os"]
+    ^{:line 32} [runtime "runtime"]
+    ^{:line 33} [slices "slices"]
+    ^{:line 34} [strconv "strconv"]
+    ^{:line 35} [sync "sync"]
+    ^{:line 36} [atomic "sync/atomic"]
+    ^{:line 37} [utf8 "unicode/utf8"]])
+
+
+
+(go/type Var "Var is an abstract type for all exported variables.\n" (interface
+
+
+
+    (^{:doc "String returns a valid JSON value for the variable.\nTypes with String methods that do not return valid JSON\n(such as time.Time) must not be used as a Var.\n"} String ^string [])))
+
+
+(go/type jsonVar (interface
+
+    (^{:doc "appendJSON appends the JSON representation of the receiver to b.\n"} appendJSON ^{:tag (slice byte)} [^{:tag (slice byte)} b])))
+
+
+
+(go/type Int "Int is a 64-bit integer variable that satisfies the [Var] interface.\n" (struct
+    ^{:line 55 :tag atomic/Int64} i))
+
+
+^{:go/end 60} (go/method Value ^int64 [^{:tag (* Int)} v]
+  (.Load (.-i v)))
+
+
+^{:go/end 64} (go/method String ^string [^{:tag (* Int)} v]
+  (conv string (.appendJSON v nil)))
+
+
+^{:go/end 68} (go/method appendJSON ^{:tag (slice byte)} [^{:tag (* Int)} v ^{:tag (slice byte)} b]
+  (strconv/AppendInt b (.Load (.-i v)) 10))
+
+
+^{:go/end 72} (go/method Add [^{:tag (* Int)} v ^int64 delta]
+  (.Add (.-i v) delta))
+
+
+^{:go/end 76} (go/method Set [^{:tag (* Int)} v ^int64 value]
+  (.Store (.-i v) value))
+
+
+
+(go/type Float "Float is a 64-bit float variable that satisfies the [Var] interface.\n" (struct
+    ^{:line 80 :tag atomic/Uint64} f))
+
+
+^{:go/end 85} (go/method Value ^float64 [^{:tag (* Float)} v]
+  (math/Float64frombits (.Load (.-f v))))
+
+
+^{:go/end 89} (go/method String ^string [^{:tag (* Float)} v]
+  (conv string (.appendJSON v nil)))
+
+
+^{:go/end 93} (go/method appendJSON ^{:tag (slice byte)} [^{:tag (* Float)} v ^{:tag (slice byte)} b]
+  (strconv/AppendFloat b (math/Float64frombits (.Load (.-f v))) \g -1 64))
+
+
+
+^{:go/end 106} (go/method Add "Add adds delta to v.\n" [^{:tag (* Float)} v ^float64 delta]
+  (while true
+    (let [cur (.Load (.-f v))
+        ^{:line 99} curVal (math/Float64frombits cur)
+        ^{:line 100} nxtVal (+ curVal delta)
+        ^{:line 101} nxt (math/Float64bits nxtVal)]
+      (when (.CompareAndSwap (.-f v) cur nxt)
+        (return)))))
+
+
+
+
+
+^{:go/end 111} (go/method Set "Set sets v to value.\n" [^{:tag (* Float)} v ^float64 value]
+  (.Store (.-f v) (math/Float64bits value)))
+
+
+
+(go/type Map "Map is a string-to-Var map variable that satisfies the [Var] interface.\n" (struct
+    ^{:line 115 :tag sync/Map} m ; map[string]Var
+    ^{:line 116 :tag sync/RWMutex} keysMu
+    ^{:line 117 :tag (slice string)} keys)) ; sorted
+
+
+
+(go/type KeyValue "KeyValue represents a single entry in a [Map].\n" (struct
+    ^{:line 122 :tag string} Key
+    ^{:line 123 :tag Var} Value))
+
+
+^{:go/end 128} (go/method String ^string [^{:tag (* Map)} v]
+  (conv string (.appendJSON v nil)))
+
+
+^{:go/end 132} (go/method appendJSON ^{:tag (slice byte)} [^{:tag (* Map)} v ^{:tag (slice byte)} b]
+  (.appendJSONMayExpand v b false))
+
+
+^{:go/end 165} (go/method appendJSONMayExpand ^{:tag (slice byte)} [^{:tag (* Map)} v ^{:tag (slice byte)} b ^bool expand]
+  (let [afterCommaDelim (conv byte \space)
+      ^{:line 136} mayAppendNewline ^{:go/end 136} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} b] b)]
+    (when expand
+      (set! afterCommaDelim \newline)
+      (set! mayAppendNewline ^{:go/end 139} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} b] (append b \newline))))
+
+
+    (set! b (append b \{))
+    (set! b (mayAppendNewline b))
+    (let [first true]
+      (.Do v ^{:go/end 160} (fn [^KeyValue kv]
+          (when (not first)
+            (set! b (append b \, afterCommaDelim)))
+
+          (set! first false)
+          (set! b (appendJSONQuote b (.-Key kv)))
+          (set! b (append b \: \space))
+          (type-switch [v (.-Value kv)]
+            (case [nil]
+              (set! b (append b (spread "null"))))
+            (case [jsonVar]
+              (set! b (.appendJSON v b)))
+            (default
+              (set! b (append b (spread (.String v))))))))
+
+
+      (set! b (mayAppendNewline b))
+      (set! b (append b \}))
+      (set! b (mayAppendNewline b))
+      ^{:line 164} b)))
+
+
+
+^{:go/end 174} (go/method Init "Init removes all keys from the map.\n" ^{:tag (* Map)} [^{:tag (* Map)} v]
+  (.Lock (.-keysMu v))
+  (defer (.Unlock (.-keysMu v)))
+  (set! (.-keys v) (subslice (.-keys v) _ 0))
+  (.Clear (.-m v))
+  ^{:line 173} v)
+
+
+
+^{:go/end 186} (go/method addKey "addKey updates the sorted list of keys in v.keys.\n" [^{:tag (* Map)} v ^string key]
+  (.Lock (.-keysMu v))
+  (defer (.Unlock (.-keysMu v)))
+  ;; Using insertion sort to place key into the already-sorted v.keys.
+  (let [(values i found) (^{:inst [(slice string) string]} slices/BinarySearch (.-keys v) key)]
+    (when found
+      (return))
+
+    (set! (.-keys v) (^{:inst [(slice string) string]} slices/Insert (.-keys v) i key))))
+
+
+^{:go/end 192} (go/method Get ^Var [^{:tag (* Map)} v ^string key]
+  (let [(values i _) (.Load (.-m v) key)
+      (values av _) (assert Var i)]
+    ^{:line 191} av))
+
+
+^{:go/end 206} (go/method Set [^{:tag (* Map)} v ^string key ^Var av]
+  ;; Before we store the value, check to see whether the key is new. Try a Load
+  ;; before LoadOrStore: LoadOrStore causes the key interface to escape even on
+  ;; the Load path.
+  (when [(values _ ok) (.Load (.-m v) key)] (not ok)
+    (when [(values _ dup) (.LoadOrStore (.-m v) key av)] (not dup)
+      (.addKey v key)
+      (return)))
+
+
+
+  (.Store (.-m v) key av))
+
+
+
+^{:go/end 223} (go/method Add "Add adds delta to the *[Int] value stored under the given map key.\n" [^{:tag (* Map)} v ^string key ^int64 delta]
+  (let [(values i ok) (.Load (.-m v) key)]
+    (when (not ok)
+      (let [^bool dup (zero bool)]
+        (set! (values i dup) (.LoadOrStore (.-m v) key (new Int)))
+        (when (not dup)
+          (.addKey v key))))
+
+
+
+    ;; Add to Int; ignore otherwise.
+    (when [(values iv ok) (assert (* Int) i)] ok
+      (.Add iv delta))))
+
+
+
+
+^{:go/end 240} (go/method AddFloat "AddFloat adds delta to the *[Float] value stored under the given map key.\n" [^{:tag (* Map)} v ^string key ^float64 delta]
+  (let [(values i ok) (.Load (.-m v) key)]
+    (when (not ok)
+      (let [^bool dup (zero bool)]
+        (set! (values i dup) (.LoadOrStore (.-m v) key (new Float)))
+        (when (not dup)
+          (.addKey v key))))
+
+
+
+    ;; Add to Float; ignore otherwise.
+    (when [(values iv ok) (assert (* Float) i)] ok
+      (.Add iv delta))))
+
+
+
+
+^{:go/end 251} (go/method Delete "Delete deletes the given key from the map.\n" [^{:tag (* Map)} v ^string key]
+  (.Lock (.-keysMu v))
+  (defer (.Unlock (.-keysMu v)))
+  (let [(values i found) (^{:inst [(slice string) string]} slices/BinarySearch (.-keys v) key)]
+    (when found
+      (set! (.-keys v) (^{:inst [(slice string) string]} slices/Delete (.-keys v) i (+ i 1)))
+      (.Delete (.-m v) key))))
+
+
+
+
+
+
+^{:go/end 264} (go/method Do "Do calls f for each entry in the map.\nThe map is locked during the iteration,\nbut existing entries may be concurrently updated.\n" [^{:tag (* Map)} v ^{:tag (func [KeyValue])} f]
+  (.RLock (.-keysMu v))
+  (defer (.RUnlock (.-keysMu v)))
+  (range [_ k (.-keys v)]
+    (let [(values i _) (.Load (.-m v) k)
+        (values val _) (assert Var i)]
+      (f (lit KeyValue k val)))))
+
+
+
+
+(go/type String "String is a string variable, and satisfies the [Var] interface.\n" (struct
+    ^{:line 268 :tag atomic/Value} s)) ; string
+
+
+^{:go/end 274} (go/method Value ^string [^{:tag (* String)} v]
+  (let [(values p _) (assert string (.Load (.-s v)))]
+    ^{:line 273} p))
+
+
+
+
+^{:go/end 280} (go/method String "String implements the [Var] interface. To get the unquoted string\nuse [String.Value].\n" ^string [^{:tag (* String)} v]
+  (conv string (.appendJSON v nil)))
+
+
+^{:go/end 284} (go/method appendJSON ^{:tag (slice byte)} [^{:tag (* String)} v ^{:tag (slice byte)} b]
+  (appendJSONQuote b (.Value v)))
+
+
+^{:go/end 288} (go/method Set [^{:tag (* String)} v ^string value]
+  (.Store (.-s v) value))
+
+
+
+
+(go/type Func "Func implements [Var] by calling the function\nand formatting the returned value using JSON.\n" (func [] [any]))
+
+^{:go/end 296} (go/method Value ^any [^Func f]
+  (f))
+
+
+^{:go/end 301} (go/method String ^string [^Func f]
+  (let [(values v _) (json/Marshal (f))]
+    (conv string v)))
+
+
+
+(go/var ^{:tag Map :doc "All published variables.\n"} vars)
+
+
+
+
+^{:go/end 317} (go/func Publish "Publish declares a named exported variable. This should be called from a\npackage's init function when it creates its Vars. If the name is already\nregistered then this will log.Panic.\n" [^string name ^Var v]
+  (when [(values _ dup) (.LoadOrStore (.-m vars) name v)] dup
+    (log/Panicln "Reuse of exported var name:" name))
+
+  (.Lock (.-keysMu vars))
+  (defer (.Unlock (.-keysMu vars)))
+  (set! (.-keys vars) (append (.-keys vars) name))
+  (^{:inst [(slice string) string]} slices/Sort (.-keys vars)))
+
+
+
+
+^{:go/end 323} (go/func Get "Get retrieves a named exported variable. It returns nil if the name has\nnot been registered.\n" ^Var [^string name]
+  (.Get vars name))
+
+
+;; Convenience functions for creating new exported variables.
+
+^{:go/end 331} (go/func NewInt ^{:tag (* Int)} [^string name]
+  (let [v (new Int)]
+    (Publish name v)
+    ^{:line 330} v))
+
+
+^{:go/end 337} (go/func NewFloat ^{:tag (* Float)} [^string name]
+  (let [v (new Float)]
+    (Publish name v)
+    ^{:line 336} v))
+
+
+^{:go/end 343} (go/func NewMap ^{:tag (* Map)} [^string name]
+  (let [v (.Init (new Map))]
+    (Publish name v)
+    ^{:line 342} v))
+
+
+^{:go/end 349} (go/func NewString ^{:tag (* String)} [^string name]
+  (let [v (new String)]
+    (Publish name v)
+    ^{:line 348} v))
+
+
+
+
+
+^{:go/end 356} (go/func Do "Do calls f for each exported variable.\nThe global variable map is locked during the iteration,\nbut existing entries may be concurrently updated.\n" [^{:tag (func [KeyValue])} f]
+  (.Do vars f))
+
+
+^{:go/end 361} (go/func expvarHandler [^http/ResponseWriter w ^{:tag (* http/Request)} r]
+  (.Set (.Header w) "Content-Type" "application/json; charset=utf-8")
+  (.Write w (.appendJSONMayExpand vars nil true)))
+
+
+
+
+
+^{:go/end 368} (go/func Handler "Handler returns the expvar HTTP Handler.\n\nThis is only needed to install the handler in a non-standard location.\n" ^http/Handler []
+  (conv http/HandlerFunc expvarHandler))
+
+
+^{:go/end 372} (go/func cmdline ^any []
+  ^{:line 371} os/Args)
+
+
+^{:go/end 378} (go/func memstats ^any []
+  (let [stats (new runtime/MemStats)]
+    (runtime/ReadMemStats stats)
+    ^{:line 377} @stats))
+
+
+^{:go/end 388} (go/func init []
+  (if (== (.Value (godebug/New "httpmuxgo121")) "1")
+    (http/HandleFunc "/debug/vars" expvarHandler)
+
+    (http/HandleFunc "GET /debug/vars" expvarHandler))
+
+  (Publish "cmdline" (conv Func cmdline))
+  (Publish "memstats" (conv Func memstats)))
+
+
+
+^{:go/end 417} (go/func appendJSONQuote "TODO: Use json.appendString instead.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^string s]
+  (let [^:const ^{:val "0123456789abcdef"} hex "0123456789abcdef"]
+    (set! b (append b \"))
+    (range [_ r s]
+      (switch
+        (case [(or (< r \space) (== r \\) (== r \") (== r \<) (== r \>) (== r \&) (== r \u2028) (== r \u2029))]
+          (switch r
+            (case [\\ \"]
+              (set! b (append b \\ (conv byte r))))
+            (case [\newline]
+              (set! b (append b \\ \n)))
+            (case [\return]
+              (set! b (append b \\ \r)))
+            (case [\tab]
+              (set! b (append b \\ \t)))
+            (default
+              (set! b (append b \\ \u (aget hex (bit-and (>> r 12) 0xf)) (aget hex (bit-and (>> r 8) 0xf)) (aget hex (bit-and (>> r 4) 0xf)) (aget hex (bit-and (>> r 0) 0xf)))))))
+
+        (case [(< r utf8/RuneSelf)]
+          (set! b (append b (conv byte r))))
+        (default
+          (set! b (utf8/AppendRune b r)))))
+
+
+    (set! b (append b \"))
+    ^{:line 416} b))

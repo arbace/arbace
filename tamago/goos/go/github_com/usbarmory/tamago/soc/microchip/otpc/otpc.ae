@@ -1,0 +1,177 @@
+;; Microchip One Time Programmable Controller (OTPC) support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package otpc implements helpers for the Microchip OTP Controller (OTPC).
+;;
+;; WARNING: Fusing SoC OTPs is an **irreversible** action that permanently
+;; fuses values on the device. This means that any errors in the process, or
+;; lost fused data such as cryptographic key material, might result in a
+;; **bricked** device.
+;;
+;; The use of this package is therefore **at your own risk**.
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=arm64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.microchip.otpc) (go/file "otpc.go" :doc "Package otpc implements helpers for the Microchip OTP Controller (OTPC).\n\nWARNING: Fusing SoC OTPs is an **irreversible** action that permanently\nfuses values on the device. This means that any errors in the process, or\nlost fused data such as cryptographic key material, might result in a\n**bricked** device.\n\nThe use of this package is therefore **at your own risk**.\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=arm64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 24} [errors "errors"]
+    ^{:line 25} [sync "sync"]
+    ^{:line 26} [time "time"]
+
+    ^{:line 28} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "OTPC registers\n"
+  ^{:line 33} [^{:val 0} OTP_PWR_DN 0x00]
+  ^{:line 34} [^{:val 0} PWR_DN_N 0]
+
+  ^{:line 36} [^{:val 4} OTP_ADDR_HI 0x04]
+  ^{:line 37} [^{:val 8} OTP_ADDR_LO 0x08]
+  ^{:line 38} [^{:val 16} OTP_PRGM_DATA 0x10]
+
+  ^{:line 40} [^{:val 20} OTP_PRGM_MODE 0x14]
+  ^{:line 41} [^{:val 0} MODE_BYTE 0]
+
+  ^{:line 43} [^{:val 24} OTP_RD_DATA 0x18]
+
+  ^{:line 45} [^{:val 32} OTP_FUNC_CMD 0x20]
+  ^{:line 46} [^{:val 1} CMD_PROGRAM 1]
+  ^{:line 47} [^{:val 0} CMD_READ 0]
+
+  ^{:line 49} [^{:val 40} OTP_CMD_GO 0x28]
+
+  ^{:line 51} [^{:val 44} OTP_PASS_FAIL 0x2c]
+  ^{:line 52} [^{:val 3} FAIL_READ_PROHIBITED 3]
+  ^{:line 53} [^{:val 2} FAIL_WRITE_PROHIBITED 2]
+  ^{:line 54} [^{:val 0} FAIL_FAIL 0]
+
+  ^{:line 56} [^{:val 48} OTP_STATUS 0x30]
+  ^{:line 57} [^{:val 1} STATUS_CPUMPEN 1]
+  ^{:line 58} [^{:val 0} STATUS_BUSY 0])
+
+
+
+(go/const ^{:val 100000000 :doc "Timeout is the default timeout for OTP operations.\n"} Timeout (* 100 time/Millisecond))
+
+
+(go/type OTPC "OTP controller instance\n" (struct
+    ^{:line 66} sync/Mutex
+
+
+    ^{:line 69 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 71 :tag time/Duration :doc "Timeout for OTP controller operations\n"} Timeout
+
+    ^{:line 73 :tag int :doc "OTP size\n"} Size))
+
+
+^{:go/end 82} (go/method power [^{:tag (* OTPC)} hw ^bool up]
+  (reg/SetTo (+ (.-Base hw) OTP_PWR_DN) PWR_DN_N (not up))
+
+  (when up
+    (reg/Wait (+ (.-Base hw) OTP_STATUS) STATUS_CPUMPEN 1 0)))
+
+
+
+^{:go/end 114} (go/method command [^{:tag (* OTPC)} hw ^uint32 addr ^int cmd ^int access] :results [^error err]
+  (reg/Write (+ (.-Base hw) OTP_ADDR_HI) (>> addr 8))
+  (reg/Write (+ (.-Base hw) OTP_ADDR_LO) (bit-and addr 0xff))
+
+  (reg/Set (+ (.-Base hw) OTP_FUNC_CMD) cmd)
+  (reg/Write (+ (.-Base hw) OTP_CMD_GO) 1)
+
+  (let [timeout (.-Timeout hw)]
+
+    (when (== timeout 0)
+      (set! timeout Timeout))
+
+
+    (when (not (reg/WaitFor timeout (+ (.-Base hw) OTP_CMD_GO) 0 1 0))
+      (return (errors/New "command timeout")))
+
+
+    (when (not (reg/WaitFor timeout (+ (.-Base hw) OTP_STATUS) STATUS_BUSY 1 0))
+      (return (errors/New "busy timeout")))
+
+
+    (when (reg/Get (+ (.-Base hw) OTP_PASS_FAIL) access)
+      (return (errors/New "command prohibited")))
+
+
+    (when (reg/Get (+ (.-Base hw) OTP_PASS_FAIL) FAIL_FAIL)
+      (return (errors/New "command failure")))
+
+
+    (return)))
+
+
+^{:go/end 122} (go/method read [^{:tag (* OTPC)} hw ^uint32 addr] :results [^byte b ^error err]
+  (when [(set! err (.command hw addr CMD_READ FAIL_READ_PROHIBITED))] (!= err nil)
+    (return))
+
+
+  (return (conv byte (reg/Read (+ (.-Base hw) OTP_RD_DATA))) nil))
+
+
+^{:go/end 129} (go/method write [^{:tag (* OTPC)} hw ^uint32 addr ^byte b] :results [^error err]
+  (reg/Set (+ (.-Base hw) OTP_PRGM_MODE) MODE_BYTE)
+  (reg/Write (+ (.-Base hw) OTP_PRGM_DATA) (conv uint32 b))
+
+  (.command hw addr CMD_PROGRAM FAIL_WRITE_PROHIBITED))
+
+
+
+^{:go/end 150} (go/method Read "Read reads a sequence of bytes from OTP memory.\n" [^{:tag (* OTPC)} hw ^int off ^{:tag (slice byte)} b] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (>= (+ off (len b)) (.-Size hw))
+    (return (errors/New "address out of range")))
+
+
+  (.power hw true)
+  (defer (.power hw false))
+
+  (range [i b]
+    (when [(set! (values (aget b i) err) (.read hw (conv uint32 (+ off i))))] (!= err nil)
+      (return)))
+
+
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 178} (go/method Blow "Blow writes a sequence of bytes to OTP memory.\n\nWARNING: Fusing SoC OTPs is an **irreversible** action that permanently\nfuses values on the device. This means that any errors in the process, or\nlost fused data such as cryptographic key material, might result in a\n**bricked** device.\n\nThe use of this function is therefore **at your own risk**.\n" [^{:tag (* OTPC)} hw ^int off ^{:tag (slice byte)} b] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (>= (+ off (len b)) (.-Size hw))
+    (return (errors/New "address out of range")))
+
+
+  (.power hw true)
+  (defer (.power hw false))
+
+  (range [i b]
+    (when [(set! err (.write hw (conv uint32 (+ off i)) (aget b i)))] (!= err nil)
+      (return)))
+
+
+
+  (return))

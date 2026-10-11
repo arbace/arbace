@@ -1,0 +1,311 @@
+;; VirtIO over PCI driver (non-transitional)
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.virtio) (go/file "pci.go" :imports [
+
+
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [errors "errors"]
+
+    ^{:line 15} [amd64 "github.com/usbarmory/tamago/amd64"]
+    ^{:line 16} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 17} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 18} [pci "github.com/usbarmory/tamago/soc/intel/pci"]])
+
+
+
+(go/const "VirtIO Common Configuration offsets\n"
+  ^{:line 23} [^{:val 0} deviceFeatureSel 0x00]
+  ^{:line 24} [^{:val 4} deviceFeature 0x04]
+  ^{:line 25} [^{:val 8} driverFeatureSel 0x08]
+  ^{:line 26} [^{:val 12} driverFeature 0x0c]
+  ^{:line 27} [^{:val 16} configMSIXVector 0x10]
+  ^{:line 28} [^{:val 18} numQueues 0x12]
+  ^{:line 29} [^{:val 20} deviceStatus 0x14]
+  ^{:line 30} [^{:val 21} configGeneration 0x15]
+  ^{:line 31} [^{:val 22} queueSel 0x16]
+  ^{:line 32} [^{:val 24} queueSize 0x18]
+  ^{:line 33} [^{:val 26} queueMSIXVector 0x1a]
+  ^{:line 34} [^{:val 28} queueEnable 0x1c]
+  ^{:line 35} [^{:val 30} queueNotifyOff 0x1e]
+  ^{:line 36} [^{:val 32} queueDesc 0x20]
+  ^{:line 37} [^{:val 40} queueDriver 0x28]
+  ^{:line 38} [^{:val 48} queueDevice 0x30])
+
+
+(go/const ^{:val 16} capabilityLength 16)
+
+
+(go/const "VirtIO PCI Capabilities Configuration Types\n"
+  ^{:line 45} [^{:val 1} capCommon 1]
+  ^{:line 46} [^{:val 2} capNotify 2]
+  ^{:line 47} [^{:val 3} capISR 3]
+  ^{:line 48} [^{:val 4} capDevice 4]
+  ^{:line 49} [^{:val 5} capPCI 5]
+  ^{:line 50} [^{:val 8} capShmem 8]
+  ^{:line 51} [^{:val 9} capVendor 9])
+
+
+
+(go/type capability "VirtIO PCI Capability\n" (struct
+    ^{:line 56} pci/CapabilityHeader
+
+    ^{:line 58 :tag uint8} CapLength
+    ^{:line 59 :tag uint8} CfgType
+    ^{:line 60 :tag uint8} Bar
+    ^{:line 61 :tag uint8} ID
+    ^{:line 62 :tag uint16} _
+    ^{:line 63 :tag uint32} Offset
+    ^{:line 64 :tag uint32} Length))
+
+
+^{:go/end 94} (go/method Unmarshal [^{:tag (* capability)} c ^{:tag (* pci/Device)} d ^uint32 off] :results [^{:tag (slice byte)} desc ^uint addr ^error err]
+  (let [buf (make (slice byte) capabilityLength)]
+
+    (for [i (conv uint32 0)] (< i capabilityLength) (set! i + 4)
+      (.PutUint32 binary/LittleEndian (subslice buf i (+ i 4)) (.Read d 0 (+ off i))))
+
+
+    (when [(set! (values _ err) (binary/Decode buf binary/LittleEndian c))] (!= err nil)
+      (return nil 0 (errors/New "invalid capability format")))
+
+
+    (set! addr (+ (.BaseAddress d (conv int (.-Bar c))) (conv uint (.-Offset c))))
+    (let [size (conv int (.-Length c))]
+
+      (when (or (== addr 0) (== size 0))
+        (return))
+
+
+      (let [(values r ^:assign err) (dma/NewRegion addr size false)]
+
+        (when (!= err nil)
+          (return nil 0 (errors/New "invalid capability region")))
+
+
+        (set! (values _ desc) (.Reserve r size 0))
+
+        (return)))))
+
+
+
+(go/type PCI "PCI represents a VirtIO over PCI device.\n" (struct
+
+    ^{:line 99 :tag (* pci/Device) :doc "Device represents the probed PCI device.\n"} Device
+
+    ^{:line 101 :tag uint64} features
+
+
+    ^{:line 104 :tag uint16 :doc "notification structure layout\n"} queueNotifyOff
+    ^{:line 105 :tag uint64} notifyAddress
+    ^{:line 106 :tag uint32} notifyMultiplier
+
+
+    ^{:line 109 :tag (slice byte) :doc "DMA buffers\n"} common
+    ^{:line 110 :tag (slice byte)} config
+
+    ^{:line 112 :tag (* pci/CapabilityMSIX)} msix))
+
+
+^{:go/breaks [[4 145]] :go/end 146} (go/method addCapability ^error [^{:tag (* PCI)} io ^uint32 off ^{:tag (* pci/CapabilityHeader)} hdr]
+  (switch (.-Vendor hdr)
+    (case [pci/VendorSpecific]
+      (let [c (addr (lit capability))
+
+          (values buf addr err) (.Unmarshal c (.-Device io) off)]
+
+        (when (!= err nil)
+          (return err))
+
+
+        (switch (.-CfgType c)
+          (case [capCommon]
+            (set! (.-common io) buf))
+          (case [capNotify]
+            (set! (.-notifyAddress io) (conv uint64 addr))
+            (set! (.-notifyMultiplier io) (.Read (.-Device io) 0 (+ off capabilityLength))))
+          (case [capDevice]
+            (set! (.-config io) buf)))))
+
+    (case [pci/MSIX]
+      (let [c (addr (lit pci/CapabilityMSIX))]
+
+        (when [err (.Unmarshal c (.-Device io) off)] (!= err nil)
+          (return err))
+
+
+        (set! (.-msix io) c))))
+
+
+  nil)
+
+
+^{:go/end 159} (go/method negotiate [^{:tag (* PCI)} io ^uint64 driverFeatures] :results [^error err]
+  (set! (.-features io) (negotiate (.DeviceFeatures io) driverFeatures))
+  (.SetDriverFeatures io (.-features io))
+
+  (set! (aget (.-common io) deviceStatus) bit-or (<< 1 FeaturesOk))
+
+  (when (!= (bit-and (aget (.-common io) deviceStatus) (<< 1 FeaturesOk)) (<< 1 FeaturesOk))
+    (return (errors/New "could not set features")))
+
+
+  (return))
+
+
+
+^{:go/end 189} (go/method Init "Init initializes a VirtIO over PCI device instance.\n" [^{:tag (* PCI)} io ^uint64 features] :results [^error err]
+  (when (== (.-Device io) nil)
+    (return (errors/New "invalid VirtIO instance")))
+
+
+  (when [rev (bit-and (.Read (.-Device io) 0 pci/RevisionID) 0xff)] (== rev 0)
+    (return (errors/New "transitional devices are not supported")))
+
+
+  (range [off hdr (.Capabilities (.-Device io))]
+    (when [(set! err (.addCapability io off hdr))] (!= err nil)
+      (return)))
+
+
+
+  (when (or (== (.-common io) nil) (== (.-config io) nil))
+    (return (errors/New "missing required capabilities")))
+
+
+  ;; reset
+  (aset (.-common io) deviceStatus 0)
+
+  ;; initialize driver
+  (set! (aget (.-common io) deviceStatus) bit-or (<< 1 Acknowledge))
+  (set! (aget (.-common io) deviceStatus) bit-or (<< 1 Driver))
+
+  (.negotiate io features))
+
+
+
+^{:go/end 196} (go/method Config "Config returns the device configuration layout.\n" [^{:tag (* PCI)} io ^int size] :results [^{:tag (slice byte)} config]
+  (set! config (make (slice byte) size))
+  (copy config (.-config io))
+  (return))
+
+
+
+^{:go/end 203} (go/method DeviceID "DeviceID returns the VirtIO subsystem device ID\n" ^uint32 [^{:tag (* PCI)} io]
+  ;; The PCI Device ID is calculated by adding 0x1040 to the Virtio
+  ;; Device ID (4.1.2 PCI Device Discovery.)
+  (conv uint32 (- (.-Device (.-Device io)) 0x1040)))
+
+
+
+^{:go/end 213} (go/method DeviceFeatures "DeviceFeatures returns the device feature bits.\n" [^{:tag (* PCI)} io] :results [^uint64 features]
+  (for [i (conv uint32 0)] (<= i 1) (inc! i)
+    (.PutUint32 binary/LittleEndian (subslice (.-common io) deviceFeatureSel) i)
+    (set! features bit-or (<< (conv uint64 (.Uint32 binary/LittleEndian (subslice (.-common io) deviceFeature))) (* i 32))))
+
+
+  (return))
+
+
+
+^{:go/end 223} (go/method DriverFeatures "DriverFeatures returns the driver feature bits.\n" [^{:tag (* PCI)} io] :results [^uint64 features]
+  (for [i (conv uint32 0)] (<= i 1) (inc! i)
+    (.PutUint32 binary/LittleEndian (subslice (.-common io) driverFeatureSel) i)
+    (set! features bit-or (<< (conv uint64 (.Uint32 binary/LittleEndian (subslice (.-common io) driverFeature))) (* i 32))))
+
+
+  (return))
+
+
+
+^{:go/end 233} (go/method SetDriverFeatures "SetDriverFeatures sets the driver feature bits.\n" [^{:tag (* PCI)} io ^uint64 features]
+  (for [i (conv uint32 0)] (<= i 1) (inc! i)
+    (.PutUint32 binary/LittleEndian (subslice (.-common io) driverFeatureSel) i)
+    (.PutUint32 binary/LittleEndian (subslice (.-common io) driverFeature) (conv uint32 (>> features (* i 32)))))
+
+
+  (return))
+
+
+
+^{:go/end 238} (go/method NegotiatedFeatures "NegotiatedFeatures returns the set of negotiated feature bits.\n" [^{:tag (* PCI)} io] :results [^uint64 features]
+  (.-features io))
+
+
+
+^{:go/end 244} (go/method QueueReady "QueueReady returns whether a queue is ready for use.\n" [^{:tag (* PCI)} io ^int index] :results [^bool ready]
+  (.PutUint16 binary/LittleEndian (subslice (.-common io) queueSel) (conv uint16 index))
+  (!= (.Uint16 binary/LittleEndian (subslice (.-common io) queueEnable)) 0))
+
+
+
+^{:go/end 250} (go/method MaxQueueSize "MaxQueueSize returns the maximum virtual queue size.\n" ^int [^{:tag (* PCI)} io ^int index]
+  (.PutUint16 binary/LittleEndian (subslice (.-common io) queueSel) (conv uint16 index))
+  (conv int (.Uint16 binary/LittleEndian (subslice (.-common io) queueSize))))
+
+
+
+^{:go/end 256} (go/method SetQueueSize "SetQueueSize sets the virtual queue size.\n" [^{:tag (* PCI)} io ^int index ^int n]
+  (.PutUint16 binary/LittleEndian (subslice (.-common io) queueSel) (conv uint16 index))
+  (.PutUint16 binary/LittleEndian (subslice (.-common io) queueSize) (conv uint16 n)))
+
+
+
+^{:go/end 261} (go/method Status "Status returns the device status.\n" ^uint32 [^{:tag (* PCI)} io]
+  (conv uint32 (aget (.-common io) deviceStatus)))
+
+
+
+^{:go/end 272} (go/method SetQueue "SetQueue registers the indexed virtual queue for device access.\n" [^{:tag (* PCI)} io ^int index ^{:tag (* VirtualQueue)} queue]
+  (let [(values desc driver device) (.Address queue)]
+
+    (.PutUint16 binary/LittleEndian (subslice (.-common io) queueSel) (conv uint16 index))
+    (.PutUint64 binary/LittleEndian (subslice (.-common io) queueDesc) (conv uint64 desc))
+    (.PutUint64 binary/LittleEndian (subslice (.-common io) queueDriver) (conv uint64 driver))
+    (.PutUint64 binary/LittleEndian (subslice (.-common io) queueDevice) (conv uint64 device))
+    (.PutUint16 binary/LittleEndian (subslice (.-common io) queueEnable) 1)))
+
+
+
+^{:go/end 278} (go/method SetReady "SetReady indicates that the driver is set up and ready to drive the device.\n" [^{:tag (* PCI)} io]
+  (set! (.-queueNotifyOff io) (.Uint16 binary/LittleEndian (subslice (.-common io) queueNotifyOff)))
+  (set! (aget (.-common io) deviceStatus) bit-or (<< 1 DriverOk)))
+
+
+
+^{:go/end 286} (go/method QueueNotify "QueueNotify notifies the device that a queue can be processed.\n" [^{:tag (* PCI)} io ^int index]
+  (let [addr (.-notifyAddress io)]
+    (set! addr + (* (conv uint64 index) (conv uint64 (.-queueNotifyOff io)) (conv uint64 (.-notifyMultiplier io))))
+
+    (reg/Write64 addr (conv uint64 index))))
+
+
+
+^{:go/end 291} (go/method ConfigVersion "ConfigVersion returns the device configuration (see Config field) version.\n" ^uint32 [^{:tag (* PCI)} io]
+  (conv uint32 (aget (.-common io) configGeneration)))
+
+
+
+
+^{:go/end 312} (go/method EnableInterrupt "EnableInterrupt enables MSI-X interrupt vector routing to a LAPIC instance\nfor the indexed virtual queue.\n" [^{:tag (* PCI)} io ^int id ^int index] :results [^error err]
+  (when (== (.-msix io) nil)
+    (return (errors/New "missing required capabilities")))
+
+
+  (let [entry 0
+      ^{:line 301} addr (conv uint64 amd64/LAPIC_BASE)
+      ^{:line 302} data (conv uint32 id)]
+
+    (when [(set! err (.EnableInterrupt (.-msix io) entry addr data))] (!= err nil)
+      (return))
+
+
+    (.PutUint16 binary/LittleEndian (subslice (.-common io) queueSel) (conv uint16 index))
+    (.PutUint16 binary/LittleEndian (subslice (.-common io) queueMSIXVector) (conv uint16 entry))
+
+    (return)))

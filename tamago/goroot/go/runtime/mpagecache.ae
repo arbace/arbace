@@ -1,0 +1,182 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "mpagecache.go" :imports [
+
+
+    ^{:line 8} [sys "internal/runtime/sys"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+(go/const ^{:val 64} pageCachePages (* 8 (unsafe/Sizeof (.-cache (lit pageCache)))))
+
+
+
+
+
+(go/type pageCache "pageCache represents a per-p cache of pages the allocator can\nallocate from without a lock. More specifically, it represents\na pageCachePages*pageSize chunk of memory with 0 or more free\npages in it.\n" (struct
+    ^{:line 19 :tag uintptr} base ; base address of the chunk
+    ^{:line 20 :tag uint64} cache ; 64-bit bitmap representing free pages (1 means free)
+    ^{:line 21 :tag uint64} scav)) ; 64-bit bitmap representing scavenged pages (1 means scavenged)
+
+
+
+^{:go/end 27} (go/method empty "empty reports whether the page cache has no free pages.\n" ^bool [^{:tag (* pageCache)} c]
+  (== (.-cache c) 0))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 49} (go/method alloc "alloc allocates npages from the page cache and is the main entry\npoint for allocation.\n\nReturns a base address and the amount of scavenged memory in the\nallocated region in bytes.\n\nReturns a base address of zero on failure, in which case the\namount of scavenged memory should be ignored.\n" [^{:tag (* pageCache)} c ^uintptr npages] :results [uintptr uintptr]
+  (when (== (.-cache c) 0)
+    (return 0 0))
+
+  (when (== npages 1)
+    (let [i (conv uintptr (sys/TrailingZeros64 (.-cache c)))
+        ^{:line 43} scav (bit-and (>> (.-scav c) i) 1)]
+      (set! (.-cache c) bit-and-not ^uint64 (<< 1 i)) ; set bit to mark in-use
+      (set! (.-scav c) bit-and-not ^uint64 (<< 1 i)) ; clear bit to mark unscavenged
+      (return (+ (.-base c) (* i pageSize)) (* (conv uintptr scav) pageSize))))
+
+  (.allocN c npages))
+
+
+
+
+
+
+
+
+^{:go/end 67} (go/method allocN "allocN is a helper which attempts to allocate npages worth of pages\nfrom the cache. It represents the general case for allocating from\nthe page cache.\n\nReturns a base address and the amount of scavenged memory in the\nallocated region in bytes.\n" [^{:tag (* pageCache)} c ^uintptr npages] :results [uintptr uintptr]
+  (let [i (findBitRange64 (.-cache c) (conv uint npages))]
+    (when (>= i 64)
+      (return 0 0))
+
+    (let [mask (<< (- (<< (conv uint64 1) npages) 1) i)
+        ^{:line 63} scav (sys/OnesCount64 (bit-and (.-scav c) mask))]
+      (set! (.-cache c) bit-and-not mask) ; mark in-use bits
+      (set! (.-scav c) bit-and-not mask) ; clear scavenged bits
+      (return (+ (.-base c) (conv uintptr (* i pageSize))) (* (conv uintptr scav) pageSize)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 108} (go/method ^:go/systemstack flush "flush empties out unallocated free pages in the given cache\ninto s. Then, it clears the cache, such that empty returns\ntrue.\n\np.mheapLock must be held.\n\nMust run on the system stack because p.mheapLock must be held.\n" [^{:tag (* pageCache)} c ^{:tag (* pageAlloc)} p]
+  (assertLockHeld (.-mheapLock p))
+
+  (when (.empty c)
+    (return))
+
+  (let [ci (chunkIndex (.-base c))
+      ^{:line 85} pi (chunkPageIndex (.-base c))]
+
+    ;; This method is called very infrequently, so just do the
+    ;; slower, safer thing by iterating over each bit individually.
+    (for [i (conv uint 0)] (< i 64) (inc! i)
+      (when (!= (bit-and (.-cache c) ^uint64 (<< 1 i)) 0)
+        ^{:go/via [pallocBits]} (.free1 (.chunkOf p ci) (+ pi i))
+
+        ;; Update density statistics.
+        (.free (.-index (.-scav p)) ci (+ pi i) 1))
+
+      (when (!= (bit-and (.-scav c) ^uint64 (<< 1 i)) 0)
+        (.setRange (.-scavenged (.chunkOf p ci)) (+ pi i) 1)))
+
+
+
+    ;; Since this is a lot like a free, we need to make sure
+    ;; we update the searchAddr just like free does.
+    (when [b (lit offAddr (.-base c))] (.lessThan b (.-searchAddr p))
+      (set! (.-searchAddr p) b))
+
+    (.update p (.-base c) pageCachePages false false)
+    (set! @c (lit pageCache))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 183} (go/method ^:go/systemstack allocToCache "allocToCache acquires a pageCachePages-aligned chunk of free pages which\nmay not be contiguous, and returns a pageCache structure which owns the\nchunk.\n\np.mheapLock must be held.\n\nMust run on the system stack because p.mheapLock must be held.\n" ^pageCache [^{:tag (* pageAlloc)} p]
+  (assertLockHeld (.-mheapLock p))
+
+  ;; If the searchAddr refers to a region which has a higher address than
+  ;; any known chunk, then we know we're out of memory.
+  (when (>= (chunkIndex (.addr (.-searchAddr p))) (.-end p))
+    (return (lit pageCache)))
+
+  (let [c (lit pageCache)
+      ^{:line 128} ci (chunkIndex (.addr (.-searchAddr p))) ; chunk index
+      ^{:line 129 :tag (* pallocData)} chunk (zero (* pallocData))]
+    (if (!= (aget (aget (.-summary p) (- (len (.-summary p)) 1)) ci) 0) (do
+        ;; Fast path: there's free pages at or near the searchAddr address.
+        (set! chunk (.chunkOf p ci))
+        (let [(values j _) ^{:go/via [pallocBits]} (.find chunk 1 (chunkPageIndex (.addr (.-searchAddr p))))]
+          (when (== j (bit-not (conv uint 0)))
+            (throw "bad summary data"))
+
+          (set! c ^{:go/breaks [2 4 6]} (lit pageCache
+              :base (+ (chunkBase ci) (* (alignDown (conv uintptr j) 64) pageSize))
+              :cache (bit-not ^{:go/via [pallocBits]} (.pages64 chunk j))
+              :scav (.block64 (.-scavenged chunk) j)))))
+
+
+      ;; Slow path: the searchAddr address had nothing there, so go find
+      ;; the first free page the slow way.
+      (let [(values addr _) (.find p 1)]
+        (when (== addr 0)
+          ;; We failed to find adequate free space, so mark the searchAddr as OoM
+          ;; and return an empty pageCache.
+          (set! (.-searchAddr p) (maxSearchAddr))
+          (return (lit pageCache)))
+
+        (set! ci (chunkIndex addr))
+        (set! chunk (.chunkOf p ci))
+        (set! c ^{:go/breaks [2 4 6]} (lit pageCache
+            :base (alignDown addr (* 64 pageSize))
+            :cache (bit-not ^{:go/via [pallocBits]} (.pages64 chunk (chunkPageIndex addr)))
+            :scav (.block64 (.-scavenged chunk) (chunkPageIndex addr))))))
+
+
+
+    ;; Set the page bits as allocated and clear the scavenged bits, but
+    ;; be careful to only set and clear the relevant bits.
+    (let [cpi (chunkPageIndex (.-base c))]
+      ^{:go/via [pallocBits]} (.allocPages64 chunk cpi (.-cache c))
+      (.clearBlock64 (.-scavenged chunk) cpi (bit-and (.-cache c) (.-scav c))) ; /* free and scavenged */
+
+      ;; Update as an allocation, but note that it's not contiguous.
+      (.update p (.-base c) pageCachePages false true)
+
+      ;; Update density statistics.
+      (.alloc (.-index (.-scav p)) ci (conv uint (sys/OnesCount64 (.-cache c))))
+
+      ;; Set the search address to the last page represented by the cache.
+      ;; Since all of the pages in this block are going to the cache, and we
+      ;; searched for the first free page, we can confidently start at the
+      ;; next page.
+      ;;
+      ;; However, p.searchAddr is not allowed to point into unmapped heap memory
+      ;; unless it is maxSearchAddr, so make it the last page as opposed to
+      ;; the page after.
+      (set! (.-searchAddr p) (lit offAddr (+ (.-base c) (* pageSize (- pageCachePages 1)))))
+      ^{:line 182} c)))

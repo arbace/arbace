@@ -1,0 +1,317 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.coverage.cfile) (go/file "testsupport.go" :imports [
+
+
+    ^{:line 8} [json "encoding/json"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [coverage "internal/coverage"]
+    ^{:line 11} [calloc "internal/coverage/calloc"]
+    ^{:line 12} [cformat "internal/coverage/cformat"]
+    ^{:line 13} [cmerge "internal/coverage/cmerge"]
+    ^{:line 14} [decodecounter "internal/coverage/decodecounter"]
+    ^{:line 15} [decodemeta "internal/coverage/decodemeta"]
+    ^{:line 16} [pods "internal/coverage/pods"]
+    ^{:line 17} [rtcov "internal/coverage/rtcov"]
+    ^{:line 18} [atomic "internal/runtime/atomic"]
+    ^{:line 19} [io "io"]
+    ^{:line 20} [os "os"]
+    ^{:line 21} [filepath "path/filepath"]
+    ^{:line 22} [strings "strings"]
+    ^{:line 23} [unsafe "unsafe"]])
+
+
+
+
+
+
+^{:go/end 122} (go/func ProcessCoverTestDir "ProcessCoverTestDir is called from\ntestmain code when \"go test -cover\" is in effect. It is not\nintended to be used other than internally by the Go command's\ngenerated code.\n" ^error [^string dir ^string cfile ^string cm ^string cpkg ^io/Writer w ^{:tag (slice string)} selpkgs]
+  (let [cmode (coverage/ParseCounterMode cm)]
+    (when (== cmode coverage/CtrModeInvalid)
+      (return (fmt/Errorf "invalid counter mode %q" cm)))
+
+
+    ;; Emit meta-data and counter data.
+    (let [ml (.-List rtcov/Meta)]
+      (if (== (len ml) 0) (do)
+        ;; This corresponds to the case where we have a package that
+        ;; contains test code but no functions (which is fine). In this
+        ;; case there is no need to emit anything.
+        (do
+          (when [err (emitMetaDataToDirectory dir ml)] (!= err nil)
+            (return err))
+
+          (when [err (emitCounterDataToDirectory dir)] (!= err nil)
+            (return err))))
+
+
+
+      ;; Collect pods from test run. For the majority of cases we would
+      ;; expect to see a single pod here, but allow for multiple pods in
+      ;; case the test harness is doing extra work to collect data files
+      ;; from builds that it kicks off as part of the testing.
+      (let [(values podlist err) (pods/CollectPods (lit (slice string) dir) false)]
+        (when (!= err nil)
+          (return (fmt/Errorf "reading from %s: %v" dir err)))
+
+
+        ;; Open text output file if appropriate.
+        (let [^{:tag (* os/File)} tf (zero (* os/File))
+            ^{:line 62 :tag bool} tfClosed (zero bool)]
+          (when (!= cfile "")
+            (let [^error err (zero error)]
+              (set! (values tf err) (os/Create cfile))
+              (when (!= err nil)
+                (return (fmt/Errorf "internal error: opening coverage data output file %q: %v" cfile err)))
+
+              (defer (^{:go/end 74} (fn []
+                    (when (not tfClosed)
+                      (set! tfClosed true)
+                      (.Close tf)))))))
+
+
+
+
+          ;; Read/process the pods.
+          (let [ts (addr ^{:go/breaks [2 4 6]} (lit tstate
+                  :cm (addr (lit cmerge/Merger))
+                  :cf (cformat/NewFormatter cmode)
+                  :cmode cmode))
+
+              ;; Generate the expected hash string based on the final meta-data
+              ;; hash for this test, then look only for pods that refer to that
+              ;; hash (just in case there are multiple instrumented executables
+              ;; in play). See issue #57924 for more on this.
+              ^{:line 87} hashstring (fmt/Sprintf "%x" finalHash)
+              ^{:line 88} importpaths (make (map string (struct)))]
+            (range [_ p podlist]
+              (when (not (strings/Contains (.-MetaFile p) hashstring))
+                (continue))
+
+              (when [err (.processPod ts p importpaths)] (!= err nil)
+                (return err)))
+
+
+
+            ^{:go/breaks [[5 121]]} (let [metafilespath (filepath/Join dir coverage/MetaFilesFileName)]
+              (when [(values _ err) (os/Stat metafilespath)] (== err nil)
+                (when [err (.readAuxMetaFiles ts metafilespath importpaths)] (!= err nil)
+                  (return err)))
+
+
+
+              ;; Emit percent.
+              (when [err (.EmitPercent (.-cf ts) w selpkgs cpkg true true)] (!= err nil)
+                (return err))
+
+
+              ;; Emit text output.
+              (when (!= tf nil)
+                (when [err (.EmitTextual (.-cf ts) selpkgs tf)] (!= err nil)
+                  (return err))
+
+                (set! tfClosed true)
+                (when [err (.Close tf)] (!= err nil)
+                  (return (fmt/Errorf "closing %s: %v" cfile err))))
+
+
+
+              nil)))))))
+
+
+(go/type tstate (struct
+    ^{:line 125} calloc/BatchCounterAlloc
+    ^{:line 126 :tag (* cmerge/Merger)} cm
+    ^{:line 127 :tag (* cformat/Formatter)} cf
+    ^{:line 128 :tag coverage/CounterMode} cmode))
+
+
+
+^{:go/end 238} (go/method processPod "processPod reads coverage counter data for a specific pod.\n" ^error [^{:tag (* tstate)} ts ^pods/Pod p ^{:tag (map string (struct))} importpaths]
+  ;; Open meta-data file
+  (let [(values f err) (os/Open (.-MetaFile p))]
+    (when (!= err nil)
+      (return (fmt/Errorf "unable to open meta-data file %s: %v" (.-MetaFile p) err)))
+
+    (defer (^{:go/end 140} (fn []
+          (.Close f))))
+
+    (let [^{:tag (* decodemeta/CoverageMetaFileReader)} mfr (zero (* decodemeta/CoverageMetaFileReader))]
+      (set! (values mfr err) (decodemeta/NewCoverageMetaFileReader f nil))
+      (when (!= err nil)
+        (return (fmt/Errorf "error reading meta-data file %s: %v" (.-MetaFile p) err)))
+
+      (let [newmode (.CounterMode mfr)]
+        (when (!= newmode (.-cmode ts))
+          (return (fmt/Errorf "internal error: counter mode clash: %q from test harness, %q from data file %s" (.String (.-cmode ts)) (.String newmode) (.-MetaFile p))))
+
+        (let [newgran (.CounterGranularity mfr)]
+          (when [err (.SetModeAndGranularity (.-cm ts) (.-MetaFile p) cmode newgran)] (!= err nil)
+            (return err))
+
+
+          ;; A map to store counter data, indexed by pkgid/fnid tuple.
+          (let [pmm (make (map pkfunc (slice uint32)))
+
+              ;; Helper to read a single counter data file.
+              ^{:line 159} readcdf ^{:go/end 193} (fn ^error [^string cdf]
+                (let [(values cf err) (os/Open cdf)]
+                  (when (!= err nil)
+                    (return (fmt/Errorf "opening counter data file %s: %s" cdf err)))
+
+                  (defer (.Close cf))
+                  (let [^{:tag (* decodecounter/CounterDataReader)} cdr (zero (* decodecounter/CounterDataReader))]
+                    (set! (values cdr err) (decodecounter/NewCounterDataReader cdf cf))
+                    (when (!= err nil)
+                      (return (fmt/Errorf "reading counter data file %s: %s" cdf err)))
+
+                    ^{:go/breaks [[3 192]]} (let [^decodecounter/FuncPayload data (zero decodecounter/FuncPayload)]
+                      (while true
+                        (let [(values ok err) (.NextFunc cdr (addr data))]
+                          (when (!= err nil)
+                            (return (fmt/Errorf "reading counter data file %s: %v" cdf err)))
+
+                          (when (not ok)
+                            (break))
+
+
+                          ;; NB: sanity check on pkg and func IDs?
+                          (let [key (lit pkfunc :pk (.-PkgIdx data) :fcn (.-FuncIdx data))]
+                            (when [(values prev found) (aget pmm key)] found
+                              ;; Note: no overflow reporting here.
+                              (when [(values err _) (.MergeCounters (.-cm ts) (.-Counters data) prev)] (!= err nil)
+                                (return (fmt/Errorf "processing counter data file %s: %v" cdf err))))
+
+
+                            (let [c ^{:go/via [BatchCounterAlloc]} (.AllocateCounters ts (len (.-Counters data)))]
+                              (copy c (.-Counters data))
+                              (aset pmm key c)))))
+
+                      nil))))]
+
+
+            ;; Read counter data files.
+            (range [_ cdf (.-CounterDataFiles p)]
+              (when [err (readcdf cdf)] (!= err nil)
+                (return err)))
+
+
+
+            ;; Visit meta-data file.
+            ^{:go/breaks [[3 237]]} (let [np (conv uint32 (.NumPackages mfr))
+                ^{:line 204} payload (lit (slice byte))]
+              (for [pkIdx (conv uint32 0)] (< pkIdx np) (inc! pkIdx)
+                (let [^{:tag (* decodemeta/CoverageMetaDataDecoder)} pd (zero (* decodemeta/CoverageMetaDataDecoder))]
+                  (set! (values pd payload err) (.GetPackageDecoder mfr pkIdx payload))
+                  (when (!= err nil)
+                    (return (fmt/Errorf "reading pkg %d from meta-file %s: %s" pkIdx (.-MetaFile p) err)))
+
+                  (.SetPackage (.-cf ts) (.PackagePath pd))
+                  (aset importpaths (.PackagePath pd) (lit (struct)))
+                  (let [^coverage/FuncDesc fd (zero coverage/FuncDesc)
+                      ^{:line 214} nf (.NumFuncs pd)]
+                    (for [fnIdx (conv uint32 0)] (< fnIdx nf) (inc! fnIdx)
+                      (when [err (.ReadFunc pd fnIdx (addr fd))] (!= err nil)
+                        (return (fmt/Errorf "reading meta-data file %s: %v"
+                            (.-MetaFile p) err)))
+
+                      (let [key (lit pkfunc :pk pkIdx :fcn fnIdx)
+                          (values counters haveCounters) (aget pmm key)]
+                        (for [i 0] (< i (len (.-Units fd))) (inc! i)
+                          (let [u (aget (.-Units fd) i)]
+                            ;; Skip units with non-zero parent (no way to represent
+                            ;; these in the existing format).
+                            (when (!= (.-Parent u) 0)
+                              (continue))
+
+                            (let [count (conv uint32 0)]
+                              (when haveCounters
+                                (set! count (aget counters i)))
+
+                              (.AddUnit (.-cf ts) (.-Srcfile fd) (.-Funcname fd) (.-Lit fd) u count)))))))))
+
+
+
+              nil)))))))
+
+
+(go/type pkfunc (struct
+    ^{:line 241 :tag uint32} pk ^uint32 fcn))
+
+
+^{:go/end 273} (go/method readAuxMetaFiles ^error [^{:tag (* tstate)} ts ^string metafiles ^{:tag (map string (struct))} importpaths]
+  ;; Unmarshal the information on available aux metafiles into
+  ;; a MetaFileCollection struct.
+  ^{:go/breaks [[5 272]]} (let [^coverage/MetaFileCollection mfc (zero coverage/MetaFileCollection)
+      (values data err) (os/ReadFile metafiles)]
+    (when (!= err nil)
+      (return (fmt/Errorf "error reading auxmetafiles file %q: %v" metafiles err)))
+
+    (when [err (json/Unmarshal data (addr mfc))] (!= err nil)
+      (return (fmt/Errorf "error reading auxmetafiles file %q: %v" metafiles err)))
+
+
+    ;; Walk through each available aux meta-file. If we've already
+    ;; seen the package path in question during the walk of the
+    ;; "regular" meta-data file, then we can skip the package,
+    ;; otherwise construct a dummy pod with the single meta-data file
+    ;; (no counters) and invoke processPod on it.
+    (range [i (.-ImportPaths mfc)]
+      (let [p (aget (.-ImportPaths mfc) i)]
+        (when [(values _ ok) (aget importpaths p)] ok
+          (continue))
+
+        (let [^pods/Pod pod (zero pods/Pod)]
+          (set! (.-MetaFile pod) (aget (.-MetaFileFragments mfc) i))
+          (when [err (.processPod ts pod importpaths)] (!= err nil)
+            (return err)))))
+
+
+    nil))
+
+
+
+
+
+
+
+
+^{:go/end 318} (go/func Snapshot "Snapshot returns a snapshot of coverage percentage at a moment of\ntime within a running test, so as to support the testing.Coverage()\nfunction. This version doesn't examine coverage meta-data, so the\nresult it returns will be less accurate (more \"slop\") due to the\nfact that we don't look at the meta data to see how many statements\nare associated with each counter.\n" ^float64 []
+  (let [cl (getCovCounterList)]
+    (when (== (len cl) 0)
+      ;; no work to do here.
+      (return 0.0))
+
+
+    (let [tot (conv uint64 0)
+        ^{:line 289} totExec (conv uint64 0)]
+      (range [_ c cl]
+        (let [sd (unsafe/Slice (conv (* atomic/Uint32) (conv unsafe/Pointer (.-Counters c))) (.-Len c))]
+          (set! tot + (conv uint64 (len sd)))
+          (for [i 0] (< i (len sd)) (inc! i)
+            ;; Skip ahead until the next non-zero value.
+            (when (== (.Load (aget sd i)) 0)
+              (continue))
+
+            ;; We found a function that was executed.
+            (let [nCtrs (.Load (aget sd (+ i coverage/NumCtrsOffset)))
+                ^{:line 300} cst (+ i coverage/FirstCtrOffset)]
+
+              (when (> (+ cst (conv int nCtrs)) (len sd))
+                (break))
+
+              (let [counters (subslice sd cst (+ cst (conv int nCtrs)))]
+                (range [i counters]
+                  (when (!= (.Load (aget counters i)) 0)
+                    (inc! totExec)))
+
+
+                (set! i + (- (+ coverage/FirstCtrOffset (conv int nCtrs)) 1)))))))
+
+
+      (when (== tot 0)
+        (return 0.0))
+
+      (/ (conv float64 totExec) (conv float64 tot)))))

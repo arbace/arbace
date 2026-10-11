@@ -1,0 +1,162 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.os) (go/file "exec_posix.go" :build ["//go:build unix || (js && wasm) || wasip1 || windows || tamago"] :imports [
+
+
+    ^{:line 10} [strconv "internal/strconv"]
+    ^{:line 11} [execenv "internal/syscall/execenv"]
+    ^{:line 12} [runtime "runtime"]
+    ^{:line 13} [syscall "syscall"]])
+
+
+
+
+
+
+
+(go/var "The only signal values guaranteed to be present in the os package on all\nsystems are os.Interrupt (send the process an interrupt) and os.Kill (force\nthe process to exit). On Windows, sending os.Interrupt to a process with\nos.Process.Signal is not implemented; it will return an error instead of\nsending a signal.\n"
+  ^{:line 22} [^Signal Interrupt syscall/SIGINT]
+  ^{:line 23} [^Signal Kill syscall/SIGKILL])
+
+
+^{:go/end 74} (go/func startProcess [^string name ^{:tag (slice string)} argv ^{:tag (* ProcAttr)} attr] :results [^{:tag (* Process)} p ^error err]
+  ;; If there is no SysProcAttr (ie. no Chroot or changed
+  ;; UID/GID), double-check existence of the directory we want
+  ;; to chdir into. We can make the error clearer this way.
+  (when (and (!= attr nil) (== (.-Sys attr) nil) (!= (.-Dir attr) ""))
+    (when [(values _ err) (Stat (.-Dir attr))] (!= err nil)
+      (let [pe (assert (* PathError) err)]
+        (set! (.-Op pe) "chdir")
+        (return nil pe))))
+
+
+
+  (let [(values attrSys shouldDupPidfd) (ensurePidfd (.-Sys attr))
+      ^{:line 39} sysattr (addr ^{:go/breaks [2 4 6]} (lit syscall/ProcAttr
+          :Dir (.-Dir attr)
+          :Env (.-Env attr)
+          :Sys attrSys))]
+
+    (when (== (.-Env sysattr) nil)
+      (set! (values (.-Env sysattr) err) (execenv/Default (.-Sys sysattr)))
+      (when (!= err nil)
+        (return nil err)))
+
+
+    (set! (.-Files sysattr) (make (slice uintptr) 0 (len (.-Files attr))))
+    (range [_ f (.-Files attr)]
+      (set! (.-Files sysattr) (append (.-Files sysattr) (.Fd f))))
+
+
+    (let [(values pid h e) (syscall/StartProcess name argv sysattr)]
+
+      ;; Make sure we don't run the finalizers of attr.Files.
+      (runtime/KeepAlive attr)
+
+      (when (!= e nil)
+        (return nil (addr (lit PathError :Op "fork/exec" :Path name :Err e))))
+
+
+      ;; For Windows, syscall.StartProcess above already returned a process handle.
+      (when (!= runtime/GOOS "windows")
+        (let [^bool ok (zero bool)]
+          (set! (values h ok) (getPidfd (.-Sys sysattr) shouldDupPidfd))
+          (when (not ok)
+            (return (newPIDProcess pid) nil))))
+
+
+
+      (return (newHandleProcess pid h) nil))))
+
+
+^{:go/end 78} (go/method kill ^error [^{:tag (* Process)} p]
+  (.Signal p Kill))
+
+
+^{:go/end 95} (go/method withHandle ^error [^{:tag (* Process)} p ^{:tag (func [^uintptr handle])} f]
+  (when (== (.-handle p) nil)
+    (return ErrNoHandle))
+
+  ^{:go/breaks [[5 94]]} (let [(values handle status) (.handleTransientAcquire p)]
+    (switch status
+      (case [statusDone]
+        (return ErrProcessDone))
+      (case [statusReleased]
+        (return errProcessReleased)))
+
+    (defer (.handleTransientRelease p))
+    (f handle)
+
+    nil))
+
+
+
+(go/type ProcessState "ProcessState stores information about a process, as reported by Wait.\n" (struct
+    ^{:line 99 :tag int} pid ; The process's id.
+    ^{:line 100 :tag syscall/WaitStatus} status ; System-dependent status info.
+    ^{:line 101 :tag (* syscall/Rusage)} rusage))
+
+
+
+^{:go/end 107} (go/method Pid "Pid returns the process id of the exited process.\n" ^int [^{:tag (* ProcessState)} p]
+  (.-pid p))
+
+
+^{:go/end 111} (go/method exited ^bool [^{:tag (* ProcessState)} p]
+  (.Exited (.-status p)))
+
+
+^{:go/end 115} (go/method success ^bool [^{:tag (* ProcessState)} p]
+  (== (.ExitStatus (.-status p)) 0))
+
+
+^{:go/end 119} (go/method sys ^any [^{:tag (* ProcessState)} p]
+  (.-status p))
+
+
+^{:go/end 123} (go/method sysUsage ^any [^{:tag (* ProcessState)} p]
+  (.-rusage p))
+
+
+^{:go/end 153} (go/method String ^string [^{:tag (* ProcessState)} p]
+  (when (== p nil)
+    (return "<nil>"))
+
+  (let [status (assert syscall/WaitStatus (.Sys p))
+      ^{:line 130} res ""]
+    (switch
+      (case [(.Exited status)]
+        (let [code (.ExitStatus status)]
+          (if (and (== runtime/GOOS "windows") (>= (conv uint code) (<< 1 16))) ; windows uses large hex numbers
+            (set! res (+ "exit status 0x" (strconv/FormatUint (conv uint64 code) 16)))
+            ;; unix systems use small decimal integers
+            (set! res (+ "exit status " (strconv/Itoa code)))))) ; unix
+
+      (case [(.Signaled status)]
+        (set! res (+ "signal: " (.String (.Signal status)))))
+      (case [(.Stopped status)]
+        (set! res (+ "stop signal: " (.String (.StopSignal status))))
+        (when (and (== (.StopSignal status) syscall/SIGTRAP) (!= (.TrapCause status) 0))
+          (set! res + (+ " (trap " (strconv/Itoa (.TrapCause status)) ")"))))
+
+      (case [(.Continued status)]
+        (set! res "continued")))
+
+    (when (.CoreDump status)
+      (set! res + " (core dumped)"))
+
+    ^{:line 152} res))
+
+
+
+
+^{:go/end 163} (go/method ExitCode "ExitCode returns the exit code of the exited process, or -1\nif the process hasn't exited or was terminated by a signal.\n" ^int [^{:tag (* ProcessState)} p]
+  ;; return -1 if the process hasn't started.
+  (when (== p nil)
+    (return -1))
+
+  (.ExitStatus (.-status p)))

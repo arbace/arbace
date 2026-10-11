@@ -1,0 +1,403 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package http2 implements the HTTP/2 protocol.
+;;
+;; This package is low-level and intended to be used directly by very
+;; few people. Most users will use it indirectly through the automatic
+;; use by the net/http package (from Go 1.6 and later).
+;; For use in earlier Go versions see ConfigureServer. (Transport support
+;; requires Go 1.6 or later)
+;;
+;; See https://http2.github.io/ for more information on HTTP/2.
+(in-ns 'go.net.http.internal.http2) (go/file "http2.go" :doc "Package http2 implements the HTTP/2 protocol.\n\nThis package is low-level and intended to be used directly by very\nfew people. Most users will use it indirectly through the automatic\nuse by the net/http package (from Go 1.6 and later).\nFor use in earlier Go versions see ConfigureServer. (Transport support\nrequires Go 1.6 or later)\n\nSee https://http2.github.io/ for more information on HTTP/2.\n" :imports [
+
+
+    ^{:line 17} [bufio "bufio"]
+    ^{:line 18} [tls "crypto/tls"]
+    ^{:line 19} [errors "errors"]
+    ^{:line 20} [fmt "fmt"]
+    ^{:line 21} [net "net"]
+    ^{:line 22} [os "os"]
+    ^{:line 23} [slices "slices"]
+    ^{:line 24} [strconv "strconv"]
+    ^{:line 25} [strings "strings"]
+    ^{:line 26} [sync "sync"]
+    ^{:line 27} [time "time"]
+
+    ^{:line 29} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+(go/var
+  ^{:line 33} [^bool VerboseLogs]
+  ^{:line 34} [^bool logFrameWrites]
+  ^{:line 35} [^bool logFrameReads]
+
+
+
+
+
+
+
+
+  ^{:line 44} [^{:doc "Enabling extended CONNECT by causes browsers to attempt to use\nWebSockets-over-HTTP/2. This results in problems when the server's websocket\npackage doesn't support extended CONNECT.\n\nDisable extended CONNECT by default for now.\n\nIssue #71128.\n"} disableExtendedConnectProtocol true]
+
+  ^{:line 46} [inTests false])
+
+
+^{:go/end 62} (go/func init []
+  (let [e (os/Getenv "GODEBUG")]
+    (when (strings/Contains e "http2debug=1")
+      (set! VerboseLogs true))
+
+    (when (strings/Contains e "http2debug=2")
+      (set! VerboseLogs true)
+      (set! logFrameWrites true)
+      (set! logFrameReads true))
+
+    (when (strings/Contains e "http2xconnect=1")
+      (set! disableExtendedConnectProtocol false))))
+
+
+
+(go/const
+
+
+  ^{:line 67} [^{:val "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" :doc "ClientPreface is the string that must be sent by new\nconnections from clients.\n"} ClientPreface "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"]
+
+
+
+  ^{:line 71} [^{:val 16384 :doc "SETTINGS_MAX_FRAME_SIZE default\nhttps://httpwg.org/specs/rfc7540.html#rfc.section.6.5.2\n"} initialMaxFrameSize 16384]
+
+
+
+  ^{:line 75} [^{:val "h2" :doc "NextProtoTLS is the NPN/ALPN protocol negotiated during\nHTTP/2's TLS setup.\n"} NextProtoTLS "h2"]
+
+
+  ^{:line 78} [^{:val 4096 :doc "https://httpwg.org/specs/rfc7540.html#SettingValues\n"} initialHeaderTableSize 4096]
+
+  ^{:line 80} [^{:val 65535} initialWindowSize 65535] ; 6.9.2 Initial Flow Control Window Size
+
+  ^{:line 82} [^{:val 1048576} defaultMaxReadFrameSize (<< 1 20)])
+
+
+(go/var
+  ^{:line 86} [clientPreface (conv (slice byte) ClientPreface)])
+
+
+(go/type streamState int)
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const "HTTP/2 stream states.\n\nSee http://tools.ietf.org/html/rfc7540#section-5.1.\n\nFor simplicity, the server code merges \"reserved (local)\" into\n\"half-closed (remote)\". This is one less state transition to track.\nThe only downside is that we send PUSH_PROMISEs slightly less\nliberally than allowable. More discussion here:\nhttps://lists.w3.org/Archives/Public/ietf-http-wg/2016JulSep/0599.html\n\n\"reserved (remote)\" is omitted since the client code does not\nsupport server push.\n"
+  ^{:line 104} [^{:tag streamState :val 0} stateIdle iota]
+  ^{:line 105} [^{:val 1} stateOpen]
+  ^{:line 106} [^{:val 2} stateHalfClosedLocal]
+  ^{:line 107} [^{:val 3} stateHalfClosedRemote]
+  ^{:line 108} [^{:val 4} stateClosed])
+
+
+(go/var stateName (lit (array ... string)
+    ^{:line 112} [stateIdle "Idle"]
+    ^{:line 113} [stateOpen "Open"]
+    ^{:line 114} [stateHalfClosedLocal "HalfClosedLocal"]
+    ^{:line 115} [stateHalfClosedRemote "HalfClosedRemote"]
+    ^{:line 116} [stateClosed "Closed"]))
+
+
+^{:go/end 121} (go/method String ^string [^streamState st]
+  (aget stateName st))
+
+
+
+(go/type Setting "Setting is a setting parameter: which setting it is, and its value.\n" (struct
+
+
+    ^{:line 127 :tag SettingID :doc "ID is which setting is being set.\nSee https://httpwg.org/specs/rfc7540.html#SettingFormat\n"} ID
+
+
+    ^{:line 130 :tag uint32 :doc "Val is the value.\n"} Val))
+
+
+^{:go/end 135} (go/method String ^string [^Setting s]
+  (fmt/Sprintf "[%v = %d]" (.-ID s) (.-Val s)))
+
+
+
+^{:go/breaks [[5 158]] :go/end 159} (go/method Valid "Valid reports whether the setting is valid.\n" ^error [^Setting s]
+  ;; Limits and error codes from 6.5.2 Defined SETTINGS Parameters
+  (switch (.-ID s)
+    (case [SettingEnablePush]
+      (when (and (!= (.-Val s) 1) (!= (.-Val s) 0))
+        (return (conv ConnectionError ErrCodeProtocol))))
+
+    (case [SettingInitialWindowSize]
+      (when (> (.-Val s) (- (<< 1 31) 1))
+        (return (conv ConnectionError ErrCodeFlowControl))))
+
+    (case [SettingMaxFrameSize]
+      (when (or (< (.-Val s) 16384) (> (.-Val s) (- (<< 1 24) 1)))
+        (return (conv ConnectionError ErrCodeProtocol))))
+
+    (case [SettingEnableConnectProtocol]
+      (when (and (!= (.-Val s) 1) (!= (.-Val s) 0))
+        (return (conv ConnectionError ErrCodeProtocol)))))
+
+
+  nil)
+
+
+
+
+(go/type SettingID "A SettingID is an HTTP/2 setting as defined in\nhttps://httpwg.org/specs/rfc7540.html#iana-settings\n" uint16)
+
+(go/const
+  ^{:line 166} [^{:tag SettingID :val 1} SettingHeaderTableSize 0x1]
+  ^{:line 167} [^{:tag SettingID :val 2} SettingEnablePush 0x2]
+  ^{:line 168} [^{:tag SettingID :val 3} SettingMaxConcurrentStreams 0x3]
+  ^{:line 169} [^{:tag SettingID :val 4} SettingInitialWindowSize 0x4]
+  ^{:line 170} [^{:tag SettingID :val 5} SettingMaxFrameSize 0x5]
+  ^{:line 171} [^{:tag SettingID :val 6} SettingMaxHeaderListSize 0x6]
+  ^{:line 172} [^{:tag SettingID :val 8} SettingEnableConnectProtocol 0x8]
+  ^{:line 173} [^{:tag SettingID :val 9} SettingNoRFC7540Priorities 0x9])
+
+
+(go/var settingName (lit (map SettingID string)
+    ^{:line 177} [SettingHeaderTableSize "HEADER_TABLE_SIZE"]
+    ^{:line 178} [SettingEnablePush "ENABLE_PUSH"]
+    ^{:line 179} [SettingMaxConcurrentStreams "MAX_CONCURRENT_STREAMS"]
+    ^{:line 180} [SettingInitialWindowSize "INITIAL_WINDOW_SIZE"]
+    ^{:line 181} [SettingMaxFrameSize "MAX_FRAME_SIZE"]
+    ^{:line 182} [SettingMaxHeaderListSize "MAX_HEADER_LIST_SIZE"]
+    ^{:line 183} [SettingEnableConnectProtocol "ENABLE_CONNECT_PROTOCOL"]
+    ^{:line 184} [SettingNoRFC7540Priorities "NO_RFC7540_PRIORITIES"]))
+
+
+^{:go/end 192} (go/method String ^string [^SettingID s]
+  (when [(values v ok) (aget settingName s)] ok
+    (return v))
+
+  (fmt/Sprintf "UNKNOWN_SETTING_%d" (conv uint16 s)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 215]] :go/end 216} (go/func validWireHeaderFieldName "validWireHeaderFieldName reports whether v is a valid header field\nname (key). See httpguts.ValidHeaderName for the base rules.\n\nFurther, http2 says:\n\n\t\"Just as in HTTP/1.x, header field names are strings of ASCII\n\tcharacters that are compared in a case-insensitive\n\tfashion. However, header field names MUST be converted to\n\tlowercase prior to their encoding in HTTP/2. \"\n" ^bool [^string v]
+  (when (== (len v) 0)
+    (return false))
+
+  (range [_ r v]
+    (when (not (httpguts/IsTokenRune r))
+      (return false))
+
+    (when (and (<= \A r) (<= r \Z))
+      (return false)))
+
+
+  true)
+
+
+
+^{:go/end 227} (go/func httpCodeString "TODO: avoid alloc when code is neither 200 nor 404.\n" ^string [^int code]
+  (switch code
+    (case [200]
+      (return "200"))
+    (case [404]
+      (return "404")))
+
+  (strconv/Itoa code))
+
+
+
+(go/type closeWaiter "A closeWaiter is like a sync.WaitGroup but only goes 1 to 0 (open to closed).\n" (chan (struct)))
+
+
+
+
+
+^{:go/end 238} (go/method Init "Init makes a closeWaiter usable.\nIt exists because so a closeWaiter value can be placed inside a\nlarger struct and have the Mutex and Cond's memory in the same\nallocation.\n" [^{:tag (* closeWaiter)} cw]
+  (set! @cw (make (chan (struct)))))
+
+
+
+^{:go/end 243} (go/method Close "Close marks the closeWaiter as closed and unblocks any waiters.\n" [^closeWaiter cw]
+  (close cw))
+
+
+
+^{:go/end 248} (go/method Wait "Wait waits for the closeWaiter to become closed.\n" [^closeWaiter cw]
+  (<! cw))
+
+
+
+
+
+(go/type bufferedWriter "bufferedWriter is a buffered writer that writes to w.\nIts buffered writer is lazily allocated as needed, to minimize\nidle memory usage with many connections.\n" (struct
+    ^{:line 254 :tag incomparable} _
+    ^{:line 255 :tag net/Conn} conn ; immutable
+    ^{:line 256 :tag (* bufio/Writer)} bw ; non-nil when data is buffered
+    ^{:line 257 :tag time/Duration} byteTimeout ; immutable, WriteByteTimeout
+    ^{:line 258 :tag error} werr))
+
+
+^{:go/end 266} (go/func newBufferedWriter ^{:tag (* bufferedWriter)} [^net/Conn conn ^time/Duration timeout]
+  (addr ^{:go/breaks [2 4]} (lit bufferedWriter
+      :conn conn
+      :byteTimeout timeout)))
+
+
+
+
+
+
+
+
+
+(go/const ^{:val 4096 :doc "bufWriterPoolBufferSize is the size of bufio.Writer's\nbuffers created using bufWriterPool.\n\nTODO: pick a less arbitrary value? this is a bit under\n(3 x typical 1500 byte MTU) at least. Other than that,\nnot much thought went into it.\n"} bufWriterPoolBufferSize (<< 4 10))
+
+(go/var bufWriterPool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 279} (fn ^any []
+      (bufio/NewWriterSize nil bufWriterPoolBufferSize))))
+
+
+
+^{:go/end 287} (go/method Available ^int [^{:tag (* bufferedWriter)} w]
+  (when (== (.-bw w) nil)
+    (return bufWriterPoolBufferSize))
+
+  (.Available (.-bw w)))
+
+
+^{:go/end 300} (go/method Write [^{:tag (* bufferedWriter)} w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (!= (.-werr w) nil)
+    (return 0 (.-werr w)))
+
+  (when (== (.-bw w) nil)
+    (let [bw (assert (* bufio/Writer) (.Get bufWriterPool))]
+      (.Reset bw (conv (* bufferedWriterTimeoutWriter) w))
+      (set! (.-bw w) bw)))
+
+  (set! (values n (.-werr w)) (.Write (.-bw w) p))
+  (return n (.-werr w)))
+
+
+^{:go/end 315} (go/method Flush ^error [^{:tag (* bufferedWriter)} w]
+  (let [bw (.-bw w)]
+    (when (== bw nil)
+      (return nil))
+
+    (when (!= (.-werr w) nil)
+      (return (.-werr w)))
+
+    (set! (.-werr w) (.Flush bw))
+    (.Reset bw nil)
+    (.Put bufWriterPool bw)
+    (set! (.-bw w) nil)
+    (.-werr w)))
+
+
+(go/type bufferedWriterTimeoutWriter bufferedWriter)
+
+^{:go/end 321} (go/method Write [^{:tag (* bufferedWriterTimeoutWriter)} w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (writeWithByteTimeout (.-conn w) (.-byteTimeout w) p))
+
+
+
+
+
+^{:go/end 341} (go/func writeWithByteTimeout "writeWithByteTimeout writes to conn.\nIf more than timeout passes without any bytes being written to the connection,\nthe write fails.\n" [^net/Conn conn ^time/Duration timeout ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (<= timeout 0)
+    (return (.Write conn p)))
+
+  (while true
+    (.SetWriteDeadline conn (.Add (time/Now) timeout))
+    (let [(values nn err) (.Write conn (subslice p n))]
+      (set! n + nn)
+      (when (or (== n (len p)) (== nn 0) (not (errors/Is err os/ErrDeadlineExceeded)))
+        ;; Either we finished the write, made no progress, or hit the deadline.
+        ;; Whichever it is, we're done now.
+        (.SetWriteDeadline conn (lit time/Time))
+        (return n err)))))
+
+
+
+
+^{:go/end 348} (go/func mustUint31 ^uint32 [^int32 v]
+  (when (or (< v 0) (> v 2147483647))
+    (panic "out of range"))
+
+  (conv uint32 v))
+
+
+
+
+^{:go/breaks [[5 361]] :go/end 362} (go/func bodyAllowedForStatus "bodyAllowedForStatus reports whether a given response status code\npermits a body. See RFC 7230, section 3.3.\n" ^bool [^int status]
+  (switch
+    (case [(and (>= status 100) (<= status 199))]
+      (return false))
+    (case [(== status 204)]
+      (return false))
+    (case [(== status 304)]
+      (return false)))
+
+  true)
+
+
+(go/type httpError (struct
+    ^{:line 365 :tag incomparable} _
+    ^{:line 366 :tag string} msg
+    ^{:line 367 :tag bool} timeout))
+
+
+^{:go/end 370} (go/method Error ^string [^{:tag (* httpError)} e] (.-msg e))
+^{:go/end 371} (go/method Timeout ^bool [^{:tag (* httpError)} e] (.-timeout e))
+^{:go/end 372} (go/method Temporary ^bool [^{:tag (* httpError)} e] true)
+
+(go/var ^error errTimeout (addr (lit httpError :msg "http2: timeout awaiting response headers" :timeout true)))
+
+(go/type connectionStater (interface
+    (ConnectionState ^tls/ConnectionState [])))
+
+
+(go/var sorterPool (lit sync/Pool :New ^{:go/end 380} (fn ^any [] (new sorter))))
+
+(go/type sorter (struct
+    ^{:line 383 :tag (slice string)} v)) ; owned by sorter
+
+
+
+
+
+
+^{:go/end 398} (go/method Keys "Keys returns the sorted keys of h.\n\nThe returned slice is only valid until s used again or returned to\nits pool.\n" ^{:tag (slice string)} [^{:tag (* sorter)} s ^Header h]
+  (let [keys (subslice (.-v s) _ 0)]
+    (range [k h]
+      (set! keys (append keys k)))
+
+    (set! (.-v s) keys)
+    (^{:inst [(slice string) string]} slices/Sort (.-v s))
+    ^{:line 397} keys))
+
+
+
+
+
+(go/type incomparable "incomparable is a zero-width, non-comparable type. Adding it to a struct\nmakes that struct also non-comparable, and generally doesn't add\nany size (as long as it's first).\n" (array 0 (func [])))

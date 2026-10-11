@@ -1,0 +1,347 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.regexp.syntax) (go/file "prog.go" :imports [
+
+
+    ^{:line 8} [strconv "strconv"]
+    ^{:line 9} [strings "strings"]
+    ^{:line 10} [unicode "unicode"]
+    ^{:line 11} [utf8 "unicode/utf8"]])
+
+
+;; Compiled program.
+;; May not belong in this package, but convenient for now.
+
+
+(go/type Prog "A Prog is a compiled regular expression program.\n" (struct
+    ^{:line 19 :tag (slice Inst)} Inst
+    ^{:line 20 :tag int} Start ; index of start instruction
+    ^{:line 21 :tag int} NumCap)) ; number of InstCapture insts in re
+
+
+
+(go/type InstOp "An InstOp is an instruction opcode.\n" uint8)
+
+(go/const
+  ^{:line 28} [^{:tag InstOp :val 0} InstAlt iota]
+  ^{:line 29} [^{:val 1} InstAltMatch]
+  ^{:line 30} [^{:val 2} InstCapture]
+  ^{:line 31} [^{:val 3} InstEmptyWidth]
+  ^{:line 32} [^{:val 4} InstMatch]
+  ^{:line 33} [^{:val 5} InstFail]
+  ^{:line 34} [^{:val 6} InstNop]
+  ^{:line 35} [^{:val 7} InstRune]
+  ^{:line 36} [^{:val 8} InstRune1]
+  ^{:line 37} [^{:val 9} InstRuneAny]
+  ^{:line 38} [^{:val 10} InstRuneAnyNotNL])
+
+
+(go/var instOpNames ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12]} (lit (slice string)
+    "InstAlt"
+    "InstAltMatch"
+    "InstCapture"
+    "InstEmptyWidth"
+    "InstMatch"
+    "InstFail"
+    "InstNop"
+    "InstRune"
+    "InstRune1"
+    "InstRuneAny"
+    "InstRuneAnyNotNL"))
+
+
+^{:go/end 60} (go/method String ^string [^InstOp i]
+  (when (>= (conv uint i) (conv uint (len instOpNames)))
+    (return ""))
+
+  (aget instOpNames i))
+
+
+
+(go/type EmptyOp "An EmptyOp specifies a kind or mixture of zero-width assertions.\n" uint8)
+
+(go/const
+  ^{:line 66} [^{:tag EmptyOp :val 1} EmptyBeginLine (<< 1 iota)]
+  ^{:line 67} [^{:val 2} EmptyEndLine]
+  ^{:line 68} [^{:val 4} EmptyBeginText]
+  ^{:line 69} [^{:val 8} EmptyEndText]
+  ^{:line 70} [^{:val 16} EmptyWordBoundary]
+  ^{:line 71} [^{:val 32} EmptyNoWordBoundary])
+
+
+
+
+
+
+
+
+^{:go/end 103} (go/func EmptyOpContext "EmptyOpContext returns the zero-width assertions\nsatisfied at the position between the runes r1 and r2.\nPassing r1 == -1 indicates that the position is\nat the beginning of the text.\nPassing r2 == -1 indicates that the position is\nat the end of the text.\n" ^EmptyOp [^rune r1 ^rune r2]
+  (let [^EmptyOp op EmptyNoWordBoundary
+      ^{:line 82 :tag byte} boundary (zero byte)]
+    (switch
+      (case [(IsWordChar r1)]
+        (set! boundary 1))
+      (case [(== r1 \newline)]
+        (set! op bit-or EmptyBeginLine))
+      (case [(< r1 0)]
+        (set! op bit-or (bit-or EmptyBeginText EmptyBeginLine))))
+
+    (switch
+      (case [(IsWordChar r2)]
+        (set! boundary bit-xor 1))
+      (case [(== r2 \newline)]
+        (set! op bit-or EmptyEndLine))
+      (case [(< r2 0)]
+        (set! op bit-or (bit-or EmptyEndText EmptyEndLine))))
+
+    (when (!= boundary 0) ; IsWordChar(r1) != IsWordChar(r2)
+      (set! op bit-xor (bit-or EmptyWordBoundary EmptyNoWordBoundary)))
+
+    ^{:line 102} op))
+
+
+
+
+
+^{:go/end 112} (go/func IsWordChar "IsWordChar reports whether r is considered a “word character”\nduring the evaluation of the \\b and \\B zero-width assertions.\nThese assertions are ASCII-only: the word characters are [A-Za-z0-9_].\n" ^bool [^rune r]
+  ;; Test for lowercase letters first, as these occur more
+  ;; frequently than uppercase letters in common cases.
+  (or (and (<= \a r) (<= r \z)) (and (<= \A r) (<= r \Z)) (and (<= \0 r) (<= r \9)) (== r \_)))
+
+
+
+(go/type Inst "An Inst is a single instruction in a regular expression program.\n" (struct
+    ^{:line 116 :tag InstOp} Op
+    ^{:line 117 :tag uint32} Out ; all but InstMatch, InstFail
+    ^{:line 118 :tag uint32} Arg ; InstAlt, InstAltMatch, InstCapture, InstEmptyWidth
+    ^{:line 119 :tag (slice rune)} Rune))
+
+
+^{:go/end 126} (go/method String ^string [^{:tag (* Prog)} p]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (dumpProg (addr b) p)
+    (.String b)))
+
+
+
+^{:go/end 135} (go/method skipNop "skipNop follows any no-op or capturing instructions.\n" ^{:tag (* Inst)} [^{:tag (* Prog)} p ^uint32 pc]
+  (let [i (addr (aget (.-Inst p) pc))]
+    (while (or (== (.-Op i) InstNop) (== (.-Op i) InstCapture))
+      (set! i (addr (aget (.-Inst p) (.-Out i)))))
+
+    ^{:line 134} i))
+
+
+
+^{:go/end 145} (go/method op "op returns i.Op but merges all the Rune special cases into InstRune\n" ^InstOp [^{:tag (* Inst)} i]
+  (let [op (.-Op i)]
+    (switch op
+      (case [InstRune1 InstRuneAny InstRuneAnyNotNL]
+        (set! op InstRune)))
+
+    ^{:line 144} op))
+
+
+
+
+
+^{:go/end 165} (go/method Prefix "Prefix returns a literal string that all matches for the\nregexp must start with. Complete is true if the prefix\nis the entire match.\n" [^{:tag (* Prog)} p] :results [^string prefix ^bool complete]
+  (let [i (.skipNop p (conv uint32 (.-Start p)))]
+
+    ;; Avoid allocation of buffer if prefix is empty.
+    (when (or (!= (.op i) InstRune) (!= (len (.-Rune i)) 1))
+      (return "" (== (.-Op i) InstMatch)))
+
+
+    ;; Have prefix; gather characters.
+    (let [^strings/Builder buf (zero strings/Builder)]
+      (while (and (== (.op i) InstRune) (== (len (.-Rune i)) 1) (== (bit-and (conv Flags (.-Arg i)) FoldCase) 0) (!= (aget (.-Rune i) 0) utf8/RuneError))
+        (.WriteRune buf (aget (.-Rune i) 0))
+        (set! i (.skipNop p (.-Out i))))
+
+      (return (.String buf) (== (.-Op i) InstMatch)))))
+
+
+
+
+^{:go/end 189} (go/method StartCond "StartCond returns the leading empty-width conditions that must\nbe true in any match. It returns ^EmptyOp(0) if no matches are possible.\n" ^EmptyOp [^{:tag (* Prog)} p]
+  (let [^EmptyOp flag (zero EmptyOp)
+      ^{:line 171} pc (conv uint32 (.-Start p))
+      ^{:line 172} i (addr (aget (.-Inst p) pc))]
+    (label :Loop
+      (while true
+        (switch (.-Op i)
+          (case [InstEmptyWidth]
+            (set! flag bit-or (conv EmptyOp (.-Arg i))))
+          (case [InstFail]
+            (return (bit-not (conv EmptyOp 0))))
+          (case [InstCapture InstNop])
+          ;; skip
+          (default
+            (break :Loop)))
+
+        (set! pc (.-Out i))
+        (set! i (addr (aget (.-Inst p) pc)))))
+
+    ^{:line 188} flag))
+
+
+(go/const ^{:val -1} noMatch -1)
+
+
+
+^{:go/end 197} (go/method MatchRune "MatchRune reports whether the instruction matches (and consumes) r.\nIt should only be called when i.Op == [InstRune].\n" ^bool [^{:tag (* Inst)} i ^rune r]
+  (!= (.MatchRunePos i r) noMatch))
+
+
+
+
+
+
+
+^{:go/end 261} (go/method MatchRunePos "MatchRunePos checks whether the instruction matches (and consumes) r.\nIf so, MatchRunePos returns the index of the matching rune pair\n(or, when len(i.Rune) == 1, rune singleton).\nIf not, MatchRunePos returns -1.\nMatchRunePos should only be called when i.Op == [InstRune].\n" ^int [^{:tag (* Inst)} i ^rune r]
+  (let [rune (.-Rune i)]
+
+    (switch (len rune)
+      (case [0]
+        (return noMatch))
+
+      (case [1]
+        ;; Special case: single-rune slice is from literal string, not char class.
+        (let [r0 (aget rune 0)]
+          (when (== r r0)
+            (return 0))
+
+          (when (!= (bit-and (conv Flags (.-Arg i)) FoldCase) 0)
+            (for [r1 (unicode/SimpleFold r0)] (!= r1 r0) (set! r1 (unicode/SimpleFold r1))
+              (when (== r r1)
+                (return 0))))
+
+
+
+          (return noMatch)))
+
+      (case [2]
+        (when (and (>= r (aget rune 0)) (<= r (aget rune 1)))
+          (return 0))
+
+        (return noMatch))
+
+      (case [4 6 8]
+        ;; Linear search for a few pairs.
+        ;; Should handle ASCII well.
+        (for [j 0] (< j (len rune)) (set! j + 2)
+          (when (< r (aget rune j))
+            (return noMatch))
+
+          (when (<= r (aget rune (+ j 1)))
+            (return (/ j 2))))
+
+
+        (return noMatch)))
+
+
+    ;; Otherwise binary search.
+    (let [lo 0
+        ^{:line 248} hi (/ (len rune) 2)]
+      (while (< lo hi)
+        (let [m (conv int (>> (conv uint (+ lo hi)) 1))]
+          (if [c (aget rune (* 2 m))] (<= c r) (do
+              (when (<= r (aget rune (+ (* 2 m) 1)))
+                (return m))
+
+              (set! lo (+ m 1)))
+
+            (set! hi m))))
+
+
+      ^{:line 260} noMatch)))
+
+
+
+
+
+^{:go/end 282} (go/method MatchEmptyWidth "MatchEmptyWidth reports whether the instruction matches\nan empty string between the runes before and after.\nIt should only be called when i.Op == [InstEmptyWidth].\n" ^bool [^{:tag (* Inst)} i ^rune before ^rune after]
+  (switch (conv EmptyOp (.-Arg i))
+    (case [EmptyBeginLine]
+      (return (or (== before \newline) (== before -1))))
+    (case [EmptyEndLine]
+      (return (or (== after \newline) (== after -1))))
+    (case [EmptyBeginText]
+      (return (== before -1)))
+    (case [EmptyEndText]
+      (return (== after -1)))
+    (case [EmptyWordBoundary]
+      (return (!= (IsWordChar before) (IsWordChar after))))
+    (case [EmptyNoWordBoundary]
+      (return (== (IsWordChar before) (IsWordChar after)))))
+
+  (panic "unknown empty width arg"))
+
+
+^{:go/end 288} (go/method String ^string [^{:tag (* Inst)} i]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (dumpInst (addr b) i)
+    (.String b)))
+
+
+^{:go/end 294} (go/func bw [^{:tag (* strings/Builder)} b & ^{:tag (slice string)} args]
+  (range [_ s args]
+    (.WriteString b s)))
+
+
+
+^{:go/end 310} (go/func dumpProg [^{:tag (* strings/Builder)} b ^{:tag (* Prog)} p]
+  (range [j (.-Inst p)]
+    (let [i (addr (aget (.-Inst p) j))
+        ^{:line 299} pc (strconv/Itoa j)]
+      (when (< (len pc) 3)
+        (.WriteString b (subslice "   " (len pc))))
+
+      (when (== j (.-Start p))
+        (set! pc + "*"))
+
+      (bw b pc "\t")
+      (dumpInst b i)
+      (bw b "\n"))))
+
+
+
+^{:go/end 314} (go/func u32 ^string [^uint32 i]
+  (strconv/FormatUint (conv uint64 i) 10))
+
+
+^{:go/end 349} (go/func dumpInst [^{:tag (* strings/Builder)} b ^{:tag (* Inst)} i]
+  (switch (.-Op i)
+    (case [InstAlt]
+      (bw b "alt -> " (u32 (.-Out i)) ", " (u32 (.-Arg i))))
+    (case [InstAltMatch]
+      (bw b "altmatch -> " (u32 (.-Out i)) ", " (u32 (.-Arg i))))
+    (case [InstCapture]
+      (bw b "cap " (u32 (.-Arg i)) " -> " (u32 (.-Out i))))
+    (case [InstEmptyWidth]
+      (bw b "empty " (u32 (.-Arg i)) " -> " (u32 (.-Out i))))
+    (case [InstMatch]
+      (bw b "match"))
+    (case [InstFail]
+      (bw b "fail"))
+    (case [InstNop]
+      (bw b "nop -> " (u32 (.-Out i))))
+    (case [InstRune]
+      (when (== (.-Rune i) nil)
+        ;; shouldn't happen
+        (bw b "rune <nil>"))
+
+      (bw b "rune " (strconv/QuoteToASCII (conv string (.-Rune i))))
+      (when (!= (bit-and (conv Flags (.-Arg i)) FoldCase) 0)
+        (bw b "/i"))
+
+      (bw b " -> " (u32 (.-Out i))))
+    (case [InstRune1]
+      (bw b "rune1 " (strconv/QuoteToASCII (conv string (.-Rune i))) " -> " (u32 (.-Out i))))
+    (case [InstRuneAny]
+      (bw b "any -> " (u32 (.-Out i))))
+    (case [InstRuneAnyNotNL]
+      (bw b "anynotnl -> " (u32 (.-Out i))))))

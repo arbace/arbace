@@ -1,0 +1,425 @@
+;; Microchip CPU port module (DEVCPU)
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package devcpu implements a driver for the Microchip CPU port module
+;; (DEVCPU), responsible for exchanging frames between the internal CPU system
+;; and the switch core, adopting the following reference specifications:
+;;   - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=arm64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.microchip.devcpu) (go/file "port.go" :doc "Package devcpu implements a driver for the Microchip CPU port module\n(DEVCPU), responsible for exchanging frames between the internal CPU system\nand the switch core, adopting the following reference specifications:\n  - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=arm64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 20} [rand "crypto/rand"]
+    ^{:line 21} [binary "encoding/binary"]
+    ^{:line 22} [errors "errors"]
+    ^{:line 23} [net "net"]
+    ^{:line 24} [runtime "runtime"]
+    ^{:line 25} [sync "sync"]
+    ^{:line 26} [time "time"]
+
+    ^{:line 28} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 29} [analyzer "github.com/usbarmory/tamago/soc/microchip/analyzer"]])
+
+
+(go/const
+  ^{:line 33} [^{:val 1000000000} ExtractionTimeout (* 1 time/Second)]
+  ^{:line 34} [^{:val 1000000000} InjectionTimeout (* 1 time/Second)]
+  ^{:line 35} [^{:val 1000000} InjectionPollInterval (* 1 time/Millisecond)]
+  ^{:line 36} [^{:val 60} MinimumFrameSize 60])
+
+
+(go/type Stats (struct
+    ^{:line 40 :tag uint64} RxTruncated
+    ^{:line 41 :tag uint64} RxFIFOTimeouts
+    ^{:line 42 :tag uint64} RxAborted
+    ^{:line 43 :tag uint64} RxEmpty
+    ^{:line 44 :tag uint64} RxOversized
+    ^{:line 45 :tag uint64} RxInvalid
+    ^{:line 46 :tag uint64} RxShortHeader
+    ^{:line 47 :tag uint64} TxWatermarkTimeouts
+    ^{:line 48 :tag uint64} TxFIFOTimeouts
+    ^{:line 49 :tag uint64} TxAborts
+    ^{:line 50 :tag uint64} TxAbortTimeouts))
+
+
+
+(go/type Port "Port represents a CPU port module.\n" (struct
+    ^{:line 55} sync/Mutex
+
+
+    ^{:line 58 :tag int :doc "Port index\n"} Index
+
+    ^{:line 60 :tag int :doc "Group index\n"} Group
+
+    ^{:line 62 :tag int :doc "Interrupt ID\n"} IRQ
+
+
+    ^{:line 65 :tag uint32 :doc "Queue System Base register\n"} Queue
+
+    ^{:line 67 :tag (* analyzer/ANA) :doc "Analyzer block\n"} Analyzer
+
+
+    ^{:line 70 :tag int :doc "HeaderLength allows to override the default internal frame header\nlength [see IFH_LEN].\n"} HeaderLength
+
+
+    ^{:line 73 :tag (func [] [error]) :doc "Enable implements port enabling and MAC learning\n"} Enable
+
+
+    ^{:line 76 :tag net/HardwareAddr :doc "MAC address (use SetMAC() for post Init() changes)\n"} MAC
+
+    ^{:line 78 :tag int :doc "FID represents the VLAN filtering identifier\n"} FID
+
+
+    ^{:line 81 :tag Stats :doc "Statistics\n"} Stats
+
+    ^{:line 83 :tag sync/Mutex} rxMu
+    ^{:line 84 :tag sync/Mutex} txMu
+
+
+    ^{:line 87 :tag uint32 :doc "control registers\n"} xtr_rd
+    ^{:line 88 :tag uint32} inj_ctrl
+    ^{:line 89 :tag uint32} inj_wr
+    ^{:line 90 :tag uint32} inj_status))
+
+
+
+^{:go/end 148} (go/method Init "Init initializes a CPU port module.\n" [^{:tag (* Port)} p] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock p)
+  (defer ^{:go/via [Mutex]} (.Unlock p))
+
+  (when (== (.-Queue p) 0)
+    (return (errors/New "invalid port instance")))
+
+
+  (when (or (< (.-Group p) 0) (> (.-Group p) 1))
+    (return (errors/New "invalid port group")))
+
+
+  (set! (.-Stats p) (lit Stats))
+
+  (cond (== (.-MAC p) nil) (do
+      (set! (.-MAC p) (make (slice byte) 6))
+      (rand/Read (.-MAC p))
+      ;; flag address as unicast and locally administered
+      (set! (aget (.-MAC p) 0) bit-and 0xfe)
+      (set! (aget (.-MAC p) 0) bit-or 0x02))
+    (!= (len (.-MAC p)) 6)
+    (return (errors/New "invalid MAC")))
+
+
+  (when (== (.-HeaderLength p) 0)
+    (set! (.-HeaderLength p) IFH_LEN))
+
+
+  (when (!= (.-Enable p) nil)
+    (when [(set! err ((.-Enable p)))] (!= err nil)
+      (return)))
+
+
+
+  (let [groupOffset (* (conv uint32 (.-Group p)) 4)]
+    (set! (.-xtr_rd p) (+ (.-Queue p) XTR_RD groupOffset))
+    (set! (.-inj_ctrl p) (+ (.-Queue p) INJ_CTRL groupOffset))
+    (set! (.-inj_wr p) (+ (.-Queue p) INJ_WR groupOffset))
+    (set! (.-inj_status p) (+ (.-Queue p) INJ_STATUS))
+
+    ;; set manual injection/extraction for CPU queue
+    (reg/Write (+ (.-Queue p) INJ_GRP_CFG groupOffset) (bit-or (<< 1 CFG_MODE) (<< 1 CFG_BYTE_SWAP)))
+    (reg/Write (+ (.-Queue p) XTR_GRP_CFG groupOffset) (bit-or (<< 1 CFG_MODE) (<< 1 CFG_STATUS_WORD_POS) (<< 1 CFG_BYTE_SWAP)))
+    (reg/Write (+ (.-Queue p) XTR_FRM_PRUNING groupOffset) 0)
+
+    ;; abort stale frame
+    (when (not (.abortInjection p))
+      (return (errors/New "injection abort failed")))
+
+
+    ;; add physical address to MAC table
+    (.SetMAC p (.-MAC p))
+
+    (return)))
+
+
+
+
+^{:go/end 163} (go/method SetMAC "SetMAC allows to change the controller physical address register after\ninitialization.\n" [^{:tag (* Port)} p ^net/HardwareAddr mac]
+  (when (!= (len mac) 6)
+    (return))
+
+
+  (when (!= (len (.-MAC p)) 0)
+    (.Delete (.-Analyzer p) (.-MAC p) (conv uint32 (.-FID p)) analyzer/PGID_HOST))
+
+
+  (.Insert (.-Analyzer p) mac (conv uint32 (.-FID p)) analyzer/PGID_HOST)
+  (set! (.-MAC p) mac))
+
+
+^{:go/end 183} (go/method abortInjection [^{:tag (* Port)} p] :results [^bool complete]
+  ^{:go/breaks [[3 182]]} (let [^time/Time deadline (zero time/Time)]
+
+    (while (reg/Get (.-inj_status p) (+ INJ_STATUS_INJ_IN_PROGRESS (.-Group p)))
+      (when (.IsZero deadline)
+        (reg/Set (.-inj_ctrl p) CTRL_ABORT)
+        (set! deadline (.Add (time/Now) InjectionTimeout)))
+
+
+      (when (not (.Before (time/Now) deadline))
+        (inc! (.-TxAbortTimeouts (.-Stats p)))
+        (return))
+
+
+      (runtime/Gosched))
+
+
+    true))
+
+
+^{:go/end 202} (go/method read [^{:tag (* Port)} p] :results [^uint32 val ^error err]
+  (let [^time/Time deadline (zero time/Time)]
+
+    (for [(set! val (reg/Read (.-xtr_rd p)))] (== val RD_NOT_READY) (set! val (reg/Read (.-xtr_rd p)))
+      (when (.IsZero deadline)
+        (set! deadline (.Add (time/Now) ExtractionTimeout)))
+
+
+      (when (not (.Before (time/Now) deadline))
+        (inc! (.-RxFIFOTimeouts (.-Stats p)))
+        (return 0 (errors/New "extraction FIFO not ready")))
+
+
+      (runtime/Gosched))
+
+
+    (return)))
+
+
+^{:go/end 223} (go/method write [^{:tag (* Port)} p ^uint32 val] :results [^error err]
+  (let [^time/Time deadline (zero time/Time)]
+
+    (while (not (reg/Get (.-inj_status p) (+ INJ_STATUS_FIFO_RDY (.-Group p))))
+      (when (.IsZero deadline)
+        (set! deadline (.Add (time/Now) InjectionTimeout)))
+
+
+      (when (not (.Before (time/Now) deadline))
+        (inc! (.-TxFIFOTimeouts (.-Stats p)))
+        (return (errors/New "injection FIFO not ready")))
+
+
+      (runtime/Gosched))
+
+
+    (reg/Write (.-inj_wr p) val)
+
+    (return)))
+
+
+^{:go/end 260} (go/method recv [^{:tag (* Port)} p ^{:tag (slice byte)} buf] :results [^bool eof ^int unused ^error err]
+  (let [(values val ^:assign err) (.read p)]
+
+    (when (!= err nil)
+      (return))
+
+
+    (switch val
+      (case [RD_EOF_UNUSED_0]
+        (set! eof true))
+      (case [RD_EOF_UNUSED_1]
+        (set! eof true)
+        (set! unused 1))
+      (case [RD_EOF_UNUSED_2]
+        (set! eof true)
+        (set! unused 2))
+      (case [RD_EOF_UNUSED_3]
+        (set! eof true)
+        (set! unused 3))
+      (case [RD_EOF_TRUNCATED]
+        (.read p)
+        (inc! (.-RxTruncated (.-Stats p)))
+        (set! err (errors/New "truncated frame")))
+      (case [RD_EOF_ABORTED]
+        (inc! (.-RxAborted (.-Stats p)))
+        (set! err (errors/New "aborted frame")))
+      (case [RD_ESCAPE]
+        (when [(set! (values val err) (.read p))] (== err nil)
+          (.PutUint32 binary/LittleEndian buf val)))
+
+      (default
+        (.PutUint32 binary/LittleEndian buf val)))
+
+
+    (return)))
+
+
+
+^{:go/end 322} (go/method Receive "Receive receives a single Ethernet frame from a port module.\n" [^{:tag (* Port)} p ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  (.Lock (.-rxMu p))
+  (defer (.Unlock (.-rxMu p)))
+
+  (when (not (reg/Get (+ (.-Queue p) XTR_DATA_PRESENT) (.-Group p)))
+    (return))
+
+
+  ;; rx FIFO reads are 32-bits of frame data
+  (let [^{:tag (array 4 byte)} scratch (zero (array 4 byte))]
+
+    ;; skip internal frame header
+    (for [i 0] (< i (.-HeaderLength p)) (set! i + 4)
+      (let [(values eof _ err) (.recv p (subslice scratch))]
+
+        (switch
+          (case [(!= err nil)]
+            (return 0 err))
+          (case [eof]
+            (inc! (.-RxShortHeader (.-Stats p)))
+            (return 0 (errors/New "short frame header"))))))
+
+
+
+    (let [padded 0]
+
+      (while true
+        (let [dst (subslice scratch)]
+
+          (when (>= (- (len buf) padded) (len scratch))
+            (set! dst (subslice buf padded (+ padded (len scratch)))))
+
+
+          (let [(values eof unused err) (.recv p dst)]
+
+            (when (!= err nil)
+              (return 0 err))
+
+
+            (when eof
+              (when (> unused padded)
+                (inc! (.-RxInvalid (.-Stats p)))
+                (return 0 (errors/New "invalid frame length")))
+
+
+              (switch [length (- padded unused)]
+                (case [(== length 0)]
+                  (inc! (.-RxEmpty (.-Stats p)))
+                  (return 0 (errors/New "empty frame")))
+                (case [(> length (len buf))]
+                  (inc! (.-RxOversized (.-Stats p)))
+                  (return n (errors/New "frame exceeds receive buffer")))
+                (default
+                  (return length nil))))
+
+
+
+            (set! padded + (len scratch))))))))
+
+
+
+^{:go/end 359} (go/method waitForInjection [^{:tag (* Port)} p] :results [^error err]
+  (let [^time/Time deadline (zero time/Time)
+
+      ^{:line 327} group (conv uint32 ^uint32 (<< 1 (.-Group p)))
+      ^{:line 328} fifoReady (<< group INJ_STATUS_FIFO_RDY)
+      ^{:line 329} watermarkReached (<< group INJ_STATUS_WMARK_REACHED)]
+
+    (while true
+      (let [status (reg/Read (.-inj_status p))
+          ^{:line 333} watermarked (!= (bit-and status watermarkReached) 0)]
+
+        (when (and (not watermarked) (!= (bit-and status fifoReady) 0))
+          (return))
+
+
+        (let [now (time/Now)]
+
+          (cond (.IsZero deadline)
+            (set! deadline (.Add now InjectionTimeout))
+            (not (.Before now deadline)) (do
+              (when watermarked
+                (inc! (.-TxWatermarkTimeouts (.-Stats p)))
+                (return (errors/New "injection watermark reached")))
+
+
+              (inc! (.-TxFIFOTimeouts (.-Stats p)))
+              (return (errors/New "injection FIFO not ready"))))
+
+
+          (if watermarked
+            (time/Sleep InjectionPollInterval)
+
+            (runtime/Gosched)))))))
+
+
+
+
+
+^{:go/end 426} (go/method Transmit "Transmit transmits a single Ethernet frame to a port module.\n" [^{:tag (* Port)} p ^{:tag (slice byte)} buf] :results [^error err]
+  (.Lock (.-txMu p))
+  (defer (.Unlock (.-txMu p)))
+
+  (when [(set! err (.waitForInjection p))] (!= err nil)
+    (return))
+
+
+  (let [valid (% (len buf) 4)
+      ^{:line 371} written 0]
+
+    (when (< (len buf) MinimumFrameSize)
+      (set! valid 0))
+
+
+    ;; signal Start Of Frame
+    (reg/Set (.-inj_ctrl p) CTRL_SOF)
+
+    (defer (^{:go/end 385} (fn []
+          (when (!= err nil)
+            (inc! (.-TxAborts (.-Stats p)))
+            (.abortInjection p)))))
+
+
+
+    ;; tx FIFO reads are 32-bits of frame data
+    (let [^{:tag (array 4 byte)} scratch (zero (array 4 byte))]
+
+      (while (>= (- (len buf) written) (len scratch))
+        (when [(set! err (.write p (.Uint32 binary/LittleEndian (subslice buf written))))] (!= err nil)
+          (return))
+
+
+        (set! written + (len scratch)))
+
+
+      (when (< written (len buf))
+        (copy (subslice scratch) (subslice buf written))
+
+        (when [(set! err (.write p (.Uint32 binary/LittleEndian (subslice scratch))))] (!= err nil)
+          (return))
+
+
+        (set! written + (len scratch)))
+
+
+      (while (< written MinimumFrameSize)
+        (when [(set! err (.write p 0))] (!= err nil)
+          (return))
+
+
+        (set! written + (len scratch)))
+
+
+      ;; set valid bytes of last word
+      (reg/SetN (.-inj_ctrl p) CTRL_VLD_BYTES 2r11 (conv uint32 valid))
+
+      ;; signal End Of Frame
+      (reg/Set (.-inj_ctrl p) CTRL_EOF)
+
+      ;; add dummy CRC
+      (set! err (.write p 0))
+
+      (return))))

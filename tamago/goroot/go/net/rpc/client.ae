@@ -1,0 +1,322 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.rpc) (go/file "client.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [gob "encoding/gob"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [log "log"]
+    ^{:line 13} [net "net"]
+    ^{:line 14} [http "net/http"]
+    ^{:line 15} [sync "sync"]])
+
+
+
+
+(go/type ServerError "ServerError represents an error that has been returned from\nthe remote side of the RPC connection.\n" string)
+
+^{:go/end 24} (go/method Error ^string [^ServerError e]
+  (conv string e))
+
+
+(go/var ErrShutdown (errors/New "connection is shut down"))
+
+
+(go/type Call "Call represents an active RPC.\n" (struct
+    ^{:line 30 :tag string} ServiceMethod ; The name of the service and method to call.
+    ^{:line 31 :tag any} Args ; The argument to the function (*struct).
+    ^{:line 32 :tag any} Reply ; The reply from the function (*struct).
+    ^{:line 33 :tag error} Error ; After completion, the error status.
+    ^{:line 34 :tag (chan (* Call))} Done)) ; Receives *Call when Go is complete.
+
+
+
+
+
+
+(go/type Client "Client represents an RPC Client.\nThere may be multiple outstanding Calls associated\nwith a single Client, and a Client may be used by\nmultiple goroutines simultaneously.\n" (struct
+    ^{:line 42 :tag ClientCodec} codec
+
+    ^{:line 44 :tag sync/Mutex} reqMutex ; protects following
+    ^{:line 45 :tag Request} request
+
+    ^{:line 47 :tag sync/Mutex} mutex ; protects following
+    ^{:line 48 :tag uint64} seq
+    ^{:line 49 :tag (map uint64 (* Call))} pending
+    ^{:line 50 :tag bool} closing ; user has called Close
+    ^{:line 51 :tag bool} shutdown)) ; server has told us to stop
+
+
+
+
+
+
+
+
+
+
+
+(go/type ClientCodec "A ClientCodec implements writing of RPC requests and\nreading of RPC responses for the client side of an RPC session.\nThe client calls [ClientCodec.WriteRequest] to write a request to the connection\nand calls [ClientCodec.ReadResponseHeader] and [ClientCodec.ReadResponseBody] in pairs\nto read responses. The client calls [ClientCodec.Close] when finished with the\nconnection. ReadResponseBody may be called with a nil\nargument to force the body of the response to be read and then\ndiscarded.\nSee [NewClient]'s comment for information about concurrent access.\n" (interface
+    (WriteRequest ^error [(* Request) any])
+    (ReadResponseHeader ^error [(* Response)])
+    (ReadResponseBody ^error [any])
+
+    (Close ^error [])))
+
+
+^{:go/end 102} (go/method send [^{:tag (* Client)} client ^{:tag (* Call)} call]
+  (.Lock (.-reqMutex client))
+  (defer (.Unlock (.-reqMutex client)))
+
+  ;; Register this call.
+  (.Lock (.-mutex client))
+  (when (or (.-shutdown client) (.-closing client))
+    (.Unlock (.-mutex client))
+    (set! (.-Error call) ErrShutdown)
+    (.done call)
+    (return))
+
+  (let [seq (.-seq client)]
+    (inc! (.-seq client))
+    (aset (.-pending client) seq call)
+    (.Unlock (.-mutex client))
+
+    ;; Encode and send the request.
+    (set! (.-Seq (.-request client)) seq)
+    (set! (.-ServiceMethod (.-request client)) (.-ServiceMethod call))
+    (let [err (.WriteRequest (.-codec client) (addr (.-request client)) (.-Args call))]
+      (when (!= err nil)
+        (.Lock (.-mutex client))
+        (set! call (aget (.-pending client) seq))
+        (delete (.-pending client) seq)
+        (.Unlock (.-mutex client))
+        (when (!= call nil)
+          (set! (.-Error call) err)
+          (.done call))))))
+
+
+
+
+^{:go/end 169} (go/method input [^{:tag (* Client)} client]
+  (let [^error err (zero error)
+      ^{:line 106 :tag Response} response (zero Response)]
+    (while (== err nil)
+      (set! response (lit Response))
+      (set! err (.ReadResponseHeader (.-codec client) (addr response)))
+      (when (!= err nil)
+        (break))
+
+      (let [seq (.-Seq response)]
+        (.Lock (.-mutex client))
+        (let [call (aget (.-pending client) seq)]
+          (delete (.-pending client) seq)
+          (.Unlock (.-mutex client))
+
+          (switch
+            (case [(== call nil)]
+              ;; We've got no pending call. That usually means that
+              ;; WriteRequest partially failed, and call was already
+              ;; removed; response is a server telling us about an
+              ;; error reading request body. We should still attempt
+              ;; to read error body, but there's no one to give it to.
+              (set! err (.ReadResponseBody (.-codec client) nil))
+              (when (!= err nil)
+                (set! err (errors/New (+ "reading error body: " (.Error err))))))
+
+            (case [(!= (.-Error response) "")]
+              ;; We've got an error response. Give this to the request;
+              ;; any subsequent requests will get the ReadResponseBody
+              ;; error if there is one.
+              (set! (.-Error call) (conv ServerError (.-Error response)))
+              (set! err (.ReadResponseBody (.-codec client) nil))
+              (when (!= err nil)
+                (set! err (errors/New (+ "reading error body: " (.Error err)))))
+
+              (.done call))
+            (default
+              (set! err (.ReadResponseBody (.-codec client) (.-Reply call)))
+              (when (!= err nil)
+                (set! (.-Error call) (errors/New (+ "reading body " (.Error err)))))
+
+              (.done call))))))
+
+
+    ;; Terminate pending calls.
+    (.Lock (.-reqMutex client))
+    (.Lock (.-mutex client))
+    (set! (.-shutdown client) true)
+    (let [closing (.-closing client)]
+      (when (== err io/EOF)
+        (if closing
+          (set! err ErrShutdown)
+
+          (set! err io/ErrUnexpectedEOF)))
+
+
+      (range [_ call (.-pending client)]
+        (set! (.-Error call) err)
+        (.done call))
+
+      (.Unlock (.-mutex client))
+      (.Unlock (.-reqMutex client))
+      (when (and debugLog (!= err io/EOF) (not closing))
+        (log/Println "rpc: client protocol error:" err)))))
+
+
+
+^{:go/end 182} (go/method done [^{:tag (* Call)} call]
+  (select
+    (case (>! (.-Done call) call))
+    ;; ok
+    (default
+      ;; We don't want to block here. It is the caller's responsibility to make
+      ;; sure the channel has enough buffer space. See comment in Go().
+      (when debugLog
+        (log/Println "rpc: discarding Call reply due to insufficient Done chan capacity")))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 197} (go/func NewClient "NewClient returns a new [Client] to handle requests to the\nset of services at the other end of the connection.\nIt adds a buffer to the write side of the connection so\nthe header and payload are sent as a unit.\n\nThe read and write halves of the connection are serialized independently,\nso no interlocking is required. However each half may be accessed\nconcurrently so the implementation of conn should protect against\nconcurrent reads or concurrent writes.\n" ^{:tag (* Client)} [^io/ReadWriteCloser conn]
+  (let [encBuf (bufio/NewWriter conn)
+      ^{:line 195} client (addr (lit gobClientCodec conn (gob/NewDecoder conn) (gob/NewEncoder encBuf) encBuf))]
+    (NewClientWithCodec client)))
+
+
+
+
+^{:go/end 208} (go/func NewClientWithCodec "NewClientWithCodec is like [NewClient] but uses the specified\ncodec to encode requests and decode responses.\n" ^{:tag (* Client)} [^ClientCodec codec]
+  (let [client (addr ^{:go/breaks [2 4]} (lit Client
+          :codec codec
+          :pending (make (map uint64 (* Call)))))]
+
+    (go (.input client))
+    ^{:line 207} client))
+
+
+(go/type gobClientCodec (struct
+    ^{:line 211 :tag io/ReadWriteCloser} rwc
+    ^{:line 212 :tag (* gob/Decoder)} dec
+    ^{:line 213 :tag (* gob/Encoder)} enc
+    ^{:line 214 :tag (* bufio/Writer)} encBuf))
+
+
+^{:go/end 225} (go/method WriteRequest [^{:tag (* gobClientCodec)} c ^{:tag (* Request)} r ^any body] :results [^error err]
+  (when [(set! err (.Encode (.-enc c) r))] (!= err nil)
+    (return))
+
+  (when [(set! err (.Encode (.-enc c) body))] (!= err nil)
+    (return))
+
+  (.Flush (.-encBuf c)))
+
+
+^{:go/end 229} (go/method ReadResponseHeader ^error [^{:tag (* gobClientCodec)} c ^{:tag (* Response)} r]
+  (.Decode (.-dec c) r))
+
+
+^{:go/end 233} (go/method ReadResponseBody ^error [^{:tag (* gobClientCodec)} c ^any body]
+  (.Decode (.-dec c) body))
+
+
+^{:go/end 237} (go/method Close ^error [^{:tag (* gobClientCodec)} c]
+  (.Close (.-rwc c)))
+
+
+
+
+^{:go/end 243} (go/func DialHTTP "DialHTTP connects to an HTTP RPC server at the specified network address\nlistening on the default HTTP RPC path.\n" [^string network ^string address] :results [(* Client) error]
+  (DialHTTPPath network address DefaultRPCPath))
+
+
+
+
+^{:go/end 270} (go/func DialHTTPPath "DialHTTPPath connects to an HTTP RPC server\nat the specified network address and path.\n" [^string network ^string address ^string path] :results [(* Client) error]
+  (let [(values conn err) (net/Dial network address)]
+    (when (!= err nil)
+      (return nil err))
+
+    (io/WriteString conn (+ "CONNECT " path " HTTP/1.0\n\n"))
+
+    ;; Require successful HTTP response
+    ;; before switching to RPC protocol.
+    (let [(values resp ^:assign err) (http/ReadResponse (bufio/NewReader conn) (addr (lit http/Request :Method "CONNECT")))]
+      (when (and (== err nil) (== (.-Status resp) connected))
+        (return (NewClient conn) nil))
+
+      (when (== err nil)
+        (set! err (errors/New (+ "unexpected HTTP response: " (.-Status resp)))))
+
+      (.Close conn)
+      (return nil (addr ^{:go/breaks [2 4 6 8]} (lit net/OpError
+            :Op "dial-http"
+            :Net (+ network " " address)
+            :Addr nil
+            :Err err))))))
+
+
+
+
+^{:go/end 279} (go/func Dial "Dial connects to an RPC server at the specified network address.\n" [^string network ^string address] :results [(* Client) error]
+  (let [(values conn err) (net/Dial network address)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (NewClient conn) nil)))
+
+
+
+
+^{:go/end 292} (go/method Close "Close calls the underlying codec's Close method. If the connection is already\nshutting down, [ErrShutdown] is returned.\n" ^error [^{:tag (* Client)} client]
+  (.Lock (.-mutex client))
+  (when (.-closing client)
+    (.Unlock (.-mutex client))
+    (return ErrShutdown))
+
+  (set! (.-closing client) true)
+  (.Unlock (.-mutex client))
+  (.Close (.-codec client)))
+
+
+
+
+
+
+^{:go/end 317} (go/method Go "Go invokes the function asynchronously. It returns the [Call] structure representing\nthe invocation. The done channel will signal when the call is complete by returning\nthe same Call object. If done is nil, Go will allocate a new channel.\nIf non-nil, done must be buffered or Go will deliberately crash.\n" ^{:tag (* Call)} [^{:tag (* Client)} client ^string serviceMethod ^any args ^any reply ^{:tag (chan (* Call))} done]
+  (let [call (new Call)]
+    (set! (.-ServiceMethod call) serviceMethod)
+    (set! (.-Args call) args)
+    (set! (.-Reply call) reply)
+    (if (== done nil)
+      (set! done (make (chan (* Call)) 10)) ; buffered.
+      (do
+        ;; If caller passes done != nil, it must arrange that
+        ;; done has enough buffer for the number of simultaneous
+        ;; RPCs that will be using that channel. If the channel
+        ;; is totally unbuffered, it's best not to run at all.
+        (when (== (cap done) 0)
+          (log/Panic "rpc: done channel is unbuffered"))))
+
+
+    (set! (.-Done call) done)
+    (.send client call)
+    ^{:line 316} call))
+
+
+
+^{:go/end 323} (go/method Call "Call invokes the named function, waits for it to complete, and returns its error status.\n" ^error [^{:tag (* Client)} client ^string serviceMethod ^any args ^any reply]
+  (let [call (<! (.-Done (.Go client serviceMethod args reply (make (chan (* Call)) 1))))]
+    (.-Error call)))

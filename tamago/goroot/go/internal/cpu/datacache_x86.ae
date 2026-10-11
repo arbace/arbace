@@ -1,0 +1,120 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.internal.cpu) (go/file "datacache_x86.go" :build ["//go:build 386 || amd64"] :imports [])
+
+
+
+
+
+
+
+^{:go/end 30} (go/func DataCacheSizes "DataCacheSizes returns the size of each data cache from lowest\nlevel in the hierarchy to highest.\n\nUnlike other parts of this package's public API, it is not safe\nto reference early in runtime initialization because it allocates.\nIt's intended for testing only.\n" ^{:tag (slice uintptr)} []
+  ^{:go/breaks [[4 29]]} (let [(values maxFunctionInformation ebx0 ecx0 edx0) (cpuid 0 0)]
+    (when (< maxFunctionInformation 1)
+      (return nil))
+
+
+    (switch
+      ;; Check for "GenuineIntel"
+      (case [(and (== ebx0 0x756E6547) (== ecx0 0x6C65746E) (== edx0 0x49656E69))]
+        (return (getDataCacheSizesIntel maxFunctionInformation)))
+      ;; Check for "AuthenticAMD"
+      (case [(and (== ebx0 0x68747541) (== ecx0 0x444D4163) (== edx0 0x69746E65))]
+        (return (getDataCacheSizesAMD))))
+
+    nil))
+
+
+^{:go/end 37} (go/func extractBits ^uint32 [^uint32 arg ^int l ^int r]
+  (when (> l r)
+    (panic "bad bit range"))
+
+  (bit-and (>> arg l) (- ^uint32 (<< 1 (+ (- r l) 1)) 1)))
+
+
+^{:go/end 87} (go/func getDataCacheSizesIntel ^{:tag (slice uintptr)} [^uint32 maxID]
+  ;; Constants for cache types
+  (let [
+      ^:const ^{:line 42 :val 0} noCache 0
+      ^:const ^:go/grouped ^{:line 43 :val 1} dataCache 1
+      ^:const ^:go/grouped ^{:line 44 :val 2} instructionCache 2
+      ^:const ^:go/grouped ^{:line 45 :val 3} unifiedCache 3]
+
+    (when (< maxID 4)
+      (return nil))
+
+
+    ;; Iterate through CPUID leaf 4 (deterministic cache parameters)
+    (let [^{:tag (slice uintptr)} caches (zero (slice uintptr))]
+      (for [i (conv uint32 0)] (< i 0xFFFF) (inc! i)
+        (let [(values eax ebx ecx _) (cpuid 4 i)
+
+            ^{:line 56} cacheType (bit-and eax 0xF)] ; EAX bits 4-0: Cache Type
+          (when (== cacheType 0)
+            (break))
+
+
+          ;; Report only data caches.
+          (when (not (or (== cacheType dataCache) (== cacheType unifiedCache)))
+            (continue))
+
+
+          ;; Guaranteed to always start counting from 1.
+          (let [level (bit-and (>> eax 5) 0x7)
+
+              ^{:line 69} lineSize (+ (extractBits ebx 0 11) 1) ; Bits 11-0: Line size in bytes - 1
+              ^{:line 70} partitions (+ (extractBits ebx 12 21) 1) ; Bits 21-12: Physical line partitions - 1
+              ^{:line 71} ways (+ (extractBits ebx 22 31) 1) ; Bits 31-22: Ways of associativity - 1
+              ^{:line 72} sets (+ (conv uint64 ecx) 1) ; Number of sets - 1
+              ^{:line 73} size (* (conv uint64 (* ways partitions lineSize)) sets)] ; Calculate cache size in bytes
+
+            (set! caches (append caches (conv uintptr size)))
+
+            ;; If we see more than one cache described per level, or they appear
+            ;; out of order, crash.
+            ;;
+            ;; Going by the SDM, it's not clear whether this is actually possible,
+            ;; so this code is purely defensive.
+            (when (!= level (conv uint32 (len caches)))
+              (panic "expected levels to be in order and for there to be one data/unified cache per level")))))
+
+
+      ^{:line 86} caches)))
+
+
+^{:go/end 121} (go/func getDataCacheSizesAMD ^{:tag (slice uintptr)} []
+  (let [(values maxExtendedFunctionInformation _ _ _) (cpuid 0x80000000 0)]
+    (when (< maxExtendedFunctionInformation 0x80000006)
+      (return nil))
+
+
+    (let [^{:tag (slice uintptr)} caches (zero (slice uintptr))
+
+        (values _ _ ecx5 _) (cpuid 0x80000005 0)
+        (values _ _ ecx6 edx6) (cpuid 0x80000006 0)
+
+        ;; The size is return in kb, turning into bytes.
+        ^{:line 101} l1dSize (conv uintptr (<< (extractBits ecx5 24 31) 10))]
+      (set! caches (append caches l1dSize))
+
+      ;; Check that L2 cache is present.
+      (when [l2Assoc (extractBits ecx6 12 15)] (== l2Assoc 0)
+        (return caches))
+
+      (let [l2Size (conv uintptr (<< (extractBits ecx6 16 31) 10))]
+        (set! caches (append caches l2Size))
+
+        ;; Check that L3 cache is present.
+        (when [l3Assoc (extractBits edx6 12 15)] (== l3Assoc 0)
+          (return caches))
+
+        ;; Specifies the L3 cache size is within the following range:
+        ;; (L3Size[31:18] * 512KB) <= L3 cache size < ((L3Size[31:18]+1) * 512KB).
+        (let [l3Size (conv uintptr (* (extractBits edx6 18 31) (<< 512 10)))]
+          (set! caches (append caches l3Size))
+
+          ^{:line 120} caches)))))

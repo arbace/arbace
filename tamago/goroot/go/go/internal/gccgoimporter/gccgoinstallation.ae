@@ -1,0 +1,96 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.internal.gccgoimporter) (go/file "gccgoinstallation.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [types "go/types"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [exec "os/exec"]
+    ^{:line 12} [filepath "path/filepath"]
+    ^{:line 13} [strings "strings"]])
+
+
+
+(go/type GccgoInstallation "Information about a specific installation of gccgo.\n" (struct
+
+    ^{:line 19 :tag string :doc "Version of gcc (e.g. 4.8.0).\n"} GccVersion
+
+
+    ^{:line 22 :tag string :doc "Target triple (e.g. x86_64-unknown-linux-gnu).\n"} TargetTriple
+
+
+    ^{:line 25 :tag (slice string) :doc "Built-in library paths used by this installation.\n"} LibPaths))
+
+
+
+
+^{:go/end 68} (go/method InitFromDriver "Ask the driver at the given path for information for this GccgoInstallation.\nThe given arguments are passed directly to the call of the driver.\n" [^{:tag (* GccgoInstallation)} inst ^string gccgoPath & ^{:tag (slice string)} args] :results [^error err]
+  (let [argv (append (lit (slice string) "-###" "-S" "-x" "go" "-") (spread args))
+      ^{:line 32} cmd (exec/Command gccgoPath (spread argv))
+      (values stderr ^:assign err) (.StderrPipe cmd)]
+    (when (!= err nil)
+      (return))
+
+
+    (set! err (.Start cmd))
+    (when (!= err nil)
+      (return))
+
+
+    (let [scanner (bufio/NewScanner stderr)]
+      (while (.Scan scanner)
+        (let [line (.Text scanner)]
+          (switch
+            (case [(strings/HasPrefix line "Target: ")]
+              (set! (.-TargetTriple inst) (subslice line 8)))
+
+            (case [(== (aget line 0) \space)]
+              (let [args (strings/Fields line)]
+                (range [_ arg (subslice args 1)]
+                  (when (strings/HasPrefix arg "-L")
+                    (set! (.-LibPaths inst) (append (.-LibPaths inst) (subslice arg 2))))))))))
+
+
+
+
+
+      (set! argv (append (lit (slice string) "-dumpversion") (spread args)))
+      (let [(values stdout ^:assign err) (.Output (exec/Command gccgoPath (spread argv)))]
+        (when (!= err nil)
+          (return))
+
+        (set! (.-GccVersion inst) (strings/TrimSpace (conv string stdout)))
+
+        (return)))))
+
+
+
+^{:go/end 91} (go/method SearchPaths "Return the list of export search paths for this GccgoInstallation.\n" [^{:tag (* GccgoInstallation)} inst] :results [^{:tag (slice string)} paths]
+  (range [_ lpath (.-LibPaths inst)]
+    (let [spath (filepath/Join lpath "go" (.-GccVersion inst))
+        (values fi err) (os/Stat spath)]
+      (when (or (!= err nil) (not (.IsDir fi)))
+        (continue))
+
+      (set! paths (append paths spath))
+
+      (set! spath (filepath/Join spath (.-TargetTriple inst)))
+      (set! (values fi err) (os/Stat spath))
+      (when (or (!= err nil) (not (.IsDir fi)))
+        (continue))
+
+      (set! paths (append paths spath))))
+
+
+  (set! paths (append paths (spread (.-LibPaths inst))))
+
+  (return))
+
+
+
+
+^{:go/end 97} (go/method GetImporter "Return an importer that searches incpaths followed by the gcc installation's\nbuilt-in search paths and the current directory.\n" ^Importer [^{:tag (* GccgoInstallation)} inst ^{:tag (slice string)} incpaths ^{:tag (map (* types/Package) InitData)} initmap]
+  (GetImporter (append (append incpaths (spread (.SearchPaths inst))) ".") initmap))

@@ -1,0 +1,248 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "nss.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [bytealg "internal/bytealg"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [sync "sync"]
+    ^{:line 12} [time "time"]])
+
+
+(go/const
+  ^{:line 16} [^{:val "/etc/nsswitch.conf"} nssConfigPath "/etc/nsswitch.conf"])
+
+
+(go/var ^nsswitchConfig nssConfig)
+
+(go/type nsswitchConfig (struct
+    ^{:line 22 :tag sync/Once} initOnce ; guards init of nsswitchConfig
+
+
+
+    ^{:line 26 :tag (chan (struct)) :doc "ch is used as a semaphore that only allows one lookup at a\ntime to recheck nsswitch.conf\n"} ch ; guards lastChecked and modTime
+    ^{:line 27 :tag time/Time} lastChecked ; last time nsswitch.conf was checked
+
+    ^{:line 29 :tag sync/Mutex} mu ; protects nssConf
+    ^{:line 30 :tag (* nssConf)} nssConf))
+
+
+^{:go/end 39} (go/func getSystemNSS ^{:tag (* nssConf)} []
+  (.tryUpdate nssConfig)
+  (.Lock (.-mu nssConfig))
+  (let [conf (.-nssConf nssConfig)]
+    (.Unlock (.-mu nssConfig))
+    ^{:line 38} conf))
+
+
+
+^{:go/end 46} (go/method init "init initializes conf and is only called via conf.initOnce.\n" [^{:tag (* nsswitchConfig)} conf]
+  (set! (.-nssConf conf) (parseNSSConfFile "/etc/nsswitch.conf"))
+  (set! (.-lastChecked conf) (time/Now))
+  (set! (.-ch conf) (make (chan (struct)) 1)))
+
+
+
+^{:go/end 76} (go/method tryUpdate "tryUpdate tries to update conf.\n" [^{:tag (* nsswitchConfig)} conf]
+  (.Do (.-initOnce conf) (.-init conf))
+
+  ;; Ensure only one update at a time checks nsswitch.conf
+  (when (not (.tryAcquireSema conf))
+    (return))
+
+  (defer (.releaseSema conf))
+
+  (let [now (time/Now)]
+    (when (.After (.-lastChecked conf) (.Add now (* -5 time/Second)))
+      (return))
+
+    (set! (.-lastChecked conf) now)
+
+    (let [^time/Time mtime (zero time/Time)]
+      (when [(values fi err) (os/Stat nssConfigPath)] (== err nil)
+        (set! mtime (.ModTime fi)))
+
+      (when (.Equal mtime (.-mtime (.-nssConf conf)))
+        (return))
+
+
+      (let [nssConf (parseNSSConfFile nssConfigPath)]
+        (.Lock (.-mu conf))
+        (set! (.-nssConf conf) nssConf)
+        (.Unlock (.-mu conf))))))
+
+
+^{:go/end 80} (go/method acquireSema [^{:tag (* nsswitchConfig)} conf]
+  (>! (.-ch conf) (lit (struct))))
+
+
+^{:go/end 89} (go/method tryAcquireSema ^bool [^{:tag (* nsswitchConfig)} conf]
+  (select
+    (case (>! (.-ch conf) (lit (struct)))
+      (return true))
+    (default
+      (return false))))
+
+
+
+^{:go/end 93} (go/method releaseSema [^{:tag (* nsswitchConfig)} conf]
+  (<! (.-ch conf)))
+
+
+
+(go/type nssConf "nssConf represents the state of the machine's /etc/nsswitch.conf file.\n" (struct
+    ^{:line 97 :tag time/Time} mtime ; time of nsswitch.conf modification
+    ^{:line 98 :tag error} err ; any error encountered opening or parsing the file
+    ^{:line 99 :tag (map string (slice nssSource))} sources)) ; keyed by database (e.g. "hosts")
+
+
+(go/type nssSource (struct
+    ^{:line 103 :tag string} source ; e.g. "compat", "files", "mdns4_minimal"
+    ^{:line 104 :tag (slice nssCriterion)} criteria))
+
+
+
+
+^{:go/breaks [[5 115]] :go/end 116} (go/method standardCriteria "standardCriteria reports all specified criteria have the default\nstatus actions.\n" ^bool [^nssSource s]
+  (range [i crit (.-criteria s)]
+    (when (not (.standardStatusAction crit (== i (- (len (.-criteria s)) 1))))
+      (return false)))
+
+
+  true)
+
+
+
+
+(go/type nssCriterion "nssCriterion is the parsed structure of one of the criteria in brackets\nafter an NSS source name.\n" (struct
+    ^{:line 121 :tag bool} negate ; if "!" was present
+    ^{:line 122 :tag string} status ; e.g. "success", "unavail" (lowercase)
+    ^{:line 123 :tag string} action)) ; e.g. "return", "continue" (lowercase)
+
+
+
+
+
+^{:go/end 147} (go/method standardStatusAction "standardStatusAction reports whether c is equivalent to not\nspecifying the criterion at all. last is whether this criteria is the\nlast in the list.\n" ^bool [^nssCriterion c ^bool last]
+  (when (.-negate c)
+    (return false))
+
+  (let [^string def (zero string)]
+    (switch (.-status c)
+      (case ["success"]
+        (set! def "return"))
+      (case ["notfound" "unavail" "tryagain"]
+        (set! def "continue"))
+      (default
+        ;; Unknown status
+        (return false)))
+
+    (when (and last (== (.-action c) "return"))
+      (return true))
+
+    (== (.-action c) def)))
+
+
+^{:go/end 163} (go/func parseNSSConfFile ^{:tag (* nssConf)} [^string file]
+  (let [(values f err) (open file)]
+    (when (!= err nil)
+      (return (addr (lit nssConf :err err))))
+
+    (defer (.close f))
+    (let [(values mtime _ ^:assign err) (.stat f)]
+      (when (!= err nil)
+        (return (addr (lit nssConf :err err))))
+
+
+      (let [conf (parseNSSConf f)]
+        (set! (.-mtime conf) mtime)
+        ^{:line 162} conf))))
+
+
+^{:go/end 219} (go/func parseNSSConf ^{:tag (* nssConf)} [^{:tag (* file)} f]
+  (let [conf (new nssConf)]
+    (for [(values line ok) (.readLine f)] ok (set! (values line ok) (.readLine f))
+      (set! line (trimSpace (removeComment line)))
+      (when (== (len line) 0)
+        (continue))
+
+      (let [colon (bytealg/IndexByteString line \:)]
+        (when (== colon -1)
+          (set! (.-err conf) (errors/New "no colon on line"))
+          (return conf))
+
+        (let [db (trimSpace (subslice line _ colon))
+            ^{:line 178} srcs (subslice line (+ colon 1))]
+          (while true
+            (set! srcs (trimSpace srcs))
+            (when (== (len srcs) 0)
+              (break))
+
+            (let [sp (bytealg/IndexByteString srcs \space)
+                ^{:line 185 :tag string} src (zero string)]
+              (if (== sp -1) (do
+                  (set! src srcs)
+                  (set! srcs "")) ; done
+                (do
+                  (set! src (subslice srcs _ sp))
+                  (set! srcs (trimSpace (subslice srcs (+ sp 1))))))
+
+              (let [^{:tag (slice nssCriterion)} criteria (zero (slice nssCriterion))]
+                ;; See if there's a criteria block in brackets.
+                (when (and (> (len srcs) 0) (== (aget srcs 0) \[))
+                  (let [bclose (bytealg/IndexByteString srcs \])]
+                    (when (== bclose -1)
+                      (set! (.-err conf) (errors/New "unclosed criterion bracket"))
+                      (return conf))
+
+                    (let [^error err (zero error)]
+                      (set! (values criteria err) (parseCriteria (subslice srcs 1 bclose)))
+                      (when (!= err nil)
+                        (set! (.-err conf) (errors/New (+ "invalid criteria: " (subslice srcs 1 bclose))))
+                        (return conf))
+
+                      (set! srcs (subslice srcs (+ bclose 1))))))
+
+                (when (== (.-sources conf) nil)
+                  (set! (.-sources conf) (make (map string (slice nssSource)))))
+
+                (aset (.-sources conf) db (append (aget (.-sources conf) db) ^{:go/breaks [2 4]} (lit nssSource
+                      :source src
+                      :criteria criteria)))))))))
+
+
+
+    ^{:line 218} conf))
+
+
+
+^{:go/end 249} (go/func parseCriteria "parses \"foo=bar !foo=bar\"\n" [^string x] :results [^{:tag (slice nssCriterion)} c ^error err]
+  (set! err (foreachField x ^{:go/end 247} (fn ^error [^string f]
+        (let [not false]
+          (when (and (> (len f) 0) (== (aget f 0) \!))
+            (set! not true)
+            (set! f (subslice f 1)))
+
+          (when (< (len f) 3)
+            (return (errors/New "criterion too short")))
+
+          ^{:go/breaks [[5 246]]} (let [eq (bytealg/IndexByteString f \=)]
+            (when (== eq -1)
+              (return (errors/New "criterion lacks equal sign")))
+
+            (when (hasUpperCase f)
+              (let [lower (conv (slice byte) f)]
+                (lowerASCIIBytes lower)
+                (set! f (conv string lower))))
+
+            (set! c (append c ^{:go/breaks [2 4 6]} (lit nssCriterion
+                  :negate not
+                  :status (subslice f _ eq)
+                  :action (subslice f (+ eq 1)))))
+
+            nil)))))
+
+  (return))

@@ -1,0 +1,192 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.sync.atomic) (go/file "value.go" :imports [
+
+
+    ^{:line 8} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+(go/type Value "A Value provides an atomic load and store of a consistently typed value.\nThe zero value for a Value returns nil from [Value.Load].\nOnce [Value.Store] has been called, a Value must not be copied.\n\nA Value must not be copied after first use.\n" (struct
+    ^{:line 17 :tag any} v))
+
+
+
+(go/type efaceWords "efaceWords is interface{} internal representation.\n" (struct
+    ^{:line 22 :tag unsafe/Pointer} typ
+    ^{:line 23 :tag unsafe/Pointer} data))
+
+
+
+
+^{:go/end 40} (go/method Load "Load returns the value set by the most recent Store.\nIt returns nil if there has been no call to Store for this Value.\n" [^{:tag (* Value)} v] :results [^any val]
+  (let [vp (conv (* efaceWords) (conv unsafe/Pointer v))
+      ^{:line 30} typ (LoadPointer (addr (.-typ vp)))]
+    (when (or (== typ nil) (== typ (conv unsafe/Pointer (addr firstStoreInProgress))))
+      ;; First store not yet completed.
+      (return nil))
+
+    (let [data (LoadPointer (addr (.-data vp)))
+        ^{:line 36} vlp (conv (* efaceWords) (conv unsafe/Pointer (addr val)))]
+      (set! (.-typ vlp) typ)
+      (set! (.-data vlp) data)
+      (return))))
+
+
+(go/var ^byte firstStoreInProgress)
+
+
+
+
+^{:go/end 83} (go/method Store "Store sets the value of the [Value] v to val.\nAll calls to Store for a given Value must use values of the same concrete type.\nStore of an inconsistent type panics, as does Store(nil).\n" [^{:tag (* Value)} v ^any val]
+  (when (== val nil)
+    (panic "sync/atomic: store of nil value into Value"))
+
+  (let [vp (conv (* efaceWords) (conv unsafe/Pointer v))
+      ^{:line 52} vlp (conv (* efaceWords) (conv unsafe/Pointer (addr val)))]
+    (while true
+      (let [typ (LoadPointer (addr (.-typ vp)))]
+        (when (== typ nil)
+          ;; Attempt to start first store.
+          ;; Disable preemption so that other goroutines can use
+          ;; active spin wait to wait for completion.
+          (runtime_procPin)
+          (when (not (CompareAndSwapPointer (addr (.-typ vp)) nil (conv unsafe/Pointer (addr firstStoreInProgress))))
+            (runtime_procUnpin)
+            (continue))
+
+          ;; Complete first store.
+          (StorePointer (addr (.-data vp)) (.-data vlp))
+          (StorePointer (addr (.-typ vp)) (.-typ vlp))
+          (runtime_procUnpin)
+          (return))
+
+        (when (== typ (conv unsafe/Pointer (addr firstStoreInProgress)))
+          ;; First store in progress. Wait.
+          ;; Since we disable preemption around the first store,
+          ;; we can wait with active spinning.
+          (continue))
+
+        ;; First store completed. Check type and overwrite data.
+        (when (!= typ (.-typ vlp))
+          (panic "sync/atomic: store of inconsistently typed value into Value"))
+
+        (StorePointer (addr (.-data vp)) (.-data vlp))
+        (return)))))
+
+
+
+
+
+
+
+
+^{:go/end 127} (go/method Swap "Swap stores new into Value and returns the previous value. It returns nil if\nthe Value is empty.\n\nAll calls to Swap for a given Value must use values of the same concrete\ntype. Swap of an inconsistent type panics, as does Swap(nil).\n" [^{:tag (* Value)} v ^any new] :results [^any old]
+  (when (== new nil)
+    (panic "sync/atomic: swap of nil value into Value"))
+
+  (let [vp (conv (* efaceWords) (conv unsafe/Pointer v))
+      ^{:line 95} np (conv (* efaceWords) (conv unsafe/Pointer (addr new)))]
+    (while true
+      (let [typ (LoadPointer (addr (.-typ vp)))]
+        (when (== typ nil)
+          ;; Attempt to start first store.
+          ;; Disable preemption so that other goroutines can use
+          ;; active spin wait to wait for completion.
+          (runtime_procPin)
+          (when (not (CompareAndSwapPointer (addr (.-typ vp)) nil (conv unsafe/Pointer (addr firstStoreInProgress))))
+            (runtime_procUnpin)
+            (continue))
+
+          ;; Complete first store.
+          (StorePointer (addr (.-data vp)) (.-data np))
+          (StorePointer (addr (.-typ vp)) (.-typ np))
+          (runtime_procUnpin)
+          (return nil))
+
+        (when (== typ (conv unsafe/Pointer (addr firstStoreInProgress)))
+          ;; First store in progress. Wait.
+          ;; Since we disable preemption around the first store,
+          ;; we can wait with active spinning.
+          (continue))
+
+        ;; First store completed. Check type and overwrite data.
+        (when (!= typ (.-typ np))
+          (panic "sync/atomic: swap of inconsistently typed value into Value"))
+
+        (let [op (conv (* efaceWords) (conv unsafe/Pointer (addr old)))]
+          (set! (values (.-typ op) (.-data op)) (values (.-typ np) (SwapPointer (addr (.-data vp)) (.-data np))))
+          (return old))))))
+
+
+
+
+
+
+
+
+^{:go/end 188} (go/method CompareAndSwap "CompareAndSwap executes the compare-and-swap operation for the [Value].\n\nAll calls to CompareAndSwap for a given Value must use values of the same\nconcrete type. CompareAndSwap of an inconsistent type panics, as does\nCompareAndSwap(old, nil).\n" [^{:tag (* Value)} v ^any old ^any new] :results [^bool swapped]
+  (when (== new nil)
+    (panic "sync/atomic: compare and swap of nil value into Value"))
+
+  (let [vp (conv (* efaceWords) (conv unsafe/Pointer v))
+      ^{:line 139} np (conv (* efaceWords) (conv unsafe/Pointer (addr new)))
+      ^{:line 140} op (conv (* efaceWords) (conv unsafe/Pointer (addr old)))]
+    (when (and (!= (.-typ op) nil) (!= (.-typ np) (.-typ op)))
+      (panic "sync/atomic: compare and swap of inconsistently typed values"))
+
+    (while true
+      (let [typ (LoadPointer (addr (.-typ vp)))]
+        (when (== typ nil)
+          (when (!= old nil)
+            (return false))
+
+          ;; Attempt to start first store.
+          ;; Disable preemption so that other goroutines can use
+          ;; active spin wait to wait for completion.
+          (runtime_procPin)
+          (when (not (CompareAndSwapPointer (addr (.-typ vp)) nil (conv unsafe/Pointer (addr firstStoreInProgress))))
+            (runtime_procUnpin)
+            (continue))
+
+          ;; Complete first store.
+          (StorePointer (addr (.-data vp)) (.-data np))
+          (StorePointer (addr (.-typ vp)) (.-typ np))
+          (runtime_procUnpin)
+          (return true))
+
+        (when (== typ (conv unsafe/Pointer (addr firstStoreInProgress)))
+          ;; First store in progress. Wait.
+          ;; Since we disable preemption around the first store,
+          ;; we can wait with active spinning.
+          (continue))
+
+        ;; First store completed. Check type and overwrite data.
+        (when (!= typ (.-typ np))
+          (panic "sync/atomic: compare and swap of inconsistently typed value into Value"))
+
+        ;; Compare old and current via runtime equality check.
+        ;; This allows value types to be compared, something
+        ;; not offered by the package functions.
+        ;; CompareAndSwapPointer below only ensures vp.data
+        ;; has not changed since LoadPointer.
+        (let [data (LoadPointer (addr (.-data vp)))
+            ^{:line 180 :tag any} i (zero any)]
+          (set! (.-typ (conv (* efaceWords) (conv unsafe/Pointer (addr i)))) typ)
+          (set! (.-data (conv (* efaceWords) (conv unsafe/Pointer (addr i)))) data)
+          (when (!= i old)
+            (return false))
+
+          (return (CompareAndSwapPointer (addr (.-data vp)) data (.-data np))))))))
+
+
+
+
+(go/func ^:extern runtime_procPin "Disable/enable preemption, implemented in runtime.\n" ^int [])
+(go/func ^:extern runtime_procUnpin [])

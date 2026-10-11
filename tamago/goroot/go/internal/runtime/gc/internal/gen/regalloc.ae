@@ -1,0 +1,337 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.runtime.gc.internal.gen) (go/file "regalloc.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [log "log"]
+    ^{:line 10} [bits "math/bits"]
+    ^{:line 11} [strings "strings"]])
+
+
+(go/const ^{:val true} traceRegAlloc true)
+
+(go/type regClass uint8)
+
+(go/const
+  ^{:line 19} [^{:tag regClass :val 0} regClassFixed iota]
+  ^{:line 20} [^{:val 1} regClassGP]
+  ^{:line 21} [^{:val 2} regClassZ]
+  ^{:line 22} [^{:val 3} regClassK]
+
+  ^{:line 24} [^{:val 4} numRegClasses]
+
+  ^{:line 26} [^{:val 255} regClassNone (bit-not (conv regClass 0))])
+
+
+(go/type locReg (struct
+    ^{:line 30 :tag regClass} cls
+    ^{:line 31 :tag int} reg))
+
+
+^{:go/end 46} (go/method LocString ^string [^locReg l]
+  (switch (.-cls l)
+    (case [regClassFixed]
+      (return (aget fixedRegs (.-reg l))))
+    (case [regClassGP]
+      (return (aget gpRegs (.-reg l))))
+    (case [regClassZ]
+      (return (fmt/Sprintf "Z%d" (.-reg l))))
+    (case [regClassK]
+      (return (fmt/Sprintf "K%d" (.-reg l)))))
+
+  (panic "bad register class"))
+
+
+^{:go/end 50} (go/method Deref [^locReg l ^int off] :results [loc error]
+  (return (lit locMem l off "") nil))
+
+
+^{:go/end 54} (go/method Reg [^locReg l] :results [locReg bool]
+  (return l true))
+
+
+(go/type locMem (struct
+    ^{:line 57 :tag locReg} base
+    ^{:line 58 :tag int} off
+    ^{:line 59 :tag string} name))
+
+
+^{:go/end 73} (go/method LocString ^string [^locMem l]
+  (when (and (== (.-cls (.-base l)) regClassFixed) (== (.-reg (.-base l)) regSB) (== (.-off l) 0))
+    (return (+ (.-name l) "(SB)")))
+
+  (when (!= (.-name l) "")
+    (return (fmt/Sprintf "%s+%d(%s)" (.-name l) (.-off l) (.LocString (.-base l)))))
+
+  (when (!= (.-off l) 0)
+    (return (fmt/Sprintf "%d(%s)" (.-off l) (.LocString (.-base l)))))
+
+  (+ "(" (.LocString (.-base l)) ")"))
+
+
+^{:go/end 77} (go/method Deref [^locMem l ^int off] :results [loc error]
+  (return nil (fmt/Errorf "cannot dereference already memory address %s" (.LocString l))))
+
+
+^{:go/end 84} (go/method Reg [^locMem l] :results [locReg bool]
+  (when (== (.-cls (.-base l)) regClassFixed)
+    (return (lit locReg) false))
+
+  (return (.-base l) true))
+
+
+(go/type loc (interface
+    (LocString ^string []) ; Return the assembly syntax for this location
+    (Deref [^int off] :results [loc error]) ; Treat this location as an address and return a location with the contents of memory at that address
+    (Reg [] :results [locReg bool]))) ; Register used by this location
+
+
+(go/var opRMW (lit (map string int)
+    ^{:line 93} ["VPERMI2B" 2] ; Overwrites third argument
+    ^{:line 94} ["VPERMI2B.Z" 3] ; Overwrites fourth argument
+    ^{:line 95} ["VPERMI2B.mask" 3] ; Overwrites fourth argument
+    ^{:line 96} ["VPERMT2B" 1] ; Overwrites second argument TODO: Check this. Unused for now.
+    ^{:line 97} ["VPBROADCASTQ.mask" 2])) ; Overwrites last argument
+
+
+;; TODO: Should we have a general rule that all ".mask" instructions overwrite
+;; their last argument?
+
+(go/const
+  ^{:line 104} [^{:val 0} regSB iota]
+  ^{:line 105} [^{:val 1} regFP])
+
+
+(go/var fixedRegs (lit (slice string) [regSB "SB"] [regFP "FP"]))
+(go/var gpRegs (lit (slice string) "AX" "BX" "CX" "DI" "SI" "R8" "R9" "R10" "R11")) ; ABI argument order
+
+(go/type regSet (struct
+    ^{:line 112 :tag (array numRegClasses uint32)} inUse))
+
+
+^{:go/end 130} (go/method used [^{:tag (* regSet)} s ^{:tag (* op)} o ^loc l]
+  (when (== l nil)
+    (return))
+
+  (let [(values reg ok) (.Reg l)]
+    (when (not ok)
+      (return))
+
+    (when traceRegAlloc
+      (log/Printf "  alloc %s @ v%02d" (.LocString reg) (.-id o)))
+
+    (when (!= (bit-and (aget (.-inUse s) (.-cls reg)) ^uint32 (<< 1 (.-reg reg))) 0)
+      (fatalf "register %s already used" (.LocString reg)))
+
+    (set! (aget (.-inUse s) (.-cls reg)) bit-or ^uint32 (<< 1 (.-reg reg)))))
+
+
+^{:go/end 147} (go/method free [^{:tag (* regSet)} s ^loc l]
+  (when (== l nil)
+    (return))
+
+  (let [(values reg ok) (.Reg l)]
+    (when (not ok)
+      (return))
+
+    (when traceRegAlloc
+      (log/Printf "  free %s" (.LocString reg)))
+
+    (when (== (bit-and (aget (.-inUse s) (.-cls reg)) ^uint32 (<< 1 (.-reg reg))) 0)
+      (fatalf "register %s is not in use" (.LocString reg)))
+
+    (set! (aget (.-inUse s) (.-cls reg)) bit-and-not ^uint32 (<< 1 (.-reg reg)))))
+
+
+^{:go/end 338} (go/method assignLocs ^{:tag (map (* op) loc)} [^{:tag (* Func)} fn]
+  ;; Remove static indicator on name, if any. We'll add it back.
+  (let [nameBase (strings/TrimSuffix (.-name fn) "<>")
+
+      ;; Create map from op -> fn.ops index
+      ^{:line 154} opIndexes (make (map (* op) int) (len (.-ops fn)))]
+    (range [i o (.-ops fn)]
+      (aset opIndexes o i))
+
+
+    ;; Read-modify-write operations share a location with one of their inputs.
+    ;; Likewise, deref ops extend the lifetime of their input (but in a shared
+    ;; way, unlike RMW ops).
+    ;;
+    ;; Compute a map from each op to the earliest "canonical" op whose live
+    ;; range we'll use.
+    (let [canon (make (map (* op) (* op)))
+        ^{:line 166} overwritten (make (map (* op) bool))]
+      (range [_ o (.-ops fn)]
+        ;; Check that this op doesn't use any overwritten inputs.
+        (range [_ arg (.-args o)]
+          (when (aget overwritten arg)
+            ;; TODO: The solution to this is to insert copy ops.
+            (fatalf "op %+v uses overwritten input %+v" o arg)))
+
+
+
+        ;; Record canonical op.
+        (let [(values rmw ok) (aget opRMW (.-op o))]
+          (cond ok (do
+              (aset canon o (aget canon (aget (.-args o) rmw)))
+              ;; Record that the input is dead now and must not be referenced.
+              (aset overwritten (aget (.-args o) rmw) true))
+            (== (.-op o) "deref")
+            (aset canon o (aget canon (aget (.-args o) 0))) :else
+
+            (aset canon o o))))
+
+
+
+      ;; Compute live ranges of each canonical op.
+      ;;
+      ;; First, find the last use of each op.
+      (let [lastUses (make (map (* op) (* op)))] ; Canonical creation op -> last use op
+        (range [_ op (.-ops fn)]
+          (range [_ arg (.-args op)]
+            (aset lastUses (aget canon arg) op)))
+
+
+        ;; Invert the last uses map to get a map from op to the (canonical) values
+        ;; that die at that op.
+        (let [lastUseMap (make (map (* op) (slice (* op))))] ; op of last use -> (canonical) creation ops
+          (range [def lastUse lastUses]
+            (aset lastUseMap lastUse (append (aget lastUseMap lastUse) def)))
+
+
+          ;; Prepare for assignments
+          (let [regUsed (make (slice regSet) (len (.-ops fn)))] ; In-use registers at each op
+            (range [i regUsed]
+              ;; X15/Y15/Z15 is reserved by the Go ABI
+              (set! (aget (.-inUse (aget regUsed i)) regClassZ) bit-or (<< 1 15))
+              ;; K0 is contextual (if used as an opmask, it means no mask). Too
+              ;; complicated, so just ignore it.
+              (set! (aget (.-inUse (aget regUsed i)) regClassK) bit-or (<< 1 0)))
+
+            (let [locs (make (map (* op) loc))
+                ^{:line 215} assign ^{:go/end 227} (fn [^{:tag (* op)} o ^loc l]
+                  (when [(values have ok) (aget locs o)] ok
+                    (fatalf "op %+v already assigned location %v (new %v)" o have l)
+                    (return))
+
+                  (when (== o (aget canon o))
+                    ;; Mark this location used over o's live range
+                    (for [i (aget opIndexes o)] (< i (aget opIndexes (aget lastUses o))) (inc! i)
+                      (.used (aget regUsed i) (aget (.-ops fn) i) l)))
+
+
+                  (aset locs o l))
+
+
+                ;; Assign fixed locations
+                ^{:line 230} id 0]
+              (range [_ o (.-ops fn)]
+                (switch (.-op o)
+                  (case ["arg"]
+                    (when traceRegAlloc
+                      (log/Printf "fixed op %+v" o))
+
+                    (assign o (assert locReg (.-c o))))
+                  (case ["const"]
+                    (when traceRegAlloc
+                      (log/Printf "fixed op %+v" o))
+
+                    (let [name (.-name o)]
+                      (cond (== name "") (do
+                          (set! name (fmt/Sprintf "%s_%d<>" nameBase id))
+                          (inc! id))
+                        (== (aget name 0) \*)
+                        (set! name (+ nameBase (subslice name 1))))
+
+                      (assign o (lit locMem (lit locReg :cls regClassFixed :reg regSB) 0 name))))
+                  (case ["return"]
+                    (when traceRegAlloc
+                      (log/Printf "fixed op %+v" o))
+
+                    (assign o nil) ; no location
+                    ;; TODO: argZ should start at 0.
+                    (let [(values argGP argZ) (values 0 1)]
+                      (range [_ arg (.-args o)]
+                        (switch (.-reg (.-kind arg))
+                          (default
+                            (fatalf "bad register class for return value"))
+                          (case [regClassGP]
+                            (assign (aget canon arg) (lit locReg regClassGP argGP))
+                            (inc! argGP))
+                          (case [regClassZ]
+                            (assign (aget canon arg) (lit locReg regClassZ argZ))
+                            (inc! argZ))))))
+
+
+                  (case ["imm"]
+                    (assign o nil)))) ; no location
+
+
+
+              ;; Assign locations.
+              (range [_ o (.-ops fn)]
+                (when traceRegAlloc
+                  (log/Printf "assign %+v" o))
+
+
+                (when [(values _ ok) (aget locs o)] ok
+                  ;; Already assigned a fixed location above.
+                  (continue))
+
+
+                (when (== (.-op o) "deref")
+                  (let [(values loc err) (.Deref (aget locs (aget (.-args o) 0)) (assert int (.-c o)))]
+                    (when (!= err nil)
+                      (fatalf "%v" err))
+
+                    ;; We don't "assign" here because we've already processed the
+                    ;; canonical op, which marked loc's register as in-use for the whole
+                    ;; live range.
+                    (aset locs o loc)
+                    (continue)))
+
+
+                (when (!= (aget canon o) o)
+                  ;; Copy the canonical op's location.
+                  (aset locs o (aget locs (aget canon o)))
+                  (continue))
+
+                ;; Below here we know that o is already a canonical op.
+
+                (when [(values _ ok) (aget opRMW (.-op o))] ok
+                  (fatalf "read-modify-write op not canonicalized"))
+
+
+                ;; Find a free register of the right class.
+                (let [cls (.-reg (.-kind o))
+                    ^{:line 310 :tag uint32} used (zero uint32)]
+                  (for [i (aget opIndexes o)] (< i (aget opIndexes (aget lastUses o))) (inc! i)
+                    (set! used bit-or (aget (.-inUse (aget regUsed i)) cls)))
+
+
+                  ;; Assign result location.
+                  (let [num (bits/TrailingZeros32 (bit-not used))]
+                    (switch cls
+                      (default
+                        (fatalf "unknown reg class %v" cls))
+                      (case [regClassGP]
+                        (when (>= num (len gpRegs))
+                          (panic "out of GP regs")))
+
+                      (case [regClassZ]
+                        (when (>= num 32)
+                          (panic "out of Z regs")))
+
+                      (case [regClassK]
+                        (when (>= num 8)
+                          (panic "out of K regs"))))
+
+
+                    (let [loc (lit locReg cls num)]
+                      (assign o loc)))))
+
+
+              ^{:line 337} locs)))))))

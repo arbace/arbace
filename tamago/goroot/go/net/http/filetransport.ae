@@ -1,0 +1,142 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http) (go/file "filetransport.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [fs "io/fs"]])
+
+
+
+(go/type fileTransport "fileTransport implements RoundTripper for the 'file' protocol.\n" (struct
+    ^{:line 15 :tag fileHandler} fh))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 33} (go/func NewFileTransport "NewFileTransport returns a new [RoundTripper], serving the provided\n[FileSystem]. The returned RoundTripper ignores the URL host in its\nincoming requests, as well as most other properties of the\nrequest.\n\nThe typical use case for NewFileTransport is to register the \"file\"\nprotocol with a [Transport], as in:\n\n\tt := &http.Transport{}\n\tt.RegisterProtocol(\"file\", http.NewFileTransport(http.Dir(\"/\")))\n\tc := &http.Client{Transport: t}\n\tres, err := c.Get(\"file:///etc/passwd\")\n\t...\n" ^RoundTripper [^FileSystem fs]
+  (lit fileTransport (lit fileHandler fs)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 51} (go/func NewFileTransportFS "NewFileTransportFS returns a new [RoundTripper], serving the provided\nfile system fsys. The returned RoundTripper ignores the URL host in its\nincoming requests, as well as most other properties of the\nrequest. The files provided by fsys must implement [io.Seeker].\n\nThe typical use case for NewFileTransportFS is to register the \"file\"\nprotocol with a [Transport], as in:\n\n\tfsys := os.DirFS(\"/\")\n\tt := &http.Transport{}\n\tt.RegisterProtocol(\"file\", http.NewFileTransportFS(fsys))\n\tc := &http.Client{Transport: t}\n\tres, err := c.Get(\"file:///etc/passwd\")\n\t...\n" ^RoundTripper [^fs/FS fsys]
+  (NewFileTransport (FS fsys)))
+
+
+^{:go/end 66} (go/method RoundTrip [^fileTransport t ^{:tag (* Request)} req] :results [^{:tag (* Response)} resp ^error err]
+  ;; We start ServeHTTP in a goroutine, which may take a long
+  ;; time if the file is large. The newPopulateResponseWriter
+  ;; call returns a channel which either ServeHTTP or finish()
+  ;; sends our *Response on, once the *Response itself has been
+  ;; populated (even if the body itself is still being
+  ;; written to the res.Body, a pipe)
+  (let [(values rw resc) (newPopulateResponseWriter req)]
+    (go (^{:go/end 64} (fn []
+          (.ServeHTTP (.-fh t) rw req)
+          (.finish rw))))
+
+    (return (<! resc) nil)))
+
+
+^{:go/end 83} (go/func newPopulateResponseWriter [^{:tag (* Request)} req] :results [(* populateResponse) (chan :recv (* Response))]
+  (let [(values pr pw) (io/Pipe)
+      ^{:line 70} rw (addr ^{:go/breaks [2 4 6]} (lit populateResponse
+          :ch (make (chan (* Response)))
+          :pw pw
+          :res (addr ^{:go/breaks [2 4 6 8 10 12]} (lit Response
+              :Proto "HTTP/1.0"
+              :ProtoMajor 1
+              :Header (make Header)
+              :Close true
+              :Body pr
+              :Request req))))]
+
+
+    (return rw (.-ch rw))))
+
+
+
+
+
+
+(go/type populateResponse "populateResponse is a ResponseWriter that populates the *Response\nin res, and writes its body to a pipe connected to the response\nbody. Once writes begin or finish() is called, the response is sent\non ch.\n" (struct
+    ^{:line 90 :tag (* Response)} res
+    ^{:line 91 :tag (chan (* Response))} ch
+    ^{:line 92 :tag bool} wroteHeader
+    ^{:line 93 :tag bool} hasContent
+    ^{:line 94 :tag bool} sentResponse
+    ^{:line 95 :tag (* io/PipeWriter)} pw))
+
+
+^{:go/end 106} (go/method finish [^{:tag (* populateResponse)} pr]
+  (when (not (.-wroteHeader pr))
+    (.WriteHeader pr 500))
+
+  (when (not (.-sentResponse pr))
+    (.sendResponse pr))
+
+  (.Close (.-pw pr)))
+
+
+^{:go/end 118} (go/method sendResponse [^{:tag (* populateResponse)} pr]
+  (when (.-sentResponse pr)
+    (return))
+
+  (set! (.-sentResponse pr) true)
+
+  (when (.-hasContent pr)
+    (set! (.-ContentLength (.-res pr)) -1))
+
+  (>! (.-ch pr) (.-res pr)))
+
+
+^{:go/end 122} (go/method Header ^Header [^{:tag (* populateResponse)} pr]
+  (.-Header (.-res pr)))
+
+
+^{:go/end 132} (go/method WriteHeader [^{:tag (* populateResponse)} pr ^int code]
+  (when (.-wroteHeader pr)
+    (return))
+
+  (set! (.-wroteHeader pr) true)
+
+  (set! (.-StatusCode (.-res pr)) code)
+  (set! (.-Status (.-res pr)) (fmt/Sprintf "%d %s" code (StatusText code))))
+
+
+^{:go/end 143} (go/method Write [^{:tag (* populateResponse)} pr ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (not (.-wroteHeader pr))
+    (.WriteHeader pr StatusOK))
+
+  (set! (.-hasContent pr) true)
+  (when (not (.-sentResponse pr))
+    (.sendResponse pr))
+
+  (.Write (.-pw pr) p))

@@ -1,0 +1,1299 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package strings implements simple functions to manipulate UTF-8 encoded strings.
+;;
+;; For information about UTF-8 strings in Go, see https://blog.golang.org/strings.
+(in-ns 'go.strings) (go/file "strings.go" :doc "Package strings implements simple functions to manipulate UTF-8 encoded strings.\n\nFor information about UTF-8 strings in Go, see https://blog.golang.org/strings.\n" :imports [
+
+
+    ^{:line 11} [bytealg "internal/bytealg"]
+    ^{:line 12} [stringslite "internal/stringslite"]
+    ^{:line 13} [bits "math/bits"]
+    ^{:line 14} [unicode "unicode"]
+    ^{:line 15} [utf8 "unicode/utf8"]])
+
+
+(go/const ^{:val 9223372036854775807} maxInt (conv int (>> (bit-not (conv uint 0)) 1)))
+
+
+
+
+^{:go/end 38} (go/func explode "explode splits s into a slice of UTF-8 strings,\none string per Unicode character up to a maximum of n (n < 0 means no limit).\nInvalid UTF-8 bytes are sliced individually.\n" ^{:tag (slice string)} [^string s ^int n]
+  (let [l (utf8/RuneCountInString s)]
+    (when (or (< n 0) (> n l))
+      (set! n l))
+
+    (let [a (make (slice string) n)]
+      (for [i 0] (< i (- n 1)) (inc! i)
+        (let [(values _ size) (utf8/DecodeRuneInString s)]
+          (aset a i (subslice s _ size))
+          (set! s (subslice s size))))
+
+      (when (> n 0)
+        (aset a (- n 1) s))
+
+      ^{:line 37} a)))
+
+
+
+
+^{:go/end 59} (go/func Count "Count counts the number of non-overlapping instances of substr in s.\nIf substr is an empty string, Count returns 1 + the number of Unicode code points in s.\n" ^int [^string s ^string substr]
+  ;; special case
+  (when (== (len substr) 0)
+    (return (+ (utf8/RuneCountInString s) 1)))
+
+  (when (== (len substr) 1)
+    (return (bytealg/CountString s (aget substr 0))))
+
+  (let [n 0]
+    (while true
+      (let [i (Index s substr)]
+        (when (== i -1)
+          (return n))
+
+        (inc! n)
+        (set! s (subslice s (+ i (len substr))))))))
+
+
+
+
+^{:go/end 64} (go/func Contains "Contains reports whether substr is within s.\n" ^bool [^string s ^string substr]
+  (>= (Index s substr) 0))
+
+
+
+^{:go/end 69} (go/func ContainsAny "ContainsAny reports whether any Unicode code points in chars are within s.\n" ^bool [^string s ^string chars]
+  (>= (IndexAny s chars) 0))
+
+
+
+^{:go/end 74} (go/func ContainsRune "ContainsRune reports whether the Unicode code point r is within s.\n" ^bool [^string s ^rune r]
+  (>= (IndexRune s r) 0))
+
+
+
+
+^{:go/end 80} (go/func ContainsFunc "ContainsFunc reports whether any Unicode code points r within s satisfy f(r).\nIt stops as soon as a call to f returns true.\n" ^bool [^string s ^{:tag (func [rune] [bool])} f]
+  (>= (IndexFunc s f) 0))
+
+
+
+^{:go/end 99} (go/func LastIndex "LastIndex returns the index of the last instance of substr in s, or -1 if substr is not present in s.\n" ^int [^string s ^string substr]
+  (let [n (len substr)]
+    (switch
+      (case [(== n 0)]
+        (return (len s)))
+      (case [(== n 1)]
+        (return (bytealg/LastIndexByteString s (aget substr 0))))
+      (case [(== n (len s))]
+        (when (== substr s)
+          (return 0))
+
+        (return -1))
+      (case [(> n (len s))]
+        (return -1)))
+
+    (^{:inst [string]} bytealg/LastIndexRabinKarp s substr)))
+
+
+
+^{:go/end 104} (go/func IndexByte "IndexByte returns the index of the first instance of c in s, or -1 if c is not present in s.\n" ^int [^string s ^byte c]
+  (stringslite/IndexByte s c))
+
+
+
+
+
+
+^{:go/end 180} (go/func IndexRune "IndexRune returns the index of the first instance of the Unicode code point\nr, or -1 if rune is not present in s.\nIf r is [utf8.RuneError], it returns the first instance of any\ninvalid UTF-8 byte sequence.\n" ^int [^string s ^rune r]
+  (let [^:const ^{:val true} haveFastIndex (> bytealg/MaxBruteForce 0)]
+    (switch
+      (case [(and (<= 0 r) (< r utf8/RuneSelf))]
+        (return (IndexByte s (conv byte r))))
+      (case [(== r utf8/RuneError)]
+        (range [i r s]
+          (when (== r utf8/RuneError)
+            (return i)))
+
+
+        (return -1))
+      (case [(not (utf8/ValidRune r))]
+        (return -1))
+      (default
+        ;; Search for rune r using the last byte of its UTF-8 encoded form.
+        ;; The distribution of the last byte is more uniform compared to the
+        ;; first byte which has a 78% chance of being [240, 243, 244].
+        (let [rs (conv string r)
+            ^{:line 129} last (- (len rs) 1)
+            ^{:line 130} i last
+            ^{:line 131} fails 0]
+          (while (< i (len s))
+            (when (!= (aget s i) (aget rs last))
+              (let [o (IndexByte (subslice s (+ i 1)) (aget rs last))]
+                (when (< o 0)
+                  (return -1))
+
+                (set! i + (+ o 1))))
+
+            ;; Step backwards comparing bytes.
+            (for [j 1] (< j (len rs)) (inc! j)
+              (when (!= (aget s (- i j)) (aget rs (- last j)))
+                (goto :next)))
+
+
+            (return (- i last))
+            (label :next
+              (inc! fails))
+            (inc! i)
+            (when (or (and ^:go/paren (and haveFastIndex (> fails (bytealg/Cutover i))) (< i (len s)))
+                ^:go/paren (and (not haveFastIndex) (>= fails (+ 4 (>> i 4))) (< i (len s))))
+              (goto :fallback)))
+
+
+          (return -1)
+
+          (label :fallback
+            ;; see comment in ../bytes/bytes.go
+            (if haveFastIndex
+              (when [j (bytealg/IndexString (subslice s (- i last)) (conv string r))] (>= j 0)
+                (return (- (+ i j) last)))
+
+
+              (let [c0 (aget rs last)
+                  ^{:line 165} c1 (aget rs (- last 1))]
+                (label :loop
+                  (for [] (< i (len s)) (inc! i)
+                    (when (and (== (aget s i) c0) (== (aget s (- i 1)) c1))
+                      (for [k 2] (< k (len rs)) (inc! k)
+                        (when (!= (aget s (- i k)) (aget rs (- last k)))
+                          (continue :loop)))
+
+
+                      (return (- i last))))))))
+
+
+
+          (return -1))))))
+
+
+
+
+
+^{:go/breaks [[8 212]] :go/end 213} (go/func IndexAny "IndexAny returns the index of the first instance of any Unicode code point\nfrom chars in s, or -1 if no Unicode code point from chars is present in s.\n" ^int [^string s ^string chars]
+  (when (== chars "")
+    ;; Avoid scanning all of s.
+    (return -1))
+
+  (when (== (len chars) 1)
+    ;; Avoid scanning all of s.
+    (let [r (conv rune (aget chars 0))]
+      (when (>= r utf8/RuneSelf)
+        (set! r utf8/RuneError))
+
+      (return (IndexRune s r))))
+
+  (when (shouldUseASCIISet (len s))
+    (when [(values as isASCII) (makeASCIISet chars)] isASCII
+      (for [i 0] (< i (len s)) (inc! i)
+        (when (.contains as (aget s i))
+          (return i)))
+
+
+      (return -1)))
+
+
+  (range [i c s]
+    (when (>= (IndexRune chars c) 0)
+      (return i)))
+
+
+  -1)
+
+
+
+
+
+^{:go/breaks [[9 264]] :go/end 265} (go/func LastIndexAny "LastIndexAny returns the index of the last instance of any Unicode code\npoint from chars in s, or -1 if no Unicode code point from chars is\npresent in s.\n" ^int [^string s ^string chars]
+  (when (== chars "")
+    ;; Avoid scanning all of s.
+    (return -1))
+
+  (when (== (len s) 1)
+    (let [rc (conv rune (aget s 0))]
+      (when (>= rc utf8/RuneSelf)
+        (set! rc utf8/RuneError))
+
+      (when (>= (IndexRune chars rc) 0)
+        (return 0))
+
+      (return -1)))
+
+  (when (shouldUseASCIISet (len s))
+    (when [(values as isASCII) (makeASCIISet chars)] isASCII
+      (for [i (- (len s) 1)] (>= i 0) (dec! i)
+        (when (.contains as (aget s i))
+          (return i)))
+
+
+      (return -1)))
+
+
+  (when (== (len chars) 1)
+    (let [rc (conv rune (aget chars 0))]
+      (when (>= rc utf8/RuneSelf)
+        (set! rc utf8/RuneError))
+
+      (for [i (len s)] (> i 0) _
+        (let [(values r size) (utf8/DecodeLastRuneInString (subslice s _ i))]
+          (set! i - size)
+          (when (== rc r)
+            (return i))))
+
+
+      (return -1)))
+
+  (for [i (len s)] (> i 0) _
+    (let [(values r size) (utf8/DecodeLastRuneInString (subslice s _ i))]
+      (set! i - size)
+      (when (>= (IndexRune chars r) 0)
+        (return i))))
+
+
+  -1)
+
+
+
+^{:go/end 270} (go/func LastIndexByte "LastIndexByte returns the index of the last instance of c in s, or -1 if c is not present in s.\n" ^int [^string s ^byte c]
+  (bytealg/LastIndexByteString s c))
+
+
+
+
+^{:go/end 300} (go/func genSplit "Generic split: splits after each instance of sep,\nincluding sepSave bytes of sep in the subarrays.\n" ^{:tag (slice string)} [^string s ^string sep ^int sepSave ^int n]
+  (when (== n 0)
+    (return nil))
+
+  (when (== sep "")
+    (return (explode s n)))
+
+  (when (< n 0)
+    (set! n (+ (Count s sep) 1)))
+
+
+  (set! n (min n (+ (len s) 1)))
+  (let [a (make (slice string) n)]
+    (dec! n)
+    (let [i 0]
+      (while (< i n)
+        (let [m (Index s sep)]
+          (when (< m 0)
+            (break))
+
+          (aset a i (subslice s _ (+ m sepSave)))
+          (set! s (subslice s (+ m (len sep))))
+          (inc! i)))
+
+      (aset a i s)
+      (subslice a _ (+ i 1)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 314} (go/func SplitN "SplitN slices s into substrings separated by sep and returns a slice of\nthe substrings between those separators.\n\nThe count determines the number of substrings to return:\n  - n > 0: at most n substrings; the last substring will be the unsplit remainder;\n  - n == 0: the result is nil (zero substrings);\n  - n < 0: all substrings.\n\nEdge cases for s and sep (for example, empty strings) are handled\nas described in the documentation for [Split].\n\nTo split around the first instance of a separator, see [Cut].\n" ^{:tag (slice string)} [^string s ^string sep ^int n] (genSplit s sep 0 n))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 328} (go/func SplitAfterN "SplitAfterN slices s into substrings after each instance of sep and\nreturns a slice of those substrings.\n\nThe count determines the number of substrings to return:\n  - n > 0: at most n substrings; the last substring will be the unsplit remainder;\n  - n == 0: the result is nil (zero substrings);\n  - n < 0: all substrings.\n\nEdge cases for s and sep (for example, empty strings) are handled\nas described in the documentation for [SplitAfter].\n" ^{:tag (slice string)} [^string s ^string sep ^int n]
+  (genSplit s sep (len sep) n))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 342} (go/func Split "Split slices s into all substrings separated by sep and returns a slice of\nthe substrings between those separators.\n\nIf s does not contain sep and sep is not empty, Split returns a\nslice of length 1 whose only element is s.\n\nIf sep is empty, Split splits after each UTF-8 sequence. If both s\nand sep are empty, Split returns an empty slice.\n\nIt is equivalent to [SplitN] with a count of -1.\n\nTo split around the first instance of a separator, see [Cut].\n" ^{:tag (slice string)} [^string s ^string sep] (genSplit s sep 0 -1))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 356} (go/func SplitAfter "SplitAfter slices s into all substrings after each instance of sep and\nreturns a slice of those substrings.\n\nIf s does not contain sep and sep is not empty, SplitAfter returns\na slice of length 1 whose only element is s.\n\nIf sep is empty, SplitAfter splits after each UTF-8 sequence. If\nboth s and sep are empty, SplitAfter returns an empty slice.\n\nIt is equivalent to [SplitAfterN] with a count of -1.\n" ^{:tag (slice string)} [^string s ^string sep]
+  (genSplit s sep (len sep) -1))
+
+
+(go/var asciiSpace (lit (array 256 uint8) [\tab 1] [\newline 1] [\u000b 1] [\formfeed 1] [\return 1] [\space 1]))
+
+
+
+
+
+
+^{:go/end 412} (go/func Fields "Fields splits the string s around each instance of one or more consecutive white space\ncharacters, as defined by [unicode.IsSpace], returning a slice of substrings of s or an\nempty slice if s contains only white space. Every element of the returned slice is\nnon-empty. Unlike [Split], leading and trailing runs of white space characters\nare discarded.\n" ^{:tag (slice string)} [^string s]
+  ;; First count the fields.
+  ;; This is an exact count if s is ASCII, otherwise it is an approximation.
+  (let [n 0
+      ^{:line 369} wasSpace 1
+      ;; setBits is used to track which bits are set in the bytes of s.
+      ^{:line 371} setBits (conv uint8 0)]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [r (aget s i)]
+        (set! setBits bit-or r)
+        (let [isSpace (conv int (aget asciiSpace r))]
+          (set! n + (bit-and wasSpace (bit-not isSpace)))
+          (set! wasSpace isSpace))))
+
+
+    (when (>= setBits utf8/RuneSelf)
+      ;; Some runes in the input string are not ASCII.
+      (return (FieldsFunc s unicode/IsSpace)))
+
+    ;; ASCII fast path
+    (let [a (make (slice string) n)
+        ^{:line 386} na 0
+        ^{:line 387} fieldStart 0
+        ^{:line 388} i 0]
+      ;; Skip spaces in the front of the input.
+      (while (and (< i (len s)) (!= (aget asciiSpace (aget s i)) 0))
+        (inc! i))
+
+      (set! fieldStart i)
+      (while (< i (len s))
+        (when (== (aget asciiSpace (aget s i)) 0)
+          (inc! i)
+          (continue))
+
+        (aset a na (subslice s fieldStart i))
+        (inc! na)
+        (inc! i)
+        ;; Skip spaces in between fields.
+        (while (and (< i (len s)) (!= (aget asciiSpace (aget s i)) 0))
+          (inc! i))
+
+        (set! fieldStart i))
+
+      (when (< fieldStart (len s)) ; Last field might end at EOF.
+        (aset a na (subslice s fieldStart)))
+
+      ^{:line 411} a)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 464} (go/func FieldsFunc "FieldsFunc splits the string s at each run of Unicode code points c satisfying f(c)\nand returns an array of slices of s. If all code points in s satisfy f(c) or the\nstring is empty, an empty slice is returned. Every element of the returned slice is\nnon-empty. Unlike [Split], leading and trailing runs of code points satisfying f(c)\nare discarded.\n\nFieldsFunc makes no guarantees about the order in which it calls f(c)\nand assumes that f always returns the same value for a given c.\n" ^{:tag (slice string)} [^string s ^{:tag (func [rune] [bool])} f]
+  ;; A span is used to record a slice of s of the form s[start:end].
+  ;; The start index is inclusive and the end index is exclusive.
+  (let-type [span (struct
+        ^{:line 426 :tag int} start
+        ^{:line 427 :tag int} end)]
+
+    (let [spans (make (slice span) 0 32)
+
+        ;; Find the field start and end indices.
+        ;; Doing this in a separate pass (rather than slicing the string s
+        ;; and collecting the result substrings right away) is significantly
+        ;; more efficient, possibly due to cache effects.
+        ^{:line 435} start -1] ; valid span start if >= 0
+      (range [end rune s]
+        (if (f rune)
+          (when (>= start 0)
+            (set! spans (append spans (lit span start end)))
+            ;; Set start to a negative value.
+            ;; Note: using -1 here consistently and reproducibly
+            ;; slows down this code by a several percent on amd64.
+            (set! start (bit-not start)))
+
+          (do
+            (when (< start 0)
+              (set! start end)))))
+
+
+
+
+      ;; Last field might end at EOF.
+      (when (>= start 0)
+        (set! spans (append spans (lit span start (len s)))))
+
+
+      ;; Create strings from recorded field indices.
+      (let [a (make (slice string) (len spans))]
+        (range [i span spans]
+          (aset a i (subslice s (.-start span) (.-end span))))
+
+
+        ^{:line 463} a))))
+
+
+
+
+^{:go/end 498} (go/func Join "Join concatenates the elements of its first argument to create a single string. The separator\nstring sep is placed between elements in the resulting string.\n" ^string [^{:tag (slice string)} elems ^string sep]
+  (switch (len elems)
+    (case [0]
+      (return ""))
+    (case [1]
+      (return (aget elems 0))))
+
+
+  (let [^int n (zero int)]
+    (when (> (len sep) 0)
+      (when (>= (len sep) (/ maxInt (- (len elems) 1)))
+        (panic "strings: Join output length overflow"))
+
+      (set! n + (* (len sep) (- (len elems) 1))))
+
+    (range [_ elem elems]
+      (when (> (len elem) (- maxInt n))
+        (panic "strings: Join output length overflow"))
+
+      (set! n + (len elem)))
+
+
+    (let [^Builder b (zero Builder)]
+      (.Grow b n)
+      (.WriteString b (aget elems 0))
+      (range [_ s (subslice elems 1)]
+        (.WriteString b sep)
+        (.WriteString b s))
+
+      (.String b))))
+
+
+
+^{:go/end 503} (go/func HasPrefix "HasPrefix reports whether the string s begins with prefix.\n" ^bool [^string s ^string prefix]
+  (stringslite/HasPrefix s prefix))
+
+
+
+^{:go/end 508} (go/func HasSuffix "HasSuffix reports whether the string s ends with suffix.\n" ^bool [^string s ^string suffix]
+  (stringslite/HasSuffix s suffix))
+
+
+
+
+
+^{:go/end 570} (go/func Map "Map returns a copy of the string s with all its characters modified\naccording to the mapping function. If mapping returns a negative value, the character is\ndropped from the string with no replacement.\n" ^string [^{:tag (func [rune] [rune])} mapping ^string s]
+  ;; In the worst case, the string can grow when mapped, making
+  ;; things unpleasant. But it's so rare we barge in assuming it's
+  ;; fine. It could also shrink but that falls out naturally.
+
+  ;; The output buffer b is initialized on demand, the first
+  ;; time a character differs.
+  (let [^Builder b (zero Builder)]
+
+    (range [i c s]
+      (let [r (mapping c)]
+        (when (and (== r c) (!= c utf8/RuneError))
+          (continue))
+
+
+        (let [^int width (zero int)]
+          (if (== c utf8/RuneError) (do
+              (set! (values c width) (utf8/DecodeRuneInString (subslice s i)))
+              (when (and (!= width 1) (== r c))
+                (continue)))
+
+
+            (set! width (utf8/RuneLen c)))
+
+
+          (.Grow b (+ (len s) utf8/UTFMax))
+          (.WriteString b (subslice s _ i))
+          (when (>= r 0)
+            (.WriteRune b r))
+
+
+          (set! s (subslice s (+ i width)))
+          (break))))
+
+
+    ;; Fast path for unchanged input
+    (when (== (.Cap b) 0) ; didn't call b.Grow above
+      (return s))
+
+
+    (range [_ c s]
+      (let [r (mapping c)]
+
+        (when (>= r 0)
+          ;; common case
+          ;; Due to inlining, it is more performant to determine if WriteByte should be
+          ;; invoked rather than always call WriteRune
+          (if (< r utf8/RuneSelf)
+            (.WriteByte b (conv byte r))
+
+            ;; r is not an ASCII rune.
+            (.WriteRune b r)))))
+
+
+
+
+    (.String b)))
+
+
+
+
+
+
+(go/const "According to static analysis, spaces, dashes, zeros, equals, and tabs\nare the most commonly repeated string literal,\noften used for display on fixed-width terminal windows.\nPre-declare constants for these for O(1) repetition in the common-case.\n"
+  ^{:line 577} [^{:val "                                                                                                                                "} repeatedSpaces ^{:go/breaks [2 3]} (+ ""
+      "                                                                "
+      "                                                                ")]
+  ^{:line 580} [^{:val "--------------------------------------------------------------------------------------------------------------------------------"} repeatedDashes ^{:go/breaks [2 3]} (+ ""
+      "----------------------------------------------------------------"
+      "----------------------------------------------------------------")]
+  ^{:line 583} [^{:val "0000000000000000000000000000000000000000000000000000000000000000"} repeatedZeroes ^{:go/breaks [2]} (+ ""
+      "0000000000000000000000000000000000000000000000000000000000000000")]
+  ^{:line 585} [^{:val "================================================================================================================================"} repeatedEquals ^{:go/breaks [2 3]} (+ ""
+      "================================================================"
+      "================================================================")]
+  ^{:line 588} [^{:val "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t"} repeatedTabs ^{:go/breaks [2 3]} (+ ""
+      "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t"
+      "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t")])
+
+
+
+
+
+
+^{:go/end 665} (go/func Repeat "Repeat returns a new string consisting of count copies of the string s.\n\nIt panics if count is negative or if the result of (len(s) * count)\noverflows.\n" ^string [^string s ^int count]
+  (switch count
+    (case [0]
+      (return ""))
+    (case [1]
+      (return s)))
+
+
+  ;; Since we cannot return an error on overflow,
+  ;; we should panic if the repeat will generate an overflow.
+  ;; See golang.org/issue/16237.
+  (when (< count 0)
+    (panic "strings: negative Repeat count"))
+
+  (let [(values hi lo) (bits/Mul (conv uint (len s)) (conv uint count))]
+    (when (or (> hi 0) (> lo (conv uint maxInt)))
+      (panic "strings: Repeat output length overflow"))
+
+    (let [n (conv int lo)] ; lo = len(s) * count
+
+      (when (== (len s) 0)
+        (return ""))
+
+
+      ;; Optimize for commonly repeated strings of relatively short length.
+      (switch (aget s 0)
+        (case [\space \- \0 \= \tab]
+          (switch
+            (case [(and (<= n (len repeatedSpaces)) (HasPrefix repeatedSpaces s))]
+              (return (subslice repeatedSpaces _ n)))
+            (case [(and (<= n (len repeatedDashes)) (HasPrefix repeatedDashes s))]
+              (return (subslice repeatedDashes _ n)))
+            (case [(and (<= n (len repeatedZeroes)) (HasPrefix repeatedZeroes s))]
+              (return (subslice repeatedZeroes _ n)))
+            (case [(and (<= n (len repeatedEquals)) (HasPrefix repeatedEquals s))]
+              (return (subslice repeatedEquals _ n)))
+            (case [(and (<= n (len repeatedTabs)) (HasPrefix repeatedTabs s))]
+              (return (subslice repeatedTabs _ n))))))
+
+
+
+      ;; Past a certain chunk size it is counterproductive to use
+      ;; larger chunks as the source of the write, as when the source
+      ;; is too large we are basically just thrashing the CPU D-cache.
+      ;; So if the result length is larger than an empirically-found
+      ;; limit (8KB), we stop growing the source string once the limit
+      ;; is reached and keep reusing the same source string - that
+      ;; should therefore be always resident in the L1 cache - until we
+      ;; have completed the construction of the result.
+      ;; This yields significant speedups (up to +100%) in cases where
+      ;; the result length is large (roughly, over L2 cache size).
+      (let [^:const ^{:val 8192} chunkLimit (* 8 1024)
+          ^{:line 649} chunkMax n]
+        (when (> n chunkLimit)
+          (set! chunkMax (* (/ chunkLimit (len s)) (len s)))
+          (when (== chunkMax 0)
+            (set! chunkMax (len s))))
+
+
+
+        (let [^Builder b (zero Builder)]
+          (.Grow b n)
+          (.WriteString b s)
+          (while (< (.Len b) n)
+            (let [chunk (min (- n (.Len b)) (.Len b) chunkMax)]
+              (.WriteString b (subslice (.String b) _ chunk))))
+
+          (.String b))))))
+
+
+
+^{:go/end 705} (go/func ToUpper "ToUpper returns s with all Unicode letters mapped to their upper case.\n" ^string [^string s]
+  (let [(values isASCII hasLower) (values true false)]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [c (aget s i)]
+        (when (>= c utf8/RuneSelf)
+          (set! isASCII false)
+          (break))
+
+        (set! hasLower (or hasLower ^:go/paren (and (<= \a c) (<= c \z))))))
+
+
+    (when isASCII ; optimize for ASCII-only strings.
+      (when (not hasLower)
+        (return s))
+
+      (let [
+          ^{:line 684 :tag Builder} b (zero Builder)
+          ^{:line 685 :tag int} pos (zero int)]
+
+        (.Grow b (len s))
+        (for [i 0] (< i (len s)) (inc! i)
+          (let [c (aget s i)]
+            (when (and (<= \a c) (<= c \z))
+              (set! c - (- \a \A))
+              (when (< pos i)
+                (.WriteString b (subslice s pos i)))
+
+              (.WriteByte b c)
+              (set! pos (+ i 1)))))
+
+
+        (when (< pos (len s))
+          (.WriteString b (subslice s pos)))
+
+        (return (.String b))))
+
+    (Map unicode/ToUpper s)))
+
+
+
+^{:go/end 745} (go/func ToLower "ToLower returns s with all Unicode letters mapped to their lower case.\n" ^string [^string s]
+  (let [(values isASCII hasUpper) (values true false)]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [c (aget s i)]
+        (when (>= c utf8/RuneSelf)
+          (set! isASCII false)
+          (break))
+
+        (set! hasUpper (or hasUpper ^:go/paren (and (<= \A c) (<= c \Z))))))
+
+
+    (when isASCII ; optimize for ASCII-only strings.
+      (when (not hasUpper)
+        (return s))
+
+      (let [
+          ^{:line 724 :tag Builder} b (zero Builder)
+          ^{:line 725 :tag int} pos (zero int)]
+
+        (.Grow b (len s))
+        (for [i 0] (< i (len s)) (inc! i)
+          (let [c (aget s i)]
+            (when (and (<= \A c) (<= c \Z))
+              (set! c + (- \a \A))
+              (when (< pos i)
+                (.WriteString b (subslice s pos i)))
+
+              (.WriteByte b c)
+              (set! pos (+ i 1)))))
+
+
+        (when (< pos (len s))
+          (.WriteString b (subslice s pos)))
+
+        (return (.String b))))
+
+    (Map unicode/ToLower s)))
+
+
+
+
+^{:go/end 749} (go/func ToTitle "ToTitle returns a copy of the string s with all Unicode letters mapped to\ntheir Unicode title case.\n" ^string [^string s] (Map unicode/ToTitle s))
+
+
+
+^{:go/end 755} (go/func ToUpperSpecial "ToUpperSpecial returns a copy of the string s with all Unicode letters mapped to their\nupper case using the case mapping specified by c.\n" ^string [^unicode/SpecialCase c ^string s]
+  (Map (.-ToUpper c) s))
+
+
+
+
+^{:go/end 761} (go/func ToLowerSpecial "ToLowerSpecial returns a copy of the string s with all Unicode letters mapped to their\nlower case using the case mapping specified by c.\n" ^string [^unicode/SpecialCase c ^string s]
+  (Map (.-ToLower c) s))
+
+
+
+
+^{:go/end 767} (go/func ToTitleSpecial "ToTitleSpecial returns a copy of the string s with all Unicode letters mapped to their\nUnicode title case, giving priority to the special casing rules.\n" ^string [^unicode/SpecialCase c ^string s]
+  (Map (.-ToTitle c) s))
+
+
+
+
+^{:go/end 817} (go/func ToValidUTF8 "ToValidUTF8 returns a copy of the string s with each run of invalid UTF-8 byte sequences\nreplaced by the replacement string, which may be empty.\n" ^string [^string s ^string replacement]
+  (let [^Builder b (zero Builder)]
+
+    (range [i c s]
+      (when (!= c utf8/RuneError)
+        (continue))
+
+
+      (let [(values _ wid) (utf8/DecodeRuneInString (subslice s i))]
+        (when (== wid 1)
+          (.Grow b (+ (len s) (len replacement)))
+          (.WriteString b (subslice s _ i))
+          (set! s (subslice s i))
+          (break))))
+
+
+
+    ;; Fast path for unchanged input
+    (when (== (.Cap b) 0) ; didn't call b.Grow above
+      (return s))
+
+
+    (let [invalid false] ; previous byte was from an invalid UTF-8 sequence
+      (for [i 0] (< i (len s)) _
+        (let [c (aget s i)]
+          (when (< c utf8/RuneSelf)
+            (inc! i)
+            (set! invalid false)
+            (.WriteByte b c)
+            (continue))
+
+          (let [(values _ wid) (utf8/DecodeRuneInString (subslice s i))]
+            (when (== wid 1)
+              (inc! i)
+              (when (not invalid)
+                (set! invalid true)
+                (.WriteString b replacement))
+
+              (continue))
+
+            (set! invalid false)
+            (.WriteString b (subslice s i (+ i wid)))
+            (set! i + wid))))
+
+
+      (.String b))))
+
+
+
+
+^{:go/end 842} (go/func isSeparator "isSeparator reports whether the rune could mark a word boundary.\nTODO: update when package unicode captures more of the properties.\n" ^bool [^rune r]
+  ;; ASCII alphanumerics and underscore are not separators
+  (when (<= r 0x7F)
+    (switch
+      (case [(and (<= \0 r) (<= r \9))]
+        (return false))
+      (case [(and (<= \a r) (<= r \z))]
+        (return false))
+      (case [(and (<= \A r) (<= r \Z))]
+        (return false))
+      (case [(== r \_)]
+        (return false)))
+
+    (return true))
+
+  ;; Letters and digits are not separators
+  (when (or (unicode/IsLetter r) (unicode/IsDigit r))
+    (return false))
+
+  ;; Otherwise, all we can do for now is treat spaces as separators.
+  (unicode/IsSpace r))
+
+
+
+
+
+
+
+^{:go/end 864} (go/func Title "Title returns a copy of the string s with all Unicode letters that begin words\nmapped to their Unicode title case.\n\nDeprecated: The rule Title uses for word boundaries does not handle Unicode\npunctuation properly. Use golang.org/x/text/cases instead.\n" ^string [^string s]
+  ;; Use a closure here to remember state.
+  ;; Hackish but effective. Depends on Map scanning in order and calling
+  ;; the closure once per rune.
+  (let [prev \space]
+    (Map
+      ^{:go/end 862} (fn ^rune [^rune r]
+        (when (isSeparator prev)
+          (set! prev r)
+          (return (unicode/ToTitle r)))
+
+        (set! prev r)
+        ^{:line 861} r)
+
+      ^{:line 863} s)))
+
+
+
+
+^{:go/end 874} (go/func TrimLeftFunc "TrimLeftFunc returns a slice of the string s with all leading\nUnicode code points c satisfying f(c) removed.\n" ^string [^string s ^{:tag (func [rune] [bool])} f]
+  (let [i (indexFunc s f false)]
+    (when (== i -1)
+      (return ""))
+
+    (subslice s i)))
+
+
+
+
+^{:go/end 887} (go/func TrimRightFunc "TrimRightFunc returns a slice of the string s with all trailing\nUnicode code points c satisfying f(c) removed.\n" ^string [^string s ^{:tag (func [rune] [bool])} f]
+  (let [i (lastIndexFunc s f false)]
+    (if (>= i 0)
+      (let [(values _ wid) (utf8/DecodeRuneInString (subslice s i))]
+        (set! i + wid))
+
+      (inc! i))
+
+    (subslice s 0 i)))
+
+
+
+
+^{:go/end 893} (go/func TrimFunc "TrimFunc returns a slice of the string s with all leading\nand trailing Unicode code points c satisfying f(c) removed.\n" ^string [^string s ^{:tag (func [rune] [bool])} f]
+  (TrimRightFunc (TrimLeftFunc s f) f))
+
+
+
+
+^{:go/end 899} (go/func IndexFunc "IndexFunc returns the index into s of the first Unicode\ncode point satisfying f(c), or -1 if none do.\n" ^int [^string s ^{:tag (func [rune] [bool])} f]
+  (indexFunc s f true))
+
+
+
+
+^{:go/end 905} (go/func LastIndexFunc "LastIndexFunc returns the index into s of the last\nUnicode code point satisfying f(c), or -1 if none do.\n" ^int [^string s ^{:tag (func [rune] [bool])} f]
+  (lastIndexFunc s f true))
+
+
+
+
+
+^{:go/breaks [[5 916]] :go/end 917} (go/func indexFunc "indexFunc is the same as IndexFunc except that if\ntruth==false, the sense of the predicate function is\ninverted.\n" ^int [^string s ^{:tag (func [rune] [bool])} f ^bool truth]
+  (range [i r s]
+    (when (== (f r) truth)
+      (return i)))
+
+
+  -1)
+
+
+
+
+
+^{:go/breaks [[5 930]] :go/end 931} (go/func lastIndexFunc "lastIndexFunc is the same as LastIndexFunc except that if\ntruth==false, the sense of the predicate function is\ninverted.\n" ^int [^string s ^{:tag (func [rune] [bool])} f ^bool truth]
+  (for [i (len s)] (> i 0) _
+    (let [(values r size) (utf8/DecodeLastRuneInString (subslice s 0 i))]
+      (set! i - size)
+      (when (== (f r) truth)
+        (return i))))
+
+
+  -1)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type asciiSet "asciiSet is a 256-byte lookup table for fast ASCII character membership testing.\nEach element corresponds to an ASCII character value, with true indicating the\ncharacter is in the set. Using bool instead of byte allows the compiler to\neliminate the comparison instruction, as bool values are guaranteed to be 0 or 1.\n\nThe full 256-element table is used rather than a 128-element table to avoid\nadditional operations in the lookup path. Alternative approaches were tested:\n  - [128]bool with explicit bounds check (if c >= 128): introduces branches\n    that cause pipeline stalls, resulting in ~70% slower performance\n  - [128]bool with masking (c&0x7f): eliminates bounds checks but the AND\n    operation still costs ~10% performance compared to direct indexing\n\nThe 256-element array allows direct indexing with no bounds checks, no branches,\nand no masking operations, providing optimal performance. The additional 128 bytes\nof memory is a worthwhile tradeoff for the simpler, faster code.\n" (array 256 bool))
+
+
+
+^{:go/end 961} (go/func makeASCIISet "makeASCIISet creates a set of ASCII characters and reports whether all\ncharacters in chars are ASCII.\n" [^string chars] :results [^asciiSet as ^bool ok]
+  (for [i 0] (< i (len chars)) (inc! i)
+    (let [c (aget chars i)]
+      (when (>= c utf8/RuneSelf)
+        (return as false))
+
+      (aset as c true)))
+
+  (return as true))
+
+
+
+^{:go/end 966} (go/method contains "contains reports whether c is inside the set.\n" ^bool [^{:tag (* asciiSet)} as ^byte c]
+  (aget as c))
+
+
+
+
+
+
+
+
+^{:go/end 976} (go/func shouldUseASCIISet "shouldUseASCIISet returns whether to use the lookup table optimization.\nThe threshold of 8 bytes balances initialization cost against per-byte\nsearch cost, performing well across all charset sizes.\n\nMore complex heuristics (e.g., different thresholds per charset size)\nadd branching overhead that eats away any theoretical improvements.\n" ^bool [^int bufLen]
+  (> bufLen 8))
+
+
+
+
+^{:go/end 991} (go/func Trim "Trim returns a slice of the string s with all leading and\ntrailing Unicode code points contained in cutset removed.\n" ^string [^string s ^string cutset]
+  (when (or (== s "") (== cutset ""))
+    (return s))
+
+  (when (and (== (len cutset) 1) (< (aget cutset 0) utf8/RuneSelf))
+    (return (trimLeftByte (trimRightByte s (aget cutset 0)) (aget cutset 0))))
+
+  (when [(values as ok) (makeASCIISet cutset)] ok
+    (return (trimLeftASCII (trimRightASCII s (addr as)) (addr as))))
+
+  (trimLeftUnicode (trimRightUnicode s cutset) cutset))
+
+
+
+
+
+
+^{:go/end 1008} (go/func TrimLeft "TrimLeft returns a slice of the string s with all leading\nUnicode code points contained in cutset removed.\n\nTo remove a prefix, use [TrimPrefix] instead.\n" ^string [^string s ^string cutset]
+  (when (or (== s "") (== cutset ""))
+    (return s))
+
+  (when (and (== (len cutset) 1) (< (aget cutset 0) utf8/RuneSelf))
+    (return (trimLeftByte s (aget cutset 0))))
+
+  (when [(values as ok) (makeASCIISet cutset)] ok
+    (return (trimLeftASCII s (addr as))))
+
+  (trimLeftUnicode s cutset))
+
+
+^{:go/end 1015} (go/func trimLeftByte ^string [^string s ^byte c]
+  (while (and (> (len s) 0) (== (aget s 0) c))
+    (set! s (subslice s 1)))
+
+  ^{:line 1014} s)
+
+
+^{:go/end 1025} (go/func trimLeftASCII ^string [^string s ^{:tag (* asciiSet)} as]
+  (while (> (len s) 0)
+    (when (not (.contains as (aget s 0)))
+      (break))
+
+    (set! s (subslice s 1)))
+
+  ^{:line 1024} s)
+
+
+^{:go/end 1036} (go/func trimLeftUnicode ^string [^string s ^string cutset]
+  (while (> (len s) 0)
+    (let [(values r n) (utf8/DecodeRuneInString s)]
+      (when (not (ContainsRune cutset r))
+        (break))
+
+      (set! s (subslice s n))))
+
+  ^{:line 1035} s)
+
+
+
+
+
+
+^{:go/end 1053} (go/func TrimRight "TrimRight returns a slice of the string s, with all trailing\nUnicode code points contained in cutset removed.\n\nTo remove a suffix, use [TrimSuffix] instead.\n" ^string [^string s ^string cutset]
+  (when (or (== s "") (== cutset ""))
+    (return s))
+
+  (when (and (== (len cutset) 1) (< (aget cutset 0) utf8/RuneSelf))
+    (return (trimRightByte s (aget cutset 0))))
+
+  (when [(values as ok) (makeASCIISet cutset)] ok
+    (return (trimRightASCII s (addr as))))
+
+  (trimRightUnicode s cutset))
+
+
+^{:go/end 1060} (go/func trimRightByte ^string [^string s ^byte c]
+  (while (and (> (len s) 0) (== (aget s (- (len s) 1)) c))
+    (set! s (subslice s _ (- (len s) 1))))
+
+  ^{:line 1059} s)
+
+
+^{:go/end 1070} (go/func trimRightASCII ^string [^string s ^{:tag (* asciiSet)} as]
+  (while (> (len s) 0)
+    (when (not (.contains as (aget s (- (len s) 1))))
+      (break))
+
+    (set! s (subslice s _ (- (len s) 1))))
+
+  ^{:line 1069} s)
+
+
+^{:go/end 1084} (go/func trimRightUnicode ^string [^string s ^string cutset]
+  (while (> (len s) 0)
+    (let [(values r n) (values (conv rune (aget s (- (len s) 1))) 1)]
+      (when (>= r utf8/RuneSelf)
+        (set! (values r n) (utf8/DecodeLastRuneInString s)))
+
+      (when (not (ContainsRune cutset r))
+        (break))
+
+      (set! s (subslice s _ (- (len s) n)))))
+
+  ^{:line 1083} s)
+
+
+
+
+
+^{:go/breaks [[5 1115]] :go/end 1116} (go/func TrimSpace "TrimSpace returns a slice (substring) of the string s,\nwith all leading and trailing white space removed,\nas defined by Unicode.\n" ^string [^string s]
+  ;; Fast path for ASCII: look for the first ASCII non-space byte.
+  (range [lo c (conv (slice byte) s)]
+    (when (>= c utf8/RuneSelf)
+      ;; If we run into a non-ASCII byte, fall back to the
+      ;; slower unicode-aware method on the remaining bytes.
+      (return (TrimFunc (subslice s lo) unicode/IsSpace)))
+
+    (when (!= (aget asciiSpace c) 0)
+      (continue))
+
+    (set! s (subslice s lo))
+    ;; Now look for the first ASCII non-space byte from the end.
+    (for [hi (- (len s) 1)] (>= hi 0) (dec! hi)
+      (let [c (aget s hi)]
+        (when (>= c utf8/RuneSelf)
+          (return (TrimRightFunc (subslice s _ (+ hi 1)) unicode/IsSpace)))
+
+        (when (== (aget asciiSpace c) 0)
+          ;; At this point, s[:hi+1] starts and ends with ASCII
+          ;; non-space bytes, so we're done. Non-ASCII cases have
+          ;; already been handled above.
+          (return (subslice s _ (+ hi 1)))))))
+
+
+
+  "")
+
+
+
+
+^{:go/end 1122} (go/func TrimPrefix "TrimPrefix returns s without the provided leading prefix string.\nIf s doesn't start with prefix, s is returned unchanged.\n" ^string [^string s ^string prefix]
+  (stringslite/TrimPrefix s prefix))
+
+
+
+
+^{:go/end 1128} (go/func TrimSuffix "TrimSuffix returns s without the provided trailing suffix string.\nIf s doesn't end with suffix, s is returned unchanged.\n" ^string [^string s ^string suffix]
+  (stringslite/TrimSuffix s suffix))
+
+
+
+
+
+
+
+
+^{:go/end 1171} (go/func Replace "Replace returns a copy of the string s with the first n\nnon-overlapping instances of old replaced by new.\nIf old is empty, it matches at the beginning of the string\nand after each UTF-8 sequence, yielding up to k+1 replacements\nfor a k-rune string.\nIf n < 0, there is no limit on the number of replacements.\n" ^string [^string s ^string old ^string new ^int n]
+  (when (or (== old new) (== n 0))
+    (return s)) ; avoid allocation
+
+
+  ;; Compute number of replacements.
+  (if [m (Count s old)] (== m 0)
+    (return s) ; avoid allocation
+    (when (or (< n 0) (< m n))
+      (set! n m)))
+
+
+  ;; Apply replacements to buffer.
+  (let [^Builder b (zero Builder)]
+    (.Grow b (+ (len s) (* n (- (len new) (len old)))))
+    (let [start 0]
+      (if (> (len old) 0)
+        (range [n]
+          (let [j (+ start (Index (subslice s start) old))]
+            (.WriteString b (subslice s start j))
+            (.WriteString b new)
+            (set! start (+ j (len old)))))
+
+        (do ; len(old) == 0
+          (.WriteString b new)
+          (range [(- n 1)]
+            (let [(values _ wid) (utf8/DecodeRuneInString (subslice s start))
+                ^{:line 1163} j (+ start wid)]
+              (.WriteString b (subslice s start j))
+              (.WriteString b new)
+              (set! start j)))))
+
+
+      (.WriteString b (subslice s start))
+      (.String b))))
+
+
+
+
+
+
+
+^{:go/end 1180} (go/func ReplaceAll "ReplaceAll returns a copy of the string s with all\nnon-overlapping instances of old replaced by new.\nIf old is empty, it matches at the beginning of the string\nand after each UTF-8 sequence, yielding up to k+1 replacements\nfor a k-rune string.\n" ^string [^string s ^string old ^string new]
+  (Replace s old new -1))
+
+
+
+
+
+^{:go/end 1260} (go/func EqualFold "EqualFold reports whether s and t, interpreted as UTF-8 strings,\nare equal under simple Unicode case-folding, which is a more general\nform of case-insensitivity.\n" ^bool [^string s ^string t]
+  ;; ASCII fast path
+  (let [i 0]
+    (for [n (min (len s) (len t))] (< i n) (inc! i)
+      (let [sr (aget s i)
+          ^{:line 1190} tr (aget t i)]
+        (when (>= (bit-or sr tr) utf8/RuneSelf)
+          (goto :hasUnicode))
+
+
+        ;; Easy case.
+        (when (== tr sr)
+          (continue))
+
+
+        ;; Make sr < tr to simplify what follows.
+        (when (< tr sr)
+          (set! (values tr sr) (values sr tr)))
+
+        ;; ASCII only, sr/tr must be upper/lower case
+        (when (and (<= \A sr) (<= sr \Z) (== tr (- (+ sr \a) \A)))
+          (continue))
+
+        (return false)))
+
+    ;; Check if we've exhausted both strings.
+    (return (== (len s) (len t)))
+
+    (label :hasUnicode
+      (set! s (subslice s i)))
+    (set! t (subslice t i))
+    (range [_ sr s]
+      ;; If t is exhausted the strings are not equal.
+      (when (== (len t) 0)
+        (return false))
+
+
+      ;; Extract first rune from second string.
+      (let [(values tr size) (utf8/DecodeRuneInString t)]
+        (set! t (subslice t size))
+
+        ;; If they match, keep going; if not, return false.
+
+        ;; Easy case.
+        (when (== tr sr)
+          (continue))
+
+
+        ;; Make sr < tr to simplify what follows.
+        (when (< tr sr)
+          (set! (values tr sr) (values sr tr)))
+
+        ;; Fast check for ASCII.
+        (when (< tr utf8/RuneSelf)
+          ;; ASCII only, sr/tr must be upper/lower case
+          (when (and (<= \A sr) (<= sr \Z) (== tr (- (+ sr \a) \A)))
+            (continue))
+
+          (return false))
+
+
+        ;; General case. SimpleFold(x) returns the next equivalent rune > x
+        ;; or wraps around to smaller values.
+        (let [r (unicode/SimpleFold sr)]
+          (while (and (!= r sr) (< r tr))
+            (set! r (unicode/SimpleFold r)))
+
+          (when (== r tr)
+            (continue))
+
+          (return false))))
+
+
+    ;; First string is empty, so check if the second one is also empty.
+    (== (len t) 0)))
+
+
+
+^{:go/end 1265} (go/func Index "Index returns the index of the first instance of substr in s, or -1 if substr is not present in s.\n" ^int [^string s ^string substr]
+  (stringslite/Index s substr))
+
+
+
+
+
+
+^{:go/end 1273} (go/func Cut "Cut slices s around the first instance of sep,\nreturning the text before and after sep.\nThe found result reports whether sep appears in s.\nIf sep does not appear in s, cut returns s, \"\", false.\n" [^string s ^string sep] :results [^string before ^string after ^bool found]
+  (stringslite/Cut s sep))
+
+
+
+
+
+
+^{:go/end 1281} (go/func CutPrefix "CutPrefix returns s without the provided leading prefix string\nand reports whether it found the prefix.\nIf s doesn't start with prefix, CutPrefix returns s, false.\nIf prefix is the empty string, CutPrefix returns s, true.\n" [^string s ^string prefix] :results [^string after ^bool found]
+  (stringslite/CutPrefix s prefix))
+
+
+
+
+
+
+^{:go/end 1289} (go/func CutSuffix "CutSuffix returns s without the provided ending suffix string\nand reports whether it found the suffix.\nIf s doesn't end with suffix, CutSuffix returns s, false.\nIf suffix is the empty string, CutSuffix returns s, true.\n" [^string s ^string suffix] :results [^string before ^bool found]
+  (stringslite/CutSuffix s suffix))
+
+
+
+
+
+
+^{:go/end 1300} (go/func CutLast "CutLast slices s around the last instance of sep,\nreturning the text before and after sep.\nThe found result reports whether sep appears in s.\nIf sep does not appear in s, CutLast returns s, \"\", false.\n" [^string s ^string sep] :results [^string before ^string after ^bool found]
+  (when [i (LastIndex s sep)] (>= i 0)
+    (return (subslice s _ i) (subslice s (+ i (len sep))) true))
+
+  (return s "" false))

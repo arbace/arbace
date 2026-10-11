@@ -1,0 +1,573 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http) (go/file "cookie.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [godebug "internal/godebug"]
+    ^{:line 11} [log "log"]
+    ^{:line 12} [net "net"]
+    ^{:line 13} [ascii "net/http/internal/ascii"]
+    ^{:line 14} [textproto "net/textproto"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [time "time"]])
+
+
+(go/var httpcookiemaxnum (godebug/New "httpcookiemaxnum"))
+
+
+
+
+
+(go/type Cookie "A Cookie represents an HTTP cookie as sent in the Set-Cookie header of an\nHTTP response or the Cookie header of an HTTP request.\n\nSee https://tools.ietf.org/html/rfc6265 for details.\n" (struct
+    ^{:line 27 :tag string} Name
+    ^{:line 28 :tag string} Value
+    ^{:line 29 :tag bool} Quoted ; indicates whether the Value was originally quoted
+
+    ^{:line 31 :tag string} Path ; optional
+    ^{:line 32 :tag string} Domain ; optional
+    ^{:line 33 :tag time/Time} Expires ; optional
+    ^{:line 34 :tag string} RawExpires ; for reading cookies only
+
+
+
+
+    ^{:line 39 :tag int :doc "MaxAge=0 means no 'Max-Age' attribute specified.\nMaxAge<0 means delete cookie now, equivalently 'Max-Age: 0'\nMaxAge>0 means Max-Age attribute present and given in seconds\n"} MaxAge
+    ^{:line 40 :tag bool} Secure
+    ^{:line 41 :tag bool} HttpOnly
+    ^{:line 42 :tag SameSite} SameSite
+    ^{:line 43 :tag bool} Partitioned
+    ^{:line 44 :tag string} Raw
+    ^{:line 45 :tag (slice string)} Unparsed)) ; Raw text of unparsed attribute-value pairs
+
+
+
+
+
+
+
+
+(go/type SameSite "SameSite allows a server to define a cookie attribute making it impossible for\nthe browser to send this cookie along with cross-site requests. The main\ngoal is to mitigate the risk of cross-origin information leakage, and provide\nsome protection against cross-site request forgery attacks.\n\nSee https://tools.ietf.org/html/draft-ietf-httpbis-cookie-same-site-00 for details.\n" int)
+
+(go/const
+  ^{:line 57} [^{:tag SameSite :val 1} SameSiteDefaultMode (+ iota 1)]
+  ^{:line 58} [^{:val 2} SameSiteLaxMode]
+  ^{:line 59} [^{:val 3} SameSiteStrictMode]
+  ^{:line 60} [^{:val 4} SameSiteNoneMode])
+
+
+(go/var
+  ^{:line 64} [errBlankCookie (errors/New "http: blank cookie")]
+  ^{:line 65} [errEqualNotFoundInCookie (errors/New "http: '=' not found in cookie")]
+  ^{:line 66} [errInvalidCookieName (errors/New "http: invalid cookie name")]
+  ^{:line 67} [errInvalidCookieValue (errors/New "http: invalid cookie value")]
+  ^{:line 68} [errCookieNumLimitExceeded (errors/New "http: number of cookies exceeded limit")])
+
+
+(go/const ^{:val 3000} defaultCookieMaxNum 3000)
+
+^{:go/end 86} (go/func cookieNumWithinMax ^bool [^int cookieNum]
+  (let [withinDefaultMax (<= cookieNum defaultCookieMaxNum)]
+    (when (== (.Value httpcookiemaxnum) "")
+      (return withinDefaultMax))
+
+    (when [(values customMax err) (strconv/Atoi (.Value httpcookiemaxnum))] (== err nil)
+      (let [withinCustomMax (or (== customMax 0) (<= cookieNum customMax))]
+        (when (!= withinDefaultMax withinCustomMax)
+          (.IncNonDefault httpcookiemaxnum))
+
+        (return withinCustomMax)))
+
+    ^{:line 85} withinDefaultMax))
+
+
+
+
+
+^{:go/end 115} (go/func ParseCookie "ParseCookie parses a Cookie header value and returns all the cookies\nwhich were set in it. Since the same cookie name can appear multiple times\nthe returned Values can contain more than one value for a given key.\n" [^string line] :results [(slice (* Cookie)) error]
+  (let [nparts (+ (strings/Count line ";") 1)]
+    (cond (not (cookieNumWithinMax nparts))
+      (return nil errCookieNumLimitExceeded)
+      (and (== nparts 1) (== (textproto/TrimString line) ""))
+      (return nil errBlankCookie))
+
+    (let [cookies (make (slice (* Cookie)) 0 nparts)]
+      (range [s (strings/SplitSeq line ";")]
+        (set! s (textproto/TrimString s))
+        (let [(values name value found) (strings/Cut s "=")]
+          (when (not found)
+            (return nil errEqualNotFoundInCookie))
+
+          (when (not (isToken name))
+            (return nil errInvalidCookieName))
+
+          (let [(values ^:assign value quoted ^:assign found) (parseCookieValue value true)]
+            (when (not found)
+              (return nil errInvalidCookieValue))
+
+            (set! cookies (append cookies (addr (lit Cookie :Name name :Value value :Quoted quoted)))))))
+
+      (return cookies nil))))
+
+
+
+
+^{:go/end 219} (go/func ParseSetCookie "ParseSetCookie parses a Set-Cookie header value and returns a cookie.\nIt returns an error on syntax error.\n" [^string line] :results [(* Cookie) error]
+  (let [parts (strings/Split (textproto/TrimString line) ";")]
+    (when (and (== (len parts) 1) (== (aget parts 0) ""))
+      (return nil errBlankCookie))
+
+    (aset parts 0 (textproto/TrimString (aget parts 0)))
+    (let [(values name value ok) (strings/Cut (aget parts 0) "=")]
+      (when (not ok)
+        (return nil errEqualNotFoundInCookie))
+
+      (set! name (textproto/TrimString name))
+      (when (not (isToken name))
+        (return nil errInvalidCookieName))
+
+      (let [(values ^:assign value quoted ^:assign ok) (parseCookieValue value true)]
+        (when (not ok)
+          (return nil errInvalidCookieValue))
+
+        (let [c (addr ^{:go/breaks [2 4 6 8]} (lit Cookie
+                :Name name
+                :Value value
+                :Quoted quoted
+                :Raw line))]
+
+          (for [i 1] (< i (len parts)) (inc! i)
+            (aset parts i (textproto/TrimString (aget parts i)))
+            (when (== (len (aget parts i)) 0)
+              (continue))
+
+
+            (let [(values attr val _) (strings/Cut (aget parts i) "=")
+                (values lowerAttr isASCII) (ascii/ToLower attr)]
+              (when (not isASCII)
+                (continue))
+
+              (set! (values val _ ok) (parseCookieValue val false))
+              (when (not ok)
+                (set! (.-Unparsed c) (append (.-Unparsed c) (aget parts i)))
+                (continue))
+
+
+              (switch lowerAttr
+                (case ["samesite"]
+                  (let [(values lowerVal ascii) (ascii/ToLower val)]
+                    (when (not ascii)
+                      (set! (.-SameSite c) SameSiteDefaultMode)
+                      (continue))
+
+                    (switch lowerVal
+                      (case ["lax"]
+                        (set! (.-SameSite c) SameSiteLaxMode))
+                      (case ["strict"]
+                        (set! (.-SameSite c) SameSiteStrictMode))
+                      (case ["none"]
+                        (set! (.-SameSite c) SameSiteNoneMode))
+                      (default
+                        (set! (.-SameSite c) SameSiteDefaultMode)))
+
+                    (continue)))
+                (case ["secure"]
+                  (set! (.-Secure c) true)
+                  (continue))
+                (case ["httponly"]
+                  (set! (.-HttpOnly c) true)
+                  (continue))
+                (case ["domain"]
+                  (set! (.-Domain c) val)
+                  (continue))
+                (case ["max-age"]
+                  (let [(values secs err) (strconv/Atoi val)]
+                    (when (or (!= err nil) (and (!= secs 0) (== (aget val 0) \0)))
+                      (break))
+
+                    (when (<= secs 0)
+                      (set! secs -1))
+
+                    (set! (.-MaxAge c) secs)
+                    (continue)))
+                (case ["expires"]
+                  (set! (.-RawExpires c) val)
+                  (let [(values exptime err) (time/Parse time/RFC1123 val)]
+                    (when (!= err nil)
+                      (set! (values exptime err) (time/Parse "Mon, 02-Jan-2006 15:04:05 MST" val))
+                      (when (!= err nil)
+                        (set! (.-Expires c) (lit time/Time))
+                        (break)))
+
+
+                    (set! (.-Expires c) (.UTC exptime))
+                    (continue)))
+                (case ["path"]
+                  (set! (.-Path c) val)
+                  (continue))
+                (case ["partitioned"]
+                  (set! (.-Partitioned c) true)
+                  (continue)))
+
+              (set! (.-Unparsed c) (append (.-Unparsed c) (aget parts i)))))
+
+          (return c nil))))))
+
+
+
+
+
+
+
+
+^{:go/end 245} (go/func readSetCookies "readSetCookies parses all \"Set-Cookie\" values from\nthe header h and returns the successfully parsed Cookies.\n\nIf the amount of cookies exceeds CookieNumLimit, and httpcookielimitnum\nGODEBUG option is not explicitly turned off, this function will silently\nfail and return an empty slice.\n" ^{:tag (slice (* Cookie))} [^Header h]
+  (let [cookieCount (len (aget h "Set-Cookie"))]
+    (when (== cookieCount 0)
+      (return (lit (slice (* Cookie)))))
+
+    ;; Cookie limit was unfortunately introduced at a later point in time.
+    ;; As such, we can only fail by returning an empty slice rather than
+    ;; explicit error.
+    (when (not (cookieNumWithinMax cookieCount))
+      (return (lit (slice (* Cookie)))))
+
+    (let [cookies (make (slice (* Cookie)) 0 cookieCount)]
+      (range [_ line (aget h "Set-Cookie")]
+        (when [(values cookie err) (ParseSetCookie line)] (== err nil)
+          (set! cookies (append cookies cookie))))
+
+
+      ^{:line 244} cookies)))
+
+
+
+
+
+^{:go/end 254} (go/func SetCookie "SetCookie adds a Set-Cookie header to the provided [ResponseWriter]'s headers.\nThe provided cookie must have a valid Name. Invalid cookies may be\nsilently dropped.\n" [^ResponseWriter w ^{:tag (* Cookie)} cookie]
+  (when [v (.String cookie)] (!= v "")
+    (.Add (.Header w) "Set-Cookie" v)))
+
+
+
+
+
+
+
+^{:go/end 324} (go/method String "String returns the serialization of the cookie for use in a [Cookie]\nheader (if only Name and Value are set) or a Set-Cookie response\nheader (if other fields are set).\nIf c is nil or c.Name is invalid, the empty string is returned.\n" ^string [^{:tag (* Cookie)} c]
+  (when (or (== c nil) (not (isToken (.-Name c))))
+    (return ""))
+
+  ;; extraCookieLength derived from typical length of cookie attributes
+  ;; see RFC 6265 Sec 4.1.
+  (let [^:const ^{:val 110} extraCookieLength 110
+      ^{:line 267 :tag strings/Builder} b (zero strings/Builder)]
+    (.Grow b (+ (len (.-Name c)) (len (.-Value c)) (len (.-Domain c)) (len (.-Path c)) extraCookieLength))
+    (.WriteString b (.-Name c))
+    (.WriteRune b \=)
+    (.WriteString b (sanitizeCookieValue (.-Value c) (.-Quoted c)))
+
+    (when (> (len (.-Path c)) 0)
+      (.WriteString b "; Path=")
+      (.WriteString b (sanitizeCookiePath (.-Path c))))
+
+    (when (> (len (.-Domain c)) 0)
+      (if (validCookieDomain (.-Domain c))
+        ;; A c.Domain containing illegal characters is not
+        ;; sanitized but simply dropped which turns the cookie
+        ;; into a host-only cookie. A leading dot is okay
+        ;; but won't be sent.
+        (let [d (.-Domain c)]
+          (when (== (aget d 0) \.)
+            (set! d (subslice d 1)))
+
+          (.WriteString b "; Domain=")
+          (.WriteString b d))
+
+        (log/Printf "net/http: invalid Cookie.Domain %q; dropping domain attribute" (.-Domain c))))
+
+
+    (let [^{:tag (array (len TimeFormat) byte)} buf (zero (array (len TimeFormat) byte))]
+      (when (validCookieExpires (.-Expires c))
+        (.WriteString b "; Expires=")
+        (.Write b (.AppendFormat (.UTC (.-Expires c)) (subslice buf _ 0) TimeFormat)))
+
+      (cond (> (.-MaxAge c) 0) (do
+          (.WriteString b "; Max-Age=")
+          (.Write b (strconv/AppendInt (subslice buf _ 0) (conv int64 (.-MaxAge c)) 10)))
+        (< (.-MaxAge c) 0)
+        (.WriteString b "; Max-Age=0"))
+
+      (when (.-HttpOnly c)
+        (.WriteString b "; HttpOnly"))
+
+      (when (.-Secure c)
+        (.WriteString b "; Secure"))
+
+      (switch (.-SameSite c)
+        (case [SameSiteDefaultMode])
+        ;; Skip, default mode is obtained by not emitting the attribute.
+        (case [SameSiteNoneMode]
+          (.WriteString b "; SameSite=None"))
+        (case [SameSiteLaxMode]
+          (.WriteString b "; SameSite=Lax"))
+        (case [SameSiteStrictMode]
+          (.WriteString b "; SameSite=Strict")))
+
+      (when (.-Partitioned c)
+        (.WriteString b "; Partitioned"))
+
+      (.String b))))
+
+
+
+^{:go/breaks [[11 359]] :go/end 360} (go/method Valid "Valid reports whether the cookie is valid.\n" ^error [^{:tag (* Cookie)} c]
+  (when (== c nil)
+    (return (errors/New "http: nil Cookie")))
+
+  (when (not (isToken (.-Name c)))
+    (return (errors/New "http: invalid Cookie.Name")))
+
+  (when (and (not (.IsZero (.-Expires c))) (not (validCookieExpires (.-Expires c))))
+    (return (errors/New "http: invalid Cookie.Expires")))
+
+  (for [i 0] (< i (len (.-Value c))) (inc! i)
+    (when (not (validCookieValueByte (aget (.-Value c) i)))
+      (return (fmt/Errorf "http: invalid byte %q in Cookie.Value" (aget (.-Value c) i)))))
+
+
+  (when (> (len (.-Path c)) 0)
+    (for [i 0] (< i (len (.-Path c))) (inc! i)
+      (when (not (validCookiePathByte (aget (.-Path c) i)))
+        (return (fmt/Errorf "http: invalid byte %q in Cookie.Path" (aget (.-Path c) i))))))
+
+
+
+  (when (> (len (.-Domain c)) 0)
+    (when (not (validCookieDomain (.-Domain c)))
+      (return (errors/New "http: invalid Cookie.Domain"))))
+
+
+  (when (.-Partitioned c)
+    (when (not (.-Secure c))
+      (return (errors/New "http: partitioned cookies must be set with Secure"))))
+
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 414} (go/func readCookies "readCookies parses all \"Cookie\" values from the header h and\nreturns the successfully parsed Cookies.\n\nIf filter isn't empty, only cookies of that name are returned.\n\nIf the amount of cookies exceeds CookieNumLimit, and httpcookielimitnum\nGODEBUG option is not explicitly turned off, this function will silently\nfail and return an empty slice.\n" ^{:tag (slice (* Cookie))} [^Header h ^string filter]
+  (let [lines (aget h "Cookie")]
+    (when (== (len lines) 0)
+      (return (lit (slice (* Cookie)))))
+
+
+    ;; Cookie limit was unfortunately introduced at a later point in time.
+    ;; As such, we can only fail by returning an empty slice rather than
+    ;; explicit error.
+    (let [cookieCount 0]
+      (range [_ line lines]
+        (set! cookieCount + (+ (strings/Count line ";") 1)))
+
+      (when (not (cookieNumWithinMax cookieCount))
+        (return (lit (slice (* Cookie)))))
+
+
+      (let [cookies (make (slice (* Cookie)) 0 (+ (len lines) (strings/Count (aget lines 0) ";")))]
+        (range [_ line lines]
+          (set! line (textproto/TrimString line))
+
+          (let [^string part (zero string)]
+            (while (> (len line) 0) ; continue since we have rest
+              (set! (values part line _) (strings/Cut line ";"))
+              (set! part (textproto/TrimString part))
+              (when (== part "")
+                (continue))
+
+              (let [(values name val _) (strings/Cut part "=")]
+                (set! name (textproto/TrimString name))
+                (when (not (isToken name))
+                  (continue))
+
+                (when (and (!= filter "") (!= filter name))
+                  (continue))
+
+                (let [(values ^:assign val quoted ok) (parseCookieValue val true)]
+                  (when (not ok)
+                    (continue))
+
+                  (set! cookies (append cookies (addr (lit Cookie :Name name :Value val :Quoted quoted)))))))))
+
+
+        ^{:line 413} cookies))))
+
+
+
+^{:go/breaks [[6 424]] :go/end 425} (go/func validCookieDomain "validCookieDomain reports whether v is a valid cookie domain-value.\n" ^bool [^string v]
+  (when (isCookieDomainName v)
+    (return true))
+
+  (when (and (!= (net/ParseIP v) nil) (not (strings/Contains v ":")))
+    (return true))
+
+  false)
+
+
+
+^{:go/end 431} (go/func validCookieExpires "validCookieExpires reports whether v is a valid cookie expires-value.\n" ^bool [^time/Time t]
+  ;; IETF RFC 6265 Section 5.1.1.5, the year must not be less than 1601
+  (>= (.Year t) 1601))
+
+
+
+
+
+^{:go/end 487} (go/func isCookieDomainName "isCookieDomainName reports whether s is a valid domain name or a valid\ndomain name with a leading dot '.'.  It is almost a direct copy of\npackage net's isDomainName.\n" ^bool [^string s]
+  (when (== (len s) 0)
+    (return false))
+
+  (when (> (len s) 255)
+    (return false))
+
+
+  (when (== (aget s 0) \.)
+    ;; A cookie domain attribute may start with a leading dot.
+    ;; Per RFC 6265 section 5.2.3, a leading dot is ignored.
+    (set! s (subslice s 1)))
+
+  (let [last (conv byte \.)
+      ^{:line 450} ok false ; Ok once we've seen a letter.
+      ^{:line 451} partlen 0]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [c (aget s i)]
+        (switch
+          (default
+            (return false))
+          (case [(or (and (<= \a c) (<= c \z)) (and (<= \A c) (<= c \Z)))]
+            ;; No '_' allowed here (in contrast to package net).
+            (set! ok true)
+            (inc! partlen))
+          (case [(and (<= \0 c) (<= c \9))]
+            ;; fine
+            (inc! partlen))
+          (case [(== c \-)]
+            ;; Byte before dash cannot be dot.
+            (when (== last \.)
+              (return false))
+
+            (inc! partlen))
+          (case [(== c \.)]
+            ;; Byte before dot cannot be dot, dash.
+            (when (or (== last \.) (== last \-))
+              (return false))
+
+            (when (or (> partlen 63) (== partlen 0))
+              (return false))
+
+            (set! partlen 0)))
+
+        (set! last c)))
+
+    (when (or (== last \-) (> partlen 63))
+      (return false))
+
+
+    ^{:line 486} ok))
+
+
+(go/var cookieNameSanitizer (strings/NewReplacer "\n" "-" "\r" "-"))
+
+^{:go/end 493} (go/func sanitizeCookieName ^string [^string n]
+  (.Replace cookieNameSanitizer n))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 515} (go/func sanitizeCookieValue "sanitizeCookieValue produces a suitable cookie-value from v.\nIt receives a quoted bool indicating whether the value was originally\nquoted.\nhttps://tools.ietf.org/html/rfc6265#section-4.1.1\n\n\tcookie-value      = *cookie-octet / ( DQUOTE *cookie-octet DQUOTE )\n\tcookie-octet      = %x21 / %x23-2B / %x2D-3A / %x3C-5B / %x5D-7E\n\t          ; US-ASCII characters excluding CTLs,\n\t          ; whitespace DQUOTE, comma, semicolon,\n\t          ; and backslash\n\nWe loosen this as spaces and commas are common in cookie values\nthus we produce a quoted cookie-value if v contains commas or spaces.\nSee https://golang.org/issue/7243 for the discussion.\n" ^string [^string v ^bool quoted]
+  (set! v (sanitizeOrWarn "Cookie.Value" validCookieValueByte v))
+  (when (or (strings/ContainsAny v " ,") quoted)
+    (return (+ "\"" v "\"")))
+
+  ^{:line 514} v)
+
+
+^{:go/end 519} (go/func validCookieValueByte ^bool [^byte b]
+  (and (<= 0x20 b) (< b 0x7f) (!= b \") (!= b \;) (!= b \\)))
+
+
+
+
+^{:go/end 525} (go/func sanitizeCookiePath "path-av           = \"Path=\" path-value\npath-value        = <any CHAR except CTLs or \";\">\n" ^string [^string v]
+  (sanitizeOrWarn "Cookie.Path" validCookiePathByte v))
+
+
+^{:go/end 529} (go/func validCookiePathByte ^bool [^byte b]
+  (and (<= 0x20 b) (< b 0x7f) (!= b \;)))
+
+
+^{:go/end 551} (go/func sanitizeOrWarn ^string [^string fieldName ^{:tag (func [byte] [bool])} valid ^string v]
+  (let [ok true]
+    (for [i 0] (< i (len v)) (inc! i)
+      (when (valid (aget v i))
+        (continue))
+
+      (log/Printf "net/http: invalid byte %q in %s; dropping invalid bytes" (aget v i) fieldName)
+      (set! ok false)
+      (break))
+
+    (when ok
+      (return v))
+
+    (let [buf (make (slice byte) 0 (len v))]
+      (for [i 0] (< i (len v)) (inc! i)
+        (when [b (aget v i)] (valid b)
+          (set! buf (append buf b))))
+
+
+      (conv string buf))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 574} (go/func parseCookieValue "parseCookieValue parses a cookie value according to RFC 6265.\nIf allowDoubleQuote is true, parseCookieValue will consider that it\nis parsing the cookie-value;\notherwise, it will consider that it is parsing a cookie-av value\n(cookie attribute-value).\n\nIt returns the parsed cookie value, a boolean indicating whether the\nparsing was successful, and a boolean indicating whether the parsed\nvalue was enclosed in double quotes.\n" [^string raw ^bool allowDoubleQuote] :results [^string value ^bool quoted ^bool ok]
+  ;; Strip the quotes, if present.
+  (when (and allowDoubleQuote (> (len raw) 1) (== (aget raw 0) \") (== (aget raw (- (len raw) 1)) \"))
+    (set! raw (subslice raw 1 (- (len raw) 1)))
+    (set! quoted true))
+
+  (for [i 0] (< i (len raw)) (inc! i)
+    (when (not (validCookieValueByte (aget raw i)))
+      (return "" quoted false)))
+
+
+  (return raw quoted true))

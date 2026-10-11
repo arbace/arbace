@@ -1,0 +1,331 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.internal.http3) (go/file "transport.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [http "net/http"]
+    ^{:line 11} [url "net/url"]
+    ^{:line 12} [sync "sync"]
+
+    ^{:line 14} [quic "golang.org/x/net/quic"]])
+
+
+
+
+
+
+
+
+
+(go/type transport "A transport is an HTTP/3 transport.\n\nIt does not manage a pool of connections,\nand therefore does not implement net/http.RoundTripper.\n\nTODO: Provide a way to register an HTTP/3 transport with a net/http.transport's\nconnection pool.\n" (struct
+
+    ^{:line 26 :tag (* quic/Config) :doc "config is the QUIC configuration used for client connections.\n"} config
+
+    ^{:line 28 :tag (func [^string addr ^{:tag (* quic/Config)} config] [(* quic/Endpoint) error])} listenQUIC
+
+    ^{:line 30 :tag sync/Mutex} mu ; Guards fields below.
+
+
+
+
+    ^{:line 35 :tag (* quic/Endpoint) :doc "endpoint is the QUIC endpoint used by connections created by the\ntransport. If CloseIdleConnections is called when activeConns is empty,\nendpoint will be unset. If unset, endpoint will be initialized by any\ncall to dial.\n"} endpoint
+    ^{:line 36 :tag (map (* clientConn) (struct))} activeConns
+    ^{:line 37 :tag int} inFlightDials))
+
+
+
+
+(go/type netHTTPTransport "netHTTPTransport implements the net/http.dialClientConner interface,\nallowing our HTTP/3 transport to integrate with net/http.\n" (struct
+    (* transport)))
+
+
+
+
+
+
+^{:go/end 52} (go/method RoundTrip "RoundTrip is defined since Transport.RegisterProtocol takes in a\nRoundTripper. However, this method will never be used as net/http's\ndialClientConner interface does not have a RoundTrip method and will only\nuse DialClientConn to create a new RoundTripper.\n" [^netHTTPTransport t (* http/Request)] :results [(* http/Response) error]
+  (panic "netHTTPTransport.RoundTrip should never be called"))
+
+
+^{:go/end 56} (go/method DialClientConn [^netHTTPTransport t ^context/Context ctx ^string addr ^{:tag (* url/URL)} _ ^{:tag (func [])} _] :results [http/RoundTripper error]
+  (.dial (.-transport t) ctx addr))
+
+
+(go/type TransportOpts (struct
+
+
+
+    ^{:line 62 :tag (func [^string addr ^{:tag (* quic/Config)} config] [(* quic/Endpoint) error]) :doc "ListenQUIC determines how the transport will open a QUIC endpoint.\nBy default, quic.Listen(\"udp\", addr, config) is used.\nListenQUIC might be called multiple times.\n"} ListenQUIC
+
+
+
+
+
+
+    ^{:line 69 :tag (* quic/Config) :doc "QUICConfig is the QUIC configuration used by the transport.\nQUICConfig may be nil and should not be modified after calling\nRegisterTransport.\nIf QUICConfig.TLSConfig is nil, the TLSConfig of the net/http Transport\ngiven to RegisterTransport will be used.\n"} QUICConfig))
+
+
+
+^{:go/end 92} (go/func RegisterTransport "RegisterTransport configures a net/http HTTP/1 Transport to use HTTP/3.\n" [^{:tag (* http/Transport)} tr ^TransportOpts opts]
+  (when (== (.-QUICConfig opts) nil)
+    (set! (.-QUICConfig opts) (addr (lit quic/Config))))
+
+  (when (== (.-TLSConfig (.-QUICConfig opts)) nil)
+    (set! (.-TLSConfig (.-QUICConfig opts)) (.-TLSClientConfig tr)))
+
+  (when (== (.-ListenQUIC opts) nil)
+    (set! (.-ListenQUIC opts) ^{:go/end 83} (fn [^string addr ^{:tag (* quic/Config)} config] :results [(* quic/Endpoint) error]
+        (quic/Listen "udp" addr config))))
+
+
+  (let [tr3 (addr ^{:go/breaks [[2 87] 4 6]} (lit transport
+          ;; initConfig will clone the tr.TLSClientConfig.
+          :config (initConfig (.-QUICConfig opts))
+          :listenQUIC (.-ListenQUIC opts)
+          :activeConns (make (map (* clientConn) (struct)))))]
+
+    (.RegisterProtocol tr "http/3" (lit netHTTPTransport tr3))))
+
+
+^{:go/end 98} (go/method incInFlightDials [^{:tag (* transport)} tr]
+  (.Lock (.-mu tr))
+  (defer (.Unlock (.-mu tr)))
+  (inc! (.-inFlightDials tr)))
+
+
+^{:go/end 104} (go/method decInFlightDials [^{:tag (* transport)} tr]
+  (.Lock (.-mu tr))
+  (defer (.Unlock (.-mu tr)))
+  (dec! (.-inFlightDials tr)))
+
+
+^{:go/end 138} (go/method initEndpoint [^{:tag (* transport)} tr] :results [^error err]
+  (.Lock (.-mu tr))
+  (defer (.Unlock (.-mu tr)))
+  ;; This might cause rare issues on Darwin. Unlike Linux, Darwin kernel
+  ;; seems to have the following behaviors:
+  ;; - After closing a UDP socket, the port that was bound to the socket
+  ;;   might not be immediately usable again.
+  ;; - When doing IPv6 dual-stack binding (e.g., bind to ":0"), it will
+  ;;   happily bind the IPv6 port, even when the IPv4 port is unavailable.
+  ;;
+  ;; When both of these are combined, in practice, it is possible for the
+  ;; following to happen:
+  ;; 1. Transport binds ":0", creating a dual-stack IPv6 UDP socket.
+  ;;    Everything works as expected.
+  ;; 2. At some point, CloseIdleConnections is called and the socket is
+  ;;    closed.
+  ;; 3. Soon after, a new dial is started, and a new dual-stack IPv6 socket
+  ;;    is coincidentally assigned the same port as the previous socket.
+  ;; 4. If the IPv4 port is still unavailable, Darwin's permissive binding
+  ;;    behavior will cause us to have a socket that silently is unable to
+  ;;    receive packets on its IPv4 address.
+  ;; 5. If the dial target is an IPv4 address, transport will be able to send
+  ;;    packets to the target, but will be unable to receive its reply.
+  ;;
+  ;; TransportOpts.ListenQUIC can technically be configured to avoid
+  ;; dual-stack binding to avoid this issue, and high socket churn is
+  ;; probably uncommon for regular use cases. However, finding a workaround
+  ;; for this eventually would be ideal.
+  (when (== (.-endpoint tr) nil)
+    (set! (values (.-endpoint tr) err) ((.-listenQUIC tr) ":0" (.-config tr))))
+
+  ^{:line 137} err)
+
+
+
+^{:go/end 153} (go/method dial "dial creates a new HTTP/3 client connection.\n" [^{:tag (* transport)} tr ^context/Context ctx ^string target] :results [(* clientConn) error]
+  (.incInFlightDials tr)
+  (defer (.decInFlightDials tr))
+
+  (when [err (.initEndpoint tr)] (!= err nil)
+    (return nil err))
+
+  (let [(values qconn err) (.Dial (.-endpoint tr) ctx "udp" target (.-config tr))]
+    (when (!= err nil)
+      (return nil err))
+
+    (.newClientConn tr ctx qconn)))
+
+
+
+
+
+
+
+
+^{:go/end 169} (go/method CloseIdleConnections "CloseIdleConnections is called by net/http.Transport.CloseIdleConnections\nafter all existing idle connections are closed using http3.clientConn.Close.\n\nWhen the transport has no active connections anymore, calling this method\nwill make the transport clean up any shared resources that are no longer\nrequired, such as its QUIC endpoint.\n" [^{:tag (* transport)} tr]
+  (.Lock (.-mu tr))
+  (defer (.Unlock (.-mu tr)))
+  (when (or (== (.-endpoint tr) nil) (> (len (.-activeConns tr)) 0) (> (.-inFlightDials tr) 0))
+    (return))
+
+  (.Close (.-endpoint tr) canceledCtx)
+  (set! (.-endpoint tr) nil))
+
+
+
+
+
+(go/type clientConn "A clientConn is a client HTTP/3 connection.\n\nMultiple goroutines may invoke methods on a clientConn simultaneously.\n" (struct
+    ^{:line 175 :tag (* quic/Conn)} qconn
+    ^{:line 176} genericConn
+
+    ^{:line 178 :tag qpackEncoder} enc
+    ^{:line 179 :tag qpackDecoder} dec))
+
+
+^{:go/end 186} (go/method registerConn [^{:tag (* transport)} tr ^{:tag (* clientConn)} cc]
+  (.Lock (.-mu tr))
+  (defer (.Unlock (.-mu tr)))
+  (aset (.-activeConns tr) cc (lit (struct))))
+
+
+^{:go/end 192} (go/method unregisterConn [^{:tag (* transport)} tr ^{:tag (* clientConn)} cc]
+  (.Lock (.-mu tr))
+  (defer (.Unlock (.-mu tr)))
+  (delete (.-activeConns tr) cc))
+
+
+^{:go/end 215} (go/method newClientConn [^{:tag (* transport)} tr ^context/Context ctx ^{:tag (* quic/Conn)} qconn] :results [(* clientConn) error]
+  (let [cc (addr ^{:go/breaks [2]} (lit clientConn
+          :qconn qconn))]
+
+    (.registerConn tr cc)
+    (.init (.-enc cc))
+
+    ;; Create control stream and send SETTINGS frame.
+    (let [(values controlStream err) (newConnStream ctx (.-qconn cc) streamTypeControl)]
+      (when (!= err nil)
+        (.unregisterConn tr cc)
+        (return nil (fmt/Errorf "http3: cannot create control stream: %v" err)))
+
+      (.writeSettings controlStream)
+      (.Flush controlStream)
+
+      (go (^{:go/end 213} (fn []
+            ^{:go/via [genericConn]} (.acceptStreams cc qconn cc)
+            (.unregisterConn tr cc))))
+
+      (return cc nil))))
+
+
+
+^{:go/end 226} (go/method Close "TODO: implement the rest of net/http.ClientConn methods beyond Close.\n" ^error [^{:tag (* clientConn)} cc]
+  ;; We need to use Close rather than Abort on the QUIC connection.
+  ;; Otherwise, when a net/http.Transport.CloseIdleConnections is called, it
+  ;; might call the http3.transport.CloseIdleConnections prior to all idle
+  ;; connections being fully closed; this would make it unable to close its
+  ;; QUIC endpoint, making http3.transport.CloseIdleConnections a no-op
+  ;; unintentionally.
+  (.Close (.-qconn cc)))
+
+
+^{:go/breaks [3] :go/end 230} (go/method Err ^error [^{:tag (* clientConn)} cc]
+  nil)
+
+
+^{:go/breaks [3] :go/end 234} (go/method Reserve ^error [^{:tag (* clientConn)} cc]
+  nil)
+
+
+^{:go/end 237} (go/method Release [^{:tag (* clientConn)} cc])
+
+
+^{:go/breaks [3] :go/end 241} (go/method Available ^int [^{:tag (* clientConn)} cc]
+  0)
+
+
+^{:go/breaks [3] :go/end 245} (go/method InFlight ^int [^{:tag (* clientConn)} cc]
+  0)
+
+
+^{:go/end 291} (go/method handleControlStream ^error [^{:tag (* clientConn)} cc ^{:tag (* stream)} st]
+  ;; "A SETTINGS frame MUST be sent as the first frame of each control stream [...]"
+  ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-7.2.4-2
+  (when [err (.readSettings st ^{:go/breaks [[3 261]] :go/end 262} (fn ^error [^int64 settingsType ^int64 settingsValue]
+          (switch settingsType
+            (case [settingsMaxFieldSectionSize]
+              (set! _ settingsValue)) ; TODO
+            (case [settingsQPACKMaxTableCapacity]
+              (set! _ settingsValue)) ; TODO
+            (case [settingsQPACKBlockedStreams]
+              (set! _ settingsValue)) ; TODO
+            (default))
+          ;; Unknown settings types are ignored.
+
+          nil))]
+    (!= err nil)
+    (return err))
+
+
+  (while true
+    (let [(values ftype err) (.readFrameHeader st)]
+      (when (!= err nil)
+        (return err))
+
+      (switch ftype
+        (case [frameTypeCancelPush]
+          ;; "If a CANCEL_PUSH frame is received that references a push ID
+          ;; greater than currently allowed on the connection,
+          ;; this MUST be treated as a connection error of type H3_ID_ERROR."
+          ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-7.2.3-7
+          (return (addr ^{:go/breaks [2 4]} (lit connectionError
+                :code errH3IDError
+                :message "CANCEL_PUSH received when no MAX_PUSH_ID has been sent"))))
+
+        (case [frameTypeGoaway]
+          ;; TODO: Wait for requests to complete before closing connection.
+          (return errH3NoError))
+        (default
+          ;; Unknown frames are ignored.
+          (when [err (.discardUnknownFrame st ftype)] (!= err nil)
+            (return err)))))))
+
+
+
+
+
+^{:go/breaks [[3 295]] :go/end 296} (go/method handleEncoderStream ^error [^{:tag (* clientConn)} cc (* stream)]
+  ;; TODO
+  nil)
+
+
+^{:go/breaks [[3 300]] :go/end 301} (go/method handleDecoderStream ^error [^{:tag (* clientConn)} cc (* stream)]
+  ;; TODO
+  nil)
+
+
+^{:go/end 311} (go/method handlePushStream ^error [^{:tag (* clientConn)} cc (* stream)]
+  ;; "A client MUST treat receipt of a push stream as a connection error
+  ;; of type H3_ID_ERROR when no MAX_PUSH_ID frame has been sent [...]"
+  ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-4.6-3
+  (addr ^{:go/breaks [2 4]} (lit connectionError
+      :code errH3IDError
+      :message "push stream created when no MAX_PUSH_ID has been sent")))
+
+
+
+^{:go/end 321} (go/method handleRequestStream ^error [^{:tag (* clientConn)} cc ^{:tag (* stream)} st]
+  ;; "Clients MUST treat receipt of a server-initiated bidirectional
+  ;; stream as a connection error of type H3_STREAM_CREATION_ERROR [...]"
+  ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-6.1-3
+  (addr ^{:go/breaks [2 4]} (lit connectionError
+      :code errH3StreamCreationError
+      :message "server created bidirectional stream")))
+
+
+
+
+^{:go/end 333} (go/method abort "abort closes the connection with an error.\n" [^{:tag (* clientConn)} cc ^error err]
+  (if [(values e ok) (assert (* connectionError) err)] ok
+    (.Abort (.-qconn cc) (addr ^{:go/breaks [2 4]} (lit quic/ApplicationError
+          :Code (conv uint64 (.-code e))
+          :Reason (.-message e))))
+
+
+    (.Abort (.-qconn cc) err)))

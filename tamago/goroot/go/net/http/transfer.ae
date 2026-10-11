@@ -1,0 +1,1162 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http) (go/file "transfer.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [godebug "internal/godebug"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [maps "maps"]
+    ^{:line 15} [math "math"]
+    ^{:line 16} [httptrace "net/http/httptrace"]
+    ^{:line 17} [internal "net/http/internal"]
+    ^{:line 18} [ascii "net/http/internal/ascii"]
+    ^{:line 19} [textproto "net/textproto"]
+    ^{:line 20} [reflect "reflect"]
+    ^{:line 21} [slices "slices"]
+    ^{:line 22} [strconv "strconv"]
+    ^{:line 23} [strings "strings"]
+    ^{:line 24} [sync "sync"]
+    ^{:line 25} [time "time"]
+
+    ^{:line 27} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+
+
+(go/var ^{:doc "ErrLineTooLong is returned when reading request or response bodies\nwith malformed chunked encoding.\n"} ErrLineTooLong internal/ErrLineTooLong)
+
+(go/type errorReader (struct
+    ^{:line 35 :tag error} err))
+
+
+^{:go/end 40} (go/method Read [^errorReader r ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (return 0 (.-err r)))
+
+
+(go/type byteReader (struct
+    ^{:line 43 :tag byte} b
+    ^{:line 44 :tag bool} done))
+
+
+^{:go/end 57} (go/method Read [^{:tag (* byteReader)} br ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (.-done br)
+    (return 0 io/EOF))
+
+  (when (== (len p) 0)
+    (return 0 nil))
+
+  (set! (.-done br) true)
+  (aset p 0 (.-b br))
+  (return 1 io/EOF))
+
+
+
+
+
+(go/type transferWriter "transferWriter inspects the fields of a user-supplied Request or Response,\nsanitizes them without changing the user object and provides methods for\nwriting the respective header, body and trailer in wire format.\n" (struct
+    ^{:line 63 :tag string} Method
+    ^{:line 64 :tag io/Reader} Body
+    ^{:line 65 :tag io/Closer} BodyCloser
+    ^{:line 66 :tag bool} ResponseToHEAD
+    ^{:line 67 :tag int64} ContentLength ; -1 means unknown, 0 means exactly none
+    ^{:line 68 :tag bool} Close
+    ^{:line 69 :tag (slice string)} TransferEncoding
+    ^{:line 70 :tag Header} Header
+    ^{:line 71 :tag Header} Trailer
+    ^{:line 72 :tag bool} IsResponse
+    ^{:line 73 :tag error} bodyReadError ; any non-EOF error from reading Body
+
+    ^{:line 75 :tag bool} FlushHeaders ; flush headers to network before body
+    ^{:line 76 :tag (chan readResult)} ByteReadCh)) ; non-nil if probeRequestBody called
+
+
+^{:go/end 158} (go/func newTransferWriter [^any r] :results [^{:tag (* transferWriter)} t ^error err]
+  (set! t (addr (lit transferWriter)))
+
+  ;; Extract relevant fields
+  (let [atLeastHTTP11 false]
+    (type-switch [rr r]
+      (case [(* Request)]
+        (when (and (!= (.-ContentLength rr) 0) (== (.-Body rr) nil))
+          (return nil (fmt/Errorf "http: Request.ContentLength=%d with nil Body" (.-ContentLength rr))))
+
+        (set! (.-Method t) (valueOrDefault (.-Method rr) "GET"))
+        (set! (.-Close t) (.-Close rr))
+        (set! (.-TransferEncoding t) (.-TransferEncoding rr))
+        (set! (.-Header t) (.-Header rr))
+        (set! (.-Trailer t) (.-Trailer rr))
+        (set! (.-Body t) (.-Body rr))
+        (set! (.-BodyCloser t) (.-Body rr))
+        (set! (.-ContentLength t) (.outgoingLength rr))
+        (when (and (< (.-ContentLength t) 0) (== (len (.-TransferEncoding t)) 0) (.shouldSendChunkedRequestBody t))
+          (set! (.-TransferEncoding t) (lit (slice string) "chunked")))
+
+        ;; If there's a body, conservatively flush the headers
+        ;; to any bufio.Writer we're writing to, just in case
+        ;; the server needs the headers early, before we copy
+        ;; the body and possibly block. We make an exception
+        ;; for the common standard library in-memory types,
+        ;; though, to avoid unnecessary TCP packets on the
+        ;; wire. (Issue 22088.)
+        (when (and (!= (.-ContentLength t) 0) (not (isKnownInMemoryReader (.-Body t))))
+          (set! (.-FlushHeaders t) true))
+
+
+        (set! atLeastHTTP11 true)) ; Transport requests are always 1.1 or 2.0
+      (case [(* Response)]
+        (set! (.-IsResponse t) true)
+        (when (!= (.-Request rr) nil)
+          (set! (.-Method t) (.-Method (.-Request rr))))
+
+        (set! (.-Body t) (.-Body rr))
+        (set! (.-BodyCloser t) (.-Body rr))
+        (set! (.-ContentLength t) (.-ContentLength rr))
+        (set! (.-Close t) (.-Close rr))
+        (set! (.-TransferEncoding t) (.-TransferEncoding rr))
+        (set! (.-Header t) (.-Header rr))
+        (set! (.-Trailer t) (.-Trailer rr))
+        (set! atLeastHTTP11 (.ProtoAtLeast rr 1 1))
+        (set! (.-ResponseToHEAD t) (noResponseBodyExpected (.-Method t)))))
+
+
+    ;; Sanitize Body,ContentLength,TransferEncoding
+    (if (.-ResponseToHEAD t) (do
+        (set! (.-Body t) nil)
+        (when (chunked (.-TransferEncoding t))
+          (set! (.-ContentLength t) -1)))
+
+      (do
+        (when (or (not atLeastHTTP11) (== (.-Body t) nil))
+          (set! (.-TransferEncoding t) nil))
+
+        (cond (chunked (.-TransferEncoding t))
+          (set! (.-ContentLength t) -1)
+          (== (.-Body t) nil) ; no chunking, no body
+          (set! (.-ContentLength t) 0))))
+
+
+
+    ;; Sanitize Trailer
+    (when (not (chunked (.-TransferEncoding t)))
+      (set! (.-Trailer t) nil))
+
+
+    ;; Validate Trailer names and values. The names are later written
+    ;; unmodified on the "Trailer:" line of the header, so invalid bytes
+    ;; (in particular CR and LF) would permit header injection. (Issue 78775.)
+    (when [err (validateHeaders (.-Trailer t))] (!= err "")
+      (return nil (fmt/Errorf "net/http: invalid trailer %s" err)))
+
+
+    (return t nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 198]] :go/end 199} (go/method shouldSendChunkedRequestBody "shouldSendChunkedRequestBody reports whether we should try to send a\nchunked request body to the server. In particular, the case we really\nwant to prevent is sending a GET or other typically-bodyless request to a\nserver with a chunked body when the body has zero bytes, since GETs with\nbodies (while acceptable according to specs), even zero-byte chunked\nbodies, are approximately never seen in the wild and confuse most\nservers. See Issue 18257, as one example.\n\nThe only reason we'd send such a request is if the user set the Body to a\nnon-nil value (say, io.NopCloser(bytes.NewReader(nil))) and didn't\nset ContentLength, or NewRequest set it to -1 (unknown), so then we assume\nthere's bytes to send.\n\nThis code tries to read a byte from the Request.Body in such cases to see\nwhether the body actually has content (super rare) or is actually just\na non-nil content-less ReadCloser (the more common case). In that more\ncommon case, we act as if their Body were nil instead, and don't send\na body.\n" ^bool [^{:tag (* transferWriter)} t]
+  ;; Note that t.ContentLength is the corrected content length
+  ;; from rr.outgoingLength, so 0 actually means zero, not unknown.
+  (when (or (>= (.-ContentLength t) 0) (== (.-Body t) nil)) ; redundant checks; caller did them
+    (return false))
+
+  (when (== (.-Method t) "CONNECT")
+    (return false))
+
+  (when (requestMethodUsuallyLacksBody (.-Method t))
+    ;; Only probe the Request.Body for GET/HEAD/DELETE/etc
+    ;; requests, because it's only those types of requests
+    ;; that confuse servers.
+    (.probeRequestBody t) ; adjusts t.Body, t.ContentLength
+    (return (!= (.-Body t) nil)))
+
+  ;; For all other request types (PUT, POST, PATCH, or anything
+  ;; made-up we've never heard of), assume it's normal and the server
+  ;; can deal with a chunked request body. Maybe we'll adjust this
+  ;; later.
+  true)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 256} (go/method probeRequestBody "probeRequestBody reads a byte from t.Body to see whether it's empty\n(returns io.EOF right away).\n\nBut because we've had problems with this blocking users in the past\n(issue 17480) when the body is a pipe (perhaps waiting on the response\nheaders before the pipe is fed data), we need to be careful and bound how\nlong we wait for it. This delay will only affect users if all the following\nare true:\n  - the request body blocks\n  - the content length is not set (or set to -1)\n  - the method doesn't usually have a body (GET, HEAD, DELETE, ...)\n  - there is no transfer-encoding=chunked already set.\n\nIn other words, this delay will not normally affect anybody, and there\nare workarounds if it does.\n" [^{:tag (* transferWriter)} t]
+  (set! (.-ByteReadCh t) (make (chan readResult) 1))
+  (go (^{:go/end 227} (fn [^io/Reader body]
+        (let [^{:tag (array 1 byte)} buf (zero (array 1 byte))
+            ^{:line 220 :tag readResult} rres (zero readResult)]
+          (set! (values (.-n rres) (.-err rres)) (.Read body (subslice buf)))
+          (when (== (.-n rres) 1)
+            (set! (.-b rres) (aget buf 0)))
+
+          (>! (.-ByteReadCh t) rres)
+          (close (.-ByteReadCh t))))
+      (.-Body t)))
+  (let [timer (time/NewTimer (* 200 time/Millisecond))]
+    (select
+      (case [rres (<! (.-ByteReadCh t))]
+        (.Stop timer)
+        (cond (and (== (.-n rres) 0) (== (.-err rres) io/EOF)) (do
+            ;; It was empty.
+            (set! (.-Body t) nil)
+            (set! (.-ContentLength t) 0))
+          (== (.-n rres) 1)
+          (if (!= (.-err rres) nil)
+            (set! (.-Body t) (io/MultiReader (addr (lit byteReader :b (.-b rres))) (lit errorReader (.-err rres))))
+
+            (set! (.-Body t) (io/MultiReader (addr (lit byteReader :b (.-b rres))) (.-Body t))))
+
+          (!= (.-err rres) nil)
+          (set! (.-Body t) (lit errorReader (.-err rres)))))
+
+      (case (<! (.-C timer))
+        ;; Too slow. Don't wait. Read it later, and keep
+        ;; assuming that this is ContentLength == -1
+        ;; (unknown), which means we'll send a
+        ;; "Transfer-Encoding: chunked" header.
+        (set! (.-Body t) (io/MultiReader (lit finishAsyncByteRead t) (.-Body t)))
+        ;; Request that Request.Write flush the headers to the
+        ;; network before writing the body, since our body may not
+        ;; become readable until it's seen the response headers.
+        (set! (.-FlushHeaders t) true)))))
+
+
+
+^{:go/end 260} (go/func noResponseBodyExpected ^bool [^string requestMethod]
+  (== requestMethod "HEAD"))
+
+
+^{:go/breaks [[8 283]] :go/end 284} (go/method shouldSendContentLength ^bool [^{:tag (* transferWriter)} t]
+  (when (chunked (.-TransferEncoding t))
+    (return false))
+
+  (when (> (.-ContentLength t) 0)
+    (return true))
+
+  (when (< (.-ContentLength t) 0)
+    (return false))
+
+  ;; Many servers expect a Content-Length for these methods
+  (when (or (== (.-Method t) "POST") (== (.-Method t) "PUT") (== (.-Method t) "PATCH"))
+    (return true))
+
+  (when (and (== (.-ContentLength t) 0) (isIdentity (.-TransferEncoding t)))
+    (when (or (== (.-Method t) "GET") (== (.-Method t) "HEAD"))
+      (return false))
+
+    (return true))
+
+
+  false)
+
+
+^{:go/breaks [[6 342]] :go/end 343} (go/method writeHeader ^error [^{:tag (* transferWriter)} t ^io/Writer w ^{:tag (* httptrace/ClientTrace)} trace]
+  (when (and (.-Close t) (not (hasToken (.get (.-Header t) "Connection") "close")))
+    (when [(values _ err) (io/WriteString w "Connection: close\r\n")] (!= err nil)
+      (return err))
+
+    (when (and (!= trace nil) (!= (.-WroteHeaderField trace) nil))
+      ((.-WroteHeaderField trace) "Connection" (lit (slice string) "close"))))
+
+
+
+  ;; Write Content-Length and/or Transfer-Encoding whose values are a
+  ;; function of the sanitized field triple (Body, ContentLength,
+  ;; TransferEncoding)
+  (cond (.shouldSendContentLength t) (do
+      (when [(values _ err) (io/WriteString w "Content-Length: ")] (!= err nil)
+        (return err))
+
+      (when [(values _ err) (io/WriteString w (+ (strconv/FormatInt (.-ContentLength t) 10) "\r\n"))] (!= err nil)
+        (return err))
+
+      (when (and (!= trace nil) (!= (.-WroteHeaderField trace) nil))
+        ((.-WroteHeaderField trace) "Content-Length" (lit (slice string) (strconv/FormatInt (.-ContentLength t) 10)))))
+
+    (chunked (.-TransferEncoding t)) (do
+      (when [(values _ err) (io/WriteString w "Transfer-Encoding: chunked\r\n")] (!= err nil)
+        (return err))
+
+      (when (and (!= trace nil) (!= (.-WroteHeaderField trace) nil))
+        ((.-WroteHeaderField trace) "Transfer-Encoding" (lit (slice string) "chunked")))))
+
+
+
+  ;; Write Trailer header
+  (when (!= (.-Trailer t) nil)
+    (let [keys (make (slice string) 0 (len (.-Trailer t)))]
+      (range [k (.-Trailer t)]
+        (set! k (CanonicalHeaderKey k))
+        (switch k
+          (case ["Transfer-Encoding" "Trailer" "Content-Length"]
+            (return (badStringError "invalid Trailer key" k))))
+
+        (set! keys (append keys k)))
+
+      (when (> (len keys) 0)
+        (^{:inst [(slice string) string]} slices/Sort keys)
+        ;; TODO: could do better allocation-wise here, but trailers are rare,
+        ;; so being lazy for now.
+        (when [(values _ err) (io/WriteString w (+ "Trailer: " (strings/Join keys ",") "\r\n"))] (!= err nil)
+          (return err))
+
+        (when (and (!= trace nil) (!= (.-WroteHeaderField trace) nil))
+          ((.-WroteHeaderField trace) "Trailer" keys)))))
+
+
+
+
+  nil)
+
+
+
+^{:go/end 415} (go/method writeBody "always closes t.BodyCloser\n" [^{:tag (* transferWriter)} t ^io/Writer w] :results [^error err]
+  (let [^int64 ncopy (zero int64)
+      ^{:line 348} closed false]
+    (defer (^{:go/end 356} (fn []
+          (when (or closed (== (.-BodyCloser t) nil))
+            (return))
+
+          (when [closeErr (.Close (.-BodyCloser t))] (and (!= closeErr nil) (== err nil))
+            (set! err closeErr)))))
+
+
+
+    ;; Write body. We "unwrap" the body first if it was wrapped in a
+    ;; nopCloser or readTrackingBody. This is to ensure that we can take advantage of
+    ;; OS-level optimizations in the event that the body is an
+    ;; *os.File.
+    (when (and (not (.-ResponseToHEAD t)) (!= (.-Body t) nil))
+      (let [^:var body (.unwrapBody t)]
+        (cond (chunked (.-TransferEncoding t)) (do
+            (when [(values bw ok) (assert (* bufio/Writer) w)] (and ok (not (.-IsResponse t)))
+              (set! w (addr (lit internal/FlushAfterChunkWriter :Writer bw))))
+
+            (let [cw (internal/NewChunkedWriter w)]
+              (set! (values _ err) (.doBodyCopy t cw body))
+              (when (== err nil)
+                (set! err (.Close cw)))))
+
+          (== (.-ContentLength t) -1)
+          (let [dst w]
+            (when (== (.-Method t) "CONNECT")
+              (set! dst (lit bufioFlushWriter dst)))
+
+            (set! (values ncopy err) (.doBodyCopy t dst body))) :else
+          (do
+            (set! (values ncopy err) (.doBodyCopy t w (io/LimitReader body (.-ContentLength t))))
+            (when (!= err nil)
+              (return err))
+
+            (let [^int64 nextra (zero int64)]
+              (set! (values nextra err) (.doBodyCopy t io/Discard body))
+              (set! ncopy + nextra))))
+
+        (when (!= err nil)
+          (return err))))
+
+
+    (when (!= (.-BodyCloser t) nil)
+      (set! closed true)
+      (when [err (.Close (.-BodyCloser t))] (!= err nil)
+        (return err)))
+
+
+
+    (when (and (not (.-ResponseToHEAD t)) (!= (.-ContentLength t) -1) (!= (.-ContentLength t) ncopy))
+      (return (fmt/Errorf "http: ContentLength=%d with Body length %d"
+          (.-ContentLength t) ncopy)))
+
+
+    (when (and (not (.-ResponseToHEAD t)) (chunked (.-TransferEncoding t)))
+      ;; Write Trailer header
+      (when (!= (.-Trailer t) nil)
+        (when [err (.Write (.-Trailer t) w)] (!= err nil)
+          (return err)))
+
+
+      ;; Last chunk, empty trailer
+      (set! (values _ err) (io/WriteString w "\r\n")))
+
+    ^{:line 414} err))
+
+
+
+
+
+
+^{:go/end 430} (go/method doBodyCopy "doBodyCopy wraps a copy operation, with any resulting error also\nbeing saved in bodyReadError.\n\nThis function is only intended for use in writeBody.\n" [^{:tag (* transferWriter)} t ^io/Writer dst ^io/Reader src] :results [^int64 n ^error err]
+  (let [buf (getCopyBuf)]
+    (defer (putCopyBuf buf))
+
+    (set! (values n err) (io/CopyBuffer dst src buf))
+    (when (and (!= err nil) (!= err io/EOF))
+      (set! (.-bodyReadError t) err))
+
+    (return)))
+
+
+
+
+
+
+
+^{:go/end 446} (go/method unwrapBody "unwrapBody unwraps the body's inner reader if it's a\nnopCloser. This is to ensure that body writes sourced from local\nfiles (*os.File types) are properly optimized.\n\nThis function is only intended for use in writeBody.\n" ^io/Reader [^{:tag (* transferWriter)} t]
+  (when [(values r ok) (unwrapNopCloser (.-Body t))] ok
+    (return r))
+
+  (when [(values r ok) (assert (* readTrackingBody) (.-Body t))] ok
+    (set! (.-didRead r) true)
+    (return (.-ReadCloser r)))
+
+  (.-Body t))
+
+
+(go/type transferReader (struct
+
+    ^{:line 450 :tag Header :doc "Input\n"} Header
+    ^{:line 451 :tag int} StatusCode
+    ^{:line 452 :tag string} RequestMethod
+    ^{:line 453 :tag int} ProtoMajor
+    ^{:line 454 :tag int} ProtoMinor
+
+    ^{:line 456 :tag io/ReadCloser :doc "Output\n"} Body
+    ^{:line 457 :tag int64} ContentLength
+    ^{:line 458 :tag bool} Chunked
+    ^{:line 459 :tag bool} Close
+    ^{:line 460 :tag Header} Trailer))
+
+
+^{:go/end 465} (go/method protoAtLeast ^bool [^{:tag (* transferReader)} t ^int m ^int n]
+  (or (> (.-ProtoMajor t) m) ^:go/paren (and (== (.-ProtoMajor t) m) (>= (.-ProtoMinor t) n))))
+
+
+
+
+^{:go/breaks [[5 478]] :go/end 479} (go/func bodyAllowedForStatus "bodyAllowedForStatus reports whether a given response status code\npermits a body. See RFC 7230, section 3.3.\n" ^bool [^int status]
+  (switch
+    (case [(and (>= status 100) (<= status 199))]
+      (return false))
+    (case [(== status 204)]
+      (return false))
+    (case [(== status 304)]
+      (return false)))
+
+  true)
+
+
+(go/var
+  ^{:line 482} [suppressedHeaders304 (lit (slice string) "Content-Type" "Content-Length" "Transfer-Encoding")]
+  ^{:line 483} [suppressedHeadersNoBody (lit (slice string) "Content-Length" "Transfer-Encoding")]
+  ^{:line 484} [excludedHeadersNoBody (lit (map string bool) ["Content-Length" true] ["Transfer-Encoding" true])])
+
+
+^{:go/breaks [[4 495]] :go/end 496} (go/func suppressedHeaders ^{:tag (slice string)} [^int status]
+  (switch
+    (case [(== status 304)]
+      ;; RFC 7232 section 4.1
+      (return suppressedHeaders304))
+    (case [(not (bodyAllowedForStatus status))]
+      (return suppressedHeadersNoBody)))
+
+  nil)
+
+
+
+^{:go/end 614} (go/func readTransfer "msg is *Request or *Response.\n" [^any msg ^{:tag (* bufio/Reader)} r ^int64 maxTrailerHeaders] :results [^error err]
+  (let [t (addr (lit transferReader :RequestMethod "GET"))
+
+      ;; Unify input
+      ^{:line 503} isResponse false]
+    (type-switch [rr msg]
+      (case [(* Response)]
+        (set! (.-Header t) (.-Header rr))
+        (set! (.-StatusCode t) (.-StatusCode rr))
+        (set! (.-ProtoMajor t) (.-ProtoMajor rr))
+        (set! (.-ProtoMinor t) (.-ProtoMinor rr))
+        (set! (.-Close t) (shouldClose (.-ProtoMajor t) (.-ProtoMinor t) (.-Header t) true))
+        (set! isResponse true)
+        (when (!= (.-Request rr) nil)
+          (set! (.-RequestMethod t) (.-Method (.-Request rr)))))
+
+      (case [(* Request)]
+        (set! (.-Header t) (.-Header rr))
+        (set! (.-RequestMethod t) (.-Method rr))
+        (set! (.-ProtoMajor t) (.-ProtoMajor rr))
+        (set! (.-ProtoMinor t) (.-ProtoMinor rr))
+        ;; Transfer semantics for Requests are exactly like those for
+        ;; Responses with status code 200, responding to a GET method
+        (set! (.-StatusCode t) 200)
+        (set! (.-Close t) (.-Close rr)))
+      (default
+        (panic "unexpected type")))
+
+
+    ;; Default to HTTP/1.1
+    (when (and (== (.-ProtoMajor t) 0) (== (.-ProtoMinor t) 0))
+      (set! (values (.-ProtoMajor t) (.-ProtoMinor t)) (values 1 1)))
+
+
+    ;; Transfer-Encoding: chunked, and overriding Content-Length.
+    (when [err (.parseTransferEncoding t)] (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[9 613]]} (let [(values realLength ^:assign err) (fixLength isResponse (.-StatusCode t) (.-RequestMethod t) (.-Header t) (.-Chunked t))]
+      (when (!= err nil)
+        (return err))
+
+      (if (and isResponse (== (.-RequestMethod t) "HEAD"))
+        (if [(values n err) (parseContentLength (aget (.-Header t) "Content-Length"))] (!= err nil)
+          (return err)
+
+          (set! (.-ContentLength t) n))
+
+
+        (set! (.-ContentLength t) realLength))
+
+
+      ;; Trailer
+      (set! (values (.-Trailer t) err) (fixTrailer (.-Header t) (.-Chunked t)))
+      (when (!= err nil)
+        (return err))
+
+
+      ;; If there is no Content-Length or chunked Transfer-Encoding on a *Response
+      ;; and the status is not 1xx, 204 or 304, then the body is unbounded.
+      ;; See RFC 7230, section 3.3.
+      (type-switch msg
+        (case [(* Response)]
+          (when (and (== realLength -1) (not (.-Chunked t)) (bodyAllowedForStatus (.-StatusCode t)))
+            ;; Unbounded body.
+            (set! (.-Close t) true))))
+
+
+
+      ;; Prepare body reader. ContentLength < 0 means chunked encoding
+      ;; or close connection when finished, since multipart is not supported yet
+      (switch
+        (case [(.-Chunked t)]
+          (if (and isResponse ^:go/paren (or (noResponseBodyExpected (.-RequestMethod t)) (not (bodyAllowedForStatus (.-StatusCode t)))))
+            (set! (.-Body t) NoBody)
+
+            (set! (.-Body t) (addr (lit body :src (internal/NewChunkedReader r) :hdr msg :r r :closing (.-Close t) :maxTrailerHeaders maxTrailerHeaders)))))
+
+        (case [(== realLength 0)]
+          (set! (.-Body t) NoBody))
+        (case [(> realLength 0)]
+          (set! (.-Body t) (addr (lit body :src (io/LimitReader r realLength) :closing (.-Close t)))))
+        (default
+          ;; realLength < 0, i.e. "Content-Length" not mentioned in header
+          (if (.-Close t)
+            ;; Close semantics (i.e. HTTP/1.0)
+            (set! (.-Body t) (addr (lit body :src r :closing (.-Close t))))
+
+            ;; Persistent connection (i.e. HTTP/1.1)
+            (set! (.-Body t) NoBody))))
+
+
+
+      ;; Unify output
+      (type-switch [rr msg]
+        (case [(* Request)]
+          (set! (.-Body rr) (.-Body t))
+          (set! (.-ContentLength rr) (.-ContentLength t))
+          (when (.-Chunked t)
+            (set! (.-TransferEncoding rr) (lit (slice string) "chunked")))
+
+          (set! (.-Close rr) (.-Close t))
+          (set! (.-Trailer rr) (.-Trailer t)))
+        (case [(* Response)]
+          (set! (.-Body rr) (.-Body t))
+          (set! (.-ContentLength rr) (.-ContentLength t))
+          (when (.-Chunked t)
+            (set! (.-TransferEncoding rr) (lit (slice string) "chunked")))
+
+          (set! (.-Close rr) (.-Close t))
+          (set! (.-Trailer rr) (.-Trailer t))))
+
+
+      nil)))
+
+
+
+^{:go/end 617} (go/func chunked "Checks whether chunked is part of the encodings stack.\n" ^bool [^{:tag (slice string)} te] (and (> (len te) 0) (== (aget te 0) "chunked")))
+
+
+^{:go/end 620} (go/func isIdentity "Checks whether the encoding is explicitly \"identity\".\n" ^bool [^{:tag (slice string)} te] (and (== (len te) 1) (== (aget te 0) "identity")))
+
+
+(go/type unsupportedTEError "unsupportedTEError reports unsupported transfer-encodings.\n" (struct
+    ^{:line 624 :tag string} err))
+
+
+^{:go/end 629} (go/method Error ^string [^{:tag (* unsupportedTEError)} uste]
+  (.-err uste))
+
+
+
+
+^{:go/end 636} (go/func isUnsupportedTEError "isUnsupportedTEError checks if the error is of type\nunsupportedTEError. It is usually invoked with a non-nil err.\n" ^bool [^error err]
+  (let [(values _ ok) (assert (* unsupportedTEError) err)]
+    ^{:line 635} ok))
+
+
+
+^{:go/end 664} (go/method parseTransferEncoding "parseTransferEncoding sets t.Chunked based on the Transfer-Encoding header.\n" ^error [^{:tag (* transferReader)} t]
+  ^{:go/breaks [8]} (let [(values raw present) (aget (.-Header t) "Transfer-Encoding")]
+    (when (not present)
+      (return nil))
+
+    (delete (.-Header t) "Transfer-Encoding")
+
+    ;; Issue 12785; ignore Transfer-Encoding on HTTP/1.0 requests.
+    (when (not (.protoAtLeast t 1 1))
+      (return nil))
+
+
+    ;; Like nginx, we only support a single Transfer-Encoding header field, and
+    ;; only if set to "chunked". This is one of the most security sensitive
+    ;; surfaces in HTTP/1.1 due to the risk of request smuggling, so we keep it
+    ;; strict and simple.
+    (when (!= (len raw) 1)
+      (return (addr (lit unsupportedTEError (fmt/Sprintf "too many transfer encodings: %q" raw)))))
+
+    (when (not (ascii/EqualFold (aget raw 0) "chunked"))
+      (return (addr (lit unsupportedTEError (fmt/Sprintf "unsupported transfer encoding: %q" (aget raw 0))))))
+
+
+    (set! (.-Chunked t) true)
+    nil))
+
+
+
+
+
+^{:go/end 751} (go/func fixLength "Determine the expected body length, using RFC 7230 Section 3.3. This\nfunction is not a method, because ultimately it should be shared by\nReadResponse and ReadRequest.\n" [^bool isResponse ^int status ^string requestMethod ^Header header ^bool chunked] :results [^int64 n ^error err]
+  (let [isRequest (not isResponse)
+      ^{:line 671} contentLens (aget header "Content-Length")]
+
+    ;; Hardening against HTTP request smuggling
+    (when (> (len contentLens) 1)
+      ;; Per RFC 7230 Section 3.3.2, prevent multiple
+      ;; Content-Length headers if they differ in value.
+      ;; If there are dups of the value, remove the dups.
+      ;; See Issue 16490.
+      (let [first (textproto/TrimString (aget contentLens 0))]
+        (range [_ ct (subslice contentLens 1)]
+          (when (!= first (textproto/TrimString ct))
+            (return 0 (fmt/Errorf "http: message cannot contain multiple Content-Length headers; got %q" contentLens))))
+
+
+
+        ;; deduplicate Content-Length
+        (.Del header "Content-Length")
+        (.Add header "Content-Length" first)
+
+        (set! contentLens (aget header "Content-Length"))))
+
+
+    ;; Reject requests with invalid Content-Length headers.
+    (when (> (len contentLens) 0)
+      (set! (values n err) (parseContentLength contentLens))
+      (when (!= err nil)
+        (return -1 err)))
+
+
+
+    ;; Logic based on response type or status
+    (when (and isResponse (noResponseBodyExpected requestMethod))
+      (return 0 nil))
+
+    (when (== (/ status 100) 1)
+      (return 0 nil))
+
+    (switch status
+      (case [204 304]
+        (return 0 nil)))
+
+
+    ;; According to RFC 9112, "If a message is received with both a
+    ;; Transfer-Encoding and a Content-Length header field, the Transfer-Encoding
+    ;; overrides the Content-Length. Such a message might indicate an attempt to
+    ;; perform request smuggling (Section 11.2) or response splitting (Section 11.1)
+    ;; and ought to be handled as an error. An intermediary that chooses to forward
+    ;; the message MUST first remove the received Content-Length field and process
+    ;; the Transfer-Encoding (as described below) prior to forwarding the message downstream."
+    ;;
+    ;; Chunked-encoding requests with either valid Content-Length
+    ;; headers or no Content-Length headers are accepted after removing
+    ;; the Content-Length field from header.
+    ;;
+    ;; Logic based on Transfer-Encoding
+    (when chunked
+      (.Del header "Content-Length")
+      (return -1 nil))
+
+
+    ;; Logic based on Content-Length
+    (when (> (len contentLens) 0)
+      (return n nil))
+
+
+    (.Del header "Content-Length")
+
+    (when isRequest
+      ;; RFC 7230 neither explicitly permits nor forbids an
+      ;; entity-body on a GET request so we permit one if
+      ;; declared, but we default to 0 here (not -1 below)
+      ;; if there's no mention of a body.
+      ;; Likewise, all other request methods are assumed to have
+      ;; no body if neither Transfer-Encoding chunked nor a
+      ;; Content-Length are set.
+      (return 0 nil))
+
+
+    ;; Body-EOF logic based on other methods (like closing, or chunked coding)
+    (return -1 nil)))
+
+
+
+
+
+^{:go/end 772} (go/func shouldClose "Determine whether to hang up after sending a request and body, or\nreceiving a response and body\n'header' is the request headers.\n" ^bool [^int major ^int minor ^Header header ^bool removeCloseHeader]
+  (when (< major 1)
+    (return true))
+
+
+  (let [conv (aget header "Connection")
+      ^{:line 762} hasClose (httpguts/HeaderValuesContainsToken conv "close")]
+    (when (and (== major 1) (== minor 0))
+      (return (or hasClose (not (httpguts/HeaderValuesContainsToken conv "keep-alive")))))
+
+
+    (when (and hasClose removeCloseHeader)
+      (.Del header "Connection"))
+
+
+    ^{:line 771} hasClose))
+
+
+
+^{:go/end 814} (go/func fixTrailer "Parse the trailer header.\n" [^Header header ^bool chunked] :results [Header error]
+  (let [(values vv ok) (aget header "Trailer")]
+    (when (not ok)
+      (return nil nil))
+
+    (when (not chunked)
+      ;; Trailer and no chunking:
+      ;; this is an invalid use case for trailer header.
+      ;; Nevertheless, no error will be returned and we
+      ;; let users decide if this is a valid HTTP message.
+      ;; The Trailer header will be kept in Response.Header
+      ;; but not populate Response.Trailer.
+      ;; See issue #27197.
+      (return nil nil))
+
+    (.Del header "Trailer")
+
+    (let [trailer (make Header)
+        ^{:line 793 :tag error} err (zero error)]
+      (range [_ v vv]
+        (foreachHeaderElement v ^{:go/end 805} (fn [^string key]
+            (set! key (CanonicalHeaderKey key))
+            (switch key
+              (case ["Transfer-Encoding" "Trailer" "Content-Length"]
+                (when (== err nil)
+                  (set! err (badStringError "bad trailer key" key))
+                  (return))))
+
+
+            (aset trailer key nil))))
+
+
+      (when (!= err nil)
+        (return nil err))
+
+      (when (== (len trailer) 0)
+        (return nil nil))
+
+      (return trailer nil))))
+
+
+
+
+
+(go/type body "body turns a Reader into a ReadCloser.\nClose ensures that the body has been fully read\nand then reads the trailer if necessary.\n" (struct
+    ^{:line 820 :tag io/Reader} src
+    ^{:line 821 :tag any} hdr ; non-nil (Response or Request) value means read trailer
+    ^{:line 822 :tag (* bufio/Reader)} r ; underlying wire-format reader for the trailer
+    ^{:line 823 :tag bool} closing ; is the connection to be closed after reading body?
+    ^{:line 824 :tag bool} doEarlyClose ; whether Close should stop early
+    ^{:line 825 :tag int64} maxTrailerHeaders ; how many trailer header values are allowed
+
+    ^{:line 827 :tag sync/Mutex} mu ; guards following, and calls to Read and Close
+    ^{:line 828 :tag bool} sawEOF
+    ^{:line 829 :tag bool} closed
+    ^{:line 830 :tag bool} earlyClose ; Close called and we didn't read to the end of src
+    ^{:line 831 :tag (func [])} onHitEOF)) ; if non-nil, func to call when EOF is Read
+
+
+
+
+
+
+(go/var ^{:doc "ErrBodyReadAfterClose is returned when reading a [Request] or [Response]\nBody after the body has been closed. This typically happens when the body is\nread after an HTTP [Handler] calls WriteHeader or Write on its\n[ResponseWriter].\n"} ErrBodyReadAfterClose (errors/New "http: invalid Read on closed Body"))
+
+^{:go/end 850} (go/method Read [^{:tag (* body)} b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (== b nil)
+    (return 0 io/EOF))
+
+  (.Lock (.-mu b))
+  (defer (.Unlock (.-mu b)))
+  (when (.-closed b)
+    (return 0 ErrBodyReadAfterClose))
+
+  (.readLocked b p))
+
+
+
+^{:go/end 899} (go/method readLocked "Must hold b.mu.\n" [^{:tag (* body)} b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (.-sawEOF b)
+    (return 0 io/EOF))
+
+  (set! (values n err) (.Read (.-src b) p))
+
+  (when (== err io/EOF)
+    (set! (.-sawEOF b) true)
+    ;; Chunked case. Read the trailer.
+    (if (!= (.-hdr b) nil) (do
+        (when [e (.readTrailer b)] (!= e nil)
+          (set! err e)
+          ;; Something went wrong in the trailer, we must not allow any
+          ;; further reads of any kind to succeed from body, nor any
+          ;; subsequent requests on the server connection. See
+          ;; golang.org/issue/12027
+          (set! (.-sawEOF b) false)
+          (set! (.-closed b) true))
+
+        (set! (.-hdr b) nil))
+      (do
+        ;; If the server declared the Content-Length, our body is a LimitedReader
+        ;; and we need to check whether this EOF arrived early.
+        (when [(values lr ok) (assert (* io/LimitedReader) (.-src b))] (and ok (> (.-N lr) 0))
+          (set! err io/ErrUnexpectedEOF)))))
+
+
+
+
+  ;; If we can return an EOF here along with the read data, do
+  ;; so. This is optional per the io.Reader contract, but doing
+  ;; so helps the HTTP transport code recycle its connection
+  ;; earlier (since it will see this EOF itself), even if the
+  ;; client doesn't do future reads or Close.
+  (when (and (== err nil) (> n 0))
+    (when [(values lr ok) (assert (* io/LimitedReader) (.-src b))] (and ok (== (.-N lr) 0))
+      (set! err io/EOF)
+      (set! (.-sawEOF b) true)))
+
+
+
+  (when (and (.-sawEOF b) (!= (.-onHitEOF b) nil))
+    ((.-onHitEOF b)))
+
+
+  (return n err))
+
+
+(go/var
+  ^{:line 902} [singleCRLF (conv (slice byte) "\r\n")]
+  ^{:line 903} [doubleCRLF (conv (slice byte) "\r\n\r\n")])
+
+
+^{:go/breaks [[4 918]] :go/end 919} (go/func seeUpcomingDoubleCRLF ^bool [^{:tag (* bufio/Reader)} r]
+  (for [peekSize 4] _ (inc! peekSize)
+    ;; This loop stops when Peek returns an error,
+    ;; which it does when r's buffer has been filled.
+    (let [(values buf err) (.Peek r peekSize)]
+      (when (bytes/HasSuffix buf doubleCRLF)
+        (return true))
+
+      (when (!= err nil)
+        (break))))
+
+
+  false)
+
+
+(go/var errTrailerEOF (errors/New "http: unexpected EOF reading trailer"))
+
+^{:go/end 963} (go/method readTrailer ^error [^{:tag (* body)} b]
+  ;; The common case, since nobody uses trailers.
+  (let [(values buf err) (.Peek (.-r b) 2)]
+    (when (bytes/Equal buf singleCRLF)
+      (.Discard (.-r b) 2)
+      (return nil))
+
+    (when (< (len buf) 2)
+      (return errTrailerEOF))
+
+    (when (!= err nil)
+      (return err))
+
+
+    ;; Make sure there's a header terminator coming up, to prevent
+    ;; a DoS with an unbounded size Trailer. It's not easy to
+    ;; slip in a LimitReader here, as textproto.NewReader requires
+    ;; a concrete *bufio.Reader. Also, we can't get all the way
+    ;; back up to our conn's LimitedReader that *might* be backing
+    ;; this bufio.Reader. Instead, a hack: we iteratively Peek up
+    ;; to the bufio.Reader's max size, looking for a double CRLF.
+    ;; This limits the trailer to the underlying buffer size, typically 4kB.
+    (when (not (seeUpcomingDoubleCRLF (.-r b)))
+      (return (errors/New "http: suspiciously long trailer after chunked body")))
+
+
+    ^{:go/breaks [[4 962]]} (let [(values hdr ^:assign err) (readMIMEHeader (textproto/NewReader (.-r b)) math/MaxInt64 (.-maxTrailerHeaders b))]
+      (when (!= err nil)
+        (when (== err io/EOF)
+          (return errTrailerEOF))
+
+        (return err))
+
+      (type-switch [rr (.-hdr b)]
+        (case [(* Request)]
+          (mergeSetHeader (addr (.-Trailer rr)) (conv Header hdr)))
+        (case [(* Response)]
+          (mergeSetHeader (addr (.-Trailer rr)) (conv Header hdr))))
+
+      nil)))
+
+
+^{:go/end 971} (go/func mergeSetHeader [^{:tag (* Header)} dst ^Header src]
+  (when (== @dst nil)
+    (set! @dst src)
+    (return))
+
+  (^{:inst [Header Header string (slice string)]} maps/Copy @dst src))
+
+
+
+
+
+^{:go/breaks [[5 980]] :go/end 981} (go/method unreadDataSizeLocked "unreadDataSizeLocked returns the number of bytes of unread input.\nIt returns -1 if unknown.\nb.mu must be held.\n" ^int64 [^{:tag (* body)} b]
+  (when [(values lr ok) (assert (* io/LimitedReader) (.-src b))] ok
+    (return (.-N lr)))
+
+  -1)
+
+
+^{:go/end 1027} (go/method Close ^error [^{:tag (* body)} b]
+  (when (== b nil)
+    (return nil))
+
+  (.Lock (.-mu b))
+  (defer (.Unlock (.-mu b)))
+  (when (.-closed b)
+    (return nil))
+
+  (let [^error err (zero error)]
+    (switch
+      (case [(.-sawEOF b)])
+      ;; Already saw EOF, so no need going to look for it.
+      (case [(and (== (.-hdr b) nil) (.-closing b))])
+      ;; no trailer and closing the connection next.
+      ;; no point in reading to EOF.
+      (case [(.-doEarlyClose b)]
+        ;; Read up to maxPostHandlerReadBytes bytes of the body, looking
+        ;; for EOF (and trailers), so we can re-use this connection.
+        (if [(values lr ok) (assert (* io/LimitedReader) (.-src b))] (and ok (> (.-N lr) maxPostHandlerReadBytes))
+          ;; There was a declared Content-Length, and we have more bytes remaining
+          ;; than our maxPostHandlerReadBytes tolerance. So, give up.
+          (set! (.-earlyClose b) true)
+
+          (let [^int64 n (zero int64)]
+            ;; Consume the body, or, which will also lead to us reading
+            ;; the trailer headers after the body, if present.
+            (set! (values n err) (io/CopyN io/Discard (lit bodyLocked b) (+ maxPostHandlerReadBytes 1)))
+            (set! (.-earlyClose b) true)
+            (when (and (== err io/EOF) (<= n maxPostHandlerReadBytes))
+              (set! (.-earlyClose b) false)
+              (set! (.-sawEOF b) true)
+              ;; Reaching the end of the body is the expected
+              ;; outcome here, not an error to report to the caller.
+              (set! err nil)))))
+
+
+      (default
+        ;; Fully consume the body, which will also lead to us reading
+        ;; the trailer headers after the body, if present.
+        (set! (values _ err) (io/Copy io/Discard (lit bodyLocked b)))))
+
+    (set! (.-closed b) true)
+    ^{:line 1026} err))
+
+
+^{:go/end 1033} (go/method didEarlyClose ^bool [^{:tag (* body)} b]
+  (.Lock (.-mu b))
+  (defer (.Unlock (.-mu b)))
+  (.-earlyClose b))
+
+
+
+
+^{:go/end 1044} (go/method bodyRemains "bodyRemains reports whether future Read calls might\nyield data.\n" ^bool [^{:tag (* body)} b]
+  (when (== b nil)
+    (return false))
+
+  (.Lock (.-mu b))
+  (defer (.Unlock (.-mu b)))
+  (not (.-sawEOF b)))
+
+
+^{:go/end 1053} (go/method registerOnHitEOF [^{:tag (* body)} b ^{:tag (func [])} fn]
+  (when (== b nil)
+    (return))
+
+  (.Lock (.-mu b))
+  (defer (.Unlock (.-mu b)))
+  (set! (.-onHitEOF b) fn))
+
+
+
+
+(go/type bodyLocked "bodyLocked is an io.Reader reading from a *body when its mutex is\nalready held.\n" (struct
+    ^{:line 1058 :tag (* body)} b))
+
+
+^{:go/end 1066} (go/method Read [^bodyLocked bl ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (.-closed (.-b bl))
+    (return 0 ErrBodyReadAfterClose))
+
+  (.readLocked (.-b bl) p))
+
+
+(go/var httplaxcontentlength (godebug/New "httplaxcontentlength"))
+
+
+
+
+^{:go/end 1093} (go/func parseContentLength "parseContentLength checks that the header is valid and then trims\nwhitespace. It returns -1 if no value is set otherwise the value\nif it's >= 0.\n" [^{:tag (slice string)} clHeaders] :results [int64 error]
+  (when (== (len clHeaders) 0)
+    (return -1 nil))
+
+  (let [cl (textproto/TrimString (aget clHeaders 0))]
+
+    ;; The Content-Length must be a valid numeric value.
+    ;; See: https://datatracker.ietf.org/doc/html/rfc2616/#section-14.13
+    (when (== cl "")
+      (when (== (.Value httplaxcontentlength) "1")
+        (.IncNonDefault httplaxcontentlength)
+        (return -1 nil))
+
+      (return 0 (badStringError "invalid empty Content-Length" cl)))
+
+    (let [(values n err) (strconv/ParseUint cl 10 63)]
+      (when (!= err nil)
+        (return 0 (badStringError "bad Content-Length" cl)))
+
+      (return (conv int64 n) nil))))
+
+
+
+
+(go/type finishAsyncByteRead "finishAsyncByteRead finishes reading the 1-byte sniff\nfrom the ContentLength==0, Body!=nil case.\n" (struct
+    ^{:line 1098 :tag (* transferWriter)} tw))
+
+
+^{:go/end 1114} (go/method Read [^finishAsyncByteRead fr ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (== (len p) 0)
+    (return))
+
+  (let [rres (<! (.-ByteReadCh (.-tw fr)))]
+    (set! (values n err) (values (.-n rres) (.-err rres)))
+    (when (== n 1)
+      (aset p 0 (.-b rres)))
+
+    (when (== err nil)
+      (set! err io/EOF))
+
+    (return)))
+
+
+(go/var nopCloserType (reflect/TypeOf (io/NopCloser nil)))
+(go/var nopCloserWriterToType (reflect/TypeOf (io/NopCloser (lit (struct
+          ^{:line 1118} io/Reader
+          ^{:line 1119} io/WriterTo)))))
+
+
+
+
+^{:go/end 1131} (go/func unwrapNopCloser "unwrapNopCloser return the underlying reader and true if r is a NopCloser\nelse it return false.\n" [^io/Reader r] :results [^io/Reader underlyingReader ^bool isNopCloser]
+  (switch (reflect/TypeOf r)
+    (case [nopCloserType nopCloserWriterToType]
+      (return (assert io/Reader (.Interface (.Field (reflect/ValueOf r) 0))) true))
+    (default
+      (return nil false))))
+
+
+
+
+
+
+^{:go/breaks [[7 1147]] :go/end 1148} (go/func isKnownInMemoryReader "isKnownInMemoryReader reports whether r is a type known to not\nblock on Read. Its caller uses this as an optional optimization to\nsend fewer TCP packets.\n" ^bool [^io/Reader r]
+  (type-switch r
+    (case [(* bytes/Reader) (* bytes/Buffer) (* strings/Reader)]
+      (return true)))
+
+  (when [(values r ok) (unwrapNopCloser r)] ok
+    (return (isKnownInMemoryReader r)))
+
+  (when [(values r ok) (assert (* readTrackingBody) r)] ok
+    (return (isKnownInMemoryReader (.-ReadCloser r))))
+
+  false)
+
+
+
+
+(go/type bufioFlushWriter "bufioFlushWriter is an io.Writer wrapper that flushes all writes\non its wrapped writer if it's a *bufio.Writer.\n" (struct ^io/Writer w))
+
+^{:go/end 1163} (go/method Write [^bufioFlushWriter fw ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (set! (values n err) (.Write (.-w fw) p))
+  (when [(values bw ok) (assert (* bufio/Writer) (.-w fw))] (and (> n 0) ok)
+    (let [ferr (.Flush bw)]
+      (when (and (!= ferr nil) (== err nil))
+        (set! err ferr))))
+
+
+  (return))

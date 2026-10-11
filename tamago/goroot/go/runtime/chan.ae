@@ -1,0 +1,953 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "chan.go" :imports [
+
+    ;; This file contains the implementation of Go channels.
+
+    ;; Invariants:
+    ;;  At least one of c.sendq and c.recvq is empty,
+    ;;  except for the case of an unbuffered channel with a single goroutine
+    ;;  blocked on it for both sending and receiving using a select statement,
+    ;;  in which case the length of c.sendq and c.recvq is limited only by the
+    ;;  size of the select statement.
+    ;;
+    ;; For buffered channels, also:
+    ;;  c.qcount > 0 implies that c.recvq is empty.
+    ;;  c.qcount < c.dataqsiz implies that c.sendq is empty.
+
+
+    ^{:line 21} [abi "internal/abi"]
+    ^{:line 22} [atomic "internal/runtime/atomic"]
+    ^{:line 23} [math "internal/runtime/math"]
+    ^{:line 24} [sys "internal/runtime/sys"]
+    ^{:line 25} [unsafe "unsafe"]])
+
+
+(go/const
+  ^{:line 29} [^{:val 8} maxAlign 8]
+  ^{:line 30} [^{:val 112} hchanSize (+ (unsafe/Sizeof (lit hchan)) (conv uintptr (bit-and (- (conv int (unsafe/Sizeof (lit hchan)))) (- maxAlign 1))))]
+  ^{:line 31} [^{:val false} debugChan false])
+
+
+(go/type hchan (struct
+    ^{:line 35 :tag uint} qcount ; total data in the queue
+    ^{:line 36 :tag uint} dataqsiz ; size of the circular queue
+    ^{:line 37 :tag unsafe/Pointer} buf ; points to an array of dataqsiz elements
+    ^{:line 38 :tag uint16} elemsize
+    ^{:line 39 :tag uint32} closed
+    ^{:line 40 :tag (* timer)} timer ; timer feeding this chan
+    ^{:line 41 :tag (* _type)} elemtype ; element type
+    ^{:line 42 :tag uint} sendx ; send index
+    ^{:line 43 :tag uint} recvx ; receive index
+    ^{:line 44 :tag waitq} recvq ; list of recv waiters
+    ^{:line 45 :tag waitq} sendq ; list of send waiters
+    ^{:line 46 :tag (* synctestBubble)} bubble
+
+
+
+
+
+
+
+    ^{:line 54 :tag mutex :doc "lock protects all fields in hchan, as well as several\nfields in sudogs blocked on this channel.\n\nDo not change another G's status while holding this lock\n(in particular, do not ready a G), as this can deadlock\nwith stack shrinking.\n"} lock))
+
+
+(go/type waitq (struct
+    ^{:line 58 :tag (* sudog)} first
+    ^{:line 59 :tag (* sudog)} last))
+
+
+
+^{:go/end 65} (go/func ^{:go/linkname "reflect_makechan reflect.makechan"} reflect_makechan ^{:tag (* hchan)} [^{:tag (* chantype)} t ^int size]
+  (makechan t size))
+
+
+^{:go/end 73} (go/func makechan64 ^{:tag (* hchan)} [^{:tag (* chantype)} t ^int64 size]
+  (when (!= (conv int64 (conv int size)) size)
+    (panic (conv plainError "makechan: size out of range")))
+
+
+  (makechan t (conv int size)))
+
+
+^{:go/end 125} (go/func makechan ^{:tag (* hchan)} [^{:tag (* chantype)} t ^int size]
+  (let [elem (.-Elem t)]
+
+    ;; compiler checks this but be safe.
+    (when (>= (.-Size_ elem) (<< 1 16))
+      (throw "makechan: invalid channel element type"))
+
+    (when (or (!= (% hchanSize maxAlign) 0) (> (.-Align_ elem) maxAlign))
+      (throw "makechan: bad alignment"))
+
+
+    (let [(values mem overflow) (math/MulUintptr (.-Size_ elem) (conv uintptr size))]
+      (when (or overflow (> mem (- maxAlloc hchanSize)) (< size 0))
+        (panic (conv plainError "makechan: size out of range")))
+
+
+      ;; Hchan does not contain pointers interesting for GC when elements stored in buf do not contain pointers.
+      ;; buf points into the same allocation, elemtype is persistent.
+      ;; SudoG's are referenced from their owning thread so they can't be collected.
+      ;; TODO(dvyukov,rlh): Rethink when collector can move allocated objects.
+      (let [^{:tag (* hchan)} c (zero (* hchan))]
+        (switch
+          (case [(== mem 0)]
+            ;; Queue or element size is zero.
+            (set! c (conv (* hchan) (mallocgc hchanSize nil true)))
+            ;; Race detector uses this location for synchronization.
+            (set! (.-buf c) (.raceaddr c)))
+          (case [(not (.Pointers elem))]
+            ;; Elements do not contain pointers.
+            ;; Allocate hchan and buf in one call.
+            (set! c (conv (* hchan) (mallocgc (+ hchanSize mem) nil true)))
+            (set! (.-buf c) (add (conv unsafe/Pointer c) hchanSize)))
+          (default
+            ;; Elements contain pointers.
+            (set! c (new hchan))
+            (set! (.-buf c) (mallocgc mem elem true))))
+
+
+        (set! (.-elemsize c) (conv uint16 (.-Size_ elem)))
+        (set! (.-elemtype c) elem)
+        (set! (.-dataqsiz c) (conv uint size))
+        (when [b (.-bubble (getg))] (!= b nil)
+          (set! (.-bubble c) b))
+
+        (lockInit (addr (.-lock c)) lockRankHchan)
+
+        (when debugChan
+          (print "makechan: chan=" c "; elemsize=" (.-Size_ elem) "; dataqsiz=" size "\n"))
+
+        ^{:line 124} c))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 140} (go/func ^{:go/linkname "chanbuf"} chanbuf "chanbuf(c, i) is pointer to the i'th slot in the buffer.\n\nchanbuf should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/fjl/memsize\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^unsafe/Pointer [^{:tag (* hchan)} c ^uint i]
+  (add (.-buf c) (* (conv uintptr i) (conv uintptr (.-elemsize c)))))
+
+
+
+
+
+
+^{:go/end 155} (go/func full "full reports whether a send on c would block (that is, the channel is full).\nIt uses a single word-sized read of mutable state, so although\nthe answer is instantaneously true, the correct answer may have changed\nby the time the calling function receives the return value.\n" ^bool [^{:tag (* hchan)} c]
+  ;; c.dataqsiz is immutable (never written after the channel is created)
+  ;; so it is safe to read at any time during channel operation.
+  (when (== (.-dataqsiz c) 0)
+    ;; Assumes that a pointer read is relaxed-atomic.
+    (return (== (.-first (.-recvq c)) nil)))
+
+  ;; Assumes that a uint read is relaxed-atomic.
+  (== (.-qcount c) (.-dataqsiz c)))
+
+
+
+
+
+^{:go/end 162} (go/func ^:go/nosplit chansend1 "entry point for c <- x from compiled code.\n" [^{:tag (* hchan)} c ^unsafe/Pointer elem]
+  (chansend c elem true (sys/GetCallerPC)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 310} (go/func chansend " * generic single channel send/recv\n * If block is not nil,\n * then the protocol will not\n * sleep but return if it could\n * not complete.\n *\n * sleep can wake up with g.param == nil\n * when a channel involved in the sleep has\n * been closed.  it is easiest to loop and re-run\n * the operation; we'll see that it's now closed.\n" ^bool [^{:tag (* hchan)} c ^unsafe/Pointer ep ^bool block ^uintptr callerpc]
+  (when (== c nil)
+    (when (not block)
+      (return false))
+
+    (gopark nil nil waitReasonChanSendNilChan traceBlockForever 2)
+    (throw "unreachable"))
+
+
+  (when debugChan
+    (print "chansend: chan=" c "\n"))
+
+
+  (when raceenabled
+    (racereadpc (.raceaddr c) callerpc (abi/FuncPCABIInternal chansend)))
+
+
+  (when (and (!= (.-bubble c) nil) (!= (.-bubble (getg)) (.-bubble c)))
+    (fatal "send on synctest channel from outside bubble"))
+
+
+  ;; Fast path: check for failed non-blocking operation without acquiring the lock.
+  ;;
+  ;; After observing that the channel is not closed, we observe that the channel is
+  ;; not ready for sending. Each of these observations is a single word-sized read
+  ;; (first c.closed and second full()).
+  ;; Because a closed channel cannot transition from 'ready for sending' to
+  ;; 'not ready for sending', even if the channel is closed between the two observations,
+  ;; they imply a moment between the two when the channel was both not yet closed
+  ;; and not ready for sending. We behave as if we observed the channel at that moment,
+  ;; and report that the send cannot proceed.
+  ;;
+  ;; It is okay if the reads are reordered here: if we observe that the channel is not
+  ;; ready for sending and then observe that it is not closed, that implies that the
+  ;; channel wasn't closed during the first observation. However, nothing here
+  ;; guarantees forward progress. We rely on the side effects of lock release in
+  ;; chanrecv() and closechan() to update this thread's view of c.closed and full().
+  (when (and (not block) (== (.-closed c) 0) (full c))
+    (return false))
+
+
+  (let [^int64 t0 (zero int64)]
+    (when (> blockprofilerate 0)
+      (set! t0 (cputicks)))
+
+
+    (lock (addr (.-lock c)))
+
+    (when (!= (.-closed c) 0)
+      (unlock (addr (.-lock c)))
+      (panic (conv plainError "send on closed channel")))
+
+
+    (when [sg (.dequeue (.-recvq c))] (!= sg nil)
+      ;; Found a waiting receiver. We pass the value we want to send
+      ;; directly to the receiver, bypassing the channel buffer (if any).
+      (send c sg ep ^{:go/end 232} (fn [] (unlock (addr (.-lock c)))) 3)
+      (return true))
+
+
+    (when (< (.-qcount c) (.-dataqsiz c))
+      ;; Space is available in the channel buffer. Enqueue the element to send.
+      (let [qp (chanbuf c (.-sendx c))]
+        (when raceenabled
+          (racenotify c (.-sendx c) nil))
+
+        (typedmemmove (.-elemtype c) qp ep)
+        (inc! (.-sendx c))
+        (when (== (.-sendx c) (.-dataqsiz c))
+          (set! (.-sendx c) 0))
+
+        (inc! (.-qcount c))
+        (unlock (addr (.-lock c)))
+        (return true)))
+
+
+    (when (not block)
+      (unlock (addr (.-lock c)))
+      (return false))
+
+
+    ;; Block on the channel. Some receiver will complete our operation for us.
+    (let [gp (getg)
+        ^{:line 259} mysg (acquireSudog)]
+      (set! (.-releasetime mysg) 0)
+      (when (!= t0 0)
+        (set! (.-releasetime mysg) -1))
+
+      ;; No stack splits between assigning elem and enqueuing mysg
+      ;; on gp.waiting where copystack can find it.
+      (.set (.-elem mysg) ep)
+      (set! (.-waitlink mysg) nil)
+      (set! (.-g mysg) gp)
+      (set! (.-isSelect mysg) false)
+      (.set (.-c mysg) c)
+      (set! (.-waiting gp) mysg)
+      (set! (.-param gp) nil)
+      (.enqueue (.-sendq c) mysg)
+      ;; Signal to anyone trying to shrink our stack that we're about
+      ;; to park on a channel. The window between when this G's status
+      ;; changes and when we set gp.activeStackChans is not safe for
+      ;; stack shrinking.
+      (.Store (.-parkingOnChan gp) true)
+      (let [reason waitReasonChanSend]
+        (when (!= (.-bubble c) nil)
+          (set! reason waitReasonSynctestChanSend))
+
+        (gopark chanparkcommit (conv unsafe/Pointer (addr (.-lock c))) reason traceBlockChanSend 2)
+        ;; Ensure the value being sent is kept alive until the
+        ;; receiver copies it out. The sudog has a pointer to the
+        ;; stack object, but sudogs aren't considered as roots of the
+        ;; stack tracer.
+        (KeepAlive ep)
+
+        ;; someone woke us up.
+        (when (!= mysg (.-waiting gp))
+          (throw "G waiting list is corrupted"))
+
+        (set! (.-waiting gp) nil)
+        (set! (.-activeStackChans gp) false)
+        ^{:go/breaks [[7 309]]} (let [closed (not (.-success mysg))]
+          (set! (.-param gp) nil)
+          (when (> (.-releasetime mysg) 0)
+            (blockevent (- (.-releasetime mysg) t0) 2))
+
+          (.set (.-c mysg) nil)
+          (releaseSudog mysg)
+          (when closed
+            (when (== (.-closed c) 0)
+              (throw "chansend: spurious wakeup"))
+
+            (panic (conv plainError "send on closed channel")))
+
+          true)))))
+
+
+
+
+
+
+
+
+^{:go/end 351} (go/func send "send processes a send operation on an empty channel c.\nThe value ep sent by the sender is copied to the receiver sg.\nThe receiver is then woken up to go on its merry way.\nChannel c must be empty and locked.  send unlocks c with unlockf.\nsg must already be dequeued from c.\nep must be non-nil and point to the heap or the caller's stack.\n" [^{:tag (* hchan)} c ^{:tag (* sudog)} sg ^unsafe/Pointer ep ^{:tag (func [])} unlockf ^int skip]
+  (when (and (!= (.-bubble c) nil) (!= (.-bubble (getg)) (.-bubble c)))
+    (unlockf)
+    (fatal "send on synctest channel from outside bubble"))
+
+  (when raceenabled
+    (if (== (.-dataqsiz c) 0)
+      (racesync c sg)
+      (do
+        ;; Pretend we go through the buffer, even though
+        ;; we copy directly. Note that we need to increment
+        ;; the head/tail locations only when raceenabled.
+        (racenotify c (.-recvx c) nil)
+        (racenotify c (.-recvx c) sg)
+        (inc! (.-recvx c))
+        (when (== (.-recvx c) (.-dataqsiz c))
+          (set! (.-recvx c) 0))
+
+        (set! (.-sendx c) (.-recvx c))))) ; c.sendx = (c.sendx+1) % c.dataqsiz
+
+
+  (when (!= (.get (.-elem sg)) nil)
+    (sendDirect (.-elemtype c) sg ep)
+    (.set (.-elem sg) nil))
+
+  (let [gp (.-g sg)]
+    (unlockf)
+    (set! (.-param gp) (conv unsafe/Pointer sg))
+    (set! (.-success sg) true)
+    (when (!= (.-releasetime sg) 0)
+      (set! (.-releasetime sg) (cputicks)))
+
+    (goready gp (+ skip 1))))
+
+
+
+
+
+
+
+^{:go/end 380} (go/func timerchandrain "timerchandrain removes all elements in channel c's buffer.\nIt reports whether any elements were removed.\nBecause it is only intended for timers, it does not\nhandle waiting senders at all (all timer channels\nuse non-blocking sends to fill the buffer).\n" ^bool [^{:tag (* hchan)} c]
+  ;; Note: Cannot use empty(c) because we are called
+  ;; while holding c.timer.sendLock, and empty(c) will
+  ;; call c.timer.maybeRunChan, which will deadlock.
+  ;; We are emptying the channel, so we only care about
+  ;; the count, not about potentially filling it up.
+  (when (== (atomic/Loaduint (addr (.-qcount c))) 0)
+    (return false))
+
+  (lock (addr (.-lock c)))
+  (let [any false]
+    (while (> (.-qcount c) 0)
+      (set! any true)
+      (typedmemclr (.-elemtype c) (chanbuf c (.-recvx c)))
+      (inc! (.-recvx c))
+      (when (== (.-recvx c) (.-dataqsiz c))
+        (set! (.-recvx c) 0))
+
+      (dec! (.-qcount c)))
+
+    (unlock (addr (.-lock c)))
+    ^{:line 379} any))
+
+
+;; Sends and receives on unbuffered or empty-buffered channels are the
+;; only operations where one running goroutine writes to the stack of
+;; another running goroutine. The GC assumes that stack writes only
+;; happen when the goroutine is running and are only done by that
+;; goroutine. Using a write barrier is sufficient to make up for
+;; violating that assumption, but the write barrier has to work.
+;; typedmemmove will call bulkBarrierPreWrite, but the target bytes
+;; are not in the heap, so that will not help. We arrange to call
+;; memmove and typeBitsBulkBarrier instead.
+
+^{:go/end 403} (go/func sendDirect [^{:tag (* _type)} t ^{:tag (* sudog)} sg ^unsafe/Pointer src]
+  ;; src is on our stack, dst is a slot on another stack.
+
+  ;; Once we read sg.elem out of sg, it will no longer
+  ;; be updated if the destination's stack gets copied (shrunk).
+  ;; So make sure that no preemption points can happen between read & use.
+  (let [dst (.get (.-elem sg))]
+    (typeBitsBulkBarrier t (conv uintptr dst) (conv uintptr src) (.-Size_ t))
+    ;; No need for cgo write barrier checks because dst is always
+    ;; Go memory.
+    (memmove dst src (.-Size_ t))))
+
+
+^{:go/end 412} (go/func recvDirect [^{:tag (* _type)} t ^{:tag (* sudog)} sg ^unsafe/Pointer dst]
+  ;; dst is on our stack or the heap, src is on another stack.
+  ;; The channel is locked, so src will not move during this
+  ;; operation.
+  (let [src (.get (.-elem sg))]
+    (typeBitsBulkBarrier t (conv uintptr dst) (conv uintptr src) (.-Size_ t))
+    (memmove dst src (.-Size_ t))))
+
+
+^{:go/end 486} (go/func closechan [^{:tag (* hchan)} c]
+  (when (== c nil)
+    (panic (conv plainError "close of nil channel")))
+
+  (when (and (!= (.-bubble c) nil) (!= (.-bubble (getg)) (.-bubble c)))
+    (fatal "close of synctest channel from outside bubble"))
+
+
+  (lock (addr (.-lock c)))
+  (when (!= (.-closed c) 0)
+    (unlock (addr (.-lock c)))
+    (panic (conv plainError "close of closed channel")))
+
+
+  (when raceenabled
+    (let [callerpc (sys/GetCallerPC)]
+      (racewritepc (.raceaddr c) callerpc (abi/FuncPCABIInternal closechan))
+      (racerelease (.raceaddr c))))
+
+
+  (set! (.-closed c) 1)
+
+  (let [^gList glist (zero gList)]
+
+    ;; release all readers
+    (while true
+      (let [sg (.dequeue (.-recvq c))]
+        (when (== sg nil)
+          (break))
+
+        (when (!= (.get (.-elem sg)) nil)
+          (typedmemclr (.-elemtype c) (.get (.-elem sg)))
+          (.set (.-elem sg) nil))
+
+        (when (!= (.-releasetime sg) 0)
+          (set! (.-releasetime sg) (cputicks)))
+
+        (let [gp (.-g sg)]
+          (set! (.-param gp) (conv unsafe/Pointer sg))
+          (set! (.-success sg) false)
+          (when raceenabled
+            (raceacquireg gp (.raceaddr c)))
+
+          (.push glist gp))))
+
+
+    ;; release all writers (they will panic)
+    (while true
+      (let [sg (.dequeue (.-sendq c))]
+        (when (== sg nil)
+          (break))
+
+        (.set (.-elem sg) nil)
+        (when (!= (.-releasetime sg) 0)
+          (set! (.-releasetime sg) (cputicks)))
+
+        (let [gp (.-g sg)]
+          (set! (.-param gp) (conv unsafe/Pointer sg))
+          (set! (.-success sg) false)
+          (when raceenabled
+            (raceacquireg gp (.raceaddr c)))
+
+          (.push glist gp))))
+
+    (unlock (addr (.-lock c)))
+
+    ;; Ready all Gs now that we've dropped the channel lock.
+    (while (not (.empty glist))
+      (let [gp (.pop glist)]
+        (set! (.-schedlink gp) 0)
+        (goready gp 3)))))
+
+
+
+
+
+
+
+^{:go/end 503} (go/func empty "empty reports whether a read from c would block (that is, the channel is\nempty).  It is atomically correct and sequentially consistent at the moment\nit returns, but since the channel is unlocked, the channel may become\nnon-empty immediately afterward.\n" ^bool [^{:tag (* hchan)} c]
+  ;; c.dataqsiz is immutable.
+  (when (== (.-dataqsiz c) 0)
+    (return (== (atomic/Loadp (conv unsafe/Pointer (addr (.-first (.-sendq c))))) nil)))
+
+  ;; c.timer is also immutable (it is set after make(chan) but before any channel operations).
+  ;; All timer channels have dataqsiz > 0.
+  (when (!= (.-timer c) nil)
+    (.maybeRunChan (.-timer c) c))
+
+  (== (atomic/Loaduint (addr (.-qcount c))) 0))
+
+
+
+
+
+^{:go/end 510} (go/func ^:go/nosplit chanrecv1 "entry points for <- c from compiled code.\n" [^{:tag (* hchan)} c ^unsafe/Pointer elem]
+  (chanrecv c elem true))
+
+
+
+^{:go/end 516} (go/func ^:go/nosplit chanrecv2 [^{:tag (* hchan)} c ^unsafe/Pointer elem] :results [^bool received]
+  (set! (values _ received) (chanrecv c elem true))
+  (return))
+
+
+
+
+
+
+
+
+^{:go/end 686} (go/func chanrecv "chanrecv receives on channel c and writes the received data to ep.\nep may be nil, in which case received data is ignored.\nIf block == false and no elements are available, returns (false, false).\nOtherwise, if c is closed, zeros *ep and returns (true, false).\nOtherwise, fills in *ep with an element and returns (true, true).\nA non-nil ep must point to the heap or the caller's stack.\n" [^{:tag (* hchan)} c ^unsafe/Pointer ep ^bool block] :results [^bool selected ^bool received]
+  ;; raceenabled: don't need to check ep, as it is always on the stack
+  ;; or is new memory allocated by reflect.
+
+  (when debugChan
+    (print "chanrecv: chan=" c "\n"))
+
+
+  (when (== c nil)
+    (when (not block)
+      (return))
+
+    (gopark nil nil waitReasonChanReceiveNilChan traceBlockForever 2)
+    (throw "unreachable"))
+
+
+  (when (and (!= (.-bubble c) nil) (!= (.-bubble (getg)) (.-bubble c)))
+    (fatal "receive on synctest channel from outside bubble"))
+
+
+  (when (!= (.-timer c) nil)
+    (.maybeRunChan (.-timer c) c))
+
+
+  ;; Fast path: check for failed non-blocking operation without acquiring the lock.
+  (when (and (not block) (empty c))
+    ;; After observing that the channel is not ready for receiving, we observe whether the
+    ;; channel is closed.
+    ;;
+    ;; Reordering of these checks could lead to incorrect behavior when racing with a close.
+    ;; For example, if the channel was open and not empty, was closed, and then drained,
+    ;; reordered reads could incorrectly indicate "open and empty". To prevent reordering,
+    ;; we use atomic loads for both checks, and rely on emptying and closing to happen in
+    ;; separate critical sections under the same lock.  This assumption fails when closing
+    ;; an unbuffered channel with a blocked send, but that is an error condition anyway.
+    (when (== (atomic/Load (addr (.-closed c))) 0)
+      ;; Because a channel cannot be reopened, the later observation of the channel
+      ;; being not closed implies that it was also not closed at the moment of the
+      ;; first observation. We behave as if we observed the channel at that moment
+      ;; and report that the receive cannot proceed.
+      (return))
+
+    ;; The channel is irreversibly closed. Re-check whether the channel has any pending data
+    ;; to receive, which could have arrived between the empty and closed checks above.
+    ;; Sequential consistency is also required here, when racing with such a send.
+    (when (empty c)
+      ;; The channel is irreversibly closed and empty.
+      (when raceenabled
+        (raceacquire (.raceaddr c)))
+
+      (when (!= ep nil)
+        (typedmemclr (.-elemtype c) ep))
+
+      (return true false)))
+
+
+
+  (let [^int64 t0 (zero int64)]
+    (when (> blockprofilerate 0)
+      (set! t0 (cputicks)))
+
+
+    (lock (addr (.-lock c)))
+
+    (if (!= (.-closed c) 0)
+      (when (== (.-qcount c) 0)
+        (when raceenabled
+          (raceacquire (.raceaddr c)))
+
+        (unlock (addr (.-lock c)))
+        (when (!= ep nil)
+          (typedmemclr (.-elemtype c) ep))
+
+        (return true false))
+
+      ;; The channel has been closed, but the channel's buffer have data.
+      (do
+        ;; Just found waiting sender with not closed.
+        (when [sg (.dequeue (.-sendq c))] (!= sg nil)
+          ;; Found a waiting sender. If buffer is size 0, receive value
+          ;; directly from sender. Otherwise, receive from head of queue
+          ;; and add sender's value to the tail of the queue (both map to
+          ;; the same buffer slot because the queue is full).
+          (recv c sg ep ^{:go/end 607} (fn [] (unlock (addr (.-lock c)))) 3)
+          (return true true))))
+
+
+
+    (when (> (.-qcount c) 0)
+      ;; Receive directly from queue
+      (let [qp (chanbuf c (.-recvx c))]
+        (when raceenabled
+          (racenotify c (.-recvx c) nil))
+
+        (when (!= ep nil)
+          (typedmemmove (.-elemtype c) ep qp))
+
+        (typedmemclr (.-elemtype c) qp)
+        (inc! (.-recvx c))
+        (when (== (.-recvx c) (.-dataqsiz c))
+          (set! (.-recvx c) 0))
+
+        (dec! (.-qcount c))
+        (unlock (addr (.-lock c)))
+        (return true true)))
+
+
+    (when (not block)
+      (unlock (addr (.-lock c)))
+      (return false false))
+
+
+    ;; no sender available: block on this channel.
+    (let [gp (getg)
+        ^{:line 638} mysg (acquireSudog)]
+      (set! (.-releasetime mysg) 0)
+      (when (!= t0 0)
+        (set! (.-releasetime mysg) -1))
+
+      ;; No stack splits between assigning elem and enqueuing mysg
+      ;; on gp.waiting where copystack can find it.
+      (.set (.-elem mysg) ep)
+      (set! (.-waitlink mysg) nil)
+      (set! (.-waiting gp) mysg)
+
+      (set! (.-g mysg) gp)
+      (set! (.-isSelect mysg) false)
+      (.set (.-c mysg) c)
+      (set! (.-param gp) nil)
+      (.enqueue (.-recvq c) mysg)
+      (when (!= (.-timer c) nil)
+        (blockTimerChan c))
+
+
+      ;; Signal to anyone trying to shrink our stack that we're about
+      ;; to park on a channel. The window between when this G's status
+      ;; changes and when we set gp.activeStackChans is not safe for
+      ;; stack shrinking.
+      (.Store (.-parkingOnChan gp) true)
+      (let [reason waitReasonChanReceive]
+        (when (!= (.-bubble c) nil)
+          (set! reason waitReasonSynctestChanReceive))
+
+        (gopark chanparkcommit (conv unsafe/Pointer (addr (.-lock c))) reason traceBlockChanRecv 2)
+
+        ;; someone woke us up
+        (when (!= mysg (.-waiting gp))
+          (throw "G waiting list is corrupted"))
+
+        (when (!= (.-timer c) nil)
+          (unblockTimerChan c))
+
+        (set! (.-waiting gp) nil)
+        (set! (.-activeStackChans gp) false)
+        (when (> (.-releasetime mysg) 0)
+          (blockevent (- (.-releasetime mysg) t0) 2))
+
+        (let [success (.-success mysg)]
+          (set! (.-param gp) nil)
+          (.set (.-c mysg) nil)
+          (releaseSudog mysg)
+          (return true success))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 746} (go/func recv "recv processes a receive operation on a full channel c.\nThere are 2 parts:\n 1. The value sent by the sender sg is put into the channel\n    and the sender is woken up to go on its merry way.\n 2. The value received by the receiver (the current G) is\n    written to ep.\n\nFor synchronous channels, both values are the same.\nFor asynchronous channels, the receiver gets its data from\nthe channel buffer and the sender's data is put in the\nchannel buffer.\nChannel c must be full and locked. recv unlocks c with unlockf.\nsg must already be dequeued from c.\nA non-nil ep must point to the heap or the caller's stack.\n" [^{:tag (* hchan)} c ^{:tag (* sudog)} sg ^unsafe/Pointer ep ^{:tag (func [])} unlockf ^int skip]
+  (when (and (!= (.-bubble c) nil) (!= (.-bubble (getg)) (.-bubble c)))
+    (unlockf)
+    (fatal "receive on synctest channel from outside bubble"))
+
+  (if (== (.-dataqsiz c) 0) (do
+      (when raceenabled
+        (racesync c sg))
+
+      (when (!= ep nil)
+        ;; copy data from sender
+        (recvDirect (.-elemtype c) sg ep)))
+
+
+    ;; Queue is full. Take the item at the
+    ;; head of the queue. Make the sender enqueue
+    ;; its item at the tail of the queue. Since the
+    ;; queue is full, those are both the same slot.
+    (let [qp (chanbuf c (.-recvx c))]
+      (when raceenabled
+        (racenotify c (.-recvx c) nil)
+        (racenotify c (.-recvx c) sg))
+
+      ;; copy data from queue to receiver
+      (when (!= ep nil)
+        (typedmemmove (.-elemtype c) ep qp))
+
+      ;; copy data from sender to queue
+      (typedmemmove (.-elemtype c) qp (.get (.-elem sg)))
+      (inc! (.-recvx c))
+      (when (== (.-recvx c) (.-dataqsiz c))
+        (set! (.-recvx c) 0))
+
+      (set! (.-sendx c) (.-recvx c)))) ; c.sendx = (c.sendx+1) % c.dataqsiz
+
+  (.set (.-elem sg) nil)
+  (let [gp (.-g sg)]
+    (unlockf)
+    (set! (.-param gp) (conv unsafe/Pointer sg))
+    (set! (.-success sg) true)
+    (when (!= (.-releasetime sg) 0)
+      (set! (.-releasetime sg) (cputicks)))
+
+    (goready gp (+ skip 1))))
+
+
+^{:go/breaks [6] :go/end 766} (go/func chanparkcommit ^bool [^{:tag (* g)} gp ^unsafe/Pointer chanLock]
+  ;; There are unlocked sudogs that point into gp's stack. Stack
+  ;; copying must lock the channels of those sudogs.
+  ;; Set activeStackChans here instead of before we try parking
+  ;; because we could self-deadlock in stack growth on the
+  ;; channel lock.
+  (set! (.-activeStackChans gp) true)
+  ;; Mark that it's safe for stack shrinking to occur now,
+  ;; because any thread acquiring this G's stack for shrinking
+  ;; is guaranteed to observe activeStackChans after this store.
+  (.Store (.-parkingOnChan gp) false)
+  ;; Make sure we unlock after setting activeStackChans and
+  ;; unsetting parkingOnChan. The moment we unlock chanLock
+  ;; we risk gp getting readied by a channel operation and
+  ;; so gp could continue running before everything before
+  ;; the unlock is visible (even to gp itself).
+  (unlock (conv (* mutex) chanLock))
+  true)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 786} (go/func selectnbsend "compiler implements\n\n\tselect {\n\tcase c <- v:\n\t\t... foo\n\tdefault:\n\t\t... bar\n\t}\n\nas\n\n\tif selectnbsend(c, v) {\n\t\t... foo\n\t} else {\n\t\t... bar\n\t}\n" [^{:tag (* hchan)} c ^unsafe/Pointer elem] :results [^bool selected]
+  (chansend c elem false (sys/GetCallerPC)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 806} (go/func selectnbrecv "compiler implements\n\n\tselect {\n\tcase v, ok = <-c:\n\t\t... foo\n\tdefault:\n\t\t... bar\n\t}\n\nas\n\n\tif selected, ok = selectnbrecv(&v, c); selected {\n\t\t... foo\n\t} else {\n\t\t... bar\n\t}\n" [^unsafe/Pointer elem ^{:tag (* hchan)} c] :results [^bool selected ^bool received]
+  (chanrecv c elem false))
+
+
+
+^{:go/end 811} (go/func ^{:go/linkname "reflect_chansend reflect.chansend0"} reflect_chansend [^{:tag (* hchan)} c ^unsafe/Pointer elem ^bool nb] :results [^bool selected]
+  (chansend c elem (not nb) (sys/GetCallerPC)))
+
+
+
+^{:go/end 816} (go/func ^{:go/linkname "reflect_chanrecv reflect.chanrecv"} reflect_chanrecv [^{:tag (* hchan)} c ^bool nb ^unsafe/Pointer elem] :results [^bool selected ^bool received]
+  (chanrecv c elem (not nb)))
+
+
+^{:go/end 826} (go/func chanlen ^int [^{:tag (* hchan)} c]
+  (when (or (== c nil) (!= (.-timer c) nil))
+    ;; timer channels have a buffered implementation
+    ;; but present to users as unbuffered, so that we can
+    ;; undo sends without users noticing.
+    (return 0))
+
+  (conv int (.-qcount c)))
+
+
+^{:go/end 836} (go/func chancap ^int [^{:tag (* hchan)} c]
+  (when (or (== c nil) (!= (.-timer c) nil))
+    ;; timer channels have a buffered implementation
+    ;; but present to users as unbuffered, so that we can
+    ;; undo sends without users noticing.
+    (return 0))
+
+  (conv int (.-dataqsiz c)))
+
+
+
+^{:go/end 841} (go/func ^{:go/linkname "reflect_chanlen reflect.chanlen"} reflect_chanlen ^int [^{:tag (* hchan)} c]
+  (chanlen c))
+
+
+
+^{:go/end 846} (go/func ^{:go/linkname "reflectlite_chanlen internal/reflectlite.chanlen"} reflectlite_chanlen ^int [^{:tag (* hchan)} c]
+  (chanlen c))
+
+
+
+^{:go/end 851} (go/func ^{:go/linkname "reflect_chancap reflect.chancap"} reflect_chancap ^int [^{:tag (* hchan)} c]
+  (chancap c))
+
+
+
+^{:go/end 856} (go/func ^{:go/linkname "reflect_chanclose reflect.chanclose"} reflect_chanclose [^{:tag (* hchan)} c]
+  (closechan c))
+
+
+^{:go/end 870} (go/method enqueue [^{:tag (* waitq)} q ^{:tag (* sudog)} sgp]
+  (set! (.-next sgp) nil)
+  (let [x (.-last q)]
+    (when (== x nil)
+      (set! (.-prev sgp) nil)
+      (set! (.-first q) sgp)
+      (set! (.-last q) sgp)
+      (return))
+
+    (set! (.-prev sgp) x)
+    (set! (.-next x) sgp)
+    (set! (.-last q) sgp)))
+
+
+^{:go/end 905} (go/method dequeue ^{:tag (* sudog)} [^{:tag (* waitq)} q]
+  (while true
+    (let [sgp (.-first q)]
+      (when (== sgp nil)
+        (return nil))
+
+      (let [y (.-next sgp)]
+        (if (== y nil) (do
+            (set! (.-first q) nil)
+            (set! (.-last q) nil))
+          (do
+            (set! (.-prev y) nil)
+            (set! (.-first q) y)
+            (set! (.-next sgp) nil))) ; mark as removed (see dequeueSudoG)
+
+
+        ;; if a goroutine was put on this queue because of a
+        ;; select, there is a small window between the goroutine
+        ;; being woken up by a different case and it grabbing the
+        ;; channel locks. Once it has the lock
+        ;; it removes itself from the queue, so we won't see it after that.
+        ;; We use a flag in the G struct to tell us when someone
+        ;; else has won the race to signal this goroutine but the goroutine
+        ;; hasn't removed itself from the queue yet.
+        (when (.-isSelect sgp)
+          (when (not (.CompareAndSwap (.-selectDone (.-g sgp)) 0 1))
+            ;; We lost the race to wake this goroutine.
+            (continue)))
+
+
+
+        (return sgp)))))
+
+
+
+^{:go/end 914} (go/method raceaddr ^unsafe/Pointer [^{:tag (* hchan)} c]
+  ;; Treat read-like and write-like operations on the channel to
+  ;; happen at this address. Avoid using the address of qcount
+  ;; or dataqsiz, because the len() and cap() builtins read
+  ;; those addresses, and we don't want them racing with
+  ;; operations like close().
+  (conv unsafe/Pointer (addr (.-buf c))))
+
+
+^{:go/end 921} (go/func racesync [^{:tag (* hchan)} c ^{:tag (* sudog)} sg]
+  (racerelease (chanbuf c 0))
+  (raceacquireg (.-g sg) (chanbuf c 0))
+  (racereleaseg (.-g sg) (chanbuf c 0))
+  (raceacquire (chanbuf c 0)))
+
+
+
+
+
+^{:go/end 956} (go/func racenotify "Notify the race detector of a send or receive involving buffer entry idx\nand a channel c or its communicating partner sg.\nThis function handles the special case of c.elemsize==0.\n" [^{:tag (* hchan)} c ^uint idx ^{:tag (* sudog)} sg]
+  ;; We could have passed the unsafe.Pointer corresponding to entry idx
+  ;; instead of idx itself.  However, in a future version of this function,
+  ;; we can use idx to better handle the case of elemsize==0.
+  ;; A future improvement to the detector is to call TSan with c and idx:
+  ;; this way, Go will continue to not allocating buffer entries for channels
+  ;; of elemsize==0, yet the race detector can be made to handle multiple
+  ;; sync objects underneath the hood (one sync object per idx)
+  (let [qp (chanbuf c idx)]
+    ;; When elemsize==0, we don't allocate a full buffer for the channel.
+    ;; Instead of individual buffer entries, the race detector uses the
+    ;; c.buf as the only buffer entry.  This simplification prevents us from
+    ;; following the memory model's happens-before rules (rules that are
+    ;; implemented in racereleaseacquire).  Instead, we accumulate happens-before
+    ;; information in the synchronization object associated with c.buf.
+    (if (== (.-elemsize c) 0)
+      (if (== sg nil) (do
+          (raceacquire qp)
+          (racerelease qp))
+        (do
+          (raceacquireg (.-g sg) qp)
+          (racereleaseg (.-g sg) qp)))
+
+      (do
+        (if (== sg nil)
+          (racereleaseacquire qp)
+
+          (racereleaseacquireg (.-g sg) qp))))))

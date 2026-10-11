@@ -1,0 +1,202 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "histogram.go" :imports [
+
+
+    ^{:line 8} [atomic "internal/runtime/atomic"]
+    ^{:line 9} [sys "internal/runtime/sys"]
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+(go/const
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 65} [^{:val 9 :doc "For the time histogram type, we use an HDR histogram.\nValues are placed in buckets based solely on the most\nsignificant set bit. Thus, buckets are power-of-2 sized.\nValues are then placed into sub-buckets based on the value of\nthe next timeHistSubBucketBits most significant bits. Thus,\nsub-buckets are linear within a bucket.\n\nTherefore, the number of sub-buckets (timeHistNumSubBuckets)\ndefines the error. This error may be computed as\n1/timeHistNumSubBuckets*100%. For example, for 16 sub-buckets\nper bucket the error is approximately 6%.\n\nThe number of buckets (timeHistNumBuckets), on the\nother hand, defines the range. To avoid producing a large number\nof buckets that are close together, especially for small numbers\n(e.g. 1, 2, 3, 4, 5 ns) that aren't very useful, timeHistNumBuckets\nis defined in terms of the least significant bit (timeHistMinBucketBits)\nthat needs to be set before we start bucketing and the most\nsignificant bit (timeHistMaxBucketBits) that we bucket before we just\ndump it into a catch-all bucket.\n\nAs an example, consider the configuration:\n\n   timeHistMinBucketBits = 9\n   timeHistMaxBucketBits = 48\n   timeHistSubBucketBits = 2\n\nThen:\n\n   011000001\n   ^--\n   │ ^\n   │ └---- Next 2 bits -> sub-bucket 3\n   └------- Bit 9 unset -> bucket 0\n\n   110000001\n   ^--\n   │ ^\n   │ └---- Next 2 bits -> sub-bucket 2\n   └------- Bit 9 set -> bucket 1\n\n   1000000010\n   ^-- ^\n   │ ^ └-- Lower bits ignored\n   │ └---- Next 2 bits -> sub-bucket 0\n   └------- Bit 10 set -> bucket 2\n\nFollowing this pattern, bucket 38 will have the bit 46 set. We don't\nhave any buckets for higher values, so we spill the rest into an overflow\nbucket containing values of 2^47-1 nanoseconds or approx. 1 day or more.\nThis range is more than enough to handle durations produced by the runtime.\n"} timeHistMinBucketBits 9]
+  ^{:line 66} [^{:val 48} timeHistMaxBucketBits 48] ; Note that this is exclusive; 1 higher than the actual range.
+  ^{:line 67} [^{:val 2} timeHistSubBucketBits 2]
+  ^{:line 68} [^{:val 4} timeHistNumSubBuckets (<< 1 timeHistSubBucketBits)]
+  ^{:line 69} [^{:val 40} timeHistNumBuckets (+ (- timeHistMaxBucketBits timeHistMinBucketBits) 1)]
+
+  ^{:line 71} [^{:val 162 :doc "Two extra buckets, one for underflow, one for overflow.\n"} timeHistTotalBuckets (+ (* timeHistNumBuckets timeHistNumSubBuckets) 2)])
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type timeHistogram "timeHistogram represents a distribution of durations in\nnanoseconds.\n\nThe accuracy and range of the histogram is defined by the\ntimeHistSubBucketBits and timeHistNumBuckets constants.\n\nIt is an HDR histogram with exponentially-distributed\nbuckets and linearly distributed sub-buckets.\n\nThe histogram is safe for concurrent reads and writes.\n" (struct
+    ^{:line 85 :tag (array (* timeHistNumBuckets timeHistNumSubBuckets) atomic/Uint64)} counts
+
+
+
+
+
+
+    ^{:line 92 :tag atomic/Uint64 :doc "underflow counts all the times we got a negative duration\nsample. Because of how time works on some platforms, it's\npossible to measure negative durations. We could ignore them,\nbut we record them anyway because it's better to have some\nsignal that it's happening than just missing samples.\n"} underflow
+
+
+
+    ^{:line 96 :tag atomic/Uint64 :doc "overflow counts all the times we got a duration that exceeded\nthe range counts represents.\n"} overflow))
+
+
+
+
+
+
+
+
+^{:go/end 135} (go/method ^:go/nosplit record "record adds the given duration to the distribution.\n\nDisallow preemptions and stack growths because this function\nmay run in sensitive locations.\n" [^{:tag (* timeHistogram)} h ^int64 duration]
+  ;; If the duration is negative, capture that in underflow.
+  (when (< duration 0)
+    (.Add (.-underflow h) 1)
+    (return))
+
+  ;; bucketBit is the target bit for the bucket which is usually the
+  ;; highest 1 bit, but if we're less than the minimum, is the highest
+  ;; 1 bit of the minimum (which will be zero in the duration).
+  ;;
+  ;; bucket is the bucket index, which is the bucketBit minus the
+  ;; highest bit of the minimum, plus one to leave room for the catch-all
+  ;; bucket for samples lower than the minimum.
+  (let [(values ^uint bucketBit ^uint bucket) (zero uint)]
+    (if [l (sys/Len64 (conv uint64 duration))] (< l timeHistMinBucketBits) (do
+        (set! bucketBit timeHistMinBucketBits)
+        (set! bucket 0)) ; bucketBit - timeHistMinBucketBits
+      (do
+        (set! bucketBit (conv uint l))
+        (set! bucket (+ (- bucketBit timeHistMinBucketBits) 1))))
+
+    ;; If the bucket we computed is greater than the number of buckets,
+    ;; count that in overflow.
+    (when (>= bucket timeHistNumBuckets)
+      (.Add (.-overflow h) 1)
+      (return))
+
+    ;; The sub-bucket index is just next timeHistSubBucketBits after the bucketBit.
+    (let [subBucket (% (conv uint (>> duration (- bucketBit 1 timeHistSubBucketBits))) timeHistNumSubBuckets)]
+      (.Add (aget (.-counts h) (+ (* bucket timeHistNumSubBuckets) subBucket)) 1))))
+
+
+
+^{:go/end 148} (go/method write "write dumps the histogram to the passed metricValue as a float64 histogram.\n" [^{:tag (* timeHistogram)} h ^{:tag (* metricValue)} out]
+  (let [hist (.float64HistOrInit out timeHistBuckets)]
+    ;; The bottom-most bucket, containing negative values, is tracked
+    ;; separately as underflow, so fill that in manually and then iterate
+    ;; over the rest.
+    (aset (.-counts hist) 0 (.Load (.-underflow h)))
+    (range [i (.-counts h)]
+      (aset (.-counts hist) (+ i 1) (.Load (aget (.-counts h) i))))
+
+    (aset (.-counts hist) (- (len (.-counts hist)) 1) (.Load (.-overflow h)))))
+
+
+(go/const
+  ^{:line 151} [^{:val 9218868437227405312} fInf 0x7FF0000000000000]
+  ^{:line 152} [^{:val 18442240474082181120N} fNegInf 0xFFF0000000000000])
+
+
+^{:go/end 158} (go/func float64Inf ^float64 []
+  (let [inf (conv uint64 fInf)]
+    ^{:line 157} @(conv (* float64) (conv unsafe/Pointer (addr inf)))))
+
+
+^{:go/end 163} (go/func float64NegInf ^float64 []
+  (let [inf (conv uint64 fNegInf)]
+    ^{:line 162} @(conv (* float64) (conv unsafe/Pointer (addr inf)))))
+
+
+
+
+
+^{:go/end 203} (go/func timeHistogramMetricsBuckets "timeHistogramMetricsBuckets generates a slice of boundaries for\nthe timeHistogram. These boundaries are represented in seconds,\nnot nanoseconds like the timeHistogram represents durations.\n" ^{:tag (slice float64)} []
+  (let [b (make (slice float64) (+ timeHistTotalBuckets 1))]
+    ;; Underflow bucket.
+    (aset b 0 (float64NegInf))
+
+    (for [j 0] (< j timeHistNumSubBuckets) (inc! j)
+      ;; No bucket bit for the first few buckets. Just sub-bucket bits after the
+      ;; min bucket bit.
+      (let [bucketNanos (<< (conv uint64 j) (- timeHistMinBucketBits 1 timeHistSubBucketBits))]
+        ;; Convert nanoseconds to seconds via a division.
+        ;; These values will all be exactly representable by a float64.
+        (aset b (+ j 1) (/ (conv float64 bucketNanos) 1.0E9))))
+
+    ;; Generate the rest of the buckets. It's easier to reason
+    ;; about if we cut out the 0'th bucket.
+    (for [i timeHistMinBucketBits] (< i timeHistMaxBucketBits) (inc! i)
+      (for [j 0] (< j timeHistNumSubBuckets) (inc! j)
+        ;; Set the bucket bit.
+        (let [bucketNanos (<< (conv uint64 1) (- i 1))]
+          ;; Set the sub-bucket bits.
+          (set! bucketNanos bit-or (<< (conv uint64 j) (- i 1 timeHistSubBucketBits)))
+          ;; The index for this bucket is going to be the (i+1)'th bucket
+          ;; (note that we're starting from zero, but handled the first bucket
+          ;; earlier, so we need to compensate), and the j'th sub bucket.
+          ;; Add 1 because we left space for -Inf.
+          (let [bucketIndex (+ (* (+ (- i timeHistMinBucketBits) 1) timeHistNumSubBuckets) j 1)]
+            ;; Convert nanoseconds to seconds via a division.
+            ;; These values will all be exactly representable by a float64.
+            (aset b bucketIndex (/ (conv float64 bucketNanos) 1.0E9))))))
+
+
+    ;; Overflow bucket.
+    (aset b (- (len b) 2) (/ (conv float64 (<< (conv uint64 1) (- timeHistMaxBucketBits 1))) 1.0E9))
+    (aset b (- (len b) 1) (float64Inf))
+    ^{:line 202} b))

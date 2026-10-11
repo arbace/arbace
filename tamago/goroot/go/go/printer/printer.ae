@@ -1,0 +1,1434 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package printer implements printing of AST nodes.
+(in-ns 'go.go.printer) (go/file "printer.go" :doc "Package printer implements printing of AST nodes.\n" :imports [
+
+
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [ast "go/ast"]
+    ^{:line 11} [constraint "go/build/constraint"]
+    ^{:line 12} [token "go/token"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [sync "sync"]
+    ^{:line 17} [tabwriter "text/tabwriter"]
+    ^{:line 18} [unicode "unicode"]])
+
+
+(go/const
+  ^{:line 22} [^{:val 2} maxNewlines 2] ; max. number of newlines between source text
+  ^{:line 23} [^{:val false} debug false] ; enable for debugging
+  ^{:line 24} [^{:val 1073741824} infinity (<< 1 30)])
+
+
+(go/type whiteSpace byte)
+
+(go/const
+  ^{:line 30} [^{:val 0} ignore (conv whiteSpace 0)]
+  ^{:line 31} [^{:val 32} blank (conv whiteSpace \space)]
+  ^{:line 32} [^{:val 11} vtab (conv whiteSpace \u000b)]
+  ^{:line 33} [^{:val 10} newline (conv whiteSpace \newline)]
+  ^{:line 34} [^{:val 12} formfeed (conv whiteSpace \formfeed)]
+  ^{:line 35} [^{:val 62} indent (conv whiteSpace \>)]
+  ^{:line 36} [^{:val 60} unindent (conv whiteSpace \<)])
+
+
+
+(go/type pmode "A pmode value represents the current printer mode.\n" int)
+
+(go/const
+  ^{:line 43} [^{:tag pmode :val 1} noExtraBlank (<< 1 iota)] ; disables extra blank after /*-style comment
+  ^{:line 44} [^{:val 2} noExtraLinebreak]) ; disables extra line break after /*-style comment
+
+
+(go/type commentInfo (struct
+    ^{:line 48 :tag int} cindex ; index of the next comment
+    ^{:line 49 :tag (* ast/CommentGroup)} comment ; = printer.comments[cindex-1]; or nil
+    ^{:line 50 :tag int} commentOffset ; = printer.posFor(printer.comments[cindex-1].List[0].Pos()).Offset; or infinity
+    ^{:line 51 :tag bool} commentNewline)) ; true if the comment group contains newlines
+
+
+(go/type printer (struct
+
+    ^{:line 56 :doc "Configuration (does not change after initialization)\n"} Config
+    ^{:line 57 :tag (* token/FileSet)} fset
+
+
+    ^{:line 60 :tag (slice byte) :doc "Current state\n"} output ; raw printer result
+    ^{:line 61 :tag int} indent ; current indentation
+    ^{:line 62 :tag int} level ; level == 0: outside composite literal; level > 0: inside composite literal
+    ^{:line 63 :tag pmode} mode ; current printer mode
+    ^{:line 64 :tag bool} endAlignment ; if set, terminate alignment immediately
+    ^{:line 65 :tag bool} impliedSemi ; if set, a linebreak implies a semicolon
+    ^{:line 66 :tag token/Token} lastTok ; last token printed (token.ILLEGAL if it's whitespace)
+    ^{:line 67 :tag token/Token} prevOpen ; previous non-brace "open" token (, [, or token.ILLEGAL
+    ^{:line 68 :tag (slice whiteSpace)} wsbuf ; delayed white space
+    ^{:line 69 :tag (slice int)} goBuild ; start index of all //go:build comments in output
+    ^{:line 70 :tag (slice int)} plusBuild ; start index of all // +build comments in output
+
+
+
+
+
+
+
+    ^{:line 78 :tag token/Position :doc "Positions\nThe out position differs from the pos position when the result\nformatting differs from the source formatting (in the amount of\nwhite space). If there's a difference and SourcePos is set in\nConfigMode, //line directives are used in the output to restore\noriginal source positions for a reader.\n"} pos ; current position in AST (source) space
+    ^{:line 79 :tag token/Position} out ; current position in output space
+    ^{:line 80 :tag token/Position} last ; value of pos after calling writeString
+    ^{:line 81 :tag (* int)} linePtr ; if set, record out.Line for the next token in *linePtr
+    ^{:line 82 :tag error} sourcePosErr ; if non-nil, the first error emitting a //line directive
+
+
+    ^{:line 85 :tag (slice (* ast/CommentGroup)) :doc "The list of all source comments, in order of appearance.\n"} comments ; may be nil
+    ^{:line 86 :tag bool} useNodeComments ; if not set, ignore lead and line comments of nodes
+
+
+    ^{:line 89 :doc "Information about p.comments[p.cindex]; set up by nextComment.\n"} commentInfo
+
+
+    ^{:line 92 :tag (map ast/Node int) :doc "Cache of already computed node sizes.\n"} nodeSizes
+
+
+    ^{:line 95 :tag token/Pos :doc "Cache of most recently computed line position.\n"} cachedPos
+    ^{:line 96 :tag int} cachedLine)) ; line corresponding to cachedPos
+
+
+^{:go/end 105} (go/method internalError [^{:tag (* printer)} p & ^{:tag (slice any)} msg]
+  (when debug
+    (fmt/Print (+ (.String (.-pos p)) ": "))
+    (fmt/Println (spread msg))
+    (panic "go/printer")))
+
+
+
+
+
+
+^{:go/end 124} (go/method commentsHaveNewline "commentsHaveNewline reports whether a list of comments belonging to\nan *ast.CommentGroup contains newlines. Because the position information\nmay only be partially correct, we also have to read the comment text.\n" ^bool [^{:tag (* printer)} p ^{:tag (slice (* ast/Comment))} list]
+  ;; len(list) > 0
+  ^{:go/breaks [4]} (let [line (.lineFor p (.Pos (aget list 0)))]
+    (range [i c list]
+      (when (and (> i 0) (!= (.lineFor p (.Pos (aget list i))) line))
+        ;; not all comments on the same line
+        (return true))
+
+      (when [t (.-Text c)] (and (>= (len t) 2) ^:go/paren (or (== (aget t 1) \/) (strings/Contains t "\n")))
+        (return true)))
+
+
+    (set! _ line)
+    false))
+
+
+^{:go/end 141} (go/method nextComment [^{:tag (* printer)} p]
+  (while (< ^{:go/via [commentInfo]} (.-cindex p) (len (.-comments p)))
+    (let [c (aget (.-comments p) ^{:go/via [commentInfo]} (.-cindex p))]
+      (inc! ^{:go/via [commentInfo]} (.-cindex p))
+      (when [list (.-List c)] (> (len list) 0)
+        (set! ^{:go/via [commentInfo]} (.-comment p) c)
+        (set! ^{:go/via [commentInfo]} (.-commentOffset p) (.-Offset (.posFor p (.Pos (aget list 0)))))
+        (set! ^{:go/via [commentInfo]} (.-commentNewline p) (.commentsHaveNewline p list))
+        (return))))
+
+  ;; we should not reach here (correct ASTs don't have empty
+  ;; ast.CommentGroup nodes), but be conservative and try again
+
+  ;; no more comments
+  (set! ^{:go/via [commentInfo]} (.-commentOffset p) infinity))
+
+
+
+
+
+^{:go/end 148} (go/method commentBefore "commentBefore reports whether the current comment group occurs\nbefore the next position in the source code and printing it does\nnot introduce implicit semicolons.\n" ^bool [^{:tag (* printer)} p ^token/Position next]
+  (and (< ^{:go/via [commentInfo]} (.-commentOffset p) (.-Offset next)) ^:go/paren (or (not (.-impliedSemi p)) (not ^{:go/via [commentInfo]} (.-commentNewline p)))))
+
+
+
+
+^{:go/end 166} (go/method commentSizeBefore "commentSizeBefore returns the estimated size of the\ncomments on the same line before the next position.\n" ^int [^{:tag (* printer)} p ^token/Position next]
+  ;; save/restore current p.commentInfo (p.nextComment() modifies it)
+  (defer (^{:go/end 156} (fn [^commentInfo info]
+        (set! (.-commentInfo p) info))
+      (.-commentInfo p)))
+
+  (let [size 0]
+    (while (.commentBefore p next)
+      (range [_ c (.-List ^{:go/via [commentInfo]} (.-comment p))]
+        (set! size + (len (.-Text c))))
+
+      (.nextComment p))
+
+    ^{:line 165} size))
+
+
+
+
+
+
+^{:go/end 174} (go/method recordLine "recordLine records the output line number for the next non-whitespace\ntoken in *linePtr. It is used to compute an accurate line number for a\nformatted construct, independent of pending (not yet emitted) whitespace\nor comments.\n" [^{:tag (* printer)} p ^{:tag (* int)} linePtr]
+  (set! (.-linePtr p) linePtr))
+
+
+
+
+
+
+^{:go/end 182} (go/method linesFrom "linesFrom returns the number of output lines between the current\noutput line and the line argument, ignoring any pending (not yet\nemitted) whitespace or comments. It is used to compute an accurate\nsize (in number of lines) for a formatted construct.\n" ^int [^{:tag (* printer)} p ^int line]
+  (- (.-Line (.-out p)) line))
+
+
+^{:go/end 187} (go/method posFor ^token/Position [^{:tag (* printer)} p ^token/Pos pos]
+  ;; not used frequently enough to cache entire token.Position
+  (.PositionFor (.-fset p) pos false)) ; /* absolute position */
+
+
+^{:go/end 195} (go/method lineFor ^int [^{:tag (* printer)} p ^token/Pos pos]
+  (when (!= pos (.-cachedPos p))
+    (set! (.-cachedPos p) pos)
+    (set! (.-cachedLine p) (.-Line (.PositionFor (.-fset p) pos false)))) ; /* absolute position */
+
+  (.-cachedLine p))
+
+
+
+^{:go/end 214} (go/method writeLineDirective "writeLineDirective writes a //line directive if necessary.\n" [^{:tag (* printer)} p ^token/Position pos]
+  (when (and (.IsValid pos) ^:go/paren (or (!= (.-Line (.-out p)) (.-Line pos)) (!= (.-Filename (.-out p)) (.-Filename pos))))
+    (when (strings/ContainsAny (.-Filename pos) "\r\n")
+      (when (== (.-sourcePosErr p) nil)
+        (set! (.-sourcePosErr p) (fmt/Errorf "go/printer: source filename contains unexpected newline character: %q" (.-Filename pos))))
+
+      (return))
+
+
+    (set! (.-output p) (append (.-output p) tabwriter/Escape)) ; protect '\n' in //line from tabwriter interpretation
+    (set! (.-output p) (append (.-output p) (spread (fmt/Sprintf "//line %s:%d\n" (.-Filename pos) (.-Line pos)))))
+    (set! (.-output p) (append (.-output p) tabwriter/Escape))
+    ;; p.out must match the //line directive
+    (set! (.-Filename (.-out p)) (.-Filename pos))
+    (set! (.-Line (.-out p)) (.-Line pos))))
+
+
+
+
+^{:go/end 229} (go/method writeIndent "writeIndent writes indentation.\n" [^{:tag (* printer)} p]
+  ;; use "hard" htabs - indentation columns
+  ;; must not be discarded by the tabwriter
+  (let [n (+ (.-Indent (.-Config p)) (.-indent p))] ; include base indentation
+    (for [i 0] (< i n) (inc! i)
+      (set! (.-output p) (append (.-output p) \tab)))
+
+
+    ;; update positions
+    (set! (.-Offset (.-pos p)) + n)
+    (set! (.-Column (.-pos p)) + n)
+    (set! (.-Column (.-out p)) + n)))
+
+
+
+
+^{:go/end 268} (go/method writeByte "writeByte writes ch n times to p.output and updates p.pos.\nOnly used to write formatting (white space) characters.\n" [^{:tag (* printer)} p ^byte ch ^int n]
+  (when (.-endAlignment p)
+    ;; Ignore any alignment control character;
+    ;; and at the end of the line, break with
+    ;; a formfeed to indicate termination of
+    ;; existing columns.
+    (switch ch
+      (case [\tab \u000b]
+        (set! ch \space))
+      (case [\newline \formfeed]
+        (set! ch \formfeed)
+        (set! (.-endAlignment p) false))))
+
+
+
+  (when (== (.-Column (.-out p)) 1)
+    ;; no need to write line directives before white space
+    (.writeIndent p))
+
+
+  (for [i 0] (< i n) (inc! i)
+    (set! (.-output p) (append (.-output p) ch)))
+
+
+  ;; update positions
+  (set! (.-Offset (.-pos p)) + n)
+  (when (or (== ch \newline) (== ch \formfeed))
+    (set! (.-Line (.-pos p)) + n)
+    (set! (.-Line (.-out p)) + n)
+    (set! (.-Column (.-pos p)) 1)
+    (set! (.-Column (.-out p)) 1)
+    (return))
+
+  (set! (.-Column (.-pos p)) + n)
+  (set! (.-Column (.-out p)) + n))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 341} (go/method writeString "writeString writes the string s to p.output and updates p.pos, p.out,\nand p.last. If isLit is set, s is escaped w/ tabwriter.Escape characters\nto protect s from being interpreted by the tabwriter.\n\nNote: writeString is only used to write Go tokens, literals, and\ncomments, all of which must be written literally. Thus, it is correct\nto always set isLit = true. However, setting it explicitly only when\nneeded (i.e., when we don't know that s contains no tabs or line breaks)\navoids processing extra escape characters and reduces run time of the\nprinter benchmark by up to 10%.\n" [^{:tag (* printer)} p ^token/Position pos ^string s ^bool isLit]
+  (when (== (.-Column (.-out p)) 1)
+    (when (!= (bit-and (.-Mode (.-Config p)) SourcePos) 0)
+      (.writeLineDirective p pos))
+
+    (.writeIndent p))
+
+
+  (when (.IsValid pos)
+    ;; update p.pos (if pos is invalid, continue with existing p.pos)
+    ;; Note: Must do this after handling line beginnings because
+    ;; writeIndent updates p.pos if there's indentation, but p.pos
+    ;; is the position of s.
+    (set! (.-pos p) pos))
+
+
+  (when isLit
+    ;; Protect s such that is passes through the tabwriter
+    ;; unchanged. Note that valid Go programs cannot contain
+    ;; tabwriter.Escape bytes since they do not appear in legal
+    ;; UTF-8 sequences.
+    (set! (.-output p) (append (.-output p) tabwriter/Escape)))
+
+
+  (when debug
+    (set! (.-output p) (append (.-output p) (spread (fmt/Sprintf "/*%s*/" pos))))) ; do not update p.pos!
+
+  (set! (.-output p) (append (.-output p) (spread s)))
+
+  ;; update positions
+  (let [nlines 0
+      ^{:line 311 :tag int} li (zero int)] ; index of last newline; valid if nlines > 0
+    (for [i 0] (< i (len s)) (inc! i)
+      ;; Raw string literals may contain any character except back quote (`).
+      (when [ch (aget s i)] (or (== ch \newline) (== ch \formfeed))
+        ;; account for line break
+        (inc! nlines)
+        (set! li i)
+        ;; A line break inside a literal will break whatever column
+        ;; formatting is in place; ignore any further alignment through
+        ;; the end of the line.
+        (set! (.-endAlignment p) true)))
+
+
+    (set! (.-Offset (.-pos p)) + (len s))
+    (if (> nlines 0) (do
+        (set! (.-Line (.-pos p)) + nlines)
+        (set! (.-Line (.-out p)) + nlines)
+        (let [c (- (len s) li)]
+          (set! (.-Column (.-pos p)) c)
+          (set! (.-Column (.-out p)) c)))
+      (do
+        (set! (.-Column (.-pos p)) + (len s))
+        (set! (.-Column (.-out p)) + (len s))))
+
+
+    (when isLit
+      (set! (.-output p) (append (.-output p) tabwriter/Escape)))
+
+
+    (set! (.-last p) (.-pos p))))
+
+
+
+
+
+
+
+
+^{:go/end 470} (go/method writeCommentPrefix "writeCommentPrefix writes the whitespace before a comment.\nIf there is any pending whitespace, it consumes as much of\nit as is likely to help position the comment nicely.\npos is the comment position, next the position of the item\nafter all pending comments, prev is the previous comment in\na group of comments (or nil), and tok is the next token.\n" [^{:tag (* printer)} p ^token/Position pos ^token/Position next ^{:tag (* ast/Comment)} prev ^token/Token tok]
+  (when (== (len (.-output p)) 0)
+    ;; the comment is the first item to be printed - don't write any whitespace
+    (return))
+
+
+  (when (and (.IsValid pos) (!= (.-Filename pos) (.-Filename (.-last p))))
+    ;; comment in a different file - separate with newlines
+    (.writeByte p \formfeed maxNewlines)
+    (return))
+
+
+  (if (and (== (.-Line pos) (.-Line (.-last p))) ^:go/paren (or (== prev nil) (!= (aget (.-Text prev) 1) \/)))
+    ;; comment on the same line as last item:
+    ;; separate with at least one separator
+    (let [hasSep false]
+      (when (== prev nil)
+        ;; first comment of a comment group
+        (let [j 0]
+          (range [i ch (.-wsbuf p)]
+            (switch ch
+              (case [blank]
+                ;; ignore any blanks before a comment
+                (aset (.-wsbuf p) i ignore)
+                (continue))
+              (case [vtab]
+                ;; respect existing tabs - important
+                ;; for proper formatting of commented structs
+                (set! hasSep true)
+                (continue))
+              (case [indent]
+                ;; apply pending indentation
+                (continue)))
+
+            (set! j i)
+            (break))
+
+          (.writeWhitespace p j)))
+
+      ;; make sure there is at least one separator
+      (when (not hasSep)
+        (let [sep (conv byte \tab)]
+          (when (== (.-Line pos) (.-Line next))
+            ;; next item is on the same line as the comment
+            ;; (which must be a /*-style comment): separate
+            ;; with a blank instead of a tab
+            (set! sep \space))
+
+          (.writeByte p sep 1))))
+
+
+
+    ;; comment on a different line:
+    ;; separate with at least one line break
+    (let [droppedLinebreak false
+        ^{:line 404} j 0]
+      (range [i ch (.-wsbuf p)]
+        (switch ch
+          (case [blank vtab]
+            ;; ignore any horizontal whitespace before line breaks
+            (aset (.-wsbuf p) i ignore)
+            (continue))
+          (case [indent]
+            ;; apply pending indentation
+            (continue))
+          (case [unindent]
+            ;; if this is not the last unindent, apply it
+            ;; as it is (likely) belonging to the last
+            ;; construct (e.g., a multi-line expression list)
+            ;; and is not part of closing a block
+            (when (and (< (+ i 1) (len (.-wsbuf p))) (== (aget (.-wsbuf p) (+ i 1)) unindent))
+              (continue))
+
+            ;; if the next token is not a closing }, apply the unindent
+            ;; if it appears that the comment is aligned with the
+            ;; token; otherwise assume the unindent is part of a
+            ;; closing block and stop (this scenario appears with
+            ;; comments before a case label where the comments
+            ;; apply to the next case instead of the current one)
+            (when (and (!= tok token/RBRACE) (== (.-Column pos) (.-Column next)))
+              (continue)))
+
+          (case [newline formfeed]
+            (aset (.-wsbuf p) i ignore)
+            (set! droppedLinebreak (== prev nil)))) ; record only if first comment of a group
+
+        (set! j i)
+        (break))
+
+      (.writeWhitespace p j)
+
+      ;; determine number of linebreaks before the comment
+      (let [n 0]
+        (when (and (.IsValid pos) (.IsValid (.-last p)))
+          (set! n (- (.-Line pos) (.-Line (.-last p))))
+          (when (< n 0) ; should never happen
+            (set! n 0)))
+
+
+
+        ;; at the package scope level only (p.indent == 0),
+        ;; add an extra newline if we dropped one before:
+        ;; this preserves a blank line before documentation
+        ;; comments at the package scope level (issue 2570)
+        (when (and (== (.-indent p) 0) droppedLinebreak)
+          (inc! n))
+
+
+        ;; make sure there is at least one line break
+        ;; if the previous comment was a line comment
+        (when (and (== n 0) (!= prev nil) (== (aget (.-Text prev) 1) \/))
+          (set! n 1))
+
+
+        (when (> n 0)
+          ;; use formfeeds to break columns before a comment;
+          ;; this is analogous to using formfeeds to separate
+          ;; individual lines of /*-style comments
+          (.writeByte p \formfeed (nlimit n)))))))
+
+
+
+
+
+
+^{:go/breaks [[5 480]] :go/end 481} (go/func isBlank "Returns true if s contains only white space\n(only tabs and blanks can appear in the printer's context).\n" ^bool [^string s]
+  (for [i 0] (< i (len s)) (inc! i)
+    (when (> (aget s i) \space)
+      (return false)))
+
+
+  true)
+
+
+
+^{:go/end 490} (go/func commonPrefix "commonPrefix returns the common prefix of a and b.\n" ^string [^string a ^string b]
+  (let [i 0]
+    (while (and (< i (len a)) (< i (len b)) (== (aget a i) (aget b i)) ^:go/paren (or (<= (aget a i) \space) (== (aget a i) \*)))
+      (inc! i))
+
+    (subslice a 0 i)))
+
+
+
+^{:go/end 495} (go/func trimRight "trimRight returns s with trailing whitespace removed.\n" ^string [^string s]
+  (strings/TrimRightFunc s unicode/IsSpace))
+
+
+
+
+
+
+
+^{:go/end 627} (go/func stripCommonPrefix "stripCommonPrefix removes a common prefix from /*-style comment lines (unless no\ncomment line is indented, all but the first line have some form of space prefix).\nThe prefix is computed using heuristics such that is likely that the comment\ncontents are nicely laid out after re-printing each line using the printer's\ncurrent indentation.\n" [^{:tag (slice string)} lines]
+  (when (<= (len lines) 1)
+    (return)) ; at most one line - nothing to do
+
+  ;; len(lines) > 1
+
+  ;; The heuristic in this function tries to handle a few
+  ;; common patterns of /*-style comments: Comments where
+  ;; the opening /* and closing */ are aligned and the
+  ;; rest of the comment text is aligned and indented with
+  ;; blanks or tabs, cases with a vertical "line of stars"
+  ;; on the left, and cases where the closing */ is on the
+  ;; same line as the last comment text.
+
+  ;; Compute maximum common white prefix of all but the first,
+  ;; last, and blank lines, and replace blank lines with empty
+  ;; lines (the first line starts with /* and has no prefix).
+  ;; In cases where only the first and last lines are not blank,
+  ;; such as two-line comments, or comments where all inner lines
+  ;; are blank, consider the last line for the prefix computation
+  ;; since otherwise the prefix would be empty.
+  ;;
+  ;; Note that the first and last line are never empty (they
+  ;; contain the opening /* and closing */ respectively) and
+  ;; thus they can be ignored by the blank line check.
+  (let [prefix ""
+      ^{:line 528} prefixSet false]
+    (when (> (len lines) 2)
+      (range [i line (subslice lines 1 (- (len lines) 1))]
+        (if (isBlank line)
+          (aset lines (+ 1 i) "") ; range starts with lines[1]
+          (do
+            (when (not prefixSet)
+              (set! prefix line)
+              (set! prefixSet true))
+
+            (set! prefix (commonPrefix prefix line))))))
+
+
+
+
+    ;; If we don't have a prefix yet, consider the last line.
+    (when (not prefixSet)
+      (let [line (aget lines (- (len lines) 1))]
+        (set! prefix (commonPrefix line line))))
+
+
+    ;; /*
+    ;; * Check for vertical "line of stars" and correct prefix accordingly.
+    ;; */
+    (let [lineOfStars false]
+      (if [(values p _ ok) (strings/Cut prefix "*")] ok (do
+          ;; remove trailing blank from prefix so stars remain aligned
+          (set! prefix (strings/TrimSuffix p " "))
+          (set! lineOfStars true))
+
+        ;; No line of stars present.
+        ;; Determine the white space on the first line after the /*
+        ;; and before the beginning of the comment text, assume two
+        ;; blanks instead of the /* unless the first character after
+        ;; the /* is a tab. If the first comment line is empty but
+        ;; for the opening /*, assume up to 3 blanks or a tab. This
+        ;; whitespace may be found as suffix in the common prefix.
+        (let [first (aget lines 0)]
+          (if (isBlank (subslice first 2))
+            ;; no comment text on the first line:
+            ;; reduce prefix by up to 3 blanks or a tab
+            ;; if present - this keeps comment text indented
+            ;; relative to the /* and */'s if it was indented
+            ;; in the first place
+            (let [i (len prefix)]
+              (for [n 0] (and (< n 3) (> i 0) (== (aget prefix (- i 1)) \space)) (inc! n)
+                (dec! i))
+
+              (when (and (== i (len prefix)) (> i 0) (== (aget prefix (- i 1)) \tab))
+                (dec! i))
+
+              (set! prefix (subslice prefix 0 i)))
+
+            ;; comment text on the first line
+            (let [suffix (make (slice byte) (len first))
+                ^{:line 583} n 2] ; start after opening /*
+              (while (and (< n (len first)) (<= (aget first n) \space))
+                (aset suffix n (aget first n))
+                (inc! n))
+
+              (if (and (> n 2) (== (aget suffix 2) \tab))
+                ;; assume the '\t' compensates for the /*
+                (set! suffix (subslice suffix 2 n))
+                (do
+                  ;; otherwise assume two blanks
+                  (set! (values (aget suffix 0) (aget suffix 1)) (values \space \space))
+                  (set! suffix (subslice suffix 0 n))))
+
+              ;; Shorten the computed common prefix by the length of
+              ;; suffix, if it is found as suffix of the prefix.
+              (set! prefix (strings/TrimSuffix prefix (conv string suffix)))))))
+
+
+
+      ;; Handle last line: If it only contains a closing */, align it
+      ;; with the opening /*, otherwise align the text with the other
+      ;; lines.
+      (let [last (aget lines (- (len lines) 1))
+          ^{:line 606} closing "*/"
+          (values before _ _) (strings/Cut last closing)] ; closing always present
+        (if (isBlank before) (do
+            ;; last line only contains closing */
+            (when lineOfStars
+              (set! closing " */")) ; add blank to align final star
+
+            (aset lines (- (len lines) 1) (+ prefix closing)))
+
+          ;; last line contains more comment text - assume
+          ;; it is aligned like the other lines and include
+          ;; in prefix computation
+          (set! prefix (commonPrefix prefix last)))
+
+
+        ;; Remove the common prefix from all but the first and empty lines.
+        (range [i line lines]
+          (when (and (> i 0) (!= line ""))
+            (aset lines i (subslice line (len prefix)))))))))
+
+
+
+
+^{:go/end 681} (go/method writeComment [^{:tag (* printer)} p ^{:tag (* ast/Comment)} comment]
+  (let [text (.-Text comment)
+      ^{:line 631} pos (.posFor p (.Pos comment))
+
+      ^:const ^{:line 633 :val "//line "} linePrefix "//line "]
+    (when (and (strings/HasPrefix text linePrefix) ^:go/paren (or (not (.IsValid pos)) (== (.-Column pos) 1)))
+      ;; Possibly a //-style line directive.
+      ;; Suspend indentation temporarily to keep line directive valid.
+      (defer (^{:go/end 637} (fn [^int indent] (set! (.-indent p) indent)) (.-indent p)))
+      (set! (.-indent p) 0))
+
+
+    ;; shortcut common case of //-style comments
+    (when (== (aget text 1) \/)
+      (cond (constraint/IsGoBuild text)
+        (set! (.-goBuild p) (append (.-goBuild p) (len (.-output p))))
+        (constraint/IsPlusBuild text)
+        (set! (.-plusBuild p) (append (.-plusBuild p) (len (.-output p)))))
+
+      (.writeString p pos (trimRight text) true)
+      (return))
+
+
+    ;; for /*-style comments, print line by line and let the
+    ;; write function take care of the proper indentation
+    (let [lines (strings/Split text "\n")]
+
+      ;; The comment started in the first column but is going
+      ;; to be indented. For an idempotent result, add indentation
+      ;; to all lines such that they look like they were indented
+      ;; before - this will make sure the common prefix computation
+      ;; is the same independent of how many times formatting is
+      ;; applied (was issue 1835).
+      (when (and (.IsValid pos) (== (.-Column pos) 1) (> (.-indent p) 0))
+        (range [i line (subslice lines 1)]
+          (aset lines (+ 1 i) (+ "   " line))))
+
+
+
+      (stripCommonPrefix lines)
+
+      ;; write comment lines, separated by formfeed,
+      ;; without a line break after the last line
+      (range [i line lines]
+        (when (> i 0)
+          (.writeByte p \formfeed 1)
+          (set! pos (.-pos p)))
+
+        (when (> (len line) 0)
+          (.writeString p pos (trimRight line) true))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 720} (go/method writeCommentSuffix "writeCommentSuffix writes a line break after a comment if indicated\nand processes any leftover indentation information. If a line break\nis needed, the kind of break (newline vs formfeed) depends on the\npending whitespace. The writeCommentSuffix result indicates if a\nnewline was written or if a formfeed was dropped from the whitespace\nbuffer.\n" [^{:tag (* printer)} p ^bool needsLinebreak] :results [^bool wroteNewline ^bool droppedFF]
+  (range [i ch (.-wsbuf p)]
+    (switch ch
+      (case [blank vtab]
+        ;; ignore trailing whitespace
+        (aset (.-wsbuf p) i ignore))
+      (case [indent unindent])
+      ;; don't lose indentation information
+      (case [newline formfeed]
+        ;; if we need a line break, keep exactly one
+        ;; but remember if we dropped any formfeeds
+        (if needsLinebreak (do
+            (set! needsLinebreak false)
+            (set! wroteNewline true))
+          (do
+            (when (== ch formfeed)
+              (set! droppedFF true))
+
+            (aset (.-wsbuf p) i ignore))))))
+
+
+
+  (.writeWhitespace p (len (.-wsbuf p)))
+
+  ;; make sure we have a line break
+  (when needsLinebreak
+    (.writeByte p \newline 1)
+    (set! wroteNewline true))
+
+
+  (return))
+
+
+
+^{:go/breaks [[5 729]] :go/end 730} (go/method containsLinebreak "containsLinebreak reports whether the whitespace buffer contains any line breaks.\n" ^bool [^{:tag (* printer)} p]
+  (range [_ ch (.-wsbuf p)]
+    (when (or (== ch newline) (== ch formfeed))
+      (return true)))
+
+
+  false)
+
+
+
+
+
+
+
+^{:go/end 816} (go/method intersperseComments "intersperseComments consumes all comments that appear before the next token\ntok and prints it together with the buffered whitespace (i.e., the whitespace\nthat needs to be written before the next token). A heuristic is used to mix\nthe comments and whitespace. The intersperseComments result indicates if a\nnewline was written or if a formfeed was dropped from the whitespace buffer.\n" [^{:tag (* printer)} p ^token/Position next ^token/Token tok] :results [^bool wroteNewline ^bool droppedFF]
+  (let [^{:tag (* ast/Comment)} last (zero (* ast/Comment))]
+    (while (.commentBefore p next)
+      (let [list (.-List ^{:go/via [commentInfo]} (.-comment p))
+          ^{:line 741} changed false]
+
+        (when (and (!= tok token/IDENT)
+            (!= (.-lastTok p) token/IMPORT) ; do not rewrite cgo's import "C" comments
+            (== (.-Column (.posFor p (.Pos ^{:go/via [commentInfo]} (.-comment p)))) 1)
+            (== (.posFor p (+ (.End ^{:go/via [commentInfo]} (.-comment p)) 1)) next))
+          ;; Unindented comment abutting next token position:
+          ;; a top-level doc comment.
+          (set! list (formatDocComment list))
+          (set! changed true)
+
+          (when (and (> (len (.-List ^{:go/via [commentInfo]} (.-comment p))) 0) (== (len list) 0))
+            ;; The doc comment was removed entirely.
+            ;; Keep preceding whitespace.
+            (.writeCommentPrefix p (.posFor p (.Pos ^{:go/via [commentInfo]} (.-comment p))) next last tok)
+            ;; Change print state to continue at next.
+            (set! (.-pos p) next)
+            (set! (.-last p) next)
+            ;; There can't be any more comments.
+            (.nextComment p)
+            (return (.writeCommentSuffix p false))))
+
+
+        (range [_ c list]
+          (.writeCommentPrefix p (.posFor p (.Pos c)) next last tok)
+          (.writeComment p c)
+          (set! last c))
+
+        ;; In case list was rewritten, change print state to where
+        ;; the original list would have ended.
+        (when (and (> (len (.-List ^{:go/via [commentInfo]} (.-comment p))) 0) changed)
+          (set! last (aget (.-List ^{:go/via [commentInfo]} (.-comment p)) (- (len (.-List ^{:go/via [commentInfo]} (.-comment p))) 1)))
+          (set! (.-pos p) (.posFor p (.End last)))
+          (set! (.-last p) (.-pos p)))
+
+        (.nextComment p)))
+
+
+    (when (!= last nil)
+      ;; If the last comment is a /*-style comment and the next item
+      ;; follows on the same line but is not a comma, and not a "closing"
+      ;; token immediately following its corresponding "opening" token,
+      ;; add an extra separator unless explicitly disabled. Use a blank
+      ;; as separator unless we have pending linebreaks, they are not
+      ;; disabled, and we are outside a composite literal, in which case
+      ;; we want a linebreak (issue 15137).
+      ;; TODO(gri) This has become overly complicated. We should be able
+      ;; to track whether we're inside an expression or statement and
+      ;; use that information to decide more directly.
+      (let [needsLinebreak false]
+        (when (and (== (bit-and (.-mode p) noExtraBlank) 0)
+            (== (aget (.-Text last) 1) \*) (== (.lineFor p (.Pos last)) (.-Line next))
+            (!= tok token/COMMA)
+            ^:go/paren (or (!= tok token/RPAREN) (== (.-prevOpen p) token/LPAREN))
+            ^:go/paren (or (!= tok token/RBRACK) (== (.-prevOpen p) token/LBRACK)))
+          (if (and (.containsLinebreak p) (== (bit-and (.-mode p) noExtraLinebreak) 0) (== (.-level p) 0))
+            (set! needsLinebreak true)
+
+            (.writeByte p \space 1)))
+
+
+        ;; Ensure that there is a line break after a //-style comment,
+        ;; before EOF, and before a closing '}' unless explicitly disabled.
+        (when (or (== (aget (.-Text last) 1) \/)
+            (== tok token/EOF)
+            (and (== tok token/RBRACE) (== (bit-and (.-mode p) noExtraLinebreak) 0)))
+          (set! needsLinebreak true))
+
+        (return (.writeCommentSuffix p needsLinebreak))))
+
+
+    ;; no comment was written - we should never reach here since
+    ;; intersperseComments should not be called in that case
+    (.internalError p "intersperseComments called without pending comments")
+    (return)))
+
+
+
+^{:go/end 859} (go/method writeWhitespace "writeWhitespace writes the first n whitespace entries.\n" [^{:tag (* printer)} p ^int n]
+  ;; write entries
+  (for [i 0] (< i n) (inc! i)
+    (switch [ch (aget (.-wsbuf p) i)] ch
+      (case [ignore])
+      ;; ignore!
+      (case [indent]
+        (inc! (.-indent p)))
+      (case [unindent]
+        (dec! (.-indent p))
+        (when (< (.-indent p) 0)
+          (.internalError p "negative indentation:" (.-indent p))
+          (set! (.-indent p) 0)))
+
+      (case [newline formfeed]
+        ;; A line break immediately followed by a "correcting"
+        ;; unindent is swapped with the unindent - this permits
+        ;; proper label positioning. If a comment is between
+        ;; the line break and the label, the unindent is not
+        ;; part of the comment whitespace prefix and the comment
+        ;; will be positioned correctly indented.
+        (when (and (< (+ i 1) n) (== (aget (.-wsbuf p) (+ i 1)) unindent))
+          ;; Use a formfeed to terminate the current section.
+          ;; Otherwise, a long label name on the next line leading
+          ;; to a wide column may increase the indentation column
+          ;; of lines before the label; effectively leading to wrong
+          ;; indentation.
+          (set! (values (aget (.-wsbuf p) i) (aget (.-wsbuf p) (+ i 1))) (values unindent formfeed))
+          (dec! i) ; do it again
+          (continue))
+
+        (fallthrough))
+      (default
+        (.writeByte p (conv byte ch) 1))))
+
+
+
+  ;; shift remaining entries down
+  (let [l (copy (.-wsbuf p) (subslice (.-wsbuf p) n))]
+    (set! (.-wsbuf p) (subslice (.-wsbuf p) _ l))))
+
+
+;; ----------------------------------------------------------------------------
+;; Printing interface
+
+
+^{:go/end 867} (go/func nlimit "nlimit limits n to maxNewlines.\n" ^int [^int n]
+  (min n maxNewlines))
+
+
+^{:go/end 885} (go/func mayCombine [^token/Token prev ^byte next] :results [^bool b]
+  (switch prev
+    (case [token/INT]
+      (set! b (== next \.))) ; 1.
+    (case [token/ADD]
+      (set! b (== next \+))) ; ++
+    (case [token/SUB]
+      (set! b (== next \-))) ; --
+    (case [token/QUO]
+      (set! b (== next \*))) ; /*
+    (case [token/LSS]
+      (set! b (or (== next \-) (== next \<)))) ; <- or <<
+    (case [token/AND]
+      (set! b (or (== next \&) (== next \^))))) ; && or &^
+
+  (return))
+
+
+^{:go/end 891} (go/method setPos [^{:tag (* printer)} p ^token/Pos pos]
+  (when (.IsValid pos)
+    (set! (.-pos p) (.posFor p pos)))) ; accurate position of next item
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1033} (go/method print "print prints a list of \"items\" (roughly corresponding to syntactic\ntokens, but also including whitespace and formatting information).\nIt is the only print function that should be called directly from\nany of the AST printing functions in nodes.go.\n\nWhitespace is accumulated until a non-whitespace token appears. Any\ncomments that need to appear before that token are printed first,\ntaking into account the amount and structure of any pending white-\nspace for best comment placement. Then, any leftover whitespace is\nprinted, followed by the actual token.\n" [^{:tag (* printer)} p & ^{:tag (slice any)} args]
+  (range [_ arg args]
+    ;; information about the current arg
+    (let [^string data (zero string)
+        ^{:line 907 :tag bool} isLit (zero bool)
+        ^{:line 908 :tag bool} impliedSemi (zero bool)] ; value for p.impliedSemi after this arg
+
+      ;; record previous opening token, if any
+      (switch (.-lastTok p)
+        (case [token/ILLEGAL])
+        ;; ignore (white space)
+        (case [token/LPAREN token/LBRACK]
+          (set! (.-prevOpen p) (.-lastTok p)))
+        (default
+          ;; other tokens followed any opening token
+          (set! (.-prevOpen p) token/ILLEGAL)))
+
+
+      (type-switch [x arg]
+        (case [pmode]
+          ;; toggle printer mode
+          (set! (.-mode p) bit-xor x)
+          (continue))
+
+        (case [whiteSpace]
+          (when (== x ignore)
+            ;; don't add ignore's to the buffer; they
+            ;; may screw up "correcting" unindents (see
+            ;; LabeledStmt)
+            (continue))
+
+          (let [i (len (.-wsbuf p))]
+            (when (== i (cap (.-wsbuf p)))
+              ;; Whitespace sequences are very short so this should
+              ;; never happen. Handle gracefully (but possibly with
+              ;; bad comment placement) if it does happen.
+              (.writeWhitespace p i)
+              (set! i 0))
+
+            (set! (.-wsbuf p) (subslice (.-wsbuf p) 0 (+ i 1)))
+            (aset (.-wsbuf p) i x)
+            (when (or (== x newline) (== x formfeed))
+              ;; newlines affect the current state (p.impliedSemi)
+              ;; and not the state after printing arg (impliedSemi)
+              ;; because comments can be interspersed before the arg
+              ;; in this case
+              (set! (.-impliedSemi p) false))
+
+            (set! (.-lastTok p) token/ILLEGAL)
+            (continue)))
+
+        (case [(* ast/Ident)]
+          (set! data (.-Name x))
+          (set! impliedSemi true)
+          (set! (.-lastTok p) token/IDENT))
+
+        (case [(* ast/BasicLit)]
+          (set! data (.-Value x))
+          (set! isLit true)
+          (set! impliedSemi true)
+          (set! (.-lastTok p) (.-Kind x)))
+
+        (case [token/Token]
+          (let [s (.String x)]
+            (when (mayCombine (.-lastTok p) (aget s 0))
+              ;; the previous and the current token must be
+              ;; separated by a blank otherwise they combine
+              ;; into a different incorrect token sequence
+              ;; (except for token.INT followed by a '.' this
+              ;; should never happen because it is taken care
+              ;; of via binary expression formatting)
+              (when (!= (len (.-wsbuf p)) 0)
+                (.internalError p "whitespace buffer not empty"))
+
+              (set! (.-wsbuf p) (subslice (.-wsbuf p) 0 1))
+              (aset (.-wsbuf p) 0 \space))
+
+            (set! data s)
+            ;; some keywords followed by a newline imply a semicolon
+            (switch x
+              (case [token/BREAK token/CONTINUE token/FALLTHROUGH token/RETURN
+                  ^{:line 984} token/INC token/DEC token/RPAREN token/RBRACK token/RBRACE]
+                (set! impliedSemi true)))
+
+            (set! (.-lastTok p) x)))
+
+        (case [string]
+          ;; incorrect AST - print error message
+          (set! data x)
+          (set! isLit true)
+          (set! impliedSemi true)
+          (set! (.-lastTok p) token/STRING))
+
+        (default
+          (fmt/Fprintf os/Stderr "print: unsupported argument %v (%T)\n" arg arg)
+          (panic "go/printer type")))
+
+      ;; data != ""
+
+      (let [next (.-pos p) ; estimated/accurate position of next item
+          (values wroteNewline droppedFF) (.flush p next (.-lastTok p))]
+
+        ;; intersperse extra newlines if present in the source and
+        ;; if they don't cause extra semicolons (don't do this in
+        ;; flush as it will cause extra newlines at the end of a file)
+        (when (not (.-impliedSemi p))
+          (let [n (nlimit (- (.-Line next) (.-Line (.-pos p))))]
+            ;; don't exceed maxNewlines if we already wrote one
+            (when (and wroteNewline (== n maxNewlines))
+              (set! n (- maxNewlines 1)))
+
+            (when (> n 0)
+              (let [ch (conv byte \newline)]
+                (when droppedFF
+                  (set! ch \formfeed)) ; use formfeed since we dropped one before
+
+                (.writeByte p ch n)
+                (set! impliedSemi false)))))
+
+
+
+        ;; the next token starts now - record its line number if requested
+        (when (!= (.-linePtr p) nil)
+          (set! @(.-linePtr p) (.-Line (.-out p)))
+          (set! (.-linePtr p) nil))
+
+
+        (.writeString p next data isLit)
+        (set! (.-impliedSemi p) impliedSemi)))))
+
+
+
+
+
+
+
+^{:go/end 1048} (go/method flush "flush prints any pending comments and whitespace occurring textually\nbefore the position of the next token tok. The flush result indicates\nif a newline was written or if a formfeed was dropped from the whitespace\nbuffer.\n" [^{:tag (* printer)} p ^token/Position next ^token/Token tok] :results [^bool wroteNewline ^bool droppedFF]
+  (if (.commentBefore p next)
+    ;; if there are comments before the next item, intersperse them
+    (set! (values wroteNewline droppedFF) (.intersperseComments p next tok))
+
+    ;; otherwise, write any leftover whitespace
+    (.writeWhitespace p (len (.-wsbuf p))))
+
+  (return))
+
+
+
+^{:go/breaks [[5 1068]] :go/end 1069} (go/func getDoc "getDoc returns the ast.CommentGroup associated with n, if any.\n" ^{:tag (* ast/CommentGroup)} [^ast/Node n]
+  (type-switch [n n]
+    (case [(* ast/Field)]
+      (return (.-Doc n)))
+    (case [(* ast/ImportSpec)]
+      (return (.-Doc n)))
+    (case [(* ast/ValueSpec)]
+      (return (.-Doc n)))
+    (case [(* ast/TypeSpec)]
+      (return (.-Doc n)))
+    (case [(* ast/GenDecl)]
+      (return (.-Doc n)))
+    (case [(* ast/FuncDecl)]
+      (return (.-Doc n)))
+    (case [(* ast/File)]
+      (return (.-Doc n))))
+
+  nil)
+
+
+^{:go/breaks [[4 1090]] :go/end 1091} (go/func getLastComment ^{:tag (* ast/CommentGroup)} [^ast/Node n]
+  (type-switch [n n]
+    (case [(* ast/Field)]
+      (return (.-Comment n)))
+    (case [(* ast/ImportSpec)]
+      (return (.-Comment n)))
+    (case [(* ast/ValueSpec)]
+      (return (.-Comment n)))
+    (case [(* ast/TypeSpec)]
+      (return (.-Comment n)))
+    (case [(* ast/GenDecl)]
+      (when (> (len (.-Specs n)) 0)
+        (return (getLastComment (aget (.-Specs n) (- (len (.-Specs n)) 1))))))
+
+    (case [(* ast/File)]
+      (when (> (len (.-Comments n)) 0)
+        (return (aget (.-Comments n) (- (len (.-Comments n)) 1))))))
+
+
+  nil)
+
+
+^{:go/end 1183} (go/method printNode ^error [^{:tag (* printer)} p ^any node]
+  ;; unpack *CommentedNode, if any
+  (let [^{:tag (slice (* ast/CommentGroup))} comments (zero (slice (* ast/CommentGroup)))]
+    (when [(values cnode ok) (assert (* CommentedNode) node)] ok
+      (set! node (.-Node cnode))
+      (set! comments (.-Comments cnode)))
+
+
+    (if (!= comments nil)
+      ;; commented node - restrict comment list to relevant range
+      (let [(values n ok) (assert ast/Node node)]
+        (when (not ok)
+          (goto :unsupported))
+
+        (let [beg (.Pos n)
+            ^{:line 1108} end (.End n)]
+          ;; if the node has associated documentation,
+          ;; include that commentgroup in the range
+          ;; (the comment list is sorted in the order
+          ;; of the comment appearance in the source code)
+          (when [doc (getDoc n)] (!= doc nil)
+            (set! beg (.Pos doc)))
+
+          (when [com (getLastComment n)] (!= com nil)
+            (when [e (.End com)] (> e end)
+              (set! end e)))
+
+
+          ;; token.Pos values are global offsets, we can
+          ;; compare them directly
+          (let [i 0]
+            (while (and (< i (len comments)) (< (.End (aget comments i)) beg))
+              (inc! i))
+
+            (let [j i]
+              (while (and (< j (len comments)) (< (.Pos (aget comments j)) end))
+                (inc! j))
+
+              (when (< i j)
+                (set! (.-comments p) (subslice comments i j)))))))
+
+      (when [(values n ok) (assert (* ast/File) node)] ok
+        ;; use ast.File comments, if any
+        (set! (.-comments p) (.-Comments n))))
+
+
+    ;; if there are no comments, use node comments
+    (set! (.-useNodeComments p) (== (.-comments p) nil))
+
+    ;; get comments ready for use
+    (.nextComment p)
+
+    (.print p (conv pmode 0))
+
+    ;; format node
+    (type-switch [n node]
+      (case [ast/Expr]
+        (.expr p n))
+      (case [ast/Stmt]
+        ;; A labeled statement will un-indent to position the label.
+        ;; Set p.indent to 1 so we don't get indent "underflow".
+        (when [(values _ ok) (assert (* ast/LabeledStmt) n)] ok
+          (set! (.-indent p) 1))
+
+        (.stmt p n false))
+      (case [ast/Decl]
+        (.decl p n))
+      (case [ast/Spec]
+        (.spec p n 1 false))
+      (case [(slice ast/Stmt)]
+        ;; A labeled statement will un-indent to position the label.
+        ;; Set p.indent to 1 so we don't get indent "underflow".
+        (range [_ s n]
+          (when [(values _ ok) (assert (* ast/LabeledStmt) s)] ok
+            (set! (.-indent p) 1)))
+
+
+        (.stmtList p n 0 false))
+      (case [(slice ast/Decl)]
+        (.declList p n))
+      (case [(* ast/File)]
+        (.file p n))
+      (default
+        (goto :unsupported)))
+
+
+    (return (.-sourcePosErr p))
+
+    (label :unsupported
+      (return (fmt/Errorf "go/printer: unsupported node type %T" node)))))
+
+
+;; ----------------------------------------------------------------------------
+;; Trimmer
+
+
+
+
+
+
+(go/type trimmer "A trimmer is an io.Writer filter for stripping tabwriter.Escape\ncharacters, trailing blanks and tabs, and for converting formfeed\nand vtab characters into newlines and htabs (in case no tabwriter\nis used). Text bracketed by tabwriter.Escape characters is passed\nthrough unchanged.\n" (struct
+    ^{:line 1194 :tag io/Writer} output
+    ^{:line 1195 :tag int} state
+    ^{:line 1196 :tag (slice byte)} space))
+
+
+
+
+(go/const "trimmer is implemented as a state machine.\nIt can be in one of the following states:\n"
+  ^{:line 1202} [^{:val 0} inSpace iota] ; inside space
+  ^{:line 1203} [^{:val 1} inEscape] ; inside text bracketed by tabwriter.Escapes
+  ^{:line 1204} [^{:val 2} inText]) ; inside text
+
+
+^{:go/end 1210} (go/method resetSpace [^{:tag (* trimmer)} p]
+  (set! (.-state p) inSpace)
+  (set! (.-space p) (subslice (.-space p) 0 0)))
+
+
+;; Design note: It is tempting to eliminate extra blanks occurring in
+;;              whitespace in this function as it could simplify some
+;;              of the blanks logic in the node printing functions.
+;;              However, this would mess up any formatting done by
+;;              the tabwriter.
+
+(go/var aNewline (conv (slice byte) "\n"))
+
+^{:go/end 1287} (go/method Write [^{:tag (* trimmer)} p ^{:tag (slice byte)} data] :results [^int n ^error err]
+  ;; invariants:
+  ;; p.state == inSpace:
+  ;;	p.space is unwritten
+  ;; p.state == inEscape, inText:
+  ;;	data[m:n] is unwritten
+  (let [m 0
+      ^{:line 1227 :tag byte} b (zero byte)]
+    ^:assign (range [n b data]
+      (when (== b \u000b)
+        (set! b \tab)) ; convert to htab
+
+      (switch (.-state p)
+        (case [inSpace]
+          (switch b
+            (case [\tab \space]
+              (set! (.-space p) (append (.-space p) b)))
+            (case [\newline \formfeed]
+              (.resetSpace p) ; discard trailing space
+              (set! (values _ err) (.Write (.-output p) aNewline)))
+            (case [tabwriter/Escape]
+              (set! (values _ err) (.Write (.-output p) (.-space p)))
+              (set! (.-state p) inEscape)
+              (set! m (+ n 1))) ; +1: skip tabwriter.Escape
+            (default
+              (set! (values _ err) (.Write (.-output p) (.-space p)))
+              (set! (.-state p) inText)
+              (set! m n))))
+
+        (case [inEscape]
+          (when (== b tabwriter/Escape)
+            (set! (values _ err) (.Write (.-output p) (subslice data m n)))
+            (.resetSpace p)))
+
+        (case [inText]
+          (switch b
+            (case [\tab \space]
+              (set! (values _ err) (.Write (.-output p) (subslice data m n)))
+              (.resetSpace p)
+              (set! (.-space p) (append (.-space p) b)))
+            (case [\newline \formfeed]
+              (set! (values _ err) (.Write (.-output p) (subslice data m n)))
+              (.resetSpace p)
+              (when (== err nil)
+                (set! (values _ err) (.Write (.-output p) aNewline))))
+
+            (case [tabwriter/Escape]
+              (set! (values _ err) (.Write (.-output p) (subslice data m n)))
+              (set! (.-state p) inEscape)
+              (set! m (+ n 1))))) ; +1: skip tabwriter.Escape
+
+        (default
+          (panic "unreachable")))
+
+      (when (!= err nil)
+        (return)))
+
+
+    (set! n (len data))
+
+    (switch (.-state p)
+      (case [inEscape inText]
+        (set! (values _ err) (.Write (.-output p) (subslice data m n)))
+        (.resetSpace p)))
+
+
+    (return)))
+
+
+;; ----------------------------------------------------------------------------
+;; Public interface
+
+
+(go/type Mode "A Mode value is a set of flags (or 0). They control printing.\n" uint)
+
+(go/const
+  ^{:line 1296} [^{:tag Mode :val 1} RawFormat (<< 1 iota)] ; do not use a tabwriter; if set, UseSpaces is ignored
+  ^{:line 1297} [^{:val 2} TabIndent] ; use tabs for indentation independent of UseSpaces
+  ^{:line 1298} [^{:val 4} UseSpaces] ; use spaces instead of tabs for alignment
+  ^{:line 1299} [^{:val 8} SourcePos]) ; emit //line directives to preserve original source positions
+
+
+
+
+
+
+
+(go/const "The mode below is not included in printer's public API because\nediting code text is deemed out of scope. Because this mode is\nunexported, it's also possible to modify or remove it based on\nthe evolving needs of go/format and cmd/gofmt without breaking\nusers. See discussion in CL 240683.\n"
+
+
+
+
+
+
+
+  ^{:line 1315} [^{:tag Mode :val 1073741824 :doc "normalizeNumbers means to canonicalize number\nliteral prefixes and exponents while printing.\n\nThis value is known in and used by go/format and cmd/gofmt.\nIt is currently more convenient and performant for those\npackages to apply number normalization during printing,\nrather than by modifying the AST in advance.\n"} normalizeNumbers (<< 1 30)])
+
+
+
+(go/type Config "A Config node controls the output of Fprint.\n" (struct
+    ^{:line 1320 :tag Mode} Mode ; default: 0
+    ^{:line 1321 :tag int} Tabwidth ; default: 8
+    ^{:line 1322 :tag int} Indent)) ; default: 0 (all code is indented at least by this much)
+
+
+(go/var printerPool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 1334} (fn ^any []
+      (addr ^{:go/breaks [[2 1329] [4 1332]]} (lit printer
+          ;; Whitespace sequences are short.
+          :wsbuf (make (slice whiteSpace) 0 16)
+          ;; We start the printer with a 16K output buffer, which is currently
+          ;; larger than about 80% of Go files in the standard library.
+          :output (make (slice byte) 0 (<< 16 10)))))))
+
+
+
+
+^{:go/end 1350} (go/func newPrinter ^{:tag (* printer)} [^{:tag (* Config)} cfg ^{:tag (* token/FileSet)} fset ^{:tag (map ast/Node int)} nodeSizes]
+  (let [p (assert (* printer) (.Get printerPool))]
+    (set! @p ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit printer
+        :Config @cfg
+        :fset fset
+        :pos (lit token/Position :Line 1 :Column 1)
+        :out (lit token/Position :Line 1 :Column 1)
+        :wsbuf (subslice (.-wsbuf p) _ 0)
+        :nodeSizes nodeSizes
+        :cachedPos -1
+        :output (subslice (.-output p) _ 0)))
+
+    ^{:line 1349} p))
+
+
+^{:go/end 1359} (go/method free [^{:tag (* printer)} p]
+  ;; Hard limit on buffer size; see https://golang.org/issue/23199.
+  (when (> (cap (.-output p)) (<< 64 10))
+    (return))
+
+
+  (.Put printerPool p))
+
+
+
+^{:go/end 1412} (go/method fprint "fprint implements Fprint and takes a nodesSizes map for setting up the printer state.\n" [^{:tag (* Config)} cfg ^io/Writer output ^{:tag (* token/FileSet)} fset ^any node ^{:tag (map ast/Node int)} nodeSizes] :results [^error err]
+  ;; print node
+  (let [p (newPrinter cfg fset nodeSizes)]
+    (defer (.free p))
+    (when [(set! err (.printNode p node))] (!= err nil)
+      (return))
+
+    ;; print outstanding comments
+    (set! (.-impliedSemi p) false) ; EOF acts like a newline
+    (.flush p (lit token/Position :Offset infinity :Line infinity) token/EOF)
+
+    ;; output is buffered in p.output now.
+    ;; fix //go:build and // +build comments if needed.
+    (.fixGoBuildLines p)
+
+    ;; redirect output through a trimmer to eliminate trailing whitespace
+    ;; (Input to a tabwriter must be untrimmed since trailing tabs provide
+    ;; formatting information. The tabwriter could provide trimming
+    ;; functionality but no tabwriter is used when RawFormat is set.)
+    (set! output (addr (lit trimmer :output output)))
+
+    ;; redirect output through a tabwriter if necessary
+    (when (== (bit-and (.-Mode cfg) RawFormat) 0)
+      (let [minwidth (.-Tabwidth cfg)
+
+          ^{:line 1387} padchar (conv byte \tab)]
+        (when (!= (bit-and (.-Mode cfg) UseSpaces) 0)
+          (set! padchar \space))
+
+
+        (let [twmode tabwriter/DiscardEmptyColumns]
+          (when (!= (bit-and (.-Mode cfg) TabIndent) 0)
+            (set! minwidth 0)
+            (set! twmode bit-or tabwriter/TabIndent))
+
+
+          (set! output (tabwriter/NewWriter output minwidth (.-Tabwidth cfg) 1 padchar twmode)))))
+
+
+    ;; write printer result via tabwriter/trimmer to output
+    (when [(set! (values _ err) (.Write output (.-output p)))] (!= err nil)
+      (return))
+
+
+    ;; flush tabwriter, if any
+    (when [(values tw _) (assert (* tabwriter/Writer) output)] (!= tw nil)
+      (set! err (.Flush tw)))
+
+
+    (return)))
+
+
+
+
+(go/type CommentedNode "A CommentedNode bundles an AST node and corresponding comments.\nIt may be provided as argument to any of the [Fprint] functions.\n" (struct
+    ^{:line 1417 :tag any} Node ; *ast.File, or ast.Expr, ast.Decl, ast.Spec, or ast.Stmt
+    ^{:line 1418 :tag (slice (* ast/CommentGroup))} Comments))
+
+
+
+
+
+
+^{:go/end 1427} (go/method Fprint "Fprint \"pretty-prints\" an AST node to output for a given configuration cfg.\nPosition information is interpreted relative to the file set fset.\nThe node type must be *[ast.File], *[CommentedNode], [][ast.Decl], [][ast.Stmt],\nor assignment-compatible to [ast.Expr], [ast.Decl], [ast.Spec], or [ast.Stmt].\n" ^error [^{:tag (* Config)} cfg ^io/Writer output ^{:tag (* token/FileSet)} fset ^any node]
+  (.fprint cfg output fset node (make (map ast/Node int))))
+
+
+
+
+
+
+^{:go/end 1435} (go/func Fprint "Fprint \"pretty-prints\" an AST node to output.\nIt calls [Config.Fprint] with default settings.\nNote that gofmt uses tabs for indentation but spaces for alignment;\nuse format.Node (package go/format) for output that matches gofmt.\n" ^error [^io/Writer output ^{:tag (* token/FileSet)} fset ^any node]
+  (.Fprint (addr (lit Config :Tabwidth 8)) output fset node))

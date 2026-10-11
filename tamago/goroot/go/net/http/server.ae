@@ -1,0 +1,4290 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; HTTP server. See RFC 7230 through 7235.
+
+(in-ns 'go.net.http) (go/file "server.go" :imports [
+
+
+    ^{:line 10} [bufio "bufio"]
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [context "context"]
+    ^{:line 13} [tls "crypto/tls"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [godebug "internal/godebug"]
+    ^{:line 17} [io "io"]
+    ^{:line 18} [log "log"]
+    ^{:line 19} [maps "maps"]
+    ^{:line 20} [rand "math/rand/v2"]
+    ^{:line 21} [net "net"]
+    ^{:line 22} [internal "net/http/internal"]
+    ^{:line 23} [textproto "net/textproto"]
+    ^{:line 24} [url "net/url"]
+    ^:alias ^{:line 25} [urlpkg "net/url"]
+    ^{:line 26} [path "path"]
+    ^{:line 27} [runtime "runtime"]
+    ^{:line 28} [slices "slices"]
+    ^{:line 29} [strconv "strconv"]
+    ^{:line 30} [strings "strings"]
+    ^{:line 31} [sync "sync"]
+    ^{:line 32} [atomic "sync/atomic"]
+    ^{:line 33} [time "time"]
+    ^{:line 34} [_ "unsafe"] ; for linkname
+
+    ^{:line 36} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+
+(go/var "Errors used by the HTTP server.\n"
+
+
+
+  ^{:line 44} [^{:doc "ErrBodyNotAllowed is returned by ResponseWriter.Write calls\nwhen the HTTP method or response code does not permit a\nbody.\n"} ErrBodyNotAllowed internal/ErrBodyNotAllowed]
+
+
+
+
+
+
+  ^{:line 51} [^{:doc "ErrHijacked is returned by ResponseWriter.Write calls when\nthe underlying connection has been hijacked using the\nHijacker interface. A zero-byte write on a hijacked\nconnection will return ErrHijacked without any other side\neffects.\n"} ErrHijacked (errors/New "http: connection has been hijacked")]
+
+
+
+
+
+  ^{:line 57} [^{:doc "ErrContentLength is returned by ResponseWriter.Write calls\nwhen a Handler set a Content-Length response header with a\ndeclared size and then attempted to write more bytes than\ndeclared.\n"} ErrContentLength (errors/New "http: wrote more than the declared Content-Length")]
+
+
+
+
+  ^{:line 62} [^{:doc "Deprecated: ErrWriteAfterFlush is no longer returned by\nanything in the net/http package. Callers should not\ncompare errors against this variable.\n"} ErrWriteAfterFlush (errors/New "unused")])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Handler "A Handler responds to an HTTP request.\n\n[Handler.ServeHTTP] should write reply headers and data to the [ResponseWriter]\nand then return. Returning signals that the request is finished; it\nis not valid to use the [ResponseWriter] or read from the\n[Request.Body] after or concurrently with the completion of the\nServeHTTP call.\n\nDepending on the HTTP client software, HTTP protocol version, and\nany intermediaries between the client and the Go server, it may not\nbe possible to read from the [Request.Body] after writing to the\n[ResponseWriter]. Cautious handlers should read the [Request.Body]\nfirst, and then reply.\n\nExcept for reading the body, handlers should not modify the\nprovided Request.\n\nIf ServeHTTP panics, the server (the caller of ServeHTTP) assumes\nthat the effect of the panic was isolated to the active request.\nIt recovers the panic, logs a stack trace to the server error log,\nand either closes the network connection or sends an HTTP/2\nRST_STREAM, depending on the HTTP protocol. To abort a handler so\nthe client sees an interrupted response but the server doesn't log\nan error, panic with the value [ErrAbortHandler].\n" (interface
+    (ServeHTTP [ResponseWriter (* Request)])))
+
+
+
+
+
+
+(go/type ResponseWriter "A ResponseWriter interface is used by an HTTP handler to\nconstruct an HTTP response.\n\nA ResponseWriter may not be used after [Handler.ServeHTTP] has returned.\n" (interface
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "Header returns the header map that will be sent by\n[ResponseWriter.WriteHeader]. The [Header] map also is the mechanism with which\n[Handler] implementations can set HTTP trailers.\n\nChanging the header map after a call to [ResponseWriter.WriteHeader] (or\n[ResponseWriter.Write]) has no effect unless the HTTP status code was of the\n1xx class or the modified headers are trailers.\n\nThere are two ways to set Trailers. The preferred way is to\npredeclare in the headers which trailers you will later\nsend by setting the \"Trailer\" header to the names of the\ntrailer keys which will come later. In this case, those\nkeys of the Header map are treated as if they were\ntrailers. See the example. The second way, for trailer\nkeys not known to the [Handler] until after the first [ResponseWriter.Write],\nis to prefix the [Header] map keys with the [TrailerPrefix]\nconstant value.\n\nTo suppress automatic response headers (such as \"Date\"), set\ntheir value to nil.\n"} Header ^Header [])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "Write writes the data to the connection as part of an HTTP reply.\n\nIf [ResponseWriter.WriteHeader] has not yet been called, Write calls\nWriteHeader(http.StatusOK) before writing the data. If the Header\ndoes not contain a Content-Type line, Write adds a Content-Type set\nto the result of passing the initial 512 bytes of written data to\n[DetectContentType]. Additionally, if the total size of all written\ndata is under a few KB and there are no Flush calls, the\nContent-Length header is added automatically.\n\nDepending on the HTTP protocol version and the client, calling\nWrite or WriteHeader may prevent future reads on the\nRequest.Body. For HTTP/1.x requests, handlers should read any\nneeded request body data before writing the response. Once the\nheaders have been flushed (due to either an explicit Flusher.Flush\ncall or writing enough data to trigger a flush), the request body\nmay be unavailable. For HTTP/2 requests, the Go HTTP server permits\nhandlers to continue to read the request body while concurrently\nwriting the response. However, such behavior may not be supported\nby all HTTP/2 clients. Handlers should read before writing if\npossible to maximize compatibility.\n"} Write [(slice byte)] :results [int error])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "WriteHeader sends an HTTP response header with the provided\nstatus code.\n\nIf WriteHeader is not called explicitly, the first call to Write\nwill trigger an implicit WriteHeader(http.StatusOK).\nThus explicit calls to WriteHeader are mainly used to\nsend error codes or 1xx informational responses.\n\nThe provided code must be a valid HTTP 1xx-5xx status code.\nAny number of 1xx headers may be written, followed by at most\none 2xx-5xx header. 1xx headers are sent immediately, but 2xx-5xx\nheaders may be buffered. Use the Flusher interface to send\nbuffered data. The header map is cleared when 2xx-5xx headers are\nsent, but not with 1xx headers.\n\nThe server will automatically send a 100 (Continue) header\non the first read from the request body if the request has\nan \"Expect: 100-continue\" header.\n"} WriteHeader [^int statusCode])))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Flusher "The Flusher interface is implemented by ResponseWriters that allow\nan HTTP handler to flush buffered data to the client.\n\nThe default HTTP/1.x and HTTP/2 [ResponseWriter] implementations\nsupport [Flusher], but ResponseWriter wrappers may not. Handlers\nshould always test for this ability at runtime.\n\nNote that even for ResponseWriters that support Flush,\nif the client is connected through an HTTP proxy,\nthe buffered data may not reach the client until the response\ncompletes.\n" (interface
+
+    (^{:doc "Flush sends any buffered data to the client.\n"} Flush [])))
+
+
+
+
+
+
+
+
+
+(go/type Hijacker "The Hijacker interface is implemented by ResponseWriters that allow\nan HTTP handler to take over the connection.\n\nThe default [ResponseWriter] for HTTP/1.x connections supports\nHijacker, but HTTP/2 connections intentionally do not.\nResponseWriter wrappers may also not support Hijacker. Handlers\nshould always test for this ability at runtime.\n" (interface
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "Hijack lets the caller take over the connection.\nAfter a call to Hijack the HTTP server library\nwill not do anything else with the connection.\n\nIt becomes the caller's responsibility to manage\nand close the connection.\n\nThe returned net.Conn may have read or write deadlines\nalready set, depending on the configuration of the\nServer. It is the caller's responsibility to set\nor clear those deadlines as needed.\n\nThe returned bufio.Reader may contain unprocessed buffered\ndata from the client.\n\nAfter a call to Hijack, the original Request.Body must not\nbe used. The original Request's Context remains valid and\nis not canceled until the Request's ServeHTTP method\nreturns.\n"} Hijack [] :results [net/Conn (* bufio/ReadWriter) error])))
+
+
+
+
+
+
+
+
+
+
+(go/type CloseNotifier "The CloseNotifier interface is implemented by ResponseWriters which\nallow detecting when the underlying connection has gone away.\n\nThis mechanism can be used to cancel long operations on the server\nif the client has disconnected before the response is ready.\n\nDeprecated: the CloseNotifier interface predates Go's context package.\nNew code should use [Request.Context] instead.\n" (interface
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "CloseNotify returns a channel that receives at most a\nsingle value (true) when the client connection has gone\naway.\n\nCloseNotify may wait to notify until Request.Body has been\nfully read.\n\nAfter the Handler has returned, there is no guarantee\nthat the channel receives a value.\n\nIf the protocol is HTTP/1.1 and CloseNotify is called while\nprocessing an idempotent request (such as GET) while\nHTTP/1.1 pipelining is in use, the arrival of a subsequent\npipelined request may cause a value to be sent on the\nreturned channel. In practice HTTP/1.1 pipelining is not\nenabled in browsers and not seen often in the wild. If this\nis a problem, use HTTP/2 or only use CloseNotify on methods\nsuch as POST.\n"} CloseNotify ^{:tag (chan :recv bool)} [])))
+
+
+(go/var
+
+
+
+
+  ^{:line 245} [^{:doc "ServerContextKey is a context key. It can be used in HTTP\nhandlers with Context.Value to access the server that\nstarted the handler. The associated value will be of\ntype *Server.\n"} ServerContextKey (addr (lit contextKey "http-server"))]
+
+
+
+
+
+  ^{:line 251} [^{:doc "LocalAddrContextKey is a context key. It can be used in\nHTTP handlers with Context.Value to access the local\naddress the connection arrived on.\nThe associated value will be of type net.Addr.\n"} LocalAddrContextKey (addr (lit contextKey "local-addr"))])
+
+
+
+(go/type conn "A conn represents the server side of an HTTP connection.\n" (struct
+
+
+    ^{:line 258 :tag (* Server) :doc "server is the server on which the connection arrived.\nImmutable; never nil.\n"} server
+
+
+    ^{:line 261 :tag context/CancelFunc :doc "cancelCtx cancels the connection-level context.\n"} cancelCtx
+
+
+
+
+
+    ^{:line 267 :tag net/Conn :doc "rwc is the underlying network connection.\nThis is never wrapped by other types and is the value given out\nto [Hijacker] callers. It is usually of type *net.TCPConn or\n*tls.Conn.\n"} rwc
+
+
+
+
+
+    ^{:line 273 :tag string :doc "remoteAddr is rwc.RemoteAddr().String(). It is not populated synchronously\ninside the Listener's Accept goroutine, as some implementations block.\nIt is populated immediately inside the (*conn).serve goroutine.\nThis is the value of a Handler's (*Request).RemoteAddr.\n"} remoteAddr
+
+
+
+    ^{:line 277 :tag (* tls/ConnectionState) :doc "tlsState is the TLS connection state when using TLS.\nnil means not TLS.\n"} tlsState
+
+
+
+    ^{:line 281 :tag error :doc "werr is set to the first write error to rwc.\nIt is set via checkConnErrorWriter{w}, where bufw writes.\n"} werr
+
+
+
+
+    ^{:line 286 :tag (* connReader) :doc "r is bufr's read source. It's a wrapper around rwc that provides\nio.LimitedReader-style limiting (while reading request headers)\nand functionality to support CloseNotifier. See *connReader docs.\n"} r
+
+
+    ^{:line 289 :tag (* bufio/Reader) :doc "bufr reads from r.\n"} bufr
+
+
+    ^{:line 292 :tag (* bufio/Writer) :doc "bufw writes to checkConnErrorWriter{c}, which populates werr on error.\n"} bufw
+
+
+
+    ^{:line 296 :tag string :doc "lastMethod is the method of the most recent request\non this connection, if any.\n"} lastMethod
+
+    ^{:line 298 :tag (atomic/Pointer response)} curReq ; (which has a Request in it)
+
+    ^{:line 300 :tag atomic/Uint64} curState ; packed (unixtime<<8|uint8(ConnState))
+
+
+    ^{:line 303 :tag sync/Mutex :doc "mu guards hijackedv\n"} mu
+
+
+
+
+    ^{:line 308 :tag bool :doc "hijackedv is whether this connection has been hijacked\nby a Handler with the Hijacker interface.\nIt is guarded by mu.\n"} hijackedv))
+
+
+^{:go/end 315} (go/method hijacked ^bool [^{:tag (* conn)} c]
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  (.-hijackedv c))
+
+
+
+^{:go/end 338} (go/method hijackLocked "c.mu must be held.\n" [^{:tag (* conn)} c] :results [^net/Conn rwc ^{:tag (* bufio/ReadWriter)} buf ^error err]
+  (when (.-hijackedv c)
+    (return nil nil ErrHijacked))
+
+  (.abortPendingRead (.-r c))
+
+  (set! (.-hijackedv c) true)
+  (set! rwc (.-rwc c))
+  (.SetDeadline rwc (lit time/Time))
+
+  (when (.-hasByte (.-r c))
+    (when [(values _ err) (.Peek (.-bufr c) (+ (.Buffered (.-bufr c)) 1))] (!= err nil)
+      (return nil nil (fmt/Errorf "unexpected Peek failure reading buffered byte: %v" err))))
+
+
+  (.Reset (.-bufw c) rwc)
+  (set! buf (bufio/NewReadWriter (.-bufr c) (.-bufw c)))
+
+  (.setState c rwc StateHijacked runHooks)
+  (return))
+
+
+
+
+(go/const ^{:val 2048 :doc "This should be >= 512 bytes for DetectContentType,\nbut otherwise it's somewhat arbitrary.\n"} bufferBeforeChunkingSize 2048)
+
+
+
+
+
+
+
+
+
+
+(go/type chunkWriter "chunkWriter writes to a response's conn buffer, and is the writer\nwrapped by the response.w buffered writer.\n\nchunkWriter also is responsible for finalizing the Header, including\nconditionally setting the Content-Type and setting a Content-Length\nin cases where the handler's final output is smaller than the buffer\nsize. It also conditionally adds chunk headers, when in chunking mode.\n\nSee the comment above (*response).Write for the entire write flow.\n" (struct
+    ^{:line 354 :tag (* response)} res
+
+
+
+
+
+    ^{:line 360 :tag Header :doc "header is either nil or a deep clone of res.handlerHeader\nat the time of res.writeHeader, if res.writeHeader is\ncalled and extra buffering is being done to calculate\nContent-Type and/or Content-Length.\n"} header
+
+
+
+
+
+    ^{:line 366 :tag bool :doc "wroteHeader tells whether the header's been written to \"the\nwire\" (or rather: w.conn.buf). this is unlike\n(*response).wroteHeader, which tells only whether it was\nlogically written.\n"} wroteHeader
+
+
+    ^{:line 369 :tag bool :doc "set by the writeHeader method:\n"} chunking)) ; using chunked transfer encoding for reply body
+
+
+(go/var
+  ^{:line 373} [crlf (conv (slice byte) "\r\n")]
+  ^{:line 374} [colonSpace (conv (slice byte) ": ")])
+
+
+^{:go/end 400} (go/method Write [^{:tag (* chunkWriter)} cw ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (not (.-wroteHeader cw))
+    (.writeHeader cw p))
+
+  (when (== (.-Method (.-req (.-res cw))) "HEAD")
+    ;; Eat writes.
+    (return (len p) nil))
+
+  (when (.-chunking cw)
+    (set! (values _ err) (fmt/Fprintf (.-bufw (.-conn (.-res cw))) "%x\r\n" (len p)))
+    (when (!= err nil)
+      (.Close (.-rwc (.-conn (.-res cw))))
+      (return)))
+
+
+  (set! (values n err) (.Write (.-bufw (.-conn (.-res cw))) p))
+  (when (and (.-chunking cw) (== err nil))
+    (set! (values _ err) (.Write (.-bufw (.-conn (.-res cw))) crlf)))
+
+  (when (!= err nil)
+    (.Close (.-rwc (.-conn (.-res cw)))))
+
+  (return))
+
+
+^{:go/end 407} (go/method flush ^error [^{:tag (* chunkWriter)} cw]
+  (when (not (.-wroteHeader cw))
+    (.writeHeader cw nil))
+
+  (.Flush (.-bufw (.-conn (.-res cw)))))
+
+
+^{:go/end 424} (go/method close [^{:tag (* chunkWriter)} cw]
+  (when (not (.-wroteHeader cw))
+    (.writeHeader cw nil))
+
+  (when (.-chunking cw)
+    (let [bw (.-bufw (.-conn (.-res cw)))] ; conn's bufio writer
+      ;; zero chunk to mark EOF
+      (.WriteString bw "0\r\n")
+      (when [trailers (.finalTrailers (.-res cw))] (!= trailers nil)
+        (.Write trailers bw)) ; the writer handles noting errors
+
+      ;; final blank line after the trailers (whether
+      ;; present or not)
+      (.WriteString bw "\r\n"))))
+
+
+
+
+(go/type response "A response represents the server side of an HTTP response.\n" (struct
+    ^{:line 428 :tag (* conn)} conn
+    ^{:line 429 :tag (* Request)} req ; request for this response
+    ^{:line 430 :tag (* body)} reqBody ; nil when NoBody
+    ^{:line 431 :tag context/CancelFunc} cancelCtx ; when ServeHTTP exits
+    ^{:line 432 :tag bool} wroteHeader ; a non-1xx header has been (logically) written
+    ^{:line 433 :tag bool} wants10KeepAlive ; HTTP/1.0 w/ Connection "keep-alive"
+    ^{:line 434 :tag bool} wantsClose ; HTTP request has Connection "close"
+    ^{:line 435 :tag (* expectContinueReader)} ecReader
+
+
+
+
+
+
+
+
+    ^{:line 444 :tag sync/Mutex :doc "canWriteContinue is an atomic boolean that says whether or\nnot a 100 Continue header can be written to the\nconnection.\nwriteContinueMu must be held while writing the header.\nThese two fields together synchronize the body reader (the\nexpectContinueReader, which wants to write 100 Continue)\nagainst the main writer.\n"} writeContinueMu
+    ^{:line 445 :tag atomic/Bool} canWriteContinue
+
+    ^{:line 447 :tag (* bufio/Writer)} w ; buffers output in chunks to chunkWriter
+    ^{:line 448 :tag chunkWriter} cw
+
+
+
+
+
+    ^{:line 454 :tag Header :doc "handlerHeader is the Header that Handlers get access to,\nwhich may be retained and mutated even after WriteHeader.\nhandlerHeader is copied into cw.header at WriteHeader\ntime, and privately mutated thereafter.\n"} handlerHeader
+    ^{:line 455 :tag bool} calledHeader ; handler accessed handlerHeader via Header
+
+    ^{:line 457 :tag int64} written ; number of bytes written in body
+    ^{:line 458 :tag int64} contentLength ; explicitly-declared Content-Length; or -1
+    ^{:line 459 :tag int} status ; status code passed to WriteHeader
+
+
+
+
+
+    ^{:line 465 :tag bool :doc "close connection after this reply.  set on request and\nupdated after response from handler if there's a\n\"Connection: keep-alive\" response header and a\nContent-Length.\n"} closeAfterReply
+
+
+
+    ^{:line 469 :tag bool :doc "When fullDuplex is false (the default), we consume any remaining\nrequest body before starting to write a response.\n"} fullDuplex
+
+
+
+
+
+
+
+
+    ^{:line 478 :tag bool :doc "requestBodyLimitHit is set by requestTooLarge when\nmaxBytesReader hits its max size. It is checked in\nWriteHeader, to make sure we don't consume the\nremaining request body to try to advance to the next HTTP\nrequest. Instead, when this is set, we stop reading\nsubsequent requests on this connection and stop reading\ninput from it.\n"} requestBodyLimitHit
+
+
+
+
+
+    ^{:line 484 :tag (slice string) :doc "trailers are the headers to be sent after the handler\nfinishes writing the body. This field is initialized from\nthe Trailer response header when the response header is\nwritten.\n"} trailers
+
+    ^{:line 486 :tag atomic/Bool} handlerDone ; set true when the handler exits
+
+
+    ^{:line 489 :tag (array (len TimeFormat) byte) :doc "Buffers for Date, Content-Length, and status code\n"} dateBuf
+    ^{:line 490 :tag (array 10 byte)} clenBuf
+    ^{:line 491 :tag (array 3 byte)} statusBuf
+
+
+    ^{:line 494 :tag sync/Mutex :doc "lazyCloseNotifyMu protects closeNotifyCh and closeNotifyTriggered.\n"} lazyCloseNotifyMu
+
+    ^{:line 496 :tag (chan bool) :doc "closeNotifyCh is the channel returned by CloseNotify.\n"} closeNotifyCh
+
+    ^{:line 498 :tag bool :doc "closeNotifyTriggered tracks prior closeNotify calls.\n"} closeNotifyTriggered))
+
+
+^{:go/end 503} (go/method SetReadDeadline ^error [^{:tag (* response)} c ^time/Time deadline]
+  (.SetReadDeadline (.-rwc (.-conn c)) deadline))
+
+
+^{:go/end 507} (go/method SetWriteDeadline ^error [^{:tag (* response)} c ^time/Time deadline]
+  (.SetWriteDeadline (.-rwc (.-conn c)) deadline))
+
+
+^{:go/breaks [4] :go/end 512} (go/method EnableFullDuplex ^error [^{:tag (* response)} c]
+  (set! (.-fullDuplex c) true)
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const ^{:val "Trailer:" :doc "TrailerPrefix is a magic prefix for [ResponseWriter.Header] map keys\nthat, if present, signals that the map entry is actually for\nthe response trailers, and not the response headers. The prefix\nis stripped after the ServeHTTP call finishes and the values are\nsent in the trailers.\n\nThis mechanism is intended only for trailers that are not known\nprior to the headers being written. If the set of trailers is fixed\nor known before the header is written, the normal Go trailers mechanism\nis preferred:\n\n\thttps://pkg.go.dev/net/http#ResponseWriter\n\thttps://pkg.go.dev/net/http#example-ResponseWriter-Trailers\n"} TrailerPrefix "Trailer:")
+
+
+
+^{:go/end 550} (go/method finalTrailers "finalTrailers is called after the Handler exits and returns a non-nil\nvalue if the Handler set any trailers.\n" ^Header [^{:tag (* response)} w]
+  (let [^Header t (zero Header)]
+    (range [k vv (.-handlerHeader w)]
+      (when [(values kk found) (strings/CutPrefix k TrailerPrefix)] found
+        (when (== t nil)
+          (set! t (make Header)))
+
+        (aset t kk vv)))
+
+
+    (range [_ k (.-trailers w)]
+      (when (== t nil)
+        (set! t (make Header)))
+
+      (range [_ v (aget (.-handlerHeader w) k)]
+        (.Add t k v)))
+
+
+    ^{:line 549} t))
+
+
+
+
+
+^{:go/end 562} (go/method declareTrailer "declareTrailer is called for each Trailer header when the\nresponse header is written. It notes that a header will need to be\nwritten in the trailers at the end of the response.\n" [^{:tag (* response)} w ^string k]
+  (set! k (CanonicalHeaderKey k))
+  (when (not (httpguts/ValidTrailerHeader k))
+    ;; Forbidden by RFC 7230, section 4.1.2
+    (return))
+
+  (set! (.-trailers w) (append (.-trailers w) k)))
+
+
+
+
+^{:go/end 572} (go/method requestTooLarge "requestTooLarge is called by maxBytesReader when too much input has\nbeen read from the client.\n" [^{:tag (* response)} w]
+  (set! (.-closeAfterReply w) true)
+  (set! (.-requestBodyLimitHit w) true)
+  (when (not (.-wroteHeader w))
+    (.Set (.Header w) "Connection" "close")))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 598} (go/method disableWriteContinue "disableWriteContinue stops Request.Body.Read from sending an automatic\n100 Continue. As the name implies, it is only useful when the request\nexpects a 100 Continue and the body is wrapped in an expectContinueReader;\notherwise, it is a no-op.\nIf a 100-Continue is being written, it waits for it to complete before\ncontinuing. If skipDrain is true, it also prevents the server from draining\nthe request body and flags the connection to be closed after the reply, as\nthe client will never send the body.\n" [^{:tag (* response)} w ^bool skipDrain]
+  (when (== (.-ecReader w) nil)
+    (return))
+
+  (.Lock (.-writeContinueMu w))
+  (when (.Load (.-canWriteContinue w))
+    (.Store (.-canWriteContinue w) false)
+    (when skipDrain
+      ;; Make sure that the connection will not be reused by sending
+      ;; "Connection: close" header in the response.
+      (set! (.-closeAfterReply w) true)
+      ;; Ensure that the body will not be drained in Close.
+      (.Store (.-closed (.-ecReader w)) true)))
+
+
+  (.Unlock (.-writeContinueMu w)))
+
+
+
+
+(go/type writerOnly "writerOnly hides an io.Writer value's optional ReadFrom method\nfrom io.Copy.\n" (struct
+    ^{:line 603} io/Writer))
+
+
+
+
+
+^{:go/end 671} (go/method ReadFrom "ReadFrom is here to optimize copying from an [*os.File] regular file\nto a [*net.TCPConn] with sendfile, or from a supported src type such\nas a *net.TCPConn on Linux with splice.\n" [^{:tag (* response)} w ^io/Reader src] :results [^int64 n ^error err]
+  (let [buf (getCopyBuf)]
+    (defer (putCopyBuf buf))
+
+    ;; Our underlying w.conn.rwc is usually a *TCPConn (with its
+    ;; own ReadFrom method). If not, just fall back to the normal
+    ;; copy method.
+    (let [(values rf ok) (assert io/ReaderFrom (.-rwc (.-conn w)))]
+      (when (not ok)
+        (return (io/CopyBuffer (lit writerOnly w) src buf)))
+
+
+      ;; Copy the first sniffLen bytes before switching to ReadFrom.
+      ;; This ensures we don't start writing the response before the
+      ;; source is available (see golang.org/issue/5660) and provides
+      ;; enough bytes to perform Content-Type sniffing when required.
+      (when (not (.-wroteHeader (.-cw w)))
+        (let [(values n0 err) (io/CopyBuffer (lit writerOnly w) (io/LimitReader src internal/SniffLen) buf)]
+          (set! n + n0)
+          (when (or (!= err nil) (< n0 internal/SniffLen))
+            (return n err))))
+
+
+
+      (.Flush (.-w w)) ; get rid of any previous writes
+      (.flush (.-cw w)) ; make sure Header is written; flush data to rwc
+
+      ;; Now that cw has been flushed, its chunking field is guaranteed initialized.
+      (when (and (not (.-chunking (.-cw w))) (.bodyAllowed w) (!= (.-Method (.-req w)) "HEAD"))
+        ;; When a content length is declared, but exceeded; any excess bytes
+        ;; from src should be ignored, and ErrContentLength should be returned.
+        ;; This mirrors the behavior of response.Write.
+        (when (!= (.-contentLength w) -1)
+          (defer (^{:go/end 649} (fn [^io/Reader originalReader]
+                (when (!= (.-written w) (.-contentLength w))
+                  (return))
+
+                (when [(values n _) (.Read originalReader (lit (slice byte) 0))] (and (== err nil) (!= n 0))
+                  (set! err ErrContentLength)))
+
+              ^{:line 649} src))
+          ;; src can be an io.LimitedReader already. To avoid unnecessary
+          ;; alloc and having to unnest readers repeatedly in net.sendFile,
+          ;; just adjust the existing LimitedReader N when this is the case.
+          (if [(values lr ok) (assert (* io/LimitedReader) src)] ok
+            (when [lenDiff (- (.-N lr) (- (.-contentLength w) (.-written w)))] (> lenDiff 0)
+              (defer (^{:go/end 655} (fn [] (set! (.-N lr) + lenDiff))))
+              (set! (.-N lr) - lenDiff))
+
+
+            (set! src (io/LimitReader src (- (.-contentLength w) (.-written w))))))
+
+
+        (let [(values n0 err) (.ReadFrom rf src)]
+          (set! n + n0)
+          (set! (.-written w) + n0)
+          (return n err)))
+
+
+      (let [(values n0 ^:assign err) (io/CopyBuffer (lit writerOnly w) src buf)]
+        (set! n + n0)
+        (return n err)))))
+
+
+
+
+(go/const ^{:val false :doc "debugServerConnections controls whether all server connections are wrapped\nwith a verbose logging wrapper.\n"} debugServerConnections false)
+
+
+^{:go/end 687} (go/method newConn "Create new connection from rwc.\n" ^{:tag (* conn)} [^{:tag (* Server)} s ^net/Conn rwc]
+  (let [c (addr ^{:go/breaks [2 4]} (lit conn
+          :server s
+          :rwc rwc))]
+
+    (when debugServerConnections
+      (set! (.-rwc c) (newLoggingConn "server" (.-rwc c))))
+
+    ^{:line 686} c))
+
+
+(go/type readResult (struct
+    ^{:line 690 :tag incomparable} _
+    ^{:line 691 :tag int} n
+    ^{:line 692 :tag error} err
+    ^{:line 693 :tag byte} b)) ; byte read, if n == 1
+
+
+
+
+
+
+
+
+
+(go/type connReader "connReader is the io.Reader wrapper used by *conn. It combines a\nselectively-activated io.LimitedReader (to bound request header\nread sizes) with support for selectively keeping an io.Reader.Read\ncall blocked in a background goroutine to wait for activity and\ntrigger a CloseNotifier channel.\nAfter a Handler has hijacked the conn and exited, connReader behaves like a\nproxy for the net.Conn and the aforementioned behavior is bypassed.\n" (struct
+    ^{:line 704 :tag net/Conn} rwc ; rwc is the underlying network connection.
+
+    ^{:line 706 :tag sync/Mutex} mu ; guards following
+    ^{:line 707 :tag (* conn)} conn ; conn is nil after handler exit.
+    ^{:line 708 :tag bool} hasByte
+    ^{:line 709 :tag (array 1 byte)} byteBuf
+    ^{:line 710 :tag (* sync/Cond)} cond
+    ^{:line 711 :tag bool} inRead
+    ^{:line 712 :tag bool} aborted ; set true before conn.rwc deadline is set to past
+    ^{:line 713 :tag int64} remain)) ; bytes remaining
+
+
+^{:go/end 721} (go/method lock [^{:tag (* connReader)} cr]
+  (.Lock (.-mu cr))
+  (when (== (.-cond cr) nil)
+    (set! (.-cond cr) (sync/NewCond (addr (.-mu cr))))))
+
+
+
+^{:go/end 723} (go/method unlock [^{:tag (* connReader)} cr] (.Unlock (.-mu cr)))
+
+^{:go/end 729} (go/method releaseConn [^{:tag (* connReader)} cr]
+  (.lock cr)
+  (defer (.unlock cr))
+  (set! (.-conn cr) nil))
+
+
+^{:go/end 743} (go/method startBackgroundRead [^{:tag (* connReader)} cr]
+  (.lock cr)
+  (defer (.unlock cr))
+  (when (.-inRead cr)
+    (panic "invalid concurrent Body.Read call"))
+
+  (when (.-hasByte cr)
+    (return))
+
+  (set! (.-inRead cr) true)
+  (.SetReadDeadline (.-rwc cr) (lit time/Time))
+  (go (.backgroundRead cr)))
+
+
+^{:go/end 783} (go/method backgroundRead [^{:tag (* connReader)} cr]
+  (let [(values n err) (.Read (.-rwc cr) (subslice (.-byteBuf cr)))]
+    (.lock cr)
+    (when (== n 1)
+      (set! (.-hasByte cr) true))
+    ;; We were past the end of the previous request's body already
+    ;; (since we wouldn't be in a background read otherwise), so
+    ;; this is a pipelined HTTP request. Prior to Go 1.11 we used to
+    ;; send on the CloseNotify channel and cancel the context here,
+    ;; but the behavior was documented as only "may", and we only
+    ;; did that because that's how CloseNotify accidentally behaved
+    ;; in very early Go releases prior to context support. Once we
+    ;; added context support, people used a Handler's
+    ;; Request.Context() and passed it along. Having that context
+    ;; cancel on pipelined HTTP requests caused problems.
+    ;; Fortunately, almost nothing uses HTTP/1.x pipelining.
+    ;; Unfortunately, apt-get does, or sometimes does.
+    ;; New Go 1.11 behavior: don't fire CloseNotify or cancel
+    ;; contexts on pipelined requests. Shouldn't affect people, but
+    ;; fixes cases like Issue 23921. This does mean that a client
+    ;; closing their TCP connection after sending a pipelined
+    ;; request won't cancel the context, but we'll catch that on any
+    ;; write failure (in checkConnErrorWriter.Write).
+    ;; If the server never writes, yes, there are still contrived
+    ;; server & client behaviors where this fails to ever cancel the
+    ;; context, but that's kinda why HTTP/1.x pipelining died
+    ;; anyway.
+
+    (if [(values ne ok) (assert net/Error err)] (and ok (.-aborted cr) (.Timeout ne)) (do)
+      ;; Ignore this error. It's the expected error from
+      ;; another goroutine calling abortPendingRead.
+      (when (!= err nil)
+        (.handleReadErrorLocked cr err)))
+
+    (set! (.-aborted cr) false)
+    (set! (.-inRead cr) false)
+    (.unlock cr)
+    (.Broadcast (.-cond cr))))
+
+
+^{:go/end 797} (go/method abortPendingRead [^{:tag (* connReader)} cr]
+  (.lock cr)
+  (defer (.unlock cr))
+  (when (not (.-inRead cr))
+    (return))
+
+  (set! (.-aborted cr) true)
+  (.SetReadDeadline (.-rwc cr) aLongTimeAgo)
+  (while (.-inRead cr)
+    (.Wait (.-cond cr)))
+
+  (.SetReadDeadline (.-rwc cr) (lit time/Time)))
+
+
+^{:go/end 799} (go/method setReadLimit [^{:tag (* connReader)} cr ^int64 remain] (set! (.-remain cr) remain))
+^{:go/end 800} (go/method setInfiniteReadLimit [^{:tag (* connReader)} cr] (set! (.-remain cr) maxInt64))
+^{:go/end 801} (go/method hitReadLimit ^bool [^{:tag (* connReader)} cr] (<= (.-remain cr) 0))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 821} (go/method handleReadErrorLocked "handleReadErrorLocked is called whenever a Read from the client returns a\nnon-nil error.\n\nThe provided non-nil err is almost always io.EOF or a \"use of\nclosed network connection\". In any case, the error is not\nparticularly interesting, except perhaps for debugging during\ndevelopment. Any error means the connection is dead and we should\ndown its context.\n\nThe caller must hold connReader.mu.\n" [^{:tag (* connReader)} cr ^error _]
+  (when (== (.-conn cr) nil)
+    (return))
+
+  ((.-cancelCtx (.-conn cr)))
+  (when [res (.Load (.-curReq (.-conn cr)))] (!= res nil)
+    (.closeNotify res)))
+
+
+
+^{:go/end 868} (go/method Read [^{:tag (* connReader)} cr ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (.lock cr)
+  (when (== (.-conn cr) nil)
+    (.unlock cr)
+    (return (.Read (.-rwc cr) p)))
+
+  (when (.-inRead cr)
+    (let [hijacked (.hijacked (.-conn cr))]
+      (.unlock cr)
+      (when hijacked
+        (panic "invalid Body.Read call. After hijacked, the original Request must not be used"))
+
+      (panic "invalid concurrent Body.Read call")))
+
+  (when (.hitReadLimit cr)
+    (.unlock cr)
+    (return 0 io/EOF))
+
+  (when (== (len p) 0)
+    (.unlock cr)
+    (return 0 nil))
+
+  (when (> (conv int64 (len p)) (.-remain cr))
+    (set! p (subslice p _ (.-remain cr))))
+
+  (when (.-hasByte cr)
+    (aset p 0 (aget (.-byteBuf cr) 0))
+    (set! (.-hasByte cr) false)
+    (.unlock cr)
+    (return 1 nil))
+
+  (set! (.-inRead cr) true)
+  (.unlock cr)
+  (set! (values n err) (.Read (.-rwc cr) p))
+
+  (.lock cr)
+  (set! (.-inRead cr) false)
+  (when (!= err nil)
+    (.handleReadErrorLocked cr err))
+
+  (set! (.-remain cr) - (conv int64 n))
+  (.unlock cr)
+
+  (.Broadcast (.-cond cr))
+  (return n err))
+
+
+(go/var
+  ^{:line 871} [^sync/Pool bufioReaderPool]
+  ^{:line 872} [^sync/Pool bufioWriter2kPool]
+  ^{:line 873} [^sync/Pool bufioWriter4kPool])
+
+
+(go/const ^{:val 32768} copyBufPoolSize (* 32 1024))
+
+(go/var copyBufPool (lit sync/Pool :New ^{:go/end 878} (fn ^any [] (new (array copyBufPoolSize byte)))))
+
+^{:go/end 882} (go/func getCopyBuf ^{:tag (slice byte)} []
+  (subslice (assert (* (array copyBufPoolSize byte)) (.Get copyBufPool))))
+
+
+^{:go/end 889} (go/func putCopyBuf [^{:tag (slice byte)} b]
+  (when (!= (len b) copyBufPoolSize)
+    (panic "trying to put back buffer of the wrong size in the copyBufPool"))
+
+  (.Put copyBufPool (conv (* (array copyBufPoolSize byte)) b)))
+
+
+^{:go/breaks [[4 898]] :go/end 899} (go/func bufioWriterPool ^{:tag (* sync/Pool)} [^int size]
+  (switch size
+    (case [(<< 2 10)]
+      (return (addr bufioWriter2kPool)))
+    (case [(<< 4 10)]
+      (return (addr bufioWriter4kPool))))
+
+  nil)
+
+
+^{:go/end 910} (go/func newBufioReader ^{:tag (* bufio/Reader)} [^io/Reader r]
+  (when [v (.Get bufioReaderPool)] (!= v nil)
+    (let [br (assert (* bufio/Reader) v)]
+      (.Reset br r)
+      (return br)))
+
+  ;; Note: if this reader size is ever changed, update
+  ;; TestHandlerBodyClose's assumptions.
+  (bufio/NewReader r))
+
+
+^{:go/end 915} (go/func putBufioReader [^{:tag (* bufio/Reader)} br]
+  (.Reset br nil)
+  (.Put bufioReaderPool br))
+
+
+^{:go/end 927} (go/func newBufioWriterSize ^{:tag (* bufio/Writer)} [^io/Writer w ^int size]
+  (let [pool (bufioWriterPool size)]
+    (when (!= pool nil)
+      (when [v (.Get pool)] (!= v nil)
+        (let [bw (assert (* bufio/Writer) v)]
+          (.Reset bw w)
+          (return bw))))
+
+
+    (bufio/NewWriterSize w size)))
+
+
+^{:go/end 934} (go/func putBufioWriter [^{:tag (* bufio/Writer)} bw]
+  (.Reset bw nil)
+  (when [pool (bufioWriterPool (.Available bw))] (!= pool nil)
+    (.Put pool bw)))
+
+
+
+
+
+
+(go/const ^{:val 1048576 :doc "DefaultMaxHeaderBytes is the maximum permitted size of the headers\nin an HTTP request.\nThis can be overridden by setting [Server.MaxHeaderBytes].\n"} DefaultMaxHeaderBytes (<< 1 20)) ; 1 MB
+
+
+
+
+(go/const ^{:val 500 :doc "DefaultMaxHeaderValueCount is the maximum permitted number of\nheader values in an HTTP request.\nThis can be overridden by setting [Server.MaxHeaderValueCount].\n"} DefaultMaxHeaderValueCount 500)
+
+^{:go/end 951} (go/method maxHeaderBytes ^int [^{:tag (* Server)} s]
+  (when (> (.-MaxHeaderBytes s) 0)
+    (return (.-MaxHeaderBytes s)))
+
+  ^{:line 950} DefaultMaxHeaderBytes)
+
+
+^{:go/end 958} (go/method maxHeaderValueCount ^int [^{:tag (* Server)} s]
+  (when (> (.-MaxHeaderValueCount s) 0)
+    (return (.-MaxHeaderValueCount s)))
+
+  ^{:line 957} DefaultMaxHeaderValueCount)
+
+
+^{:go/end 962} (go/method initialReadLimitSize ^int64 [^{:tag (* Server)} s]
+  (+ (conv int64 (.maxHeaderBytes s)) 4096)) ; bufio slop
+
+
+
+
+
+
+
+^{:go/end 984} (go/method tlsHandshakeTimeout "tlsHandshakeTimeout returns the time limit permitted for the TLS\nhandshake, or zero for unlimited.\n\nIt returns the minimum of any positive ReadHeaderTimeout,\nReadTimeout, or WriteTimeout.\n" ^time/Duration [^{:tag (* Server)} s]
+  (let [^time/Duration ret (zero time/Duration)]
+    (range [_ v (lit (array ... time/Duration)
+          (.-ReadHeaderTimeout s)
+          (.-ReadTimeout s)
+          (.-WriteTimeout s))]
+
+      (when (<= v 0)
+        (continue))
+
+      (when (or (== ret 0) (< v ret))
+        (set! ret v)))
+
+
+    ^{:line 983} ret))
+
+
+
+
+(go/type expectContinueReader "wrapper around io.ReadCloser which on first read, sends an\nHTTP/1.1 100 Continue header\n" (struct
+    ^{:line 989 :tag (* response)} resp
+    ^{:line 990 :tag io/ReadCloser} readCloser
+    ^{:line 991 :tag atomic/Bool} closed))
+
+
+^{:go/end 1009} (go/method Read [^{:tag (* expectContinueReader)} ecr ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (.Load (.-closed ecr))
+    (return 0 ErrBodyReadAfterClose))
+
+  (let [w (.-resp ecr)]
+    (when (.Load (.-canWriteContinue w))
+      (.Lock (.-writeContinueMu w))
+      (when (.Load (.-canWriteContinue w))
+        (.WriteString (.-bufw (.-conn w)) "HTTP/1.1 100 Continue\r\n\r\n")
+        (.Flush (.-bufw (.-conn w)))
+        (.Store (.-canWriteContinue w) false))
+
+      (.Unlock (.-writeContinueMu w)))
+
+    (.Read (.-readCloser ecr) p)))
+
+
+^{:go/end 1019} (go/method Close ^error [^{:tag (* expectContinueReader)} ecr]
+  (when (.Load (.-canWriteContinue (.-resp ecr)))
+    (.disableWriteContinue (.-resp ecr) true))
+
+  (when (.Swap (.-closed ecr) true)
+    (return nil))
+
+  (.Close (.-readCloser ecr)))
+
+
+
+
+
+
+
+
+(go/const ^{:val "Mon, 02 Jan 2006 15:04:05 GMT" :doc "TimeFormat is the time format to use when generating times in HTTP\nheaders. It is like [time.RFC1123] but hard-codes GMT as the time\nzone. The time being formatted must be in UTC for Format to\ngenerate the correct format.\n\nFor parsing this time format, see [ParseTime].\n"} TimeFormat "Mon, 02 Jan 2006 15:04:05 GMT")
+
+(go/var errTooLarge (errors/New "http: request too large"))
+
+
+^{:go/end 1125} (go/method readRequest "Read next request from connection.\n" [^{:tag (* conn)} c ^context/Context ctx] :results [^{:tag (* response)} w ^error err]
+  (when (.hijacked c)
+    (return nil ErrHijacked))
+
+
+  (let [t0 (time/Now)
+      ^{:line 1038 :tag time/Time} wholeReqDeadline (zero time/Time)] ; or zero if none
+    (when [d (.-ReadTimeout (.-server c))] (> d 0)
+      (set! wholeReqDeadline (.Add t0 d)))
+
+    (when [d (.-WriteTimeout (.-server c))] (> d 0)
+      (defer (^{:go/end 1045} (fn []
+            (.SetWriteDeadline (.-rwc c) (.Add (time/Now) d))))))
+
+
+
+    (.setReadLimit (.-r c) (.initialReadLimitSize (.-server c)))
+    (when (== (.-lastMethod c) "POST")
+      ;; RFC 7230 section 3 tolerance for old buggy clients.
+      (let [(values peek _) (.Peek (.-bufr c) 4)] ; ReadRequest will get err below
+        (.Discard (.-bufr c) (numLeadingCRorLF peek))))
+
+    (let [(values req ^:assign err) (readRequestLimit (.-bufr c) (conv int64 (.maxHeaderValueCount (.-server c))))]
+      (when (!= err nil)
+        (when (.hitReadLimit (.-r c))
+          (return nil errTooLarge))
+
+        (return nil err))
+
+
+      (when (not (http1ServerSupportsRequest req))
+        (return nil (lit statusError StatusHTTPVersionNotSupported "unsupported protocol version")))
+
+
+      (set! (.-lastMethod c) (.-Method req))
+      (.setInfiniteReadLimit (.-r c))
+
+      (let [(values hosts haveHost) (aget (.-Header req) "Host")
+          ^{:line 1070} isH2Upgrade (.isH2Upgrade req)]
+        (when (and (.ProtoAtLeast req 1 1) ^:go/paren (or (not haveHost) (== (len hosts) 0)) (not isH2Upgrade) (!= (.-Method req) "CONNECT"))
+          (return nil (badRequestError "missing required Host header")))
+
+        (when (and (== (len hosts) 1) (not (httpguts/ValidHostHeader (aget hosts 0))))
+          (return nil (badRequestError "malformed Host header")))
+
+        (range [k vv (.-Header req)]
+          (when (not (httpguts/ValidHeaderFieldName k))
+            (return nil (badRequestError "invalid header name")))
+
+          (range [_ v vv]
+            (when (not (httpguts/ValidHeaderFieldValue v))
+              (return nil (badRequestError "invalid header value")))))
+
+
+
+        (delete (.-Header req) "Host")
+
+        (let [(values ^:assign ctx cancelCtx) (context/WithCancel ctx)]
+          (set! (.-ctx req) ctx)
+          (set! (.-RemoteAddr req) (.-remoteAddr c))
+          (set! (.-TLS req) (.-tlsState c))
+          (let [^{:tag (* body)} reqBody (zero (* body))]
+            (type-switch [b (.-Body req)]
+              (case [noBody])
+              (case [(* body)]
+                (set! reqBody b)
+                (set! (.-doEarlyClose reqBody) true))
+              (default
+                (panic (fmt/Errorf "http: unexpected request body type %T" (.-Body req)))))
+
+
+            (.SetReadDeadline (.-rwc c) wholeReqDeadline)
+
+            (set! w (addr ^{:go/breaks [2 4 6 8 10 12 [14 1116] 16]} (lit response
+                  :conn c
+                  :cancelCtx cancelCtx
+                  :req req
+                  :reqBody reqBody
+                  :handlerHeader (make Header)
+                  :contentLength -1
+
+                  ;; We populate these ahead of time so we're not
+                  ;; reading from req.Header after their Handler starts
+                  ;; and maybe mutates it (Issue 14940)
+                  :wants10KeepAlive (.wantsHttp10KeepAlive req)
+                  :wantsClose (.wantsClose req))))
+
+            (when isH2Upgrade
+              (set! (.-closeAfterReply w) true))
+
+            (set! (.-res (.-cw w)) w)
+            (set! (.-w w) (newBufioWriterSize (addr (.-cw w)) bufferBeforeChunkingSize))
+            (return w nil)))))))
+
+
+
+
+^{:go/breaks [[6 1141]] :go/end 1142} (go/func http1ServerSupportsRequest "http1ServerSupportsRequest reports whether Go's HTTP/1.x server\nsupports the given request.\n" ^bool [^{:tag (* Request)} req]
+  (when (== (.-ProtoMajor req) 1)
+    (return true))
+
+  ;; Accept "PRI * HTTP/2.0" upgrade requests, so Handlers can
+  ;; wire up their own HTTP/2 upgrades.
+  (when (and (== (.-ProtoMajor req) 2) (== (.-ProtoMinor req) 0)
+      (== (.-Method req) "PRI") (== (.-RequestURI req) "*"))
+    (return true))
+
+  ;; Reject HTTP/0.x, and all other HTTP/2+ requests (which
+  ;; aren't encoded in ASCII anyway).
+  false)
+
+
+^{:go/end 1153} (go/method Header ^Header [^{:tag (* response)} w]
+  (when (and (== (.-header (.-cw w)) nil) (.-wroteHeader w) (not (.-wroteHeader (.-cw w))))
+    ;; Accessing the header between logically writing it
+    ;; and physically writing it means we need to allocate
+    ;; a clone to snapshot the logically written state.
+    (set! (.-header (.-cw w)) (.Clone (.-handlerHeader w))))
+
+  (set! (.-calledHeader w) true)
+  (.-handlerHeader w))
+
+
+
+
+
+
+
+
+
+
+
+(go/const ^{:val 262144 :doc "maxPostHandlerReadBytes is the max number of Request.Body bytes not\nconsumed by a handler that the server will read from the client\nin order to keep a connection alive. If there are more bytes\nthan this, the server, to be paranoid, instead sends a\n\"Connection close\" response.\n\nThis number is approximately what a typical machine's TCP buffer\nsize is anyway.  (if we have the bytes on the machine, we might as\nwell read them)\n"} maxPostHandlerReadBytes (<< 256 10))
+
+^{:go/end 1180} (go/func checkWriteHeaderCode [^int code]
+  ;; Issue 22880: require valid WriteHeader status codes.
+  ;; For now we only enforce that it's three digits.
+  ;; In the future we might block things over 599 (600 and above aren't defined
+  ;; at https://httpwg.org/specs/rfc7231.html#status.codes).
+  ;; But for now any three digits.
+  ;;
+  ;; We used to send "HTTP/1.1 000 0" on the wire in responses but there's
+  ;; no equivalent bogus thing we can realistically send in HTTP/2,
+  ;; so we'll consistently panic instead and help people find their bugs
+  ;; early. (We can't return an error from WriteHeader even if we wanted to.)
+  (when (or (< code 100) (> code 999))
+    (panic (fmt/Sprintf "invalid WriteHeader code %v" code))))
+
+
+
+
+
+^{:go/end 1200} (go/func relevantCaller "relevantCaller searches the call stack for the first function outside of net/http.\nThe purpose of this function is to provide more helpful error messages.\n" ^runtime/Frame []
+  (let [pc (make (slice uintptr) 16)
+      ^{:line 1186} n (runtime/Callers 1 pc)
+      ^{:line 1187} frames (runtime/CallersFrames (subslice pc _ n))
+      ^{:line 1188 :tag runtime/Frame} frame (zero runtime/Frame)]
+    (while true
+      (let [^bool more (zero bool)]
+        (set! (values frame more) (.Next frames))
+        (when (not (strings/HasPrefix (.-Function frame) "net/http."))
+          (return frame))
+
+        (when (not more)
+          (break))))
+
+
+    ^{:line 1199} frame))
+
+
+^{:go/end 1254} (go/method WriteHeader [^{:tag (* response)} w ^int code]
+  (when (.hijacked (.-conn w))
+    (let [caller (relevantCaller)]
+      (.logf (.-server (.-conn w)) "http: response.WriteHeader on hijacked connection from %s (%s:%d)" (.-Function caller) (path/Base (.-File caller)) (.-Line caller))
+      (return)))
+
+  (when (.-wroteHeader w)
+    (let [caller (relevantCaller)]
+      (.logf (.-server (.-conn w)) "http: superfluous response.WriteHeader call from %s (%s:%d)" (.-Function caller) (path/Base (.-File caller)) (.-Line caller))
+      (return)))
+
+  (checkWriteHeaderCode code)
+
+  ;; Sending a 100 Continue or any non-1XX header disables the
+  ;; automatically-sent 100 Continue from Request.Body.Read. If it is a final
+  ;; response (200 or higher), we skip draining the request body, which the
+  ;; client will never send.
+  (when (or (== code 100) (>= code 200))
+    (.disableWriteContinue w (>= code 200)))
+
+
+  ;; Handle informational headers.
+  ;;
+  ;; We shouldn't send any further headers after 101 Switching Protocols,
+  ;; so it takes the non-informational path.
+  (when (and (>= code 100) (<= code 199) (!= code StatusSwitchingProtocols))
+    (writeStatusLine (.-bufw (.-conn w)) (.ProtoAtLeast (.-req w) 1 1) code (subslice (.-statusBuf w)))
+
+    ;; Per RFC 8297 we must not clear the current header map
+    (.WriteSubset (.-handlerHeader w) (.-bufw (.-conn w)) excludedHeadersNoBody)
+    (.Write (.-bufw (.-conn w)) crlf)
+    (.Flush (.-bufw (.-conn w)))
+
+    (return))
+
+
+  (set! (.-wroteHeader w) true)
+  (set! (.-status w) code)
+
+  (when (and (.-calledHeader w) (== (.-header (.-cw w)) nil))
+    (set! (.-header (.-cw w)) (.Clone (.-handlerHeader w))))
+
+
+  (when [cl (.get (.-handlerHeader w) "Content-Length")] (!= cl "")
+    (let [(values v err) (strconv/ParseInt cl 10 64)]
+      (if (and (== err nil) (>= v 0))
+        (set! (.-contentLength w) v)
+        (do
+          (.logf (.-server (.-conn w)) "http: invalid Content-Length of %q" cl)
+          (.Del (.-handlerHeader w) "Content-Length"))))))
+
+
+
+
+
+
+
+(go/type extraHeader "extraHeader is the set of headers sometimes added by chunkWriter.writeHeader.\nThis type is used to avoid extra allocations from cloning and/or populating\nthe response Header map and all its 1-element slices.\n" (struct
+    ^{:line 1260 :tag string} contentType
+    ^{:line 1261 :tag string} connection
+    ^{:line 1262 :tag string} transferEncoding
+    ^{:line 1263 :tag (slice byte)} date ; written if not nil
+    ^{:line 1264 :tag (slice byte)} contentLength)) ; written if not nil
+
+
+
+(go/var ^{:doc "Sorted the same as extraHeader.Write's loop.\n"} extraHeaderKeys (lit (slice (slice byte))
+    (conv (slice byte) "Content-Type")
+    (conv (slice byte) "Connection")
+    (conv (slice byte) "Transfer-Encoding")))
+
+
+(go/var
+  ^{:line 1275} [headerContentLength (conv (slice byte) "Content-Length: ")]
+  ^{:line 1276} [headerDate (conv (slice byte) "Date: ")])
+
+
+
+
+
+
+
+^{:go/end 1303} (go/method Write "Write writes the headers described in h to w.\n\nThis method has a value receiver, despite the somewhat large size\nof h, because it prevents an allocation. The escape analysis isn't\nsmart enough to realize this function doesn't mutate h.\n" [^extraHeader h ^{:tag (* bufio/Writer)} w]
+  (when (!= (.-date h) nil)
+    (.Write w headerDate)
+    (.Write w (.-date h))
+    (.Write w crlf))
+
+  (when (!= (.-contentLength h) nil)
+    (.Write w headerContentLength)
+    (.Write w (.-contentLength h))
+    (.Write w crlf))
+
+  (range [i v (lit (slice string) (.-contentType h) (.-connection h) (.-transferEncoding h))]
+    (when (!= v "")
+      (.Write w (aget extraHeaderKeys i))
+      (.Write w colonSpace)
+      (.WriteString w v)
+      (.Write w crlf))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1566} (go/method writeHeader "writeHeader finalizes the header sent to the client and writes it\nto cw.res.conn.bufw.\n\np is not written by writeHeader, but is the first chunk of the body\nthat will be written. It is sniffed for a Content-Type if none is\nset explicitly. It's also used to set the Content-Length, if the\ntotal body size was small and the handler has already finished\nrunning.\n" [^{:tag (* chunkWriter)} cw ^{:tag (slice byte)} p]
+  (when (.-wroteHeader cw)
+    (return))
+
+  (set! (.-wroteHeader cw) true)
+
+  (let [w (.-res cw)
+      ^{:line 1320} keepAlivesEnabled (.doKeepAlives (.-server (.-conn w)))
+      ^{:line 1321} isHEAD (== (.-Method (.-req w)) "HEAD")
+
+      ;; header is written out to w.conn.buf below. Depending on the
+      ;; state of the handler, we either own the map or not. If we
+      ;; don't own it, the exclude map is created lazily for
+      ;; WriteSubset to remove headers. The setHeader struct holds
+      ;; headers we need to add.
+      ^{:line 1328} header (.-header cw)
+      ^{:line 1329} owned (!= header nil)]
+    (when (not owned)
+      (set! header (.-handlerHeader w)))
+
+    (let [^{:tag (map string bool)} excludeHeader (zero (map string bool))
+        ^{:line 1334} delHeader ^{:go/end 1346} (fn [^string key]
+          (when owned
+            (.Del header key)
+            (return))
+
+          (when [(values _ ok) (aget header key)] (not ok)
+            (return))
+
+          (when (== excludeHeader nil)
+            (set! excludeHeader (make (map string bool))))
+
+          (aset excludeHeader key true))
+
+        ^{:line 1347 :tag extraHeader} setHeader (zero extraHeader)
+
+        ;; Don't write out the fake "Trailer:foo" keys. See TrailerPrefix.
+        ^{:line 1350} trailers false]
+      (range [k (.-header cw)]
+        (when (strings/HasPrefix k TrailerPrefix)
+          (when (== excludeHeader nil)
+            (set! excludeHeader (make (map string bool))))
+
+          (aset excludeHeader k true)
+          (set! trailers true)))
+
+
+      (range [_ v (aget (.-header cw) "Trailer")]
+        (set! trailers true)
+        (foreachHeaderElement v (.-declareTrailer (.-res cw))))
+
+
+      (let [te (.get header "Transfer-Encoding")
+          ^{:line 1366} hasTE (!= te "")]
+
+        ;; If the handler is done but never sent a Content-Length
+        ;; response header and this is our first (and last) write, set
+        ;; it, even to zero. This helps HTTP/1.0 clients keep their
+        ;; "keep-alive" connections alive.
+        ;; Exceptions: 304/204/1xx responses never get Content-Length, and if
+        ;; it was a HEAD request, we don't know the difference between
+        ;; 0 actual bytes and 0 bytes because the handler noticed it
+        ;; was a HEAD request and chose not to write anything. So for
+        ;; HEAD, the handler should either write the Content-Length or
+        ;; write non-zero bytes. If it's actually 0 bytes and the
+        ;; handler never looked at the Request.Method, we just don't
+        ;; send a Content-Length header.
+        ;; Further, we don't send an automatic Content-Length if they
+        ;; set a Transfer-Encoding, because they're generally incompatible.
+        (when (and (.Load (.-handlerDone w)) (not trailers) (not hasTE) (bodyAllowedForStatus (.-status w)) (not (.has header "Content-Length")) ^:go/paren (or (not isHEAD) (> (len p) 0)))
+          (set! (.-contentLength w) (conv int64 (len p)))
+          (set! (.-contentLength setHeader) (strconv/AppendInt (subslice (.-clenBuf (.-res cw)) _ 0) (conv int64 (len p)) 10)))
+
+
+        ;; If this was an HTTP/1.0 request with keep-alive and we sent a
+        ;; Content-Length back, we can make this a keep-alive response ...
+        (when (and (.-wants10KeepAlive w) keepAlivesEnabled)
+          (let [sentLength (!= (.get header "Content-Length") "")]
+            (when (and sentLength (== (.get header "Connection") "keep-alive"))
+              (set! (.-closeAfterReply w) false))))
+
+
+
+        ;; Check for an explicit (and valid) Content-Length header.
+        (let [hasCL (!= (.-contentLength w) -1)]
+
+          (cond (and (.-wants10KeepAlive w) ^:go/paren (or isHEAD hasCL (not (bodyAllowedForStatus (.-status w)))))
+            (let [(values _ connectionHeaderSet) (aget header "Connection")]
+              (when (not connectionHeaderSet)
+                (set! (.-connection setHeader) "keep-alive")))
+
+            (or (not (.ProtoAtLeast (.-req w) 1 1)) (.-wantsClose w))
+            (set! (.-closeAfterReply w) true))
+
+
+          (when (or (== (.get header "Connection") "close") (not keepAlivesEnabled))
+            (set! (.-closeAfterReply w) true))
+
+
+          ;; If the client wanted a 100-continue but we never sent it to
+          ;; them (or, more strictly: we never finished reading their
+          ;; request body), don't reuse this connection.
+          ;;
+          ;; This behavior was first added on the theory that we don't know
+          ;; if the next bytes on the wire are going to be the remainder of
+          ;; the request body or the subsequent request (see issue 11549),
+          ;; but that's not correct: If we keep using the connection,
+          ;; the client is required to send the request body whether we
+          ;; asked for it or not.
+          ;;
+          ;; We probably do want to skip reusing the connection in most cases,
+          ;; however. If the client is offering a large request body that we
+          ;; don't intend to use, then it's better to close the connection
+          ;; than to read the body. For now, assume that if we're sending
+          ;; headers, the handler is done reading the body and we should
+          ;; drop the connection if we haven't seen EOF.
+          (when (and (!= (.-ecReader w) nil) (.bodyRemains (.-reqBody w)))
+            (set! (.-closeAfterReply w) true))
+
+
+          ;; We do this by default because there are a number of clients that
+          ;; send a full request before starting to read the response, and they
+          ;; can deadlock if we start writing the response with unconsumed body
+          ;; remaining. See Issue 15527 for some history.
+          ;;
+          ;; If full duplex mode has been enabled with ResponseController.EnableFullDuplex,
+          ;; then leave the request body alone.
+          ;;
+          ;; We don't take this path when w.closeAfterReply is set.
+          ;; We may not need to consume the request to get ready for the next one
+          ;; (since we're closing the conn), but a client which sends a full request
+          ;; before reading a response may deadlock in this case.
+          ;; This behavior has been present since CL 5268043 (2011), however,
+          ;; so it doesn't seem to be causing problems.
+          (when (and (!= (.-ContentLength (.-req w)) 0) (!= (.-reqBody w) nil) (not (.-closeAfterReply w)) (not (.-fullDuplex w)))
+            (let [(values ^bool discard ^bool tooBig) (zero bool)]
+              (.Lock (.-mu (.-reqBody w)))
+              (switch
+                (case [(.-closed (.-reqBody w))]
+                  (when (not (.-sawEOF (.-reqBody w)))
+                    ;; Body was closed in handler with non-EOF error.
+                    (set! (.-closeAfterReply w) true)))
+
+                (case [(>= (.unreadDataSizeLocked (.-reqBody w)) maxPostHandlerReadBytes)]
+                  (set! tooBig true))
+                (default
+                  (set! discard true)))
+
+              (.Unlock (.-mu (.-reqBody w)))
+
+              (when discard
+                (.Close (.-reqBody w))
+                (when (.didEarlyClose (.-reqBody w))
+                  (set! (.-closeAfterReply w) true)))
+
+
+              (when tooBig
+                (.requestTooLarge w)
+                (delHeader "Connection")
+                (set! (.-connection setHeader) "close"))))
+
+
+
+          (let [code (.-status w)]
+            (if (bodyAllowedForStatus code)
+              ;; If no content type, apply sniffing algorithm to body.
+              (let [(values _ haveType) (aget header "Content-Type")
+
+                  ;; If the Content-Encoding was set and is non-blank,
+                  ;; we shouldn't sniff the body. See Issue 31753.
+                  ^{:line 1483} ce (.Get header "Content-Encoding")
+                  ^{:line 1484} hasCE (> (len ce) 0)]
+                (when (and (not hasCE) (not haveType) (not hasTE) (> (len p) 0))
+                  (set! (.-contentType setHeader) (DetectContentType p))))
+
+
+              (range [_ k (suppressedHeaders code)]
+                (delHeader k)))
+
+
+
+            (when (not (.has header "Date"))
+              (set! (.-date setHeader) (.AppendFormat (.UTC (time/Now)) (subslice (.-dateBuf (.-res cw)) _ 0) TimeFormat)))
+
+
+            (when (and hasCL hasTE (!= te "identity"))
+              ;; TODO: return an error if WriteHeader gets a return parameter
+              ;; For now just ignore the Content-Length.
+              (.logf (.-server (.-conn w)) "http: WriteHeader called with both Transfer-Encoding of %q and a Content-Length of %d"
+                ^{:line 1502} te (.-contentLength w))
+              (delHeader "Content-Length")
+              (set! hasCL false))
+
+
+            (cond (or (== (.-Method (.-req w)) "HEAD") (not (bodyAllowedForStatus code)) (== code StatusNoContent))
+              ;; Response has no body.
+              (delHeader "Transfer-Encoding")
+              ^{:line 1510} hasCL
+              ;; Content-Length has been provided, so no chunking is to be done.
+              (delHeader "Transfer-Encoding")
+              (.ProtoAtLeast (.-req w) 1 1)
+              ;; HTTP/1.1 or greater: Transfer-Encoding has been set to identity, and no
+              ;; content-length has been provided. The connection must be closed after the
+              ;; reply is written, and no chunking is to be done. This is the setup
+              ;; recommended in the Server-Sent Events candidate recommendation 11,
+              ;; section 8.
+              (if (and hasTE (== te "identity")) (do
+                  (set! (.-chunking cw) false)
+                  (set! (.-closeAfterReply w) true)
+                  (delHeader "Transfer-Encoding"))
+                (do
+                  ;; HTTP/1.1 or greater: use chunked transfer encoding
+                  ;; to avoid closing the connection at EOF.
+                  (set! (.-chunking cw) true)
+                  (set! (.-transferEncoding setHeader) "chunked")
+                  (when (and hasTE (== te "chunked"))
+                    ;; We will send the chunked Transfer-Encoding header later.
+                    (delHeader "Transfer-Encoding")))) :else
+
+
+              (do
+                ;; HTTP version < 1.1: cannot do chunked transfer
+                ;; encoding and we don't know the Content-Length so
+                ;; signal EOF by closing connection.
+                (set! (.-closeAfterReply w) true)
+                (delHeader "Transfer-Encoding"))) ; in case already set
+
+
+            ;; Cannot use Content-Length with non-identity Transfer-Encoding.
+            (when (.-chunking cw)
+              (delHeader "Content-Length"))
+
+            (when (not (.ProtoAtLeast (.-req w) 1 0))
+              (return))
+
+
+            ;; Only override the Connection header if it is not a successful
+            ;; protocol switch response and if KeepAlives are not enabled.
+            ;; See https://golang.org/issue/36381.
+            (let [delConnectionHeader (and (.-closeAfterReply w)
+                  ^:go/paren (or (not keepAlivesEnabled) (not (hasToken (.get (.-header cw) "Connection") "close")))
+                  (not (isProtocolSwitchResponse (.-status w) header)))]
+              (when delConnectionHeader
+                (delHeader "Connection")
+                (when (.ProtoAtLeast (.-req w) 1 1)
+                  (set! (.-connection setHeader) "close")))
+
+
+
+              (writeStatusLine (.-bufw (.-conn w)) (.ProtoAtLeast (.-req w) 1 1) code (subslice (.-statusBuf w)))
+              (.WriteSubset (.-header cw) (.-bufw (.-conn w)) excludeHeader)
+              (.Write setHeader (.-bufw (.-conn w)))
+              (.Write (.-bufw (.-conn w)) crlf))))))))
+
+
+
+
+^{:go/end 1584} (go/func foreachHeaderElement "foreachHeaderElement splits v according to the \"#rule\" construction\nin RFC 7230 section 7 and calls fn for each non-empty element.\n" [^string v ^{:tag (func [string])} fn]
+  (set! v (textproto/TrimString v))
+  (when (== v "")
+    (return))
+
+  (when (not (strings/Contains v ","))
+    (go/call fn v)
+    (return))
+
+  (range [f (strings/SplitSeq v ",")]
+    (when [(set! f (textproto/TrimString f))] (!= f "")
+      (go/call fn f))))
+
+
+
+
+
+
+
+
+^{:go/end 1605} (go/func writeStatusLine "writeStatusLine writes an HTTP/1.x Status-Line (RFC 7230 Section 3.1.2)\nto bw. is11 is whether the HTTP request is HTTP/1.1. false means HTTP/1.0.\ncode is the response status code.\nscratch is an optional scratch buffer. If it has at least capacity 3, it's used.\n" [^{:tag (* bufio/Writer)} bw ^bool is11 ^int code ^{:tag (slice byte)} scratch]
+  (if is11
+    (.WriteString bw "HTTP/1.1 ")
+
+    (.WriteString bw "HTTP/1.0 "))
+
+  (if [text (StatusText code)] (!= text "") (do
+      (.Write bw (strconv/AppendInt (subslice scratch _ 0) (conv int64 code) 10))
+      (.WriteByte bw \space)
+      (.WriteString bw text)
+      (.WriteString bw "\r\n"))
+
+    ;; don't worry about performance
+    (fmt/Fprintf bw "%03d status code %d\r\n" code code)))
+
+
+
+
+
+^{:go/end 1614} (go/method bodyAllowed "bodyAllowed reports whether a Write is allowed for this response type.\nIt's illegal to call this before the header has been flushed.\n" ^bool [^{:tag (* response)} w]
+  (when (not (.-wroteHeader w))
+    (panic "net/http: bodyAllowed called before the header was written"))
+
+  (bodyAllowedForStatus (.-status w)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1652} (go/method Write "The Life Of A Write is like this:\n\nHandler starts. No header has been sent. The handler can either\nwrite a header, or just start writing. Writing before sending a header\nsends an implicitly empty 200 OK header.\n\nIf the handler didn't declare a Content-Length up front, we either\ngo into chunking mode or, if the handler finishes running before\nthe chunking buffer size, we compute a Content-Length and send that\nin the header instead.\n\nLikewise, if the handler didn't set a Content-Type, we sniff that\nfrom the initial chunk of output.\n\nThe Writers are wired together like:\n\n 1. *response (the ResponseWriter) ->\n 2. (*response).w, a [*bufio.Writer] of bufferBeforeChunkingSize bytes ->\n 3. chunkWriter.Writer (whose writeHeader finalizes Content-Length/Type)\n    and which writes the chunk headers, if needed ->\n 4. conn.bufw, a *bufio.Writer of default (4kB) bytes, writing to ->\n 5. checkConnErrorWriter{c}, which notes any non-nil error on Write\n    and populates c.werr with it if so, but otherwise writes to ->\n 6. the rwc, the [net.Conn].\n\nTODO(bradfitz): short-circuit some of the buffering when the\ninitial header contains both a Content-Type and Content-Length.\nAlso short-circuit in (1) when the header's been sent and not in\nchunking mode, writing directly to (4) instead, if (2) has no\nbuffered data. More generally, we could short-circuit from (1) to\n(3) even in chunking mode if the write size from (1) is over some\nthreshold and nothing is in (2).  The answer might be mostly making\nbufferBeforeChunkingSize smaller and having bufio's fast-paths deal\nwith this instead.\n" [^{:tag (* response)} w ^{:tag (slice byte)} data] :results [^int n ^error err]
+  (.write w (len data) data ""))
+
+
+^{:go/end 1656} (go/method WriteString [^{:tag (* response)} w ^string data] :results [^int n ^error err]
+  (.write w (len data) nil data))
+
+
+
+^{:go/end 1692} (go/method write "either dataB or dataS is non-zero.\n" [^{:tag (* response)} w ^int lenData ^{:tag (slice byte)} dataB ^string dataS] :results [^int n ^error err]
+  (when (.hijacked (.-conn w))
+    (when (> lenData 0)
+      (let [caller (relevantCaller)]
+        (.logf (.-server (.-conn w)) "http: response.Write on hijacked connection from %s (%s:%d)" (.-Function caller) (path/Base (.-File caller)) (.-Line caller))))
+
+    (return 0 ErrHijacked))
+
+
+  (when (.Load (.-canWriteContinue w))
+    ;; Body reader wants to write 100 Continue but hasn't yet. Tell it not to.
+    (.disableWriteContinue w true))
+
+
+  (when (not (.-wroteHeader w))
+    (.WriteHeader w StatusOK))
+
+  (when (== lenData 0)
+    (return 0 nil))
+
+  (when (not (.bodyAllowed w))
+    (return 0 ErrBodyNotAllowed))
+
+
+  (set! (.-written w) + (conv int64 lenData)) ; ignoring errors, for errorKludge
+  (when (and (!= (.-contentLength w) -1) (> (.-written w) (.-contentLength w)))
+    (return 0 ErrContentLength))
+
+  (if (!= dataB nil)
+    (return (.Write (.-w w) dataB))
+
+    (return (.WriteString (.-w w) dataS))))
+
+
+
+^{:go/end 1722} (go/method finishRequest [^{:tag (* response)} w]
+  (.Store (.-handlerDone w) true)
+
+  (when (not (.-wroteHeader w))
+    (.WriteHeader w StatusOK))
+
+
+  (.Flush (.-w w))
+  (putBufioWriter (.-w w))
+  (.close (.-cw w))
+  (.Flush (.-bufw (.-conn w)))
+
+  (.abortPendingRead (.-r (.-conn w)))
+  (.registerOnHitEOF (.-reqBody w) nil) ; prevent new background read from starting
+
+  (when (.Load (.-canWriteContinue w))
+    (.disableWriteContinue w true))
+
+
+  ;; Close the body (regardless of w.closeAfterReply) so we can
+  ;; re-use its bufio.Reader later safely.
+  ;;
+  ;; In full-duplex mode, this may also drain the remaining request body.
+  (.Close (.-reqBody w))
+
+  (when (!= (.-MultipartForm (.-req w)) nil)
+    (.RemoveAll (.-MultipartForm (.-req w)))))
+
+
+
+
+
+^{:go/breaks [[8 1749]] :go/end 1750} (go/method shouldReuseConnection "shouldReuseConnection reports whether the underlying TCP connection can be reused.\nIt must only be called after the handler is done executing.\n" ^bool [^{:tag (* response)} w]
+  (when (.-closeAfterReply w)
+    ;; The request or something set while executing the
+    ;; handler indicated we shouldn't reuse this
+    ;; connection.
+    (return false))
+
+
+  (when (and (!= (.-Method (.-req w)) "HEAD") (!= (.-contentLength w) -1) (.bodyAllowed w) (!= (.-contentLength w) (.-written w)))
+    ;; Did not write enough. Avoid getting out of sync.
+    (return false))
+
+
+  ;; There was some error writing to the underlying connection
+  ;; during the request, so don't re-use this conn.
+  (when (!= (.-werr (.-conn w)) nil)
+    (return false))
+
+
+  (when (.closedRequestBodyEarly w)
+    (return false))
+
+
+  true)
+
+
+^{:go/end 1754} (go/method closedRequestBodyEarly ^bool [^{:tag (* response)} w]
+  (and (!= (.-reqBody w) nil) (.didEarlyClose (.-reqBody w))))
+
+
+^{:go/end 1758} (go/method Flush [^{:tag (* response)} w]
+  (.FlushError w))
+
+
+^{:go/end 1770} (go/method FlushError ^error [^{:tag (* response)} w]
+  (when (not (.-wroteHeader w))
+    (.WriteHeader w StatusOK))
+
+  (let [err (.Flush (.-w w))
+      ^{:line 1765} e2 (.flush (.-cw w))]
+    (when (== err nil)
+      (set! err e2))
+
+    ^{:line 1769} err))
+
+
+^{:go/end 1787} (go/method finalFlush [^{:tag (* conn)} c]
+  (when (!= (.-bufr c) nil)
+    ;; Steal the bufio.Reader (~4KB worth of memory) and its associated
+    ;; reader for a future connection.
+    (putBufioReader (.-bufr c))
+    (set! (.-bufr c) nil))
+
+
+  (when (!= (.-bufw c) nil)
+    (.Flush (.-bufw c))
+    ;; Steal the bufio.Writer (~4KB worth of memory) and its associated
+    ;; writer for a future connection.
+    (putBufioWriter (.-bufw c))
+    (set! (.-bufw c) nil)))
+
+
+
+
+^{:go/end 1793} (go/method close "Close the connection.\n" [^{:tag (* conn)} c]
+  (.finalFlush c)
+  (.Close (.-rwc c)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "rstAvoidanceDelay is the amount of time we sleep after closing the\nwrite side of a TCP connection before closing the entire socket.\nBy sleeping, we increase the chances that the client sees our FIN\nand processes its final data before they process the subsequent RST\nfrom closing a connection with known unread data.\nThis RST seems to occur mostly on BSD systems. (And Windows?)\nThis timeout is somewhat arbitrary (~latency around the planet),\nand may be modified by tests.\n\nTODO(bcmills): This should arguably be a server configuration parameter,\nnot a hard-coded value.\n"} rstAvoidanceDelay (* 500 time/Millisecond))
+
+(go/type closeWriter (interface
+    (CloseWrite ^error [])))
+
+
+(go/var ^closeWriter _ (conv (* net/TCPConn) nil))
+
+
+
+
+
+
+
+^{:go/end 1847} (go/method closeWriteAndWait "closeWriteAndWait flushes any outstanding data and sends a FIN packet (if\nclient is connected via TCP), signaling that we're done. We then\npause for a bit, hoping the client processes it before any\nsubsequent RST.\n\nSee https://golang.org/issue/3595\n" [^{:tag (* conn)} c]
+  (.finalFlush c)
+  (when [(values tcp ok) (assert closeWriter (.-rwc c))] ok
+    (.CloseWrite tcp))
+
+
+  ;; When we return from closeWriteAndWait, the caller will fully close the
+  ;; connection. If client is still writing to the connection, this will cause
+  ;; the write to fail with ECONNRESET or similar. Unfortunately, many TCP
+  ;; implementations will also drop unread packets from the client's read buffer
+  ;; when a write fails, causing our final response to be truncated away too.
+  ;;
+  ;; As a result, https://www.rfc-editor.org/rfc/rfc7230#section-6.6 recommends
+  ;; that “[t]he server … continues to read from the connection until it
+  ;; receives a corresponding close by the client, or until the server is
+  ;; reasonably certain that its own TCP stack has received the client's
+  ;; acknowledgement of the packet(s) containing the server's last response.”
+  ;;
+  ;; Unfortunately, we have no straightforward way to be “reasonably certain”
+  ;; that we have received the client's ACK, and at any rate we don't want to
+  ;; allow a misbehaving client to soak up server connections indefinitely by
+  ;; withholding an ACK, nor do we want to go through the complexity or overhead
+  ;; of using low-level APIs to figure out when a TCP round-trip has completed.
+  ;;
+  ;; Instead, we declare that we are “reasonably certain” that we received the
+  ;; ACK if maxRSTAvoidanceDelay has elapsed.
+  (time/Sleep rstAvoidanceDelay))
+
+
+
+
+
+^{:go/breaks [[5 1857]] :go/end 1858} (go/func validNextProto "validNextProto reports whether the proto is a valid ALPN protocol name.\nEverything is valid except the empty string and built-in protocol types,\nso that those can't be overridden with alternate implementations.\n" ^bool [^string proto]
+  (switch proto
+    (case ["" "http/1.1" "http/1.0"]
+      (return false)))
+
+  true)
+
+
+(go/const
+  ^{:line 1861} [^{:val true} runHooks true]
+  ^{:line 1862} [^{:val false} skipHooks false])
+
+
+^{:go/end 1884} (go/method setState [^{:tag (* conn)} c ^net/Conn nc ^ConnState state ^bool runHook]
+  (let [srv (.-server c)]
+    (switch state
+      (case [StateNew]
+        (.trackConn srv c true))
+      (case [StateHijacked StateClosed]
+        (.trackConn srv c false)))
+
+    (when (or (> state 0xff) (< state 0))
+      (panic "internal error"))
+
+    (let [packedState (bit-or (conv uint64 (<< (.Unix (time/Now)) 8)) (conv uint64 state))]
+      (.Store (.-curState c) packedState)
+      (when (not runHook)
+        (return))
+
+      (when [hook (.-ConnState srv)] (!= hook nil)
+        (hook nc state)))))
+
+
+
+^{:go/end 1889} (go/method getState [^{:tag (* conn)} c] :results [^ConnState state ^int64 unixSec]
+  (let [packedState (.Load (.-curState c))]
+    (return (conv ConnState (bit-and packedState 0xff)) (conv int64 (>> packedState 8)))))
+
+
+
+
+
+^{:go/end 1894} (go/func badRequestError "badRequestError is a literal string (used by in the server in HTML,\nunescaped) to tell the user why their request was bad. It should\nbe plain text without user info or other embedded errors.\n" ^error [^string e] (lit statusError StatusBadRequest e))
+
+
+
+(go/type statusError "statusError is an error used to respond to a request with an HTTP status.\nThe text should be plain text without user info or other embedded errors.\n" (struct
+    ^{:line 1899 :tag int} code
+    ^{:line 1900 :tag string} text))
+
+
+^{:go/end 1903} (go/method Error ^string [^statusError e] (+ (StatusText (.-code e)) ": " (.-text e)))
+
+
+
+
+
+(go/var ^{:doc "ErrAbortHandler is a sentinel panic value to abort a handler.\nWhile any panic from ServeHTTP aborts the response to the client,\npanicking with ErrAbortHandler also suppresses logging of a stack\ntrace to the server's error log.\n"} ErrAbortHandler internal/ErrAbortHandler)
+
+
+
+
+
+^{:go/breaks [[7 1925]] :go/end 1926} (go/func isCommonNetReadError "isCommonNetReadError reports whether err is a common error\nencountered during reading a request off the network when the\nclient has gone away or had its read fail somehow. This is used to\ndetermine which logs are interesting enough to log about.\n" ^bool [^error err]
+  (when (== err io/EOF)
+    (return true))
+
+  (when [(values neterr ok) (assert net/Error err)] (and ok (.Timeout neterr))
+    (return true))
+
+  (when [(values oe ok) (assert (* net/OpError) err)] (and ok (== (.-Op oe) "read"))
+    (return true))
+
+  false)
+
+
+
+^{:go/end 2183} (go/method serve "Serve a new connection.\n" [^{:tag (* conn)} c ^context/Context ctx]
+  (when [ra (.RemoteAddr (.-rwc c))] (!= ra nil)
+    (set! (.-remoteAddr c) (.String ra)))
+
+  (set! ctx (context/WithValue ctx LocalAddrContextKey (.LocalAddr (.-rwc c))))
+  (let [^{:tag (* response)} inFlightResponse (zero (* response))]
+    (defer (^{:go/end 1954} (fn []
+          (when [err (recover)] (and (!= err nil) (!= err ErrAbortHandler))
+            (let [^:const ^{:val 65536} size (<< 64 10)
+                ^{:line 1938} buf (make (slice byte) size)]
+              (set! buf (subslice buf _ (runtime/Stack buf false)))
+              (.logf (.-server c) "http: panic serving %v: %v\n%s" (.-remoteAddr c) err buf)))
+
+          (when (!= inFlightResponse nil)
+            ((.-cancelCtx inFlightResponse))
+            (.disableWriteContinue inFlightResponse true))
+
+          (when (not (.hijacked c))
+            (when (!= inFlightResponse nil)
+              (.abortPendingRead (.-r (.-conn inFlightResponse)))
+              (.Close (.-reqBody inFlightResponse)))
+
+            (.close c)
+            (.setState c (.-rwc c) StateClosed runHooks)))))
+
+
+
+    (let-type [connectionStater (interface
+          (ConnectionState ^tls/ConnectionState []))
+
+        ^{:line 1959} handshakeContexter (interface
+          (HandshakeContext ^error [^context/Context ctx]))]
+
+      (when [(values connStater ok) (assert connectionStater (.-rwc c))] ok
+        (let [tlsTO (.tlsHandshakeTimeout (.-server c))]
+          (when (> tlsTO 0)
+            (let [dl (.Add (time/Now) tlsTO)]
+              (.SetReadDeadline (.-rwc c) dl)
+              (.SetWriteDeadline (.-rwc c) dl)))
+
+          (let [^error err (zero error)]
+            (when [(values handshaker ok) (assert handshakeContexter (.-rwc c))] ok
+              (set! err (.HandshakeContext handshaker ctx)))
+
+            (when (!= err nil)
+              ;; If the handshake failed due to the client not speaking
+              ;; TLS, assume they're speaking plaintext HTTP and write a
+              ;; 400 response on the TLS conn's underlying net.Conn.
+              (let [^string reason (zero string)]
+                (if [(values re ok) (assert tls/RecordHeaderError err)] (and ok (!= (.-Conn re) nil) (tlsRecordHeaderLooksLikeHTTP (.-RecordHeader re))) (do
+                    (io/WriteString (.-Conn re) "HTTP/1.0 400 Bad Request\r\n\r\nClient sent an HTTP request to an HTTPS server.\n")
+                    (.Close (.-Conn re))
+                    (set! reason "client sent an HTTP request to an HTTPS server"))
+
+                  (set! reason (.Error err)))
+
+                (.logf (.-server c) "http: TLS handshake error from %s: %v" (.RemoteAddr (.-rwc c)) reason)
+                (return)))
+
+            ;; Restore Conn-level deadlines.
+            (when (> tlsTO 0)
+              (.SetReadDeadline (.-rwc c) (lit time/Time))
+              (.SetWriteDeadline (.-rwc c) (lit time/Time)))
+
+            (set! (.-tlsState c) (new tls/ConnectionState))
+            (set! @(.-tlsState c) (.ConnectionState connStater))
+            (let [proto (.-NegotiatedProtocol (.-tlsState c))]
+              (when (and (== proto "h2") (!= (.-h2 (.-server c)) nil))
+                ;; net/http/internal/http2 path.
+                ;;
+                ;; Mark freshly created HTTP/2 as active and prevent any server state hooks
+                ;; from being run on these connections. This prevents closeIdleConns from
+                ;; closing such connections. See issue https://golang.org/issue/39776.
+                (.setState c (.-rwc c) StateActive skipHooks)
+                (let [^:const ^{:val false} sawClientPreface false]
+                  (.serveHTTP2Conn (.-server c) ctx (.-rwc c) (lit serverHandler (.-server c)) sawClientPreface nil nil)
+                  (return)))
+
+              (let [(values tlsConn tlsConnOK) (assert (* tls/Conn) (.-rwc c))]
+                (when (and (validNextProto proto) tlsConnOK)
+                  ;; Legacy TLSNextProto path.
+                  (when [fn (aget (.-TLSNextProto (.-server c)) proto)] (!= fn nil)
+                    (let [h (lit initALPNRequest ctx tlsConn (lit serverHandler (.-server c)))]
+                      ;; Mark freshly created HTTP/2 as active (see above).
+                      (.setState c (.-rwc c) StateActive skipHooks)
+                      (go/call fn (.-server c) tlsConn h)))
+
+                  (return)))))))
+
+
+
+      ;; HTTP/1.x or unencrypted HTTP/2.
+
+      ;; Set Request.TLS if the conn is not a *tls.Conn, but implements ConnectionState.
+      (when (== (.-tlsState c) nil)
+        (when [(values tc ok) (assert connectionStater (.-rwc c))] ok
+          (set! (.-tlsState c) (new tls/ConnectionState))
+          (set! @(.-tlsState c) (.ConnectionState tc))))
+
+
+
+      (let [(values ^:assign ctx cancelCtx) (context/WithCancel ctx)]
+        (set! (.-cancelCtx c) cancelCtx)
+        (defer (cancelCtx))
+
+        (set! (.-r c) (addr (lit connReader :conn c :rwc (.-rwc c))))
+        (set! (.-bufr c) (newBufioReader (.-r c)))
+        (set! (.-bufw c) (newBufioWriterSize (lit checkConnErrorWriter c) (<< 4 10)))
+
+        (when [d (.readHeaderTimeout (.-server c))] (> d 0)
+          (.SetReadDeadline (.-rwc c) (.Add (time/Now) d)))
+
+
+        (let [protos (.protocols (.-server c))]
+          (when (and (== (.-tlsState c) nil) (.UnencryptedHTTP2 protos))
+            (when (.maybeServeUnencryptedHTTP2 c ctx)
+              (return)))
+
+
+          (when (not (.HTTP1 protos))
+            (return))
+
+
+          ;; HTTP/1.x from here on.
+
+          (while true
+            (let [(values w err) (.readRequest c ctx)]
+              (when (!= (.-remain (.-r c)) (.initialReadLimitSize (.-server c)))
+                ;; If we read any bytes off the wire, we're active.
+                (.setState c (.-rwc c) StateActive runHooks))
+
+              (when (.shuttingDown (.-server c))
+                (return))
+
+              (when (!= err nil)
+                (let [^:const ^{:val "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"} errorHeaders "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"]
+
+                  (switch
+                    (case [(== err errTooLarge)]
+                      ;; Their HTTP client may or may not be
+                      ;; able to read this if we're
+                      ;; responding to them and hanging up
+                      ;; while they're still writing their
+                      ;; request. Undefined behavior.
+                      (let [^:const ^{:val "431 Request Header Fields Too Large"} publicErr "431 Request Header Fields Too Large"]
+                        (fmt/Fprintf (.-rwc c) (+ "HTTP/1.1 " publicErr errorHeaders publicErr))
+                        (.closeWriteAndWait c)
+                        (return)))
+
+                    (case [(isUnsupportedTEError err)]
+                      ;; Respond as per RFC 7230 Section 3.3.1 which says,
+                      ;;      A server that receives a request message with a
+                      ;;      transfer coding it does not understand SHOULD
+                      ;;      respond with 501 (Unimplemented).
+                      (let [code StatusNotImplemented]
+
+                        ;; We purposefully aren't echoing back the transfer-encoding's value,
+                        ;; so as to mitigate the risk of cross side scripting by an attacker.
+                        (fmt/Fprintf (.-rwc c) "HTTP/1.1 %d %s%sUnsupported transfer encoding" code (StatusText code) errorHeaders)
+                        (return)))
+
+                    (case [(isCommonNetReadError err)]
+                      (return)) ; don't reply
+
+                    (default
+                      (when [(values v ok) (assert statusError err)] ok
+                        (fmt/Fprintf (.-rwc c) "HTTP/1.1 %d %s: %s%s%d %s: %s" (.-code v) (StatusText (.-code v)) (.-text v) errorHeaders (.-code v) (StatusText (.-code v)) (.-text v))
+                        (return))
+
+                      (let [^:const ^{:val "400 Bad Request"} publicErr "400 Bad Request"]
+                        (fmt/Fprintf (.-rwc c) (+ "HTTP/1.1 " publicErr errorHeaders publicErr))
+                        (return))))))
+
+
+
+              ;; Expect 100 Continue support
+              (let [req (.-req w)]
+                (cond (.expectsContinue req)
+                  (when (and (.ProtoAtLeast req 1 1) (!= (.-ContentLength req) 0))
+                    ;; Wrap the Body reader with one that replies on the connection
+                    (set! (.-ecReader w) (addr (lit expectContinueReader :readCloser (.-Body req) :resp w)))
+                    (.Store (.-canWriteContinue w) true)
+                    (set! (.-Body req) (.-ecReader w)))
+
+                  (!= (.get (.-Header req) "Expect") "") (do
+                    (.sendExpectationFailed w)
+                    (return)))
+
+
+                (.Store (.-curReq c) w)
+
+                ;; Start background read, which detects when a client has closed its connection
+                ;; while a request handler is still running. When the request has a body, we
+                ;; start the background read only after the entire body has been consumed.
+                (if (.bodyRemains (.-reqBody w))
+                  (.registerOnHitEOF (.-reqBody w) (.-startBackgroundRead (.-r (.-conn w))))
+
+                  (.startBackgroundRead (.-r (.-conn w))))
+
+
+                ;; HTTP cannot have multiple simultaneous active requests.[*]
+                ;; Until the server replies to this request, it can't read another,
+                ;; so we might as well run the handler in this goroutine.
+                ;; [*] Not strictly true: HTTP pipelining. We could let them all process
+                ;; in parallel even if their responses need to be serialized.
+                ;; But we're not going to implement HTTP pipelining because it
+                ;; was never deployed in the wild and the answer is HTTP/2.
+                (set! inFlightResponse w)
+                (.ServeHTTP (lit serverHandler (.-server c)) w (.-req w))
+                (set! inFlightResponse nil)
+                ((.-cancelCtx w))
+                (when (.hijacked c)
+                  (.releaseConn (.-r c))
+                  (return))
+
+                (.finishRequest w)
+                (.SetWriteDeadline (.-rwc c) (lit time/Time))
+                (when (not (.shouldReuseConnection w))
+                  (when (or (.-requestBodyLimitHit w) (.closedRequestBodyEarly w))
+                    (.closeWriteAndWait c))
+
+                  (return))
+
+                (.setState c (.-rwc c) StateIdle runHooks)
+                (.Store (.-curReq c) nil)
+
+                (when (not (.doKeepAlives (.-server (.-conn w))))
+                  ;; We're in shutdown mode. We might've replied
+                  ;; to the user without "Connection: close" and
+                  ;; they might think they can send another
+                  ;; request, but such is life with HTTP/1.1.
+                  (return))
+
+
+                (if [d (.idleTimeout (.-server c))] (> d 0)
+                  (.SetReadDeadline (.-rwc c) (.Add (time/Now) d))
+
+                  (.SetReadDeadline (.-rwc c) (lit time/Time)))
+
+
+                ;; Wait for the connection to become readable again before trying to
+                ;; read the next request. This prevents a ReadHeaderTimeout or
+                ;; ReadTimeout from starting until the first bytes of the next request
+                ;; have been received.
+                (when [(values _ err) (.Peek (.-bufr c) 4)] (!= err nil)
+                  (return))
+
+
+                (if [d (.readHeaderTimeout (.-server c))] (> d 0)
+                  (.SetReadDeadline (.-rwc c) (.Add (time/Now) d))
+
+                  (.SetReadDeadline (.-rwc c) (lit time/Time)))))))))))
+
+
+
+
+
+
+
+
+(go/type unencryptedHTTP2Request "unencryptedHTTP2Request is an HTTP handler that initializes\ncertain uninitialized fields in its *Request.\n\nIt's the unencrypted version of initALPNRequest.\n" (struct
+    ^{:line 2190 :tag context/Context} ctx
+    ^{:line 2191 :tag net/Conn} c
+    ^{:line 2192 :tag serverHandler} h))
+
+
+^{:go/end 2195} (go/method BaseContext ^context/Context [^unencryptedHTTP2Request h] (.-ctx h))
+
+^{:go/end 2205} (go/method ServeHTTP [^unencryptedHTTP2Request h ^ResponseWriter rw ^{:tag (* Request)} req]
+  (when (== (.-Body req) nil)
+    (set! (.-Body req) NoBody))
+
+  (when (== (.-RemoteAddr req) "")
+    (set! (.-RemoteAddr req) (.String (.RemoteAddr (.-c h)))))
+
+  (.ServeHTTP (.-h h) rw req))
+
+
+
+
+(go/type unencryptedNetConnInTLSConn "unencryptedNetConnInTLSConn is used to pass an unencrypted net.Conn to\nfunctions that only accept a *tls.Conn.\n" (struct
+    ^{:line 2210} net/Conn ; panic on all net.Conn methods
+    ^{:line 2211 :tag net/Conn} conn))
+
+
+^{:go/end 2216} (go/method UnencryptedNetConn ^net/Conn [^unencryptedNetConnInTLSConn c]
+  (.-conn c))
+
+
+^{:go/end 2220} (go/func unencryptedTLSConn ^{:tag (* tls/Conn)} [^net/Conn c]
+  (tls/Client (lit unencryptedNetConnInTLSConn :conn c) nil))
+
+
+
+
+(go/const ^{:val "unencrypted_http2" :doc "TLSNextProto key to use for unencrypted HTTP/2 connections.\nNot actually a TLS-negotiated protocol.\n"} nextProtoUnencryptedHTTP2 "unencrypted_http2")
+
+^{:go/end 2258} (go/method maybeServeUnencryptedHTTP2 ^bool [^{:tag (* conn)} c ^context/Context ctx]
+  (let [^{:tag (func [(* Server) (* tls/Conn) Handler])} nextFunc (zero (func [(* Server) (* tls/Conn) Handler]))]
+    (when (== (.-h2 (.-server c)) nil)
+      (let [^bool ok (zero bool)]
+        (set! (values nextFunc ok) (aget (.-TLSNextProto (.-server c)) nextProtoUnencryptedHTTP2))
+        (when (not ok)
+          (return false))))
+
+
+    ^{:go/breaks [[6 2257]]} (let [hasPreface ^{:go/end 2240} (fn ^bool [^{:tag (* conn)} c ^{:tag (slice byte)} preface]
+          (.setReadLimit (.-r c) (- (conv int64 (len preface)) (conv int64 (.Buffered (.-bufr c)))))
+          (let [(values got err) (.Peek (.-bufr c) (len preface))]
+            (.setInfiniteReadLimit (.-r c))
+            (and (== err nil) (bytes/Equal got preface))))]
+
+      (when (not (hasPreface c (conv (slice byte) "PRI * HTTP/2.0")))
+        (return false))
+
+      (when (not (hasPreface c (conv (slice byte) "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")))
+        (return false))
+
+      (.setState c (.-rwc c) StateActive skipHooks)
+      (if (!= (.-h2 (.-server c)) nil)
+        (let [^:const ^{:val true} sawClientPreface true]
+          (.serveHTTP2Conn (.-server c) ctx (.-rwc c) (lit serverHandler (.-server c)) sawClientPreface nil nil))
+        (do
+          (.SetReadDeadline (.-rwc c) (lit time/Time))
+          (.SetWriteDeadline (.-rwc c) (lit time/Time))
+          (let [h (lit unencryptedHTTP2Request ctx (.-rwc c) (lit serverHandler (.-server c)))]
+            (nextFunc (.-server c) (unencryptedTLSConn (.-rwc c)) h))))
+
+      true)))
+
+
+^{:go/end 2276} (go/method sendExpectationFailed [^{:tag (* response)} w]
+  ;; TODO(bradfitz): let ServeHTTP handlers handle
+  ;; requests with non-standard expectation[s]? Seems
+  ;; theoretical at best, and doesn't fit into the
+  ;; current ServeHTTP model anyway. We'd need to
+  ;; make the ResponseWriter an optional
+  ;; "ExpectReplier" interface or something.
+  ;;
+  ;; For now we'll just obey RFC 7231 5.1.1 which says
+  ;; "A server that receives an Expect field-value other
+  ;; than 100-continue MAY respond with a 417 (Expectation
+  ;; Failed) status code to indicate that the unexpected
+  ;; expectation cannot be met."
+  (.Set (.Header w) "Connection" "close")
+  (.WriteHeader w StatusExpectationFailed)
+  (.finishRequest w))
+
+
+
+
+^{:go/end 2301} (go/method Hijack "Hijack implements the [Hijacker.Hijack] method. Our response is both a [ResponseWriter]\nand a [Hijacker].\n" [^{:tag (* response)} w] :results [^net/Conn rwc ^{:tag (* bufio/ReadWriter)} buf ^error err]
+  (when (.Load (.-handlerDone w))
+    (panic "net/http: Hijack called after ServeHTTP finished"))
+
+  (.disableWriteContinue w false)
+  (when (.-wroteHeader w)
+    (.flush (.-cw w)))
+
+
+  (let [c (.-conn w)]
+    (.Lock (.-mu c))
+    (defer (.Unlock (.-mu c)))
+
+    ;; Release the bufioWriter that writes to the chunk writer, it is not
+    ;; used after a connection has been hijacked.
+    (set! (values rwc buf err) (.hijackLocked c))
+    (when (== err nil)
+      (putBufioWriter (.-w w))
+      (set! (.-w w) nil))
+
+    (return rwc buf err)))
+
+
+^{:go/end 2316} (go/method CloseNotify ^{:tag (chan :recv bool)} [^{:tag (* response)} w]
+  (.Lock (.-lazyCloseNotifyMu w))
+  (defer (.Unlock (.-lazyCloseNotifyMu w)))
+  (when (.Load (.-handlerDone w))
+    (panic "net/http: CloseNotify called after ServeHTTP finished"))
+
+  (when (== (.-closeNotifyCh w) nil)
+    (set! (.-closeNotifyCh w) (make (chan bool) 1))
+    (when (.-closeNotifyTriggered w)
+      (>! (.-closeNotifyCh w) true))) ; action prior closeNotify call
+
+
+  (.-closeNotifyCh w))
+
+
+^{:go/end 2328} (go/method closeNotify [^{:tag (* response)} w]
+  (.Lock (.-lazyCloseNotifyMu w))
+  (defer (.Unlock (.-lazyCloseNotifyMu w)))
+  (when (.-closeNotifyTriggered w)
+    (return)) ; already triggered
+
+  (set! (.-closeNotifyTriggered w) true)
+  (when (!= (.-closeNotifyCh w) nil)
+    (>! (.-closeNotifyCh w) true)))
+
+
+
+
+
+
+
+(go/type HandlerFunc "The HandlerFunc type is an adapter to allow the use of\nordinary functions as HTTP handlers. If f is a function\nwith the appropriate signature, HandlerFunc(f) is a\n[Handler] that calls f.\n" (func [ResponseWriter (* Request)]))
+
+
+^{:go/end 2339} (go/method ServeHTTP "ServeHTTP calls f(w, r).\n" [^HandlerFunc f ^ResponseWriter w ^{:tag (* Request)} r]
+  (f w r))
+
+
+;; Helper handlers
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2371} (go/func Error "Error replies to the request with the specified error message and HTTP code.\nIt does not otherwise end the request; the caller should ensure no further\nwrites are done to w.\nThe error message should be plain text.\n\nError deletes the Content-Length header,\nsets Content-Type to “text/plain; charset=utf-8”,\nand sets X-Content-Type-Options to “nosniff”.\nThis configures the header properly for the error message,\nin case the caller had set it up expecting a successful output.\n" [^ResponseWriter w ^string error ^int code]
+  (let [h (.Header w)]
+
+    ;; Delete the Content-Length header, which might be for some other content.
+    ;; Assuming the error string fits in the writer's buffer, we'll figure
+    ;; out the correct Content-Length for it later.
+    ;;
+    ;; We don't delete Content-Encoding, because some middleware sets
+    ;; Content-Encoding: gzip and wraps the ResponseWriter to compress on-the-fly.
+    ;; See https://go.dev/issue/66343.
+    (.Del h "Content-Length")
+
+    ;; There might be content type already set, but we reset it to
+    ;; text/plain for the error message.
+    (.Set h "Content-Type" "text/plain; charset=utf-8")
+    (.Set h "X-Content-Type-Options" "nosniff")
+    (.WriteHeader w code)
+    (fmt/Fprintln w error)))
+
+
+
+^{:go/end 2374} (go/func NotFound "NotFound replies to the request with an HTTP 404 not found error.\n" [^ResponseWriter w ^{:tag (* Request)} r] (Error w "404 page not found" StatusNotFound))
+
+
+
+^{:go/end 2378} (go/func NotFoundHandler "NotFoundHandler returns a simple request handler\nthat replies to each request with a “404 page not found” reply.\n" ^Handler [] (conv HandlerFunc NotFound))
+
+
+
+
+
+
+
+^{:go/end 2405} (go/func StripPrefix "StripPrefix returns a handler that serves HTTP requests by removing the\ngiven prefix from the request URL's Path (and RawPath if set) and invoking\nthe handler h. StripPrefix handles a request for a path that doesn't begin\nwith prefix by replying with an HTTP 404 not found error. The prefix must\nmatch exactly: if the prefix in the request contains escaped characters\nthe reply is also an HTTP 404 not found error.\n" ^Handler [^string prefix ^Handler h]
+  (when (== prefix "")
+    (return h))
+
+  (conv HandlerFunc ^{:go/end 2404} (fn [^ResponseWriter w ^{:tag (* Request)} r]
+      (let [p (strings/TrimPrefix (.-Path (.-URL r)) prefix)
+          ^{:line 2392} rp (strings/TrimPrefix (.-RawPath (.-URL r)) prefix)]
+        (if (and (< (len p) (len (.-Path (.-URL r)))) ^:go/paren (or (== (.-RawPath (.-URL r)) "") (< (len rp) (len (.-RawPath (.-URL r))))))
+          (let [r2 (new Request)]
+            (set! @r2 @r)
+            (set! (.-URL r2) (new url/URL))
+            (set! @(.-URL r2) @(.-URL r))
+            (set! (.-Path (.-URL r2)) p)
+            (set! (.-RawPath (.-URL r2)) rp)
+            (.ServeHTTP h w r2))
+
+          (NotFound w r))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2472} (go/func Redirect "Redirect replies to the request with a redirect to url,\nwhich may be a path relative to the request path.\nAny non-ASCII characters in url will be percent-encoded,\nbut existing percent encodings will not be changed.\n\nThe provided code should be in the 3xx range and is usually\n[StatusMovedPermanently], [StatusFound] or [StatusSeeOther].\n\nIf the Content-Type header has not been set, [Redirect] sets it\nto \"text/html; charset=utf-8\" and writes a small HTML body.\nSetting the Content-Type header to any value, including nil,\ndisables that behavior.\n" [^ResponseWriter w ^{:tag (* Request)} r ^string url ^int code]
+  (when [(values u err) (urlpkg/Parse url)] (== err nil)
+    ;; If url was relative, make its path absolute by
+    ;; combining with request path.
+    ;; The client would probably do this for us,
+    ;; but doing it ourselves is more reliable.
+    ;; See RFC 7231, section 7.1.2
+    (when (and (== (.-Scheme u) "") (== (.-Host u) ""))
+      (let [oldpath (.EscapedPath (.-URL r))]
+        (when (== oldpath "") ; should not happen, but avoid a crash if it does
+          (set! oldpath "/"))
+
+
+        ;; no leading http://server
+        (when (or (== url "") (!= (aget url 0) \/))
+          ;; make relative path absolute
+          (let [(values olddir _) (path/Split oldpath)]
+            (set! url (+ olddir url))))
+
+
+        (let [^string query (zero string)]
+          (when [i (strings/Index url "?")] (!= i -1)
+            (set! (values url query) (values (subslice url _ i) (subslice url i))))
+
+
+          ;; clean up but preserve trailing slash
+          (let [trailing (strings/HasSuffix url "/")]
+            (set! url (path/Clean url))
+            (when (and trailing (not (strings/HasSuffix url "/")))
+              (set! url + "/"))
+
+            (set! url + query))))))
+
+
+
+  (let [h (.Header w)
+
+      ;; RFC 7231 notes that a short HTML body is usually included in
+      ;; the response because older user agents may not understand 301/307.
+      ;; Do it only if the request didn't already have a Content-Type header.
+      (values _ hadCT) (aget h "Content-Type")]
+
+    (.Set h "Location" (hexEscapeNonASCII url))
+    (when (and (not hadCT) ^:go/paren (or (== (.-Method r) "GET") (== (.-Method r) "HEAD")))
+      (.Set h "Content-Type" "text/html; charset=utf-8"))
+
+    (.WriteHeader w code)
+
+    ;; Shouldn't send the body for POST or HEAD; that leaves GET.
+    (when (and (not hadCT) (== (.-Method r) "GET"))
+      (let [body (+ "<a href=\"" (htmlEscape url) "\">" (StatusText code) "</a>.\n")]
+        (fmt/Fprintln w body)))))
+
+
+
+(go/var htmlReplacer ^{:go/breaks [1 3 5 [7 2479] [9 2481]]} (strings/NewReplacer
+    "&" "&amp;"
+    "<" "&lt;"
+    ">" "&gt;"
+    ;; "&#34;" is shorter than "&quot;".
+    "\"" "&#34;"
+    ;; "&#39;" is shorter than "&apos;" and apos was not in HTML until HTML5.
+    "'" "&#39;"))
+
+
+^{:go/end 2486} (go/func htmlEscape ^string [^string s]
+  (.Replace htmlReplacer s))
+
+
+
+(go/type redirectHandler "Redirect to a fixed URL\n" (struct
+    ^{:line 2490 :tag string} url
+    ^{:line 2491 :tag int} code))
+
+
+^{:go/end 2496} (go/method ServeHTTP [^{:tag (* redirectHandler)} rh ^ResponseWriter w ^{:tag (* Request)} r]
+  (Redirect w r (.-url rh) (.-code rh)))
+
+
+
+
+
+
+
+
+^{:go/end 2506} (go/func RedirectHandler "RedirectHandler returns a request handler that redirects\neach request it receives to the given url using the given\nstatus code.\n\nThe provided code should be in the 3xx range and is usually\n[StatusMovedPermanently], [StatusFound] or [StatusSeeOther].\n" ^Handler [^string url ^int code]
+  (addr (lit redirectHandler url code)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type ServeMux "ServeMux is an HTTP request multiplexer.\nIt matches the URL of each incoming request against a list of registered\npatterns and calls the handler for the pattern that\nmost closely matches the URL.\n\n# Patterns\n\nPatterns can match the method, host and path of a request.\nSome examples:\n\n  - \"/index.html\" matches the path \"/index.html\" for any host and method.\n  - \"GET /static/\" matches a GET request whose path begins with \"/static/\".\n  - \"example.com/\" matches any request to the host \"example.com\".\n  - \"example.com/{$}\" matches requests with host \"example.com\" and path \"/\".\n  - \"/b/{bucket}/o/{objectname...}\" matches paths whose first segment is \"b\"\n    and whose third segment is \"o\". The name \"bucket\" denotes the second\n    segment and \"objectname\" denotes the remainder of the path.\n\nIn general, a pattern looks like\n\n\t[METHOD ][HOST]/[PATH]\n\nAll three parts are optional; \"/\" is a valid pattern.\nIf METHOD is present, it must be followed by at least one space or tab.\n\nLiteral (that is, non-wildcard) parts of a pattern match\nthe corresponding parts of a request case-sensitively.\n\nA pattern with no method matches every method. A pattern\nwith the method GET matches both GET and HEAD requests.\nOtherwise, the method must match exactly.\n\nA pattern with no host matches every host.\nA pattern with a host matches URLs on that host only.\n\nA path can include wildcard segments of the form {NAME} or {NAME...}.\nFor example, \"/b/{bucket}/o/{objectname...}\".\nThe wildcard name must be a valid Go identifier.\nWildcards must be full path segments: they must be preceded by a slash and followed by\neither a slash or the end of the string.\nFor example, \"/b_{bucket}\" is not a valid pattern.\n\nNormally a wildcard matches only a single path segment,\nending at the next literal slash (not %2F) in the request URL.\nBut if the \"...\" is present, then the wildcard matches the remainder of the URL path, including slashes.\n(Therefore it is invalid for a \"...\" wildcard to appear anywhere but at the end of a pattern.)\nThe match for a wildcard can be obtained by calling [Request.PathValue] with the wildcard's name.\nA trailing slash in a path acts as an anonymous \"...\" wildcard.\n\nThe special wildcard {$} matches only the end of the URL.\nFor example, the pattern \"/{$}\" matches only the path \"/\",\nwhereas the pattern \"/\" matches every path.\n\nFor matching, both pattern paths and incoming request paths are unescaped segment by segment.\nSo, for example, the path \"/a%2Fb/100%25\" is treated as having two segments, \"a/b\" and \"100%\".\nThe pattern \"/a%2fb/\" matches it, but the pattern \"/a/b/\" does not.\n\n# Precedence\n\nIf two or more patterns match a request, then the most specific pattern takes precedence.\nA pattern P1 is more specific than P2 if P1 matches a strict subset of P2’s requests;\nthat is, if P2 matches all the requests of P1 and more.\nIf neither is more specific, then the patterns conflict.\nThere is one exception to this rule, for backwards compatibility:\nif two patterns would otherwise conflict and one has a host while the other does not,\nthen the pattern with the host takes precedence.\nIf a pattern passed to [ServeMux.Handle] or [ServeMux.HandleFunc] conflicts with\nanother pattern that is already registered, those functions panic.\n\nAs an example of the general rule, \"/images/thumbnails/\" is more specific than \"/images/\",\nso both can be registered.\nThe former matches paths beginning with \"/images/thumbnails/\"\nand the latter will match any other path in the \"/images/\" subtree.\n\nAs another example, consider the patterns \"GET /\" and \"/index.html\":\nboth match a GET request for \"/index.html\", but the former pattern\nmatches all other GET and HEAD requests, while the latter matches any\nrequest for \"/index.html\" that uses a different method.\nThe patterns conflict.\n\n# Trailing-slash redirection\n\nConsider a [ServeMux] with a handler for a subtree, registered using a trailing slash or \"...\" wildcard.\nIf the ServeMux receives a request for the subtree root without a trailing slash,\nit redirects the request by adding the trailing slash.\nThis behavior can be overridden with a separate registration for the path without\nthe trailing slash or \"...\" wildcard. For example, registering \"/images/\" causes ServeMux\nto redirect a request for \"/images\" to \"/images/\", unless \"/images\" has\nbeen registered separately.\n\n# Request sanitizing\n\nServeMux also takes care of sanitizing the URL request path and the Host\nheader, stripping the port number and redirecting any request containing . or\n.. segments or repeated slashes to an equivalent, cleaner URL.\nEscaped path elements such as \"%2e\" for \".\" and \"%2f\" for \"/\" are preserved\nand aren't considered separators for request routing.\n\n# Compatibility\n\nThe pattern syntax and matching behavior of ServeMux changed significantly\nin Go 1.22. To restore the old behavior, set the GODEBUG environment variable\nto \"httpmuxgo121=1\". This setting is read once, at program startup; changes\nduring execution will be ignored.\n\nThe backwards-incompatible changes include:\n  - Wildcards are just ordinary literal path segments in 1.21.\n    For example, the pattern \"/{x}\" will match only that path in 1.21,\n    but will match any one-segment path in 1.22.\n  - In 1.21, no pattern was rejected, unless it was empty or conflicted with an existing pattern.\n    In 1.22, syntactically invalid patterns will cause [ServeMux.Handle] and [ServeMux.HandleFunc] to panic.\n    For example, in 1.21, the patterns \"/{\"  and \"/a{x}\" match themselves,\n    but in 1.22 they are invalid and will cause a panic when registered.\n  - In 1.22, each segment of a pattern is unescaped; this was not done in 1.21.\n    For example, in 1.22 the pattern \"/%61\" matches the path \"/a\" (\"%61\" being the URL escape sequence for \"a\"),\n    but in 1.21 it would match only the path \"/%2561\" (where \"%25\" is the escape for the percent sign).\n  - When matching patterns to paths, in 1.22 each segment of the path is unescaped; in 1.21, the entire path is unescaped.\n    This change mostly affects how paths with %2F escapes adjacent to slashes are treated.\n    See https://go.dev/issue/21955 for details.\n" (struct
+    ^{:line 2628 :tag sync/RWMutex} mu
+    ^{:line 2629 :tag routingNode} tree
+    ^{:line 2630 :tag routingIndex} index
+    ^{:line 2631 :tag serveMux121} mux121)) ; used only when GODEBUG=httpmuxgo121=1
+
+
+
+^{:go/end 2637} (go/func NewServeMux "NewServeMux allocates and returns a new [ServeMux].\n" ^{:tag (* ServeMux)} []
+  (addr (lit ServeMux)))
+
+
+
+(go/var ^{:doc "DefaultServeMux is the default [ServeMux] used by [Serve].\n"} DefaultServeMux (addr defaultServeMux))
+
+(go/var ^ServeMux defaultServeMux)
+
+
+^{:go/end 2664} (go/func cleanPath "cleanPath returns the canonical path for p, eliminating . and .. elements.\n" ^string [^string p]
+  (when (== p "")
+    (return "/"))
+
+  (when (!= (aget p 0) \/)
+    (set! p (+ "/" p)))
+
+  (let [np (path/Clean p)]
+    ;; path.Clean removes trailing slash except for root;
+    ;; put the trailing slash back if necessary.
+    (when (and (== (aget p (- (len p) 1)) \/) (!= np "/"))
+      ;; Fast path for common case of p being the string we want:
+      (if (and (== (len p) (+ (len np) 1)) (strings/HasPrefix p np))
+        (set! np p)
+
+        (set! np + "/")))
+
+
+    ^{:line 2663} np))
+
+
+
+^{:go/end 2677} (go/func stripHostPort "stripHostPort returns h without any trailing \":<port>\".\n" ^string [^string h]
+  ;; If no port on host, return unchanged
+  (when (not (strings/Contains h ":"))
+    (return h))
+
+  (let [(values host _ err) (net/SplitHostPort h)]
+    (when (!= err nil)
+      (return h)) ; on error, return unchanged
+
+    ^{:line 2676} host))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2705} (go/method Handler "Handler returns the handler to use for the given request,\nconsulting r.Method, r.Host, and r.URL.Path. It always returns\na non-nil handler. If the path is not in its canonical form, the\nhandler will be an internally-generated handler that redirects\nto the canonical path. If the host contains a port, it is ignored\nwhen matching handlers.\n\nThe path and host are used unchanged for CONNECT requests.\n\nHandler also returns the registered pattern that matches the\nrequest or, in the case of internally-generated redirects,\nthe path that will match after following the redirect.\n\nIf there is no registered handler that applies to the request,\nHandler returns a “page not found” or “method not supported”\nhandler and an empty pattern.\n\nHandler does not modify its argument. In particular, it does not\npopulate named path wildcards, so r.PathValue will always return\nthe empty string.\n" [^{:tag (* ServeMux)} mux ^{:tag (* Request)} r] :results [^Handler h ^string pattern]
+  (when use121
+    (return (.findHandler (.-mux121 mux) r)))
+
+  (let [(values ^:assign h p _ _) (.findHandler mux r)]
+    (return h p)))
+
+
+
+
+
+
+^{:go/end 2765} (go/method findHandler "findHandler finds a handler for a request.\nIf there is a matching handler, it returns it and the pattern that matched.\nOtherwise it returns a Redirect or NotFound handler with the path that would match\nafter the redirect.\n" [^{:tag (* ServeMux)} mux ^{:tag (* Request)} r] :results [^Handler h ^string patStr ^{:tag (* pattern)} _ ^{:tag (slice string)} matches]
+  (let [^{:tag (* routingNode)} n (zero (* routingNode))
+      ^{:line 2713} host (.-Host (.-URL r))
+      ^{:line 2714} escapedPath (.EscapedPath (.-URL r))
+      ^{:line 2715} path escapedPath]
+    ;; CONNECT requests are not canonicalized.
+    (if (== (.-Method r) "CONNECT")
+      ;; If r.URL.Path is /tree and its handler is not registered,
+      ;; the /tree -> /tree/ redirect applies to CONNECT requests
+      ;; but the path canonicalization does not.
+      (let [(values _ _ u) (.matchOrRedirect mux host (.-Method r) path (.-URL r))]
+        (when (!= u nil)
+          (return (RedirectHandler (.String u) StatusTemporaryRedirect) (.-Path u) nil nil))
+
+        ;; Redo the match, this time with r.Host instead of r.URL.Host.
+        ;; Pass a nil URL to skip the trailing-slash redirect logic.
+        (set! (values n matches _) (.matchOrRedirect mux (.-Host r) (.-Method r) path nil)))
+      (do
+        ;; All other requests have any port stripped and path cleaned
+        ;; before passing to mux.handler.
+        (set! host (stripHostPort (.-Host r)))
+        (set! path (cleanPath path))
+
+        ;; If the given path is /tree and its handler is not registered,
+        ;; redirect for /tree/.
+        (let [^{:tag (* url/URL)} u (zero (* url/URL))]
+          (set! (values n matches u) (.matchOrRedirect mux host (.-Method r) path (.-URL r)))
+          (when (!= u nil)
+            (return (RedirectHandler (.String u) StatusTemporaryRedirect) (.String (.-pattern n)) nil nil))
+
+          (when (!= path escapedPath)
+            ;; Redirect to cleaned path.
+            (let [patStr ""]
+              (when (!= n nil)
+                (set! patStr (.String (.-pattern n))))
+
+              (let [u (urlFromEscaped path (.-RawQuery (.-URL r)))]
+                (return (RedirectHandler (.String u) StatusTemporaryRedirect) patStr nil nil)))))))
+
+
+    (when (== n nil)
+      ;; We didn't find a match with the request method. To distinguish between
+      ;; Not Found and Method Not Allowed, see if there is another pattern that
+      ;; matches except for the method.
+      (let [allowedMethods (.matchingMethods mux host path)]
+        (when (> (len allowedMethods) 0)
+          ^{:go/breaks [2]} (return (conv HandlerFunc ^{:go/end 2760} (fn [^ResponseWriter w ^{:tag (* Request)} r]
+                (.Set (.Header w) "Allow" (strings/Join allowedMethods ", "))
+                (Error w (StatusText StatusMethodNotAllowed) StatusMethodNotAllowed)))
+            "" nil nil))
+
+        (return (NotFoundHandler) "" nil nil)))
+
+    (return (.-handler n) (.String (.-pattern n)) (.-pattern n) matches)))
+
+
+
+
+
+
+
+
+^{:go/end 2796} (go/method matchOrRedirect "matchOrRedirect looks up a node in the tree that matches the host, method and path.\n\nIf the url argument is non-nil, handler also deals with trailing-slash\nredirection: when a path doesn't match exactly, the match is tried again\nafter appending \"/\" to the path. If that second match succeeds, the last\nreturn value is the URL to redirect to.\n" [^{:tag (* ServeMux)} mux ^string host ^string method ^string path ^{:tag (* url/URL)} u] :results [^{:tag (* routingNode)} _ ^{:tag (slice string)} matches ^{:tag (* url/URL)} redirectTo]
+  (.RLock (.-mu mux))
+  (defer (.RUnlock (.-mu mux)))
+
+  (let [(values n ^:assign matches) (.match (.-tree mux) host method path)]
+    ;; We can terminate here if any of the following is true:
+    ;; - We have an exact match already.
+    ;; - We were asked not to try trailing slash redirection.
+    ;; - The URL already has a trailing slash.
+    ;; - The URL is an empty string.
+    (when (and (not (exactMatch n path)) (!= u nil) (not (strings/HasSuffix path "/")) (!= path ""))
+      ;; If there is an exact match with a trailing slash, then redirect.
+      (set! path + "/")
+      (let [(values n2 _) (.match (.-tree mux) host method path)]
+        (when (exactMatch n2 path)
+          ;; It is safe to return n2 here: it is used only in the second RedirectHandler case
+          ;; of findHandler, and that method returns before it does the "n == nil" check where
+          ;; the first return value matters. We return it here only to make the pattern available
+          ;; to findHandler.
+          (return n2 nil (urlFromEscaped path (.-RawQuery u))))))
+
+
+    (return n matches nil)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2819} (go/func urlFromEscaped "urlFromEscaped returns a url.URL constructed from an escaped path and a raw\nquery.\n\nIt ensures that the Path and RawPath fields are in sync by unescaping the\nescaped path. Populating only the Path field and leaving RawPath empty (or\nfailing to keep them in sync) can cause url.URL.String to produce a URL with\neither unexpected escaping (e.g., double-escaping \"%\" into \"%25\" in an\nalready escaped path) or a lack thereof (e.g., losing the escaping of \"%2f\"\nand turning it into a literal path separator \"/\").\n" ^{:tag (* url/URL)} [^string escaped ^string rawQuery]
+  (let [(values unescaped err) (url/PathUnescape escaped)]
+    ;; Should be impossible, since ServeMux will reject unparsable URLs way
+    ;; earlier.
+    (when (!= err nil)
+      (set! unescaped escaped))
+
+    (addr ^{:go/breaks [2 4 6]} (lit url/URL
+        :Path unescaped
+        :RawPath escaped
+        :RawQuery rawQuery))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2870} (go/func exactMatch "exactMatch reports whether the node's pattern exactly matches the path.\nAs a special case, if the node is nil, exactMatch return false.\n\nBefore wildcards were introduced, it was clear that an exact match meant\nthat the pattern and path were the same string. The only other possibility\nwas that a trailing-slash pattern, like \"/\", matched a path longer than\nit, like \"/a\".\n\nWith wildcards, we define an inexact match as any one where a multi wildcard\nmatches a non-empty string. All other matches are exact.\nFor example, these are all exact matches:\n\n\tpattern   path\n\t/a        /a\n\t/{x}      /a\n\t/a/{$}    /a/\n\t/a/       /a/\n\nThe last case has a multi wildcard (implicitly), but the match is exact because\nthe wildcard matches the empty string.\n\nExamples of matches that are not exact:\n\n\tpattern   path\n\t/         /a\n\t/a/{x...} /a/b\n" ^bool [^{:tag (* routingNode)} n ^string path]
+  (when (== n nil)
+    (return false))
+
+  ;; We can't directly implement the definition (empty match for multi
+  ;; wildcard) because we don't record a match for anonymous multis.
+
+  ;; If there is no multi, the match is exact.
+  (when (not (.-multi (.lastSegment (.-pattern n))))
+    (return true))
+
+
+  ;; If the path doesn't end in a trailing slash, then the multi match
+  ;; is non-empty.
+  (when (and (> (len path) 0) (!= (aget path (- (len path) 1)) \/))
+    (return false))
+
+  ;; Only patterns ending in {$} or a multi wildcard can
+  ;; match a path with a trailing slash.
+  ;; For the match to be exact, the number of pattern
+  ;; segments should be the same as the number of slashes in the path.
+  ;; E.g. "/a/b/{$}" and "/a/b/{...}" exactly match "/a/b/", but "/a/" does not.
+  (== (len (.-segments (.-pattern n))) (strings/Count path "/")))
+
+
+
+^{:go/end 2885} (go/method matchingMethods "matchingMethods return a sorted list of all methods that would match with the given host and path.\n" ^{:tag (slice string)} [^{:tag (* ServeMux)} mux ^string host ^string path]
+  ;; Hold the read lock for the entire method so that the two matches are done
+  ;; on the same set of registered patterns.
+  (.RLock (.-mu mux))
+  (defer (.RUnlock (.-mu mux)))
+  (let [ms (lit (map string bool))]
+    (.matchingMethods (.-tree mux) host path ms)
+    ;; matchOrRedirect will try appending a trailing slash if there is no match.
+    (when (not (strings/HasSuffix path "/"))
+      (.matchingMethods (.-tree mux) host (+ path "/") ms))
+
+    (^{:inst [string]} slices/Sorted (^{:inst [(map string bool) string bool]} maps/Keys ms))))
+
+
+
+
+^{:go/end 2904} (go/method ServeHTTP "ServeHTTP dispatches the request to the handler whose\npattern most closely matches the request URL.\n" [^{:tag (* ServeMux)} mux ^ResponseWriter w ^{:tag (* Request)} r]
+  (when (== (.-RequestURI r) "*")
+    (when (.ProtoAtLeast r 1 1)
+      (.Set (.Header w) "Connection" "close"))
+
+    (.WriteHeader w StatusBadRequest)
+    (return))
+
+  (let [^Handler h (zero Handler)]
+    (if use121
+      (set! (values h _) (.findHandler (.-mux121 mux) r))
+
+      (set! (values h (.-Pattern r) (.-pat r) (.-matches r)) (.findHandler mux r)))
+
+    (.ServeHTTP h w r)))
+
+
+;; The four functions below all call ServeMux.register so that callerLocation
+;; always refers to user code.
+
+
+
+
+
+
+^{:go/end 2920} (go/method Handle "Handle registers the handler for the given pattern.\nIf the given pattern conflicts with one that is already registered\nor if the pattern is invalid, Handle panics.\n\nSee [ServeMux] for details on valid patterns and conflict rules.\n" [^{:tag (* ServeMux)} mux ^string pattern ^Handler handler]
+  (if use121
+    (.handle (.-mux121 mux) pattern handler)
+
+    (.register mux pattern handler)))
+
+
+
+
+
+
+
+
+^{:go/end 2933} (go/method HandleFunc "HandleFunc registers the handler function for the given pattern.\nIf the given pattern conflicts with one that is already registered\nor if the pattern is invalid, HandleFunc panics.\n\nSee [ServeMux] for details on valid patterns and conflict rules.\n" [^{:tag (* ServeMux)} mux ^string pattern ^{:tag (func [ResponseWriter (* Request)])} handler]
+  (if use121
+    (.handleFunc (.-mux121 mux) pattern handler)
+
+    (.register mux pattern (conv HandlerFunc handler))))
+
+
+
+
+
+^{:go/end 2943} (go/func Handle "Handle registers the handler for the given pattern in [DefaultServeMux].\nThe documentation for [ServeMux] explains how patterns are matched.\n" [^string pattern ^Handler handler]
+  (if use121
+    (.handle (.-mux121 DefaultServeMux) pattern handler)
+
+    (.register DefaultServeMux pattern handler)))
+
+
+
+
+
+^{:go/end 2953} (go/func HandleFunc "HandleFunc registers the handler function for the given pattern in [DefaultServeMux].\nThe documentation for [ServeMux] explains how patterns are matched.\n" [^string pattern ^{:tag (func [ResponseWriter (* Request)])} handler]
+  (if use121
+    (.handleFunc (.-mux121 DefaultServeMux) pattern handler)
+
+    (.register DefaultServeMux pattern (conv HandlerFunc handler))))
+
+
+
+^{:go/end 2959} (go/method register [^{:tag (* ServeMux)} mux ^string pattern ^Handler handler]
+  (when [err (.registerErr mux pattern handler)] (!= err nil)
+    (panic err)))
+
+
+
+^{:go/end 3002} (go/method registerErr ^error [^{:tag (* ServeMux)} mux ^string patstr ^Handler handler]
+  (when (== patstr "")
+    (return (errors/New "http: invalid pattern")))
+
+  (when (== handler nil)
+    (return (errors/New "http: nil handler")))
+
+  (when [(values f ok) (assert HandlerFunc handler)] (and ok (== f nil))
+    (return (errors/New "http: nil handler")))
+
+
+  (let [(values pat err) (parsePattern patstr)]
+    (when (!= err nil)
+      (return (fmt/Errorf "parsing %q: %w" patstr err)))
+
+
+    ;; Get the caller's location, for better conflict error messages.
+    ;; Skip register and whatever calls it.
+    ^{:go/breaks [8]} (let [(values _ file line ok) (runtime/Caller 3)]
+      (if (not ok)
+        (set! (.-loc pat) "unknown location")
+
+        (set! (.-loc pat) (fmt/Sprintf "%s:%d" file line)))
+
+
+      (.Lock (.-mu mux))
+      (defer (.Unlock (.-mu mux)))
+      ;; Check for conflict.
+      (when [err (.possiblyConflictingPatterns (.-index mux) pat ^{:go/breaks [[3 2995]] :go/end 2996} (fn ^error [^{:tag (* pattern)} pat2]
+              (when (.conflictsWith pat pat2)
+                (let [d (describeConflict pat pat2)]
+                  (return (fmt/Errorf "pattern %q (registered at %s) conflicts with pattern %q (registered at %s):\n%s"
+                      ^{:line 2993} pat (.-loc pat) pat2 (.-loc pat2) d))))
+
+              nil))]
+        (!= err nil)
+        (return err))
+
+      (.addPattern (.-tree mux) pat handler)
+      (.addPattern (.-index mux) pat)
+      nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3019} (go/func Serve "Serve accepts incoming HTTP connections on the listener l,\ncreating a new service goroutine for each. The service goroutines\nread requests and then call handler to reply to them.\n\nThe handler is typically nil, in which case [DefaultServeMux] is used.\n\nHTTP/2 support is only enabled if the Listener returns [*tls.Conn]\nconnections or connections which implement the same ConnectionState\nmethod as *tls.Conn, and the connection state indicates that the \"h2\"\nprotocol was negotiated by ALPN.\n\nServe always returns a non-nil error.\n" ^error [^net/Listener l ^Handler handler]
+  (let [srv (addr (lit Server :Handler handler))]
+    (.Serve srv l)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3036} (go/func ServeTLS "ServeTLS accepts incoming HTTPS connections on the listener l,\ncreating a new service goroutine for each. The service goroutines\nread requests and then call handler to reply to them.\n\nThe handler is typically nil, in which case [DefaultServeMux] is used.\n\nAdditionally, files containing a certificate and matching private key\nfor the server must be provided. If the certificate is signed by a\ncertificate authority, the certFile should be the concatenation\nof the server's certificate, any intermediates, and the CA's certificate.\n\nServeTLS always returns a non-nil error.\n" ^error [^net/Listener l ^Handler handler ^string certFile ^string keyFile]
+  (let [srv (addr (lit Server :Handler handler))]
+    (.ServeTLS srv l certFile keyFile)))
+
+
+
+
+(go/type Server "A Server defines parameters for running an HTTP server.\nThe zero value for Server is a valid configuration.\n" (struct
+
+
+
+
+    ^{:line 3045 :tag string :doc "Addr optionally specifies the TCP address for the server to listen on,\nin the form \"host:port\". If empty, \":http\" (port 80) is used.\nThe service names are defined in RFC 6335 and assigned by IANA.\nSee net.Dial for details of the address format.\n"} Addr
+
+    ^{:line 3047 :tag Handler} Handler ; handler to invoke, http.DefaultServeMux if nil
+
+
+
+    ^{:line 3051 :tag bool :doc "DisableGeneralOptionsHandler, if true, passes \"OPTIONS *\" requests to the Handler,\notherwise responds with 200 OK and Content-Length: 0.\n"} DisableGeneralOptionsHandler
+
+
+
+
+
+
+
+
+    ^{:line 3060 :tag (* tls/Config) :doc "TLSConfig optionally provides a TLS configuration for use\nby ServeTLS and ListenAndServeTLS. Note that this value is\ncloned by ServeTLS and ListenAndServeTLS, so it's not\npossible to modify the configuration with methods like\ntls.Config.SetSessionTicketKeys. To use\nSetSessionTicketKeys, use Server.Serve with a TLS Listener\ninstead.\n"} TLSConfig
+
+
+
+
+
+
+
+
+
+    ^{:line 3070 :tag time/Duration :doc "ReadTimeout is the maximum duration for reading the entire\nrequest, including the body. A zero or negative value means\nthere will be no timeout.\n\nBecause ReadTimeout does not let Handlers make per-request\ndecisions on each request body's acceptable deadline or\nupload rate, most users will prefer to use\nReadHeaderTimeout. It is valid to use them both.\n"} ReadTimeout
+
+
+
+
+
+
+
+    ^{:line 3078 :tag time/Duration :doc "ReadHeaderTimeout is the amount of time allowed to read\nrequest headers. The connection's read deadline is reset\nafter reading the headers and the Handler can decide what\nis considered too slow for the body. If zero, the value of\nReadTimeout is used. If negative, or if zero and ReadTimeout\nis zero or negative, there is no timeout.\n"} ReadHeaderTimeout
+
+
+
+
+
+
+    ^{:line 3085 :tag time/Duration :doc "WriteTimeout is the maximum duration before timing out\nwrites of the response. It is reset whenever a new\nrequest's header is read. Like ReadTimeout, it does not\nlet Handlers make decisions on a per-request basis.\nA zero or negative value means there will be no timeout.\n"} WriteTimeout
+
+
+
+
+
+    ^{:line 3091 :tag time/Duration :doc "IdleTimeout is the maximum amount of time to wait for the\nnext request when keep-alives are enabled. If zero, the value\nof ReadTimeout is used. If negative, or if zero and ReadTimeout\nis zero or negative, there is no timeout.\n"} IdleTimeout
+
+
+
+
+
+
+    ^{:line 3098 :tag int :doc "MaxHeaderBytes controls the maximum number of bytes the\nserver will read parsing the request header's keys and\nvalues, including the request line. It does not limit the\nsize of the request body.\nIf zero, DefaultMaxHeaderBytes is used.\n"} MaxHeaderBytes
+
+
+
+
+
+
+
+    ^{:line 3106 :tag int :doc "MaxHeaderValueCount controls the maximum number of header\nvalues that the server is willing to parse from a request.\nIf zero, DefaultMaxHeaderValueCount is used.\nNote that comma-separated values in a single header line are\ncounted once, while values sent as multiple header lines are\ncounted multiple times.\n"} MaxHeaderValueCount
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 3120 :tag (map string (func [(* Server) (* tls/Conn) Handler])) :doc "TLSNextProto optionally specifies a function to take over\nownership of the provided TLS connection when an ALPN\nprotocol upgrade has occurred. The map key is the protocol\nname negotiated. The Handler argument should be used to\nhandle HTTP requests and will initialize the Request's TLS\nand RemoteAddr if not already set. The connection is\nautomatically closed when the function returns.\nIf TLSNextProto is not nil, HTTP/2 support is not enabled\nautomatically.\n\nHistorically, TLSNextProto was used to disable HTTP/2 support.\nThe Server.Protocols field now provides a simpler way to do this.\n"} TLSNextProto
+
+
+
+
+    ^{:line 3125 :tag (func [net/Conn ConnState]) :doc "ConnState specifies an optional callback function that is\ncalled when a client connection changes state. See the\nConnState type and associated constants for details.\n"} ConnState
+
+
+
+
+
+    ^{:line 3131 :tag (* log/Logger) :doc "ErrorLog specifies an optional logger for errors accepting\nconnections, unexpected behavior from handlers, and\nunderlying FileSystem errors.\nIf nil, logging is done via the log package's standard logger.\n"} ErrorLog
+
+
+
+
+
+
+
+    ^{:line 3139 :tag (func [net/Listener] [context/Context]) :doc "BaseContext optionally specifies a function that returns\nthe base context for incoming requests on this server.\nThe provided Listener is the specific Listener that's\nabout to start accepting requests.\nIf BaseContext is nil, the default is context.Background().\nIf non-nil, it must return a non-nil context.\n"} BaseContext
+
+
+
+
+
+    ^{:line 3145 :tag (func [^context/Context ctx ^net/Conn c] [context/Context]) :doc "ConnContext optionally specifies a function that modifies\nthe context used for a new connection c. The provided ctx\nis derived from the base context and has a ServerContextKey\nvalue.\n"} ConnContext
+
+
+    ^{:line 3148 :tag (* HTTP2Config) :doc "HTTP2 configures HTTP/2 connections.\n"} HTTP2
+
+
+
+
+
+
+
+
+
+
+    ^{:line 3159 :tag (* Protocols) :doc "Protocols is the set of protocols accepted by the server.\n\nIf Protocols includes UnencryptedHTTP2, the server will accept\nunencrypted HTTP/2 connections. The server can serve both\nHTTP/1 and unencrypted HTTP/2 on the same address and port.\n\nIf Protocols is nil, the default is usually HTTP/1 and HTTP/2.\nIf TLSNextProto is non-nil and does not contain an \"h2\" entry,\nthe default is HTTP/1 only.\n"} Protocols
+
+
+
+
+
+
+
+
+
+
+    ^{:line 3170 :tag bool :doc "DisableClientPriority specifies whether client-specified priority, as\nspecified in RFC 9218, should be respected or not.\n\nThis field only takes effect if using HTTP/2, and if no custom write\nscheduler is defined for the HTTP/2 server. Otherwise, this field is a\nno-op.\n\nIf set to true, requests will be served in a round-robin manner, without\nprioritization.\n"} DisableClientPriority
+
+    ^{:line 3172 :tag atomic/Bool} inShutdown ; true when server is in shutdown
+
+    ^{:line 3174 :tag atomic/Bool} disableKeepAlives
+    ^{:line 3175 :tag sync/Once} nextProtoOnce ; guards setupHTTP2_* init
+    ^{:line 3176 :tag error} nextProtoErr ; result of http2.ConfigureServer if used
+
+    ^{:line 3178 :tag sync/Mutex} mu
+    ^{:line 3179 :tag (map (* net/Listener) (struct))} listeners
+    ^{:line 3180 :tag (map (* conn) (struct))} activeConn
+    ^{:line 3181 :tag (slice (func []))} onShutdown
+    ^{:line 3182 :tag (* http2Server)} h2
+    ^{:line 3183 :tag http2ExternalServerConfig} h2Config
+    ^{:line 3184 :tag time/Duration} h2IdleTimeout
+    ^{:line 3185 :tag (* http3ServerHandler)} h3
+
+    ^{:line 3187 :tag sync/WaitGroup} listenerGroup))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3218} (go/method Close "Close immediately closes all active net.Listeners and any\nconnections in state [StateNew], [StateActive], or [StateIdle]. For a\ngraceful shutdown, use [Server.Shutdown].\n\nClose does not attempt to close (and does not even know about)\nany hijacked connections, such as WebSockets.\n\nClose returns any error returned from closing the [Server]'s\nunderlying Listener(s).\n" ^error [^{:tag (* Server)} s]
+  (.Store (.-inShutdown s) true)
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (let [err (.closeListenersLocked s)]
+
+    ;; Unlock s.mu while waiting for listenerGroup.
+    ;; The group Add and Done calls are made with s.mu held,
+    ;; to avoid adding a new listener in the window between
+    ;; us setting inShutdown above and waiting here.
+    (.Unlock (.-mu s))
+    (.Wait (.-listenerGroup s))
+    (.Lock (.-mu s))
+
+    (range [c (.-activeConn s)]
+      (.Close (.-rwc c))
+      (delete (.-activeConn s) c))
+
+    ^{:line 3217} err))
+
+
+
+
+
+
+
+
+
+(go/const ^{:val 500000000 :doc "shutdownPollIntervalMax is the max polling interval when checking\nquiescence during Server.Shutdown. Polling starts with a small\ninterval and backs off to the max.\nIdeally we could find a solution that doesn't involve polling,\nbut which also doesn't have a high runtime cost (and doesn't\ninvolve any contentious mutexes), but that is left as an\nexercise for the reader.\n"} shutdownPollIntervalMax (* 500 time/Millisecond))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3288} (go/method Shutdown "Shutdown gracefully shuts down the server without interrupting any\nactive connections. Shutdown works by first closing all open\nlisteners, then closing all idle connections, and then waiting\nindefinitely for connections to return to idle and then shut down.\nIf the provided context expires before the shutdown is complete,\nShutdown returns the context's error, otherwise it returns any\nerror returned from closing the [Server]'s underlying Listener(s).\n\nWhen Shutdown is called, [Serve], [ServeTLS], [ListenAndServe], and\n[ListenAndServeTLS] immediately return [ErrServerClosed]. Make sure the\nprogram doesn't exit and waits instead for Shutdown to return.\n\nShutdown does not attempt to close nor wait for hijacked\nconnections such as WebSockets. The caller of Shutdown should\nseparately notify such long-lived connections of shutdown and wait\nfor them to close, if desired. See [Server.RegisterOnShutdown] for a way to\nregister shutdown notification functions.\n\nOnce Shutdown has been called on a server, it may not be reused;\nfuture calls to methods such as Serve will return ErrServerClosed.\n" ^error [^{:tag (* Server)} s ^context/Context ctx]
+  (.Store (.-inShutdown s) true)
+
+  (.Lock (.-mu s))
+  (when (!= (.-h3 s) nil)
+    (set! (.-shutdownCtx (.-h3 s)) ctx))
+
+  (let [lnerr (.closeListenersLocked s)]
+    (range [_ f (.-onShutdown s)]
+      (go (f)))
+
+    (.Unlock (.-mu s))
+    (.Wait (.-listenerGroup s))
+
+    (let [pollIntervalBase time/Millisecond
+        ^{:line 3264} nextPollInterval ^{:go/end 3273} (fn ^time/Duration []
+          ;; Add 10% jitter.
+          (let [interval (+ pollIntervalBase (conv time/Duration (rand/IntN (conv int (/ pollIntervalBase 10)))))]
+            ;; Double and clamp for next time.
+            (set! pollIntervalBase * 2)
+            (when (> pollIntervalBase shutdownPollIntervalMax)
+              (set! pollIntervalBase shutdownPollIntervalMax))
+
+            ^{:line 3272} interval))
+
+
+        ^{:line 3275} timer (time/NewTimer (nextPollInterval))]
+      (defer (.Stop timer))
+      (while true
+        (when (.closeIdleConns s)
+          (return lnerr))
+
+        (select
+          (case (<! (.Done ctx))
+            (return (.Err ctx)))
+          (case (<! (.-C timer))
+            (.Reset timer (nextPollInterval))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 3299} (go/method RegisterOnShutdown "RegisterOnShutdown registers a function to call on [Server.Shutdown].\nThis can be used to gracefully shutdown connections that have\nundergone ALPN protocol upgrade or that have been hijacked.\nThis function should start protocol-specific graceful shutdown,\nbut should not wait for shutdown to complete.\n" [^{:tag (* Server)} s ^{:tag (func [])} f]
+  (.Lock (.-mu s))
+  (set! (.-onShutdown s) (append (.-onShutdown s) f))
+  (.Unlock (.-mu s)))
+
+
+
+
+^{:go/end 3325} (go/method closeIdleConns "closeIdleConns closes all idle connections and reports whether the\nserver is quiescent.\n" ^bool [^{:tag (* Server)} s]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (let [quiescent true]
+    (range [c (.-activeConn s)]
+      (let [(values st unixSec) (.getState c)]
+        ;; Issue 22682: treat StateNew connections as if
+        ;; they're idle if we haven't read the first request's
+        ;; header in over 5 seconds.
+        (when (and (== st StateNew) (< unixSec (- (.Unix (time/Now)) 5)))
+          (set! st StateIdle))
+
+        (when (or (!= st StateIdle) (== unixSec 0))
+          ;; Assume unixSec == 0 means it's a very new
+          ;; connection, without state set yet.
+          (set! quiescent false)
+          (continue))
+
+        (.Close (.-rwc c))
+        (delete (.-activeConn s) c)))
+
+    ^{:line 3324} quiescent))
+
+
+^{:go/end 3335} (go/method closeListenersLocked ^error [^{:tag (* Server)} s]
+  (let [^error err (zero error)]
+    (range [ln (.-listeners s)]
+      (when [cerr (.Close @ln)] (and (!= cerr nil) (== err nil))
+        (set! err cerr)))
+
+
+    ^{:line 3334} err))
+
+
+
+
+(go/type ConnState "A ConnState represents the state of a client connection to a server.\nIt's used by the optional [Server.ConnState] hook.\n" int)
+
+(go/const
+
+
+
+
+  ^{:line 3346} [^{:tag ConnState :val 0 :doc "StateNew represents a new connection that is expected to\nsend a request immediately. Connections begin at this\nstate and then transition to either StateActive or\nStateClosed.\n"} StateNew iota]
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 3359} [^{:val 1 :doc "StateActive represents a connection that has read 1 or more\nbytes of a request. The Server.ConnState hook for\nStateActive fires before the request has entered a handler\nand doesn't fire again until the request has been\nhandled. After the request is handled, the state\ntransitions to StateClosed, StateHijacked, or StateIdle.\nFor HTTP/2, StateActive fires on the transition from zero\nto one active request, and only transitions away once all\nactive requests are complete. That means that ConnState\ncannot be used to do per-request work; ConnState only notes\nthe overall state of the connection.\n"} StateActive]
+
+
+
+
+
+  ^{:line 3365} [^{:val 2 :doc "StateIdle represents a connection that has finished\nhandling a request and is in the keep-alive state, waiting\nfor a new request. Connections transition from StateIdle\nto either StateActive or StateClosed.\n"} StateIdle]
+
+
+
+  ^{:line 3369} [^{:val 3 :doc "StateHijacked represents a hijacked connection.\nThis is a terminal state. It does not transition to StateClosed.\n"} StateHijacked]
+
+
+
+
+  ^{:line 3374} [^{:val 4 :doc "StateClosed represents a closed connection.\nThis is a terminal state. Hijacked connections do not\ntransition to StateClosed.\n"} StateClosed])
+
+
+(go/var stateName (lit (map ConnState string)
+    ^{:line 3378} [StateNew "new"]
+    ^{:line 3379} [StateActive "active"]
+    ^{:line 3380} [StateIdle "idle"]
+    ^{:line 3381} [StateHijacked "hijacked"]
+    ^{:line 3382} [StateClosed "closed"]))
+
+
+^{:go/end 3387} (go/method String ^string [^ConnState c]
+  (aget stateName c))
+
+
+
+
+(go/type serverHandler "serverHandler delegates to either the server's Handler or\nDefaultServeMux and also handles \"OPTIONS *\" requests.\n" (struct
+    ^{:line 3392 :tag (* Server)} srv))
+
+
+
+
+
+
+
+
+
+
+(go/directive "//go:linkname badServeHTTP net/http.serverHandler.ServeHTTP")
+^{:go/end 3414} (go/method ServeHTTP "ServeHTTP should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/erda-project/erda-infra\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^serverHandler sh ^ResponseWriter rw ^{:tag (* Request)} req]
+  (let [handler (.-Handler (.-srv sh))]
+    (when (== handler nil)
+      (set! handler DefaultServeMux))
+
+    (when (and (not (.-DisableGeneralOptionsHandler (.-srv sh))) (== (.-RequestURI req) "*") (== (.-Method req) "OPTIONS"))
+      (set! handler (lit globalOptionsHandler)))
+
+
+    (.ServeHTTP handler rw req)))
+
+
+(go/func ^:extern badServeHTTP [serverHandler ResponseWriter (* Request)])
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3440} (go/func AllowQuerySemicolons "AllowQuerySemicolons returns a handler that serves requests by converting any\nunescaped semicolons in the URL query to ampersands, and invoking the handler h.\n\nThis restores the pre-Go 1.17 behavior of splitting query parameters on both\nsemicolons and ampersands. (See golang.org/issue/25192). Note that this\nbehavior doesn't match that of many proxies, and the mismatch can lead to\nsecurity issues.\n\nAllowQuerySemicolons should be invoked before [Request.ParseForm] is called.\n" ^Handler [^Handler h]
+  (conv HandlerFunc ^{:go/end 3439} (fn [^ResponseWriter w ^{:tag (* Request)} r]
+      (if (strings/Contains (.-RawQuery (.-URL r)) ";")
+        (let [r2 (new Request)]
+          (set! @r2 @r)
+          (set! (.-URL r2) (new url/URL))
+          (set! @(.-URL r2) @(.-URL r))
+          (set! (.-RawQuery (.-URL r2)) (strings/ReplaceAll (.-RawQuery (.-URL r)) ";" "&"))
+          (.ServeHTTP h w r2))
+
+        (.ServeHTTP h w r)))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3463} (go/method ListenAndServe "ListenAndServe listens on the TCP network address s.Addr and then\ncalls [Serve] to handle requests on incoming connections.\nAccepted connections are configured to enable TCP keep-alives.\n\nIf s.Addr is blank, \":http\" is used.\n\nListenAndServe always returns a non-nil error. After [Server.Shutdown] or [Server.Close],\nthe returned error is [ErrServerClosed].\n" ^error [^{:tag (* Server)} s]
+  (when (.shuttingDown s)
+    (return ErrServerClosed))
+
+  (let [addr (.-Addr s)]
+    (when (== addr "")
+      (set! addr ":http"))
+
+    (let [(values ln err) (net/Listen "tcp" addr)]
+      (when (!= err nil)
+        (return err))
+
+      (.Serve s ln))))
+
+
+(go/var ^{:tag (func [(* Server) net/Listener])} testHookServerServe) ; used if non-nil
+
+
+
+^{:go/end 3490} (go/method shouldConfigureHTTP2ForServe "shouldConfigureHTTP2ForServe reports whether Server.Serve should configure\nautomatic HTTP/2. (which sets up the s.TLSNextProto map)\n" ^bool [^{:tag (* Server)} s]
+  (when (== (.-TLSConfig s) nil)
+    ;; Compatibility with Go 1.6:
+    ;; If there's no TLSConfig, it's possible that the user just
+    ;; didn't set it on the http.Server, but did pass it to
+    ;; tls.NewListener and passed that listener to Serve.
+    ;; So we should configure HTTP/2 (to set up s.TLSNextProto)
+    ;; in case the listener returns an "h2" *tls.Conn.
+    (return true))
+
+  (when (.UnencryptedHTTP2 (.protocols s))
+    (return true))
+
+  ;; The user specified a TLSConfig on their http.Server.
+  ;; In this, case, only configure HTTP/2 if their tls.Config
+  ;; explicitly mentions "h2". Otherwise http2.ConfigureServer
+  ;; would modify the tls.Config to add it, but they probably already
+  ;; passed this tls.Config to tls.NewListener. And if they did,
+  ;; it's too late anyway to fix it. It would only be potentially racy.
+  ;; See Issue 15908.
+  (^{:inst [(slice string) string]} slices/Contains (.-NextProtos (.-TLSConfig s)) "h2"))
+
+
+
+
+(go/var ^{:doc "ErrServerClosed is returned by the [Server.Serve], [ServeTLS], [ListenAndServe],\nand [ListenAndServeTLS] methods after a call to [Server.Shutdown] or [Server.Close].\n"} ErrServerClosed (errors/New "http: Server closed"))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3583} (go/method Serve "Serve accepts incoming connections on the Listener l, creating a\nnew service goroutine for each. The service goroutines read requests and\nthen call s.Handler to reply to them.\n\nHTTP/2 support is only enabled if the Listener returns [*tls.Conn]\nconnections and they were configured with \"h2\" in the TLS\nConfig.NextProtos.\n\nServe always returns a non-nil error and closes l.\nAfter [Server.Shutdown] or [Server.Close], the returned error is [ErrServerClosed].\n" ^error [^{:tag (* Server)} s ^net/Listener l]
+  (when [(values conf ok) (assert http2ExternalServerConfig l)] ok
+    ;; This is the sneaky path we use to let x/net/http2 wrap an http.Server:
+    ;; http2.ConfigureServer calls http.Server.Serve with a net.Listener that
+    ;; implements a certain interface, which we recognize here as an attempt
+    ;; to associate an http2.Server with us.
+    ;;
+    ;; (This is about as principled as the way we (ab)use Transport.RegisterProtocol,
+    ;; which is to say not at all. It's worth it.)
+    (.setHTTP2Config s conf)
+    ;; Server.Serve never returns a nil error under normal circumstances.
+    ;; Returning nil here informs our caller that we support this sneaky
+    ;; registration mechanism.
+    (return nil))
+
+
+  (when [fn testHookServerServe] (!= fn nil)
+    (go/call fn s l)) ; call hook with unwrapped listener
+
+
+  (let [origListener l]
+    (set! l (addr (lit onceCloseListener :Listener l)))
+    (defer (.Close l))
+
+    (when [err (.setupHTTP2_Serve s)] (!= err nil)
+      (return err))
+
+
+    (when (not (.trackListener s (addr l) true))
+      (return ErrServerClosed))
+
+    (defer (.trackListener s (addr l) false))
+
+    (let [baseCtx (context/Background)]
+      (when (!= (.-BaseContext s) nil)
+        (set! baseCtx ((.-BaseContext s) origListener))
+        (when (== baseCtx nil)
+          (panic "BaseContext returned a nil context")))
+
+
+
+      (let [^time/Duration tempDelay (zero time/Duration) ; how long to sleep on accept failure
+
+          ^{:line 3549} ctx (context/WithValue baseCtx ServerContextKey s)]
+        (while true
+          (let [(values rw err) (.Accept l)]
+            (when (!= err nil)
+              (when (.shuttingDown s)
+                (return ErrServerClosed))
+
+              (when [(values ne ok) (assert net/Error err)] (and ok (.Temporary ne))
+                (if (== tempDelay 0)
+                  (set! tempDelay (* 5 time/Millisecond))
+
+                  (set! tempDelay * 2))
+
+                (when [max (* 1 time/Second)] (> tempDelay max)
+                  (set! tempDelay max))
+
+                (.logf s "http: Accept error: %v; retrying in %v" err tempDelay)
+                (time/Sleep tempDelay)
+                (continue))
+
+              (return err))
+
+            (let [connCtx ctx]
+              (when [cc (.-ConnContext s)] (!= cc nil)
+                (set! connCtx (cc connCtx rw))
+                (when (== connCtx nil)
+                  (panic "ConnContext returned nil")))
+
+
+              (set! tempDelay 0)
+              (let [c (.newConn s rw)]
+                (.setState c (.-rwc c) StateNew runHooks) ; before Serve can return
+                (go (.serve c connCtx))))))))))
+
+
+
+^{:go/end 3599} (go/method setupTLSConfig [^{:tag (* Server)} s ^string certFile ^string keyFile ^{:tag (slice string)} nextProtos] :results [(* tls/Config) error]
+  (let [config (cloneTLSConfig (.-TLSConfig s))]
+    (set! (.-NextProtos config) nextProtos)
+
+    (let [configHasCert (or (> (len (.-Certificates config)) 0) (!= (.-GetCertificate config) nil) (!= (.-GetConfigForClient config) nil))]
+      (when (or (not configHasCert) (!= certFile "") (!= keyFile ""))
+        (let [^error err (zero error)]
+          (set! (.-Certificates config) (make (slice tls/Certificate) 1))
+          (set! (values (aget (.-Certificates config) 0) err) (tls/LoadX509KeyPair certFile keyFile))
+          (when (!= err nil)
+            (return nil err))))
+
+
+      (return config nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3633} (go/method ServeTLS "ServeTLS accepts incoming connections on the Listener l, creating a\nnew service goroutine for each. The service goroutines perform TLS\nsetup and then read requests, calling s.Handler to reply to them.\n\nFiles containing a certificate and matching private key for the\nserver must be provided if neither the [Server]'s\nTLSConfig.Certificates, TLSConfig.GetCertificate nor\nconfig.GetConfigForClient are populated.\nIf the certificate is signed by a certificate authority, the\ncertFile should be the concatenation of the server's certificate,\nany intermediates, and the CA's certificate.\n\nServeTLS always returns a non-nil error. After [Server.Shutdown] or [Server.Close], the\nreturned error is [ErrServerClosed].\n" ^error [^{:tag (* Server)} s ^net/Listener l ^string certFile ^string keyFile]
+  ;; Setup HTTP/2 before s.Serve, to initialize s.TLSConfig
+  ;; before we clone it and create the TLS Listener.
+  (when [err (.setupHTTP2_ServeTLS s)] (!= err nil)
+    (return err))
+
+
+  (let [^{:tag (slice string)} nextProtos (zero (slice string))]
+    (when (!= (.-TLSConfig s) nil)
+      (set! nextProtos (.-NextProtos (.-TLSConfig s))))
+
+    (let [(values config err) (.setupTLSConfig s certFile keyFile (adjustNextProtos nextProtos (.protocols s)))]
+      (when (!= err nil)
+        (return err))
+
+
+      (let [tlsListener (tls/NewListener l config)]
+        (.Serve s tlsListener)))))
+
+
+^{:go/end 3667} (go/method protocols ^Protocols [^{:tag (* Server)} s]
+  (when (!= (.-Protocols s) nil)
+    ;; Historically, even when Protocols for a Server was set to be empty,
+    ;; the Server can still run normally with just HTTP/1.
+    ;; To keep backward-compatibility, the zero value of Protocols is
+    ;; defined as having only HTTP/1 enabled.
+    (when (.empty (.-Protocols s))
+      (let [^Protocols p (zero Protocols)]
+        (.SetHTTP1 p true)
+        (return p)))
+
+    (return @(.-Protocols s))) ; user-configured set
+
+
+  ;; The historic way of disabling HTTP/2 is to set TLSNextProto to
+  ;; a non-nil map with no "h2" entry.
+  (let [(values _ hasH2) (aget (.-TLSNextProto s) "h2")
+      ^{:line 3652} http2Disabled (and (!= (.-TLSNextProto s) nil) (not hasH2))]
+
+    ;; If GODEBUG=http2server=0, then HTTP/2 is disabled unless
+    ;; the user has manually added an "h2" entry to TLSNextProto
+    ;; (probably by using x/net/http2 directly).
+    (when (and (== (.Value http2server) "0") (not hasH2))
+      (set! http2Disabled true))
+
+
+    (let [^Protocols p (zero Protocols)]
+      (.SetHTTP1 p true) ; default always includes HTTP/1
+      (when (not http2Disabled)
+        (.SetHTTP2 p true))
+
+      ^{:line 3666} p)))
+
+
+
+
+^{:go/end 3701} (go/func adjustNextProtos "adjustNextProtos adds or removes \"http/1.1\" and \"h2\" entries from\na tls.Config.NextProtos list, according to the set of protocols in protos.\n" ^{:tag (slice string)} [^{:tag (slice string)} nextProtos ^Protocols protos]
+  ;; Make a copy of NextProtos since it might be shared with some other tls.Config.
+  ;; (tls.Config.Clone doesn't do a deep copy.)
+  ;;
+  ;; We could avoid an allocation in the common case by checking to see if the slice
+  ;; is already in order, but this is just one small allocation per connection.
+  (set! nextProtos (^{:inst [(slice string) string]} slices/Clone nextProtos))
+  (let [^Protocols have (zero Protocols)]
+    (set! nextProtos (^{:inst [(slice string) string]} slices/DeleteFunc nextProtos ^{:go/breaks [[3 3692]] :go/end 3693} (fn ^bool [^string s]
+          (switch s
+            (case ["http/1.1"]
+              (when (not (.HTTP1 protos))
+                (return true))
+
+              (.SetHTTP1 have true))
+            (case ["h2"]
+              (when (not (.HTTP2 protos))
+                (return true))
+
+              (.SetHTTP2 have true)))
+
+          false)))
+
+    (when (and (.HTTP2 protos) (not (.HTTP2 have)))
+      (set! nextProtos (append nextProtos "h2")))
+
+    (when (and (.HTTP1 protos) (not (.HTTP1 have)))
+      (set! nextProtos (append nextProtos "http/1.1")))
+
+    ^{:line 3700} nextProtos))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[8 3729]] :go/end 3730} (go/method trackListener "trackListener adds or removes a net.Listener to the set of tracked\nlisteners.\n\nWe store a pointer to interface in the map set, in case the\nnet.Listener is not comparable. This is safe because we only call\ntrackListener via Serve and can track+defer untrack the same\npointer to local variable there. We never need to compare a\nListener from another caller.\n\nIt reports whether the server is still up (not Shutdown or Closed).\n" ^bool [^{:tag (* Server)} s ^{:tag (* net/Listener)} ln ^bool add]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (when (== (.-listeners s) nil)
+    (set! (.-listeners s) (make (map (* net/Listener) (struct)))))
+
+  (if add (do
+      (when (.shuttingDown s)
+        (return false))
+
+      (aset (.-listeners s) ln (lit (struct)))
+      (.Add (.-listenerGroup s) 1))
+    (do
+      (delete (.-listeners s) ln)
+      (.Done (.-listenerGroup s))))
+
+  true)
+
+
+^{:go/end 3743} (go/method trackConn [^{:tag (* Server)} s ^{:tag (* conn)} c ^bool add]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (when (== (.-activeConn s) nil)
+    (set! (.-activeConn s) (make (map (* conn) (struct)))))
+
+  (if add
+    (aset (.-activeConn s) c (lit (struct)))
+
+    (delete (.-activeConn s) c)))
+
+
+
+^{:go/end 3750} (go/method idleTimeout ^time/Duration [^{:tag (* Server)} s]
+  (when (!= (.-IdleTimeout s) 0)
+    (return (.-IdleTimeout s)))
+
+  (.-ReadTimeout s))
+
+
+^{:go/end 3757} (go/method readHeaderTimeout ^time/Duration [^{:tag (* Server)} s]
+  (when (!= (.-ReadHeaderTimeout s) 0)
+    (return (.-ReadHeaderTimeout s)))
+
+  (.-ReadTimeout s))
+
+
+^{:go/end 3761} (go/method doKeepAlives ^bool [^{:tag (* Server)} s]
+  (and (not (.Load (.-disableKeepAlives s))) (not (.shuttingDown s))))
+
+
+^{:go/end 3765} (go/method shuttingDown ^bool [^{:tag (* Server)} s]
+  (.Load (.-inShutdown s)))
+
+
+
+
+
+
+^{:go/end 3782} (go/method SetKeepAlivesEnabled "SetKeepAlivesEnabled controls whether HTTP keep-alives are enabled.\nBy default, keep-alives are always enabled. Only very\nresource-constrained environments or servers in the process of\nshutting down should disable them.\n" [^{:tag (* Server)} s ^bool v]
+  (when v
+    (.Store (.-disableKeepAlives s) false)
+    (return))
+
+  (.Store (.-disableKeepAlives s) true)
+
+  ;; Close idle HTTP/1 conns:
+  (.closeIdleConns s))
+
+;; TODO: Issue 26303: close HTTP/2 conns as soon as they become idle.
+
+
+^{:go/end 3790} (go/method logf [^{:tag (* Server)} s ^string format & ^{:tag (slice any)} args]
+  (if (!= (.-ErrorLog s) nil)
+    (.Printf (.-ErrorLog s) format (spread args))
+
+    (log/Printf format (spread args))))
+
+
+
+
+
+
+^{:go/end 3802} (go/func logf "logf prints to the ErrorLog of the *Server associated with request r\nvia ServerContextKey. If there's no associated server, or if ErrorLog\nis nil, logging is done via the log package's standard logger.\n" [^{:tag (* Request)} r ^string format & ^{:tag (slice any)} args]
+  (let [(values s _) (assert (* Server) (.Value (.Context r) ServerContextKey))]
+    (if (and (!= s nil) (!= (.-ErrorLog s) nil))
+      (.Printf (.-ErrorLog s) format (spread args))
+
+      (log/Printf format (spread args)))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3814} (go/func ListenAndServe "ListenAndServe listens on the TCP network address addr and then calls\n[Serve] with handler to handle requests on incoming connections.\nAccepted connections are configured to enable TCP keep-alives.\n\nThe handler is typically nil, in which case [DefaultServeMux] is used.\n\nListenAndServe always returns a non-nil error.\n" ^error [^string addr ^Handler handler]
+  (let [server (addr (lit Server :Addr addr :Handler handler))]
+    (.ListenAndServe server)))
+
+
+
+
+
+
+
+^{:go/end 3824} (go/func ListenAndServeTLS "ListenAndServeTLS acts identically to [ListenAndServe], except that it\nexpects HTTPS connections. Additionally, files containing a certificate and\nmatching private key for the server must be provided. If the certificate\nis signed by a certificate authority, the certFile should be the concatenation\nof the server's certificate, any intermediates, and the CA's certificate.\n" ^error [^string addr ^string certFile ^string keyFile ^Handler handler]
+  (let [server (addr (lit Server :Addr addr :Handler handler))]
+    (.ListenAndServeTLS server certFile keyFile)))
+
+
+
+
+
+
+
+
+
+(go/type http3ServerHandler "http3ServerHandler implements an interface in an external library that\nsupports HTTP/3, allowing an external implementation of HTTP/3 to be used\nvia net/http. See https://go.dev/issue/77440 for details.\n\nThis is currently only used with golang.org/x/net/internal/http3, to allow\nus to test our HTTP/3 implementation against tests in net/http. HTTP/3 is\nnot yet accessible to end-users.\n" (struct
+    ^{:line 3834 :tag serverHandler} handler
+    ^{:line 3835 :tag (* tls/Config)} tlsConfig
+    ^{:line 3836 :tag context/Context} baseCtx
+    ^{:line 3837 :tag (chan error)} errc
+    ^{:line 3838 :tag context/Context} shutdownCtx))
+
+
+
+
+^{:go/end 3845} (go/method ServeHTTP "ServeHTTP ensures that http3ServerHandler implements the Handler interface,\nand gives an HTTP/3 server implementation access to the net/http handler.\n" [^{:tag (* http3ServerHandler)} h ^ResponseWriter w ^{:tag (* Request)} r]
+  (.ServeHTTP (.-handler h) w r))
+
+
+
+
+^{:go/end 3851} (go/method Addr "Addr gives an HTTP/3 server implementation the address that it should listen\non.\n" ^string [^{:tag (* http3ServerHandler)} h]
+  (.-Addr (.-srv (.-handler h))))
+
+
+
+
+^{:go/end 3857} (go/method TLSConfig "TLSConfig gives an HTTP/3 server implementation the *tls.Config that it\nshould use.\n" ^{:tag (* tls/Config)} [^{:tag (* http3ServerHandler)} h]
+  (.-tlsConfig h))
+
+
+
+
+^{:go/end 3863} (go/method BaseContext "BaseContext gives an HTTP/3 server implementation the base context to use\nfor server requests.\n" ^context/Context [^{:tag (* http3ServerHandler)} h]
+  (.-baseCtx h))
+
+
+
+
+
+^{:go/end 3870} (go/method ListenErrHook "ListenErrHook should be called by an HTTP/3 server implementation to\npropagate any error it encounters when trying to listen, if any, to\nnet/http.\n" [^{:tag (* http3ServerHandler)} h ^error err]
+  (>! (.-errc h) err))
+
+
+
+
+
+
+
+^{:go/end 3879} (go/method ShutdownContext "ShutdownContext gives an HTTP/3 server implementation the context that is\nused when [Server.Shutdown] is called. This allows an HTTP/3 server\nimplementation to know how long it can take to gracefully shutdown in the\nfunction it registers with [Server.RegisterOnShutdown]. Callers must not use\nthis method for any other purpose.\n" ^context/Context [^{:tag (* http3ServerHandler)} h]
+  (.-shutdownCtx h))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3940} (go/method ListenAndServeTLS "ListenAndServeTLS listens on the TCP network address s.Addr and\nthen calls [ServeTLS] to handle requests on incoming TLS connections.\nAccepted connections are configured to enable TCP keep-alives.\n\nFilenames containing a certificate and matching private key for the\nserver must be provided if neither the [Server]'s TLSConfig.Certificates\nnor TLSConfig.GetCertificate are populated. If the certificate is\nsigned by a certificate authority, the certFile should be the\nconcatenation of the server's certificate, any intermediates, and\nthe CA's certificate.\n\nIf s.Addr is blank, \":https\" is used.\n\nListenAndServeTLS always returns a non-nil error. After [Server.Shutdown] or\n[Server.Close], the returned error is [ErrServerClosed].\n" ^error [^{:tag (* Server)} s ^string certFile ^string keyFile]
+  (when (.shuttingDown s)
+    (return ErrServerClosed))
+
+  (let [addr (.-Addr s)]
+    (when (== addr "")
+      (set! addr ":https"))
+
+
+    (let [p (.protocols s)]
+      (when (.http3 p)
+        (let [(values fn ok) (aget (.-TLSNextProto s) "http/3")]
+          (when (not ok)
+            (return (errors/New "http: Server.Protocols contains HTTP3, but Server does not support HTTP/3")))
+
+          (let [(values config err) (.setupTLSConfig s certFile keyFile (lit (slice string) "h3"))]
+            (when (!= err nil)
+              (return err))
+
+            (let [errc (make (chan error) 1)]
+              (.Lock (.-mu s))
+              (set! (.-h3 s) (addr ^{:go/breaks [2 4 6 8]} (lit http3ServerHandler
+                    :handler (lit serverHandler s)
+                    :tlsConfig config
+                    :baseCtx (context/WithValue (context/Background) ServerContextKey s)
+                    :errc errc)))
+
+              (.Unlock (.-mu s))
+              (go (go/call fn s nil (.-h3 s)))
+              (when [err (<! errc)] (!= err nil)
+                (return err))))))
+
+
+
+      ;; Only start a TCP listener if HTTP/1 or HTTP/2 is used.
+      (when (and (not (.HTTP1 p)) (not (.HTTP2 p)) (not (.UnencryptedHTTP2 p)))
+        (return nil))
+
+      (let [(values ln err) (net/Listen "tcp" addr)]
+        (when (!= err nil)
+          (return err))
+
+        (defer (.Close ln))
+        (.ServeTLS s ln certFile keyFile)))))
+
+
+
+
+
+^{:go/end 3948} (go/method setupHTTP2_ServeTLS "setupHTTP2_ServeTLS conditionally configures HTTP/2 on\ns and reports whether there was an error setting it up. If it is\nnot configured for policy reasons, nil is returned.\n" ^error [^{:tag (* Server)} s]
+  (.Do (.-nextProtoOnce s) (.-onceSetNextProtoDefaults s))
+  (.-nextProtoErr s))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3961} (go/method setupHTTP2_Serve "setupHTTP2_Serve is called from (*Server).Serve and conditionally\nconfigures HTTP/2 on s using a more conservative policy than\nsetupHTTP2_ServeTLS because Serve is called after tls.Listen,\nand may be called concurrently. See shouldConfigureHTTP2ForServe.\n\nThe tests named TestTransportAutomaticHTTP2* and\nTestConcurrentServerServe in server_test.go demonstrate some\nof the supported use cases and motivations.\n" ^error [^{:tag (* Server)} s]
+  (.Do (.-nextProtoOnce s) (.-onceSetNextProtoDefaults_Serve s))
+  (.-nextProtoErr s))
+
+
+^{:go/end 3967} (go/method onceSetNextProtoDefaults_Serve [^{:tag (* Server)} s]
+  (when (.shouldConfigureHTTP2ForServe s)
+    (.onceSetNextProtoDefaults s)))
+
+
+
+(go/var http2server (godebug/New "http2server"))
+
+
+
+
+^{:go/end 3993} (go/method onceSetNextProtoDefaults "onceSetNextProtoDefaults configures HTTP/2, if the user hasn't\nconfigured otherwise. (by setting s.TLSNextProto non-nil)\nIt must only be called via s.nextProtoOnce (use s.setupHTTP2_*).\n" [^{:tag (* Server)} s]
+  (when omitBundledHTTP2
+    (return))
+
+  (let [p (.protocols s)]
+    (when (and (not (.HTTP2 p)) (not (.UnencryptedHTTP2 p)))
+      (return))
+
+    (when (== (.Value http2server) "0")
+      (.IncNonDefault http2server)
+      (return))
+
+    (when [(values _ ok) (aget (.-TLSNextProto s) "h2")] ok
+      ;; TLSNextProto already contains an HTTP/2 implementation.
+      ;; The user probably called golang.org/x/net/http2.ConfigureServer
+      ;; to add it.
+      (return))
+
+    (.configureHTTP2 s)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 4012} (go/func TimeoutHandler "TimeoutHandler returns a [Handler] that runs h with the given time limit.\n\nThe new Handler calls h.ServeHTTP to handle each request, but if a\ncall runs for longer than its time limit, the handler responds with\na 503 Service Unavailable error and the given message in its body.\n(If msg is empty, a suitable default message will be sent.)\nAfter such a timeout, writes by h to its [ResponseWriter] will return\n[ErrHandlerTimeout].\n\nTimeoutHandler supports the [Pusher] interface but does not support\nthe [Hijacker] or [Flusher] interfaces.\n" ^Handler [^Handler h ^time/Duration dt ^string msg]
+  (addr ^{:go/breaks [2 4 6]} (lit timeoutHandler
+      :handler h
+      :body msg
+      :dt dt)))
+
+
+
+
+
+(go/var ^{:doc "ErrHandlerTimeout is returned on [ResponseWriter] Write calls\nin handlers which have timed out.\n"} ErrHandlerTimeout (errors/New "http: Handler timeout"))
+
+(go/type timeoutHandler (struct
+    ^{:line 4019 :tag Handler} handler
+    ^{:line 4020 :tag string} body
+    ^{:line 4021 :tag time/Duration} dt
+
+
+
+    ^{:line 4025 :tag context/Context :doc "When set, no context will be created and this context will\nbe used instead.\n"} testContext))
+
+
+^{:go/breaks [[4 4032]] :go/end 4033} (go/method errorBody ^string [^{:tag (* timeoutHandler)} h]
+  (when (!= (.-body h) "")
+    (return (.-body h)))
+
+  "<html><head><title>Timeout</title></head><body><h1>Timeout</h1></body></html>")
+
+
+^{:go/end 4085} (go/method ServeHTTP [^{:tag (* timeoutHandler)} h ^ResponseWriter w ^{:tag (* Request)} r]
+  (let [ctx (.-testContext h)]
+    (when (== ctx nil)
+      (let [^context/CancelFunc cancelCtx (zero context/CancelFunc)]
+        (set! (values ctx cancelCtx) (context/WithTimeout (.Context r) (.-dt h)))
+        (defer (cancelCtx))))
+
+    (set! r (.WithContext r ctx))
+    (let [done (make (chan (struct)))
+        ^{:line 4044} tw (addr ^{:go/breaks [2 4 6]} (lit timeoutWriter
+            :w w
+            :h (make Header)
+            :req r))
+
+        ^{:line 4049} panicChan (make (chan any) 1)]
+      (go (^{:go/end 4058} (fn []
+            (defer (^{:go/end 4055} (fn []
+                  (when [p (recover)] (!= p nil)
+                    (>! panicChan p)))))
+
+
+            (.ServeHTTP (.-handler h) tw r)
+            (close done))))
+
+      (select
+        (case [p (<! panicChan)]
+          (panic p))
+        (case (<! done)
+          (.Lock (.-mu tw))
+          (defer (.Unlock (.-mu tw)))
+          (let [dst (.Header w)]
+            (^{:inst [Header Header string (slice string)]} maps/Copy dst (.-h tw))
+            (when (not (.-wroteHeader tw))
+              (set! (.-code tw) StatusOK))
+
+            (.WriteHeader w (.-code tw))
+            (.Write w (.Bytes (.-wbuf tw)))))
+        (case (<! (.Done ctx))
+          (.Lock (.-mu tw))
+          (defer (.Unlock (.-mu tw)))
+          (switch [err (.Err ctx)] err
+            (case [context/DeadlineExceeded]
+              (.WriteHeader w StatusServiceUnavailable)
+              (io/WriteString w (.errorBody h))
+              (set! (.-err tw) ErrHandlerTimeout))
+            (default
+              (.WriteHeader w StatusServiceUnavailable)
+              (set! (.-err tw) err))))))))
+
+
+
+
+(go/type timeoutWriter (struct
+    ^{:line 4088 :tag ResponseWriter} w
+    ^{:line 4089 :tag Header} h
+    ^{:line 4090 :tag bytes/Buffer} wbuf
+    ^{:line 4091 :tag (* Request)} req
+
+    ^{:line 4093 :tag sync/Mutex} mu
+    ^{:line 4094 :tag error} err
+    ^{:line 4095 :tag bool} wroteHeader
+    ^{:line 4096 :tag int} code))
+
+
+(go/var ^Pusher _ (conv (* timeoutWriter) nil))
+
+
+^{:go/end 4107} (go/method Push "Push implements the [Pusher] interface.\n" ^error [^{:tag (* timeoutWriter)} tw ^string target ^{:tag (* PushOptions)} opts]
+  (when [(values pusher ok) (assert Pusher (.-w tw))] ok
+    (return (.Push pusher target opts)))
+
+  ^{:line 4106} ErrNotSupported)
+
+
+^{:go/end 4109} (go/method Header ^Header [^{:tag (* timeoutWriter)} tw] (.-h tw))
+
+^{:go/end 4121} (go/method Write [^{:tag (* timeoutWriter)} tw ^{:tag (slice byte)} p] :results [int error]
+  (.Lock (.-mu tw))
+  (defer (.Unlock (.-mu tw)))
+  (when (!= (.-err tw) nil)
+    (return 0 (.-err tw)))
+
+  (when (not (.-wroteHeader tw))
+    (.writeHeaderLocked tw StatusOK))
+
+  (.Write (.-wbuf tw) p))
+
+
+^{:go/end 4138} (go/method writeHeaderLocked [^{:tag (* timeoutWriter)} tw ^int code]
+  (checkWriteHeaderCode code)
+
+  (switch
+    (case [(!= (.-err tw) nil)]
+      (return))
+    (case [(.-wroteHeader tw)]
+      (when (!= (.-req tw) nil)
+        (let [caller (relevantCaller)]
+          (logf (.-req tw) "http: superfluous response.WriteHeader call from %s (%s:%d)" (.-Function caller) (path/Base (.-File caller)) (.-Line caller)))))
+
+    (default
+      (set! (.-wroteHeader tw) true)
+      (set! (.-code tw) code))))
+
+
+
+^{:go/end 4144} (go/method WriteHeader [^{:tag (* timeoutWriter)} tw ^int code]
+  (.Lock (.-mu tw))
+  (defer (.Unlock (.-mu tw)))
+  (.writeHeaderLocked tw code))
+
+
+
+
+(go/type onceCloseListener "onceCloseListener wraps a net.Listener, protecting it from\nmultiple Close calls.\n" (struct
+    ^{:line 4149} net/Listener
+    ^{:line 4150 :tag sync/Once} once
+    ^{:line 4151 :tag error} closeErr))
+
+
+^{:go/end 4157} (go/method Close ^error [^{:tag (* onceCloseListener)} oc]
+  (.Do (.-once oc) (.-close oc))
+  (.-closeErr oc))
+
+
+^{:go/end 4159} (go/method close [^{:tag (* onceCloseListener)} oc] (set! (.-closeErr oc) (.Close (.-Listener oc))))
+
+
+(go/type globalOptionsHandler "globalOptionsHandler responds to \"OPTIONS *\" requests.\n" (struct))
+
+^{:go/end 4175} (go/method ServeHTTP [globalOptionsHandler ^ResponseWriter w ^{:tag (* Request)} r]
+  (.Set (.Header w) "Content-Length" "0")
+  (when (!= (.-ContentLength r) 0)
+    ;; Read up to 4KB of OPTIONS body (as mentioned in the
+    ;; spec as being reserved for future use), but anything
+    ;; over that is considered a waste of server resources
+    ;; (or an attack) and we abort and close the connection,
+    ;; courtesy of MaxBytesReader's EOF behavior.
+    (let [mb (MaxBytesReader w (.-Body r) (<< 4 10))]
+      (io/Copy io/Discard mb))))
+
+
+
+
+
+
+(go/type initALPNRequest "initALPNRequest is an HTTP handler that initializes certain\nuninitialized fields in its *Request. Such partially-initialized\nRequests come from ALPN protocol handlers.\n" (struct
+    ^{:line 4181 :tag context/Context} ctx
+    ^{:line 4182 :tag (* tls/Conn)} c
+    ^{:line 4183 :tag serverHandler} h))
+
+
+
+
+
+
+^{:go/end 4190} (go/method BaseContext "BaseContext is an exported but unadvertised [http.Handler] method\nrecognized by x/net/http2 to pass down a context; the TLSNextProto\nAPI predates context support so we shoehorn through the only\ninterface we have available.\n" ^context/Context [^initALPNRequest h] (.-ctx h))
+
+^{:go/end 4204} (go/method ServeHTTP [^initALPNRequest h ^ResponseWriter rw ^{:tag (* Request)} req]
+  (when (== (.-TLS req) nil)
+    (set! (.-TLS req) (addr (lit tls/ConnectionState)))
+    (set! @(.-TLS req) (.ConnectionState (.-c h))))
+
+  (when (== (.-Body req) nil)
+    (set! (.-Body req) NoBody))
+
+  (when (== (.-RemoteAddr req) "")
+    (set! (.-RemoteAddr req) (.String (.RemoteAddr (.-c h)))))
+
+  (.ServeHTTP (.-h h) rw req))
+
+
+
+(go/type loggingConn "loggingConn is used for debugging.\n" (struct
+    ^{:line 4208 :tag string} name
+    ^{:line 4209} net/Conn))
+
+
+(go/var
+  ^{:line 4213} [^sync/Mutex uniqNameMu]
+  ^{:line 4214} [uniqNameNext (make (map string int))])
+
+
+^{:go/end 4225} (go/func newLoggingConn ^net/Conn [^string baseName ^net/Conn c]
+  (.Lock uniqNameMu)
+  (defer (.Unlock uniqNameMu))
+  (inc! (aget uniqNameNext baseName))
+  (addr ^{:go/breaks [2 4]} (lit loggingConn
+      :name (fmt/Sprintf "%s-%d" baseName (aget uniqNameNext baseName))
+      :Conn c)))
+
+
+
+^{:go/end 4232} (go/method Write [^{:tag (* loggingConn)} c ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (log/Printf "%s.Write(%d) = ...." (.-name c) (len p))
+  (set! (values n err) (.Write (.-Conn c) p))
+  (log/Printf "%s.Write(%d) = %d, %v" (.-name c) (len p) n err)
+  (return))
+
+
+^{:go/end 4239} (go/method Read [^{:tag (* loggingConn)} c ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (log/Printf "%s.Read(%d) = ...." (.-name c) (len p))
+  (set! (values n err) (.Read (.-Conn c) p))
+  (log/Printf "%s.Read(%d) = %d, %v" (.-name c) (len p) n err)
+  (return))
+
+
+^{:go/end 4246} (go/method Close [^{:tag (* loggingConn)} c] :results [^error err]
+  (log/Printf "%s.Close() = ..." (.-name c))
+  (set! err (.Close (.-Conn c)))
+  (log/Printf "%s.Close() = %v" (.-name c) err)
+  (return))
+
+
+
+
+
+(go/type checkConnErrorWriter "checkConnErrorWriter writes to c.rwc and records any write errors to c.werr.\nIt only contains one field (and a pointer field at that), so it\nfits in an interface value without an extra allocation.\n" (struct
+    ^{:line 4252 :tag (* conn)} c))
+
+
+^{:go/end 4262} (go/method Write [^checkConnErrorWriter w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (set! (values n err) (.Write (.-rwc (.-c w)) p))
+  (when (and (!= err nil) (== (.-werr (.-c w)) nil))
+    (set! (.-werr (.-c w)) err)
+    ((.-cancelCtx (.-c w))))
+
+  (return))
+
+
+^{:go/end 4273} (go/func numLeadingCRorLF [^{:tag (slice byte)} v] :results [^int n]
+  (range [_ b v]
+    (when (or (== b \return) (== b \newline))
+      (inc! n)
+      (continue))
+
+    (break))
+
+  (return))
+
+
+
+
+^{:go/breaks [[5 4282]] :go/end 4283} (go/func tlsRecordHeaderLooksLikeHTTP "tlsRecordHeaderLooksLikeHTTP reports whether a TLS record header\nlooks like it might've been a misdirected plaintext HTTP request.\n" ^bool [^{:tag (array 5 byte)} hdr]
+  (switch (conv string (subslice hdr))
+    (case ["GET /" "HEAD " "POST " "PUT /" "OPTIO"]
+      (return true)))
+
+  false)
+
+
+
+^{:go/end 4292} (go/func MaxBytesHandler "MaxBytesHandler returns a [Handler] that runs h with its [ResponseWriter] and [Request.Body] wrapped by a MaxBytesReader.\n" ^Handler [^Handler h ^int64 n]
+  (conv HandlerFunc ^{:go/end 4291} (fn [^ResponseWriter w ^{:tag (* Request)} r]
+      (let [r2 @r]
+        (set! (.-Body r2) (MaxBytesReader w (.-Body r) n))
+        (.ServeHTTP h w (addr r2))))))

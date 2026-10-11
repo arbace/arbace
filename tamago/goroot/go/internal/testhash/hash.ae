@@ -1,0 +1,230 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.testhash) (go/file "hash.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [hash "hash"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [rand "math/rand"]
+    ^{:line 12} [testing "testing"]
+    ^{:line 13} [time "time"]])
+
+
+(go/type MakeHash (func [] [hash/Hash]))
+
+
+
+^{:go/end 61} (go/func TestHash "TestHash performs a set of tests on hash.Hash implementations, checking the\ndocumented requirements of Write, Sum, Reset, Size, and BlockSize.\n" [^{:tag (* testing/T)} t ^MakeHash mh]
+  (TestHashWithoutClone t mh)
+
+  ;; Test whether the results after cloning are consistent.
+  (.Run t "Clone" ^{:go/end 60} (fn [^{:tag (* testing/T)} t]
+      (let [(values h ok) (assert hash/Cloner (mh))]
+        (when (not ok)
+          ^{:go/via [common]} (.Fatalf t "%T does not implement hash.Cloner" mh))
+
+        (let [(values h3 err) (.Clone h)]
+          (when (!= err nil)
+            ^{:go/via [common]} (.Fatalf t "Clone failed: %v" err))
+
+          (let [prefix (conv (slice byte) "tmp")]
+            (writeToHash t h prefix)
+            (let [(values h2 ^:assign err) (.Clone h)]
+              (when (!= err nil)
+                ^{:go/via [common]} (.Fatalf t "Clone failed: %v" err))
+
+              (let [prefixSum (.Sum h nil)]
+                (when (not (bytes/Equal prefixSum (.Sum h2 nil)))
+                  ^{:go/via [common]} (.Fatalf t "%T Clone results are inconsistent" h))
+
+                (let [suffix (conv (slice byte) "tmp2")]
+                  (writeToHash t h suffix)
+                  (writeToHash t h3 (append prefix (spread suffix)))
+                  (let [compositeSum (.Sum h3 nil)]
+                    (when (not (bytes/Equal (.Sum h nil) compositeSum))
+                      ^{:go/via [common]} (.Fatalf t "%T Clone results are inconsistent" h))
+
+                    (when (not (bytes/Equal (.Sum h2 nil) prefixSum))
+                      ^{:go/via [common]} (.Fatalf t "%T Clone results are inconsistent" h))
+
+                    (writeToHash t h2 suffix)
+                    (when (not (bytes/Equal (.Sum h nil) compositeSum))
+                      ^{:go/via [common]} (.Fatalf t "%T Clone results are inconsistent" h))
+
+                    (when (not (bytes/Equal (.Sum h2 nil) compositeSum))
+                      ^{:go/via [common]} (.Fatalf t "%T Clone results are inconsistent" h))))))))))))
+
+
+
+
+^{:go/end 190} (go/func TestHashWithoutClone [^{:tag (* testing/T)} t ^MakeHash mh]
+  ;; Test that Sum returns an appended digest matching output of Size
+  (.Run t "SumAppend" ^{:go/end 98} (fn [^{:tag (* testing/T)} t]
+      (let [h (mh)
+          ^{:line 67} rng (newRandReader t)
+
+          ^{:line 69} emptyBuff (conv (slice byte) "")
+          ^{:line 70} shortBuff (conv (slice byte) "a")
+          ^{:line 71} longBuff (make (slice byte) (+ (.BlockSize h) 1))]
+        (.Read rng longBuff)
+
+        ;; Set of example strings to append digest to
+        (let [prefixes (lit (slice (slice byte)) nil emptyBuff shortBuff longBuff)]
+
+          ;; Go to each string and check digest gets appended to and is correct size.
+          (range [_ prefix prefixes]
+            (.Reset h)
+
+            (let [sum (getSum t h prefix)] ; Append new digest to prefix
+
+              ;; Check that Sum didn't alter the prefix
+              (when (not (bytes/Equal (subslice sum _ (len prefix)) prefix))
+                ^{:go/via [common]} (.Errorf t "Sum alters passed buffer instead of appending; got %x, want %x" (subslice sum _ (len prefix)) prefix))
+
+
+              ;; Check that the appended sum wasn't affected by the prefix
+              (when [expectedSum (getSum t h nil)] (not (bytes/Equal (subslice sum (len prefix)) expectedSum))
+                ^{:go/via [common]} (.Errorf t "Sum behavior affected by data in the input buffer; got %x, want %x" (subslice sum (len prefix)) expectedSum))
+
+
+              ;; Check size of append
+              (when [(values got want) (values (- (len sum) (len prefix)) (.Size h))] (!= got want)
+                ^{:go/via [common]} (.Errorf t "Sum appends number of bytes != Size; got %v , want %v" got want))))))))
+
+
+
+
+  ;; Test that Hash.Write never returns error.
+  (.Run t "WriteWithoutError" ^{:go/end 116} (fn [^{:tag (* testing/T)} t]
+      (let [h (mh)
+          ^{:line 103} rng (newRandReader t)
+
+          ^{:line 105} emptySlice (conv (slice byte) "")
+          ^{:line 106} shortSlice (conv (slice byte) "a")
+          ^{:line 107} longSlice (make (slice byte) (+ (.BlockSize h) 1))]
+        (.Read rng longSlice)
+
+        ;; Set of example strings to append digest to
+        (let [slices (lit (slice (slice byte)) emptySlice shortSlice longSlice)]
+
+          (range [_ slice slices]
+            (writeToHash t h slice)))))) ; Writes and checks Write doesn't error
+
+
+
+  (.Run t "ResetState" ^{:go/end 134} (fn [^{:tag (* testing/T)} t]
+      (let [h (mh)
+          ^{:line 120} rng (newRandReader t)
+
+          ^{:line 122} emptySum (getSum t h nil)
+
+          ;; Write to hash and then Reset it and see if Sum is same as emptySum
+          ^{:line 125} writeEx (make (slice byte) (.BlockSize h))]
+        (.Read rng writeEx)
+        (writeToHash t h writeEx)
+        (.Reset h)
+        (let [resetSum (getSum t h nil)]
+
+          (when (not (bytes/Equal emptySum resetSum))
+            ^{:go/via [common]} (.Errorf t "Reset hash yields different Sum than new hash; got %x, want %x" emptySum resetSum))))))
+
+
+
+  ;; Check that Write isn't reading from beyond input slice's bounds
+  (.Run t "OutOfBoundsRead" ^{:go/end 163} (fn [^{:tag (* testing/T)} t]
+      (let [h (mh)
+          ^{:line 139} blockSize (.BlockSize h)
+          ^{:line 140} rng (newRandReader t)
+
+          ^{:line 142} msg (make (slice byte) blockSize)]
+        (.Read rng msg)
+        (writeToHash t h msg)
+        (let [expectedDigest (getSum t h nil)] ; Record control digest
+
+          (.Reset h)
+
+          ;; Make a buffer with msg in the middle and data on either end
+          (let [buff (make (slice byte) (* blockSize 3))
+              (values endOfPrefix startOfSuffix) (values blockSize (* blockSize 2))]
+
+            (copy (subslice buff endOfPrefix startOfSuffix) msg)
+            (.Read rng (subslice buff _ endOfPrefix))
+            (.Read rng (subslice buff startOfSuffix))
+
+            (writeToHash t h (subslice buff endOfPrefix startOfSuffix))
+            (let [testDigest (getSum t h nil)]
+
+              (when (not (bytes/Equal testDigest expectedDigest))
+                ^{:go/via [common]} (.Errorf t "Write affected by data outside of input slice bounds; got %x, want %x" testDigest expectedDigest))))))))
+
+
+
+  ;; Test that multiple calls to Write is stateful
+  (.Run t "StatefulWrite" ^{:go/end 189} (fn [^{:tag (* testing/T)} t]
+      (let [h (mh)
+          ^{:line 168} rng (newRandReader t)
+
+          (values prefix suffix) (values (make (slice byte) (.BlockSize h)) (make (slice byte) (.BlockSize h)))]
+        (.Read rng prefix)
+        (.Read rng suffix)
+
+        ;; Write prefix then suffix sequentially and record resulting hash
+        (writeToHash t h prefix)
+        (writeToHash t h suffix)
+        (let [serialSum (getSum t h nil)]
+
+          (.Reset h)
+
+          ;; Write prefix and suffix at the same time and record resulting hash
+          (writeToHash t h (append prefix (spread suffix)))
+          (let [compositeSum (getSum t h nil)]
+
+            ;; Check that sequential writing results in the same as writing all at once
+            (when (not (bytes/Equal compositeSum serialSum))
+              ^{:go/via [common]} (.Errorf t "two successive Write calls resulted in a different Sum than a single one; got %x, want %x" compositeSum serialSum))))))))
+
+
+
+
+
+^{:go/end 207} (go/func writeToHash "Helper function for writing. Verifies that Write does not error.\n" [^{:tag (* testing/T)} t ^hash/Hash h ^{:tag (slice byte)} p]
+  ^{:go/via [common]} (.Helper t)
+
+  (let [before (make (slice byte) (len p))]
+    (copy before p)
+
+    (let [(values n err) (.Write h p)]
+      (when (or (!= err nil) (!= n (len p)))
+        ^{:go/via [common]} (.Errorf t "Write returned error; got (%v, %v), want (nil, %v)" err n (len p)))
+
+
+      (when (not (bytes/Equal p before))
+        ^{:go/via [common]} (.Errorf t "Write modified input slice; got %x, want %x" p before)))))
+
+
+
+
+^{:go/end 225} (go/func getSum "Helper function for getting Sum. Checks that Sum doesn't change hash state.\n" ^{:tag (slice byte)} [^{:tag (* testing/T)} t ^hash/Hash h ^{:tag (slice byte)} buff]
+  ^{:go/via [common]} (.Helper t)
+
+  (let [testBuff (make (slice byte) (len buff))]
+    (copy testBuff buff)
+
+    (let [sum (.Sum h buff)
+        ^{:line 217} testSum (.Sum h testBuff)]
+
+      ;; Check that Sum doesn't change underlying hash state
+      (when (not (bytes/Equal sum testSum))
+        ^{:go/via [common]} (.Errorf t "successive calls to Sum yield different results; got %x, want %x" sum testSum))
+
+
+      ^{:line 224} sum)))
+
+
+^{:go/end 231} (go/func newRandReader ^io/Reader [^{:tag (* testing/T)} t]
+  (let [seed (.UnixNano (time/Now))]
+    ^{:go/via [common]} (.Logf t "Deterministic RNG seed: 0x%x" seed)
+    (rand/New (rand/NewSource seed))))

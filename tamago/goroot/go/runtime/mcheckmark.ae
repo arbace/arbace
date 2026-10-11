@@ -1,0 +1,328 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; GC checkmarks
+;;
+;; In a concurrent garbage collector, one worries about failing to mark
+;; a live object due to mutations without write barriers or bugs in the
+;; collector implementation. As a sanity check, the GC has a 'checkmark'
+;; mode that retraverses the object graph with the world stopped, to make
+;; sure that everything that should be marked is marked.
+
+(in-ns 'go.runtime) (go/file "mcheckmark.go" :imports [
+
+
+    ^{:line 16} [goarch "internal/goarch"]
+    ^{:line 17} [atomic "internal/runtime/atomic"]
+    ^{:line 18} [sys "internal/runtime/sys"]
+    ^{:line 19} [unsafe "unsafe"]])
+
+
+
+
+
+
+(go/type checkmarksMap "A checkmarksMap stores the GC marks in \"checkmarks\" mode. It is a\nper-arena bitmap with a bit for every word in the arena. The mark\nis stored on the bit corresponding to the first word of the marked\nallocation.\n" (struct
+    ^{:line 27 :tag sys/NotInHeap} _
+    ^{:line 28 :tag (array (/ heapArenaBytes goarch/PtrSize 8) uint8)} b))
+
+
+
+
+(go/var ^{:doc "If useCheckmark is true, marking of an object uses the checkmark\nbits instead of the standard mark bits.\n"} useCheckmark false)
+
+
+
+
+^{:go/end 67} (go/func startCheckmarks "startCheckmarks prepares for the checkmarks phase.\n\nThe world must be stopped.\n" []
+  (assertWorldStopped)
+
+  ;; Clear all checkmarks.
+  (let [clearCheckmarks ^{:go/end 57} (fn [^arenaIdx ai]
+        (let [arena (aget (aget (.-arenas mheap_) (.l1 ai)) (.l2 ai))
+            ^{:line 44} bitmap (.-checkmarks arena)]
+
+          (if (== bitmap nil) (do
+              ;; Allocate bitmap on first use.
+              (set! bitmap (conv (* checkmarksMap) (persistentalloc (unsafe/Sizeof @bitmap) 0 (addr (.-gcMiscSys memstats)))))
+              (when (== bitmap nil)
+                (throw "out of memory allocating checkmarks bitmap"))
+
+              (set! (.-checkmarks arena) bitmap))
+
+            ;; Otherwise clear the existing bitmap.
+            (clear (subslice (.-b bitmap))))))]
+
+
+    (range [_ ai (.-heapArenas mheap_)]
+      (clearCheckmarks ai))
+
+    (range [_ ai (.-userArenaArenas mheap_)]
+      (clearCheckmarks ai))
+
+
+    ;; Enable checkmarking.
+    (set! useCheckmark true)))
+
+
+
+^{:go/end 75} (go/func endCheckmarks "endCheckmarks ends the checkmarks phase.\n" []
+  (when (not (gcIsMarkDone))
+    (throw "GC work not flushed"))
+
+  (set! useCheckmark false))
+
+
+
+
+
+^{:go/end 105} (go/func setCheckmark "setCheckmark throws if marking object is a checkmarks violation,\nand otherwise sets obj's checkmark. It returns true if obj was\nalready checkmarked.\n" ^bool [^uintptr obj ^uintptr base ^uintptr off ^markBits mbits]
+  (when (not (.isMarked mbits))
+    (printlock)
+    (print "runtime: checkmarks found unexpected unmarked object obj=" (conv hex obj) "\n")
+    (print "runtime: found obj at *(" (conv hex base) "+" (conv hex off) ")\n")
+
+    ;; Dump the source (base) object
+    (gcDumpObject "base" base off)
+
+    ;; Dump the object
+    (gcDumpObject "obj" obj (bit-not (conv uintptr 0)))
+
+    (set! (.-traceback (.-m (getg))) 2)
+    (throw "checkmark found unmarked object"))
+
+  ^{:go/breaks [5]} (let [(values bytep mask) (getCheckmark obj)]
+    (when (== bytep nil)
+      (return false))
+
+    (when (!= (bit-and (atomic/Load8 bytep) mask) 0)
+      ;; Already checkmarked.
+      (return true))
+
+    (atomic/Or8 bytep mask)
+    false))
+
+
+^{:go/end 119} (go/func getCheckmark [^uintptr obj] :results [^{:tag (* byte)} bytep ^uint8 mask]
+  (let [ai (arenaIndex obj)
+      ^{:line 109} arena (aget (aget (.-arenas mheap_) (.l1 ai)) (.l2 ai))]
+    (when (== arena nil)
+      ;; Non-heap pointer.
+      (return nil 0))
+
+    (let [wordIdx (/ (- obj (alignDown obj heapArenaBytes)) goarch/PtrSize)
+        ^{:line 115} arenaWord (/ wordIdx 8)]
+      (set! mask (conv byte ^byte (<< 1 (% wordIdx 8))))
+      (set! bytep (addr (aget (.-b (.-checkmarks arena)) arenaWord)))
+      (return bytep mask))))
+
+
+
+
+
+
+
+^{:go/end 144} (go/func runCheckmark "runCheckmark runs a full non-parallel, stop-the-world mark using\ncheckmark bits, to check that we didn't forget to mark anything\nduring the concurrent mark process.\n\nThe world must be stopped to call runCheckmark.\n" [^{:tag (func [(* gcWork)])} prepareRootSet]
+  (assertWorldStopped)
+
+  ;; Turn off gcwaiting because that will force
+  ;; gcDrain to return early if this goroutine
+  ;; happens to have its preemption flag set.
+  ;; This is fine because the world is stopped.
+  ;; Restore it after we're done just to be safe.
+  (.Store (.-gcwaiting sched) false)
+  (startCheckmarks)
+  (gcResetMarkState)
+  (let [gcw (addr (.-gcw (.ptr (.-p (.-m (getg))))))]
+    (prepareRootSet gcw)
+    (gcDrain gcw 0)
+    (wbBufFlush1 (.ptr (.-p (.-m (getg)))))
+    (.dispose gcw)
+    (endCheckmarks)
+    (.Store (.-gcwaiting sched) true)))
+
+
+
+
+^{:go/end 291} (go/func checkFinalizersAndCleanups "checkFinalizersAndCleanups uses checkmarks to check for potential issues\nwith the program's use of cleanups and finalizers.\n" []
+  (assertWorldStopped)
+
+  (let [
+      ^:const ^{:line 152 :val 1} reportCycle (<< 1 iota)
+      ^:const ^:go/grouped ^:go/implicit ^{:line 153 :val 2} reportTiny (<< 1 iota)]
+
+
+    ;; Find the arena and page index into that arena for this shard.
+    (let-type [report (struct
+          ^{:line 158 :tag int} issues
+          ^{:line 159 :tag uintptr} ptr
+          ^{:line 160 :tag (* special)} sp)]
+
+      (let [^{:tag (array 50 report)} reports (zero (array 50 report))
+          ^{:line 163 :tag int} nreports (zero int)
+          ^{:line 164 :tag bool} more (zero bool)
+          ^{:line 165 :tag uintptr} lastTinyBlock (zero uintptr)]
+
+        (forEachSpecial ^{:go/end 219} (fn ^bool [^uintptr p ^{:tag (* mspan)} s ^{:tag (* special)} sp]
+            ;; N.B. The tiny block specials are sorted first in the specials list.
+            (when (== (.-kind sp) _KindSpecialTinyBlock)
+              (set! lastTinyBlock (+ (.base s) (.-offset sp)))
+              (return true))
+
+
+            ;; We only care about finalizers and cleanups.
+            (when (and (!= (.-kind sp) _KindSpecialFinalizer) (!= (.-kind sp) _KindSpecialCleanup))
+              (return true))
+
+
+            ;; Run a checkmark GC using this cleanup and/or finalizer as a root.
+            (when (> (.-checkfinalizers debug) 1)
+              (print "Scan trace for cleanup/finalizer on " (conv hex p) ":\n"))
+
+            (runCheckmark ^{:go/end 190} (fn [^{:tag (* gcWork)} gcw]
+                (switch (.-kind sp)
+                  (case [_KindSpecialFinalizer]
+                    (gcScanFinalizer (conv (* specialfinalizer) (conv unsafe/Pointer sp)) s gcw))
+                  (case [_KindSpecialCleanup]
+                    (gcScanCleanup (conv (* specialCleanup) (conv unsafe/Pointer sp)) gcw)))))
+
+
+            (when (> (.-checkfinalizers debug) 1)
+              (println))
+
+
+            ;; Now check to see if the object the special is attached to was marked.
+            ;; The roots above do not directly mark p, so if it is marked, then p
+            ;; must be reachable from the finalizer and/or cleanup, preventing
+            ;; reclamation.
+            (let [(values bytep mask) (getCheckmark p)]
+              (when (== bytep nil)
+                (return true))
+
+              ^{:go/breaks [[5 218]]} (let [^int issues (zero int)]
+                (when (!= (bit-and (atomic/Load8 bytep) mask) 0)
+                  (set! issues bit-or reportCycle))
+
+                (when (and (>= p lastTinyBlock) (< p (+ lastTinyBlock maxTinySize)))
+                  (set! issues bit-or reportTiny))
+
+                (when (!= issues 0)
+                  (when (>= nreports (len reports))
+                    (set! more true)
+                    (return false))
+
+                  (aset reports nreports (lit report issues p sp))
+                  (inc! nreports))
+
+                true))))
+
+
+        (when (> nreports 0)
+          (let [lastPtr (conv uintptr 0)]
+            (println "WARNING: LIKELY CLEANUP/FINALIZER ISSUES")
+            (println)
+            (range [_ r (subslice reports _ nreports)]
+              (let [^{:tag (* specialCheckFinalizer)} ctx (zero (* specialCheckFinalizer))
+                  ^{:line 227 :tag string} kind (zero string)]
+                (if (== (.-kind (.-sp r)) _KindSpecialFinalizer) (do
+                    (set! kind "finalizer")
+                    (set! ctx (getCleanupContext (.-ptr r) 0)))
+                  (do
+                    (set! kind "cleanup")
+                    (set! ctx (getCleanupContext (.-ptr r) (.-id (conv (* specialCleanup) (conv unsafe/Pointer (.-sp r))))))))
+
+
+                ;; N.B. reports is sorted 'enough' that cleanups/finalizers on the same pointer will
+                ;; appear consecutively because the specials list is sorted.
+                (when (!= lastPtr (.-ptr r))
+                  (when (!= lastPtr 0)
+                    (println))
+
+                  (print "Value of type " (.string (toRType (.-ptrType ctx))) " at " (conv hex (.-ptr r)) "\n")
+                  (when (!= (bit-and (.-issues r) reportCycle) 0)
+                    (if (== (.-kind (.-sp r)) _KindSpecialFinalizer)
+                      (println "  is reachable from finalizer")
+
+                      (println "  is reachable from cleanup or cleanup argument")))
+
+
+                  (when (!= (bit-and (.-issues r) reportTiny) 0)
+                    (println "  is in a tiny block with other (possibly long-lived) values"))
+
+                  (when (and (!= (bit-and (.-issues r) reportTiny) 0) (!= (bit-and (.-issues r) reportCycle) 0))
+                    (if (== (.-kind (.-sp r)) _KindSpecialFinalizer)
+                      (println "  may be in the same tiny block as finalizer")
+
+                      (println "  may be in the same tiny block as cleanup or cleanup argument"))))
+
+
+
+                (println)
+
+                (println "Has" kind "at" (conv hex (conv uintptr (conv unsafe/Pointer (.-sp r)))))
+                (let [funcInfo (findfunc (.-funcPC ctx))]
+                  (if (.valid funcInfo)
+                    (let [(values file line) (funcline funcInfo (.-funcPC ctx))]
+                      (print "  " (funcname funcInfo) "()\n")
+                      (print "      " file ":" line " +" (conv hex (- (.-funcPC ctx) (.entry funcInfo))) "\n"))
+
+                    (print "  <bad pc " (conv hex (.-funcPC ctx)) ">\n"))
+
+
+                  (println "created at: ")
+                  (let [createInfo (findfunc (.-createPC ctx))]
+                    (if (.valid createInfo)
+                      (let [(values file line) (funcline createInfo (.-createPC ctx))]
+                        (print "  " (funcname createInfo) "()\n")
+                        (print "      " file ":" line " +" (conv hex (- (.-createPC ctx) (.entry createInfo))) "\n"))
+
+                      (print "  <bad pc " (conv hex (.-createPC ctx)) ">\n"))
+
+
+                    (set! lastPtr (.-ptr r))))))
+
+            (println)
+            (when more
+              (println "... too many potential issues ..."))
+
+            (throw "detected possible issues with cleanups and/or finalizers")))))))
+
+
+
+
+
+
+
+
+^{:go/end 334} (go/func forEachSpecial "forEachSpecial is an iterator over all specials.\n\nUsed by debug.checkfinalizers.\n\nThe world must be stopped.\n" [^{:tag (func [^uintptr p ^{:tag (* mspan)} s ^{:tag (* special)} sp] [bool])} yield]
+  (assertWorldStopped)
+
+  ;; Find the arena and page index into that arena for this shard.
+  (range [_ ai (.-markArenas mheap_)]
+    (let [ha (aget (aget (.-arenas mheap_) (.l1 ai)) (.l2 ai))]
+
+      ;; Construct slice of bitmap which we'll iterate over.
+      (range [i (subslice (.-pageSpecials ha))]
+        ;; Find set bits, which correspond to spans with specials.
+        (let [specials (atomic/Load8 (addr (aget (.-pageSpecials ha) i)))]
+          (when (== specials 0)
+            (continue))
+
+          (for [j (conv uint 0)] (< j 8) (inc! j)
+            (when (== (bit-and specials ^uint8 (<< 1 j)) 0)
+              (continue))
+
+            ;; Find the span for this bit.
+            ;;
+            ;; This value is guaranteed to be non-nil because having
+            ;; specials implies that the span is in-use, and since we're
+            ;; currently marking we can be sure that we don't have to worry
+            ;; about the span being freed and re-used.
+            (let [s (aget (.-spans ha) (+ (* (conv uint i) 8) j))]
+
+              ;; Lock the specials to prevent a special from being
+              ;; removed from the list while we're traversing it.
+              (for [sp (.-specials s)] (!= sp nil) (set! sp (.-next sp))
+                (when (not (yield (+ (.base s) (.-offset sp)) s sp))
+                  (return))))))))))

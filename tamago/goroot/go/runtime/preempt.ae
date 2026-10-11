@@ -1,0 +1,496 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Goroutine preemption
+;;
+;; A goroutine can be preempted at any safe-point. Currently, there
+;; are a few categories of safe-points:
+;;
+;; 1. A blocked safe-point occurs for the duration that a goroutine is
+;;    descheduled, blocked on synchronization, or in a system call.
+;;
+;; 2. Synchronous safe-points occur when a running goroutine checks
+;;    for a preemption request.
+;;
+;; 3. Asynchronous safe-points occur at any instruction in user code
+;;    where the goroutine can be safely paused and a conservative
+;;    stack and register scan can find stack roots. The runtime can
+;;    stop a goroutine at an async safe-point using a signal.
+;;
+;; At both blocked and synchronous safe-points, a goroutine's CPU
+;; state is minimal and the garbage collector has complete information
+;; about its entire stack. This makes it possible to deschedule a
+;; goroutine with minimal space, and to precisely scan a goroutine's
+;; stack.
+;;
+;; Synchronous safe-points are implemented by overloading the stack
+;; bound check in function prologues. To preempt a goroutine at the
+;; next synchronous safe-point, the runtime poisons the goroutine's
+;; stack bound to a value that will cause the next stack bound check
+;; to fail and enter the stack growth implementation, which will
+;; detect that it was actually a preemption and redirect to preemption
+;; handling.
+;;
+;; Preemption at asynchronous safe-points is implemented by suspending
+;; the thread using an OS mechanism (e.g., signals) and inspecting its
+;; state to determine if the goroutine was at an asynchronous
+;; safe-point. Since the thread suspension itself is generally
+;; asynchronous, it also checks if the running goroutine wants to be
+;; preempted, since this could have changed. If all conditions are
+;; satisfied, it adjusts the signal context to make it look like the
+;; signaled thread just called asyncPreempt and resumes the thread.
+;; asyncPreempt spills all registers and enters the scheduler.
+;;
+;; (An alternative would be to preempt in the signal handler itself.
+;; This would let the OS save and restore the register state and the
+;; runtime would only need to know how to extract potentially
+;; pointer-containing registers from the signal context. However, this
+;; would consume an M for every preempted G, and the scheduler itself
+;; is not designed to run from a signal handler, as it tends to
+;; allocate memory and start threads in the preemption path.)
+
+(in-ns 'go.runtime) (go/file "preempt.go" :imports [
+
+
+    ^{:line 56} [abi "internal/abi"]
+    ^{:line 57} [goarch "internal/goarch"]
+    ^{:line 58} [goexperiment "internal/goexperiment"]
+    ^{:line 59} [stringslite "internal/stringslite"]])
+
+
+(go/type suspendGState (struct
+    ^{:line 63 :tag (* g)} g
+
+
+
+
+
+    ^{:line 69 :tag bool :doc "dead indicates the goroutine was not suspended because it\nis dead. This goroutine could be reused after the dead\nstate was observed, so the caller must not assume that it\nremains dead.\n"} dead
+
+
+
+
+    ^{:line 74 :tag bool :doc "stopped indicates that this suspendG transitioned the G to\n_Gwaiting via g.preemptStop and thus is responsible for\nreadying it when done.\n"} stopped))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 255} (go/func ^:go/systemstack suspendG "suspendG suspends goroutine gp at a safe-point and returns the\nstate of the suspended goroutine. The caller gets read access to\nthe goroutine until it calls resumeG.\n\nIt is safe for multiple callers to attempt to suspend the same\ngoroutine at the same time. The goroutine may execute between\nsubsequent successful suspend operations. The current\nimplementation grants exclusive access to the goroutine, and hence\nmultiple callers will serialize. However, the intent is to grant\nshared read access, so please don't depend on exclusive access.\n\nThis must be called from the system stack and the user goroutine on\nthe current M (if any) must be in a preemptible state. This\nprevents deadlocks where two goroutines attempt to suspend each\nother and both are in non-preemptible states. There are other ways\nto resolve this deadlock, but this seems simplest.\n\nTODO(austin): What if we instead required this to be called from a\nuser goroutine? Then we could deschedule the goroutine while\nwaiting instead of blocking the thread. If two goroutines tried to\nsuspend each other, one of them would win and the other wouldn't\ncomplete the suspend until it was resumed. We would have to be\ncareful that they couldn't actually queue up suspend for each other\nand then both be suspended. This would also avoid the need for a\nkernel context switch in the synchronous case because we could just\ndirectly schedule the waiter. The context switch is unavoidable in\nthe signal case.\n" ^suspendGState [^{:tag (* g)} gp]
+  (when [mp (.-m (getg))] (and (!= (.-curg mp) nil) (== (readgstatus (.-curg mp)) _Grunning))
+    ;; Since we're on the system stack of this M, the user
+    ;; G is stuck at an unsafe point. If another goroutine
+    ;; were to try to preempt m.curg, it could deadlock.
+    (throw "suspendG from non-preemptible goroutine"))
+
+
+  ;; See https://golang.org/cl/21503 for justification of the yield delay.
+  (let [^:const ^{:val 10000} yieldDelay (* 10 1000)
+      ^{:line 116 :tag int64} nextYield (zero int64)
+
+      ;; Drive the goroutine to a preemption point.
+      ^{:line 119} stopped false
+      ^{:line 120 :tag (* m)} asyncM (zero (* m))
+      ^{:line 121 :tag uint32} asyncGen (zero uint32)
+      ^{:line 122 :tag int64} nextPreemptM (zero int64)]
+    (for [i 0] _ (inc! i)
+      (switch [s (readgstatus gp)] s
+        (default
+          (when (!= (bit-and s _Gscan) 0)
+            ;; Someone else is suspending it. Wait
+            ;; for them to finish.
+            ;;
+            ;; TODO: It would be nicer if we could
+            ;; coalesce suspends.
+            (break))
+
+
+          (dumpgstatus gp)
+          (throw "invalid g status"))
+
+        (case [_Gdead _Gdeadextra]
+          ;; Nothing to suspend.
+          ;;
+          ;; preemptStop may need to be cleared, but
+          ;; doing that here could race with goroutine
+          ;; reuse. Instead, goexit0 clears it.
+          (return (lit suspendGState :dead true)))
+
+        (case [_Gcopystack])
+        ;; The stack is being copied. We need to wait
+        ;; until this is done.
+
+        (case [_Gpreempted]
+          ;; We (or someone else) suspended the G. Claim
+          ;; ownership of it by transitioning it to
+          ;; _Gwaiting.
+          (when (not (casGFromPreempted gp _Gpreempted _Gwaiting))
+            (break))
+
+
+          ;; We stopped the G, so we have to ready it later.
+          (set! stopped true)
+
+          (set! s _Gwaiting)
+          (fallthrough))
+
+        (case [_Grunnable _Gsyscall _Gwaiting _Gleaked]
+          ;; Claim goroutine by setting scan bit.
+          ;; This may race with execution or readying of gp.
+          ;; The scan bit keeps it from transition state.
+          (when (not (castogscanstatus gp s (bit-or s _Gscan)))
+            (break))
+
+
+          ;; Clear the preemption request. It's safe to
+          ;; reset the stack guard because we hold the
+          ;; _Gscan bit and thus own the stack.
+          (set! (.-preemptStop gp) false)
+          (set! (.-preempt gp) false)
+          (set! (.-stackguard0 gp) (+ (.-lo (.-stack gp)) stackGuard))
+
+          ;; The goroutine was already at a safe-point
+          ;; and we've now locked that in.
+          ;;
+          ;; TODO: It would be much better if we didn't
+          ;; leave it in _Gscan, but instead gently
+          ;; prevented its scheduling until resumption.
+          ;; Maybe we only use this to bump a suspended
+          ;; count and the scheduler skips suspended
+          ;; goroutines? That wouldn't be enough for
+          ;; {_Gsyscall,_Gwaiting} -> _Grunning. Maybe
+          ;; for all those transitions we need to check
+          ;; suspended and deschedule?
+          (return (lit suspendGState :g gp :stopped stopped)))
+
+        (case [_Grunning]
+          ;; Optimization: if there is already a pending preemption request
+          ;; (from the previous loop iteration), don't bother with the atomics.
+          (when (and (.-preemptStop gp) (.-preempt gp) (== (.-stackguard0 gp) stackPreempt) (== asyncM (.-m gp)) (== (.Load (.-preemptGen asyncM)) asyncGen))
+            (break))
+
+
+          ;; Temporarily block state transitions.
+          (when (not (castogscanstatus gp _Grunning _Gscanrunning))
+            (break))
+
+
+          ;; Request synchronous preemption.
+          (set! (.-preemptStop gp) true)
+          (set! (.-preempt gp) true)
+          (set! (.-stackguard0 gp) stackPreempt)
+
+          ;; Prepare for asynchronous preemption.
+          (let [asyncM2 (.-m gp)
+              ^{:line 212} asyncGen2 (.Load (.-preemptGen asyncM2))
+              ^{:line 213} needAsync (or (!= asyncM asyncM2) (!= asyncGen asyncGen2))]
+            (set! asyncM asyncM2)
+            (set! asyncGen asyncGen2)
+
+            (casfrom_Gscanstatus gp _Gscanrunning _Grunning)
+
+            ;; Send asynchronous preemption. We do this
+            ;; after CASing the G back to _Grunning
+            ;; because preemptM may be synchronous and we
+            ;; don't want to catch the G just spinning on
+            ;; its status.
+            (when (and preemptMSupported (== (.-asyncpreemptoff debug) 0) needAsync)
+              ;; Rate limit preemptM calls. This is
+              ;; particularly important on Windows
+              ;; where preemptM is actually
+              ;; synchronous and the spin loop here
+              ;; can lead to live-lock.
+              (let [now (nanotime)]
+                (when (>= now nextPreemptM)
+                  (set! nextPreemptM (+ now (/ yieldDelay 2)))
+                  (preemptM asyncM)))))))
+
+
+
+
+      ;; TODO: Don't busy wait. This loop should really only
+      ;; be a simple read/decide/CAS loop that only fails if
+      ;; there's an active race. Once the CAS succeeds, we
+      ;; should queue up the preemption (which will require
+      ;; it to be reliable in the _Grunning case, not
+      ;; best-effort) and then sleep until we're notified
+      ;; that the goroutine is suspended.
+      (when (== i 0)
+        (set! nextYield (+ (nanotime) yieldDelay)))
+
+      (if (< (nanotime) nextYield)
+        (procyield 10)
+        (do
+          (osyield)
+          (set! nextYield (+ (nanotime) (/ yieldDelay 2))))))))
+
+
+
+
+
+
+^{:go/end 282} (go/func resumeG "resumeG undoes the effects of suspendG, allowing the suspended\ngoroutine to continue from its current safe-point.\n" [^suspendGState state]
+  (when (.-dead state)
+    ;; We didn't actually stop anything.
+    (return))
+
+
+  (let [gp (.-g state)]
+    (switch [s (readgstatus gp)] s
+      (default
+        (dumpgstatus gp)
+        (throw "unexpected g status"))
+
+      (case [(bit-or _Grunnable _Gscan)
+          (bit-or _Gwaiting _Gscan)
+          (bit-or _Gleaked _Gscan)
+          (bit-or _Gsyscall _Gscan)]
+        (casfrom_Gscanstatus gp s (bit-and-not s _Gscan))))
+
+
+    (when (.-stopped state)
+      ;; We stopped it, so we need to re-schedule it.
+      (ready gp 0 true))))
+
+
+
+
+
+
+
+
+^{:go/end 291} (go/func ^:go/nosplit canPreemptM "canPreemptM reports whether mp is in a state that is safe to preempt.\n\nIt is nosplit because it has nosplit callers.\n" ^bool [^{:tag (* m)} mp]
+  (and (== (.-locks mp) 0) (== (.-mallocing mp) 0) (== (.-preemptoff mp) "") (== (.-status (.ptr (.-p mp))) _Prunning) (!= (.-curg mp) nil) (!= (bit-and-not (readgstatus (.-curg mp)) _Gscan) _Gsyscall)))
+
+
+(go/directive "//go:generate go run mkpreempt.go")
+
+
+
+
+
+
+
+
+
+
+
+(go/func ^:extern asyncPreempt "asyncPreempt saves all user registers and calls asyncPreempt2.\n\nIt saves GP registers (anything that might contain a pointer) to the G stack.\nHence, when stack scanning encounters an asyncPreempt frame, it scans that\nframe and its parent frame conservatively.\n\nOn some platforms, it saves large additional scalar-only register state such\nas vector registers to an \"extended register state\" on the P.\n\nasyncPreempt is implemented in assembly.\n" [])
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 344} (go/func ^:go/nosplit ^:go/nowritebarrierrec asyncPreempt2 "asyncPreempt2 is the Go continuation of asyncPreempt.\n\nIt must be deeply nosplit because there's untyped data on the stack from\nasyncPreempt.\n\nIt must not have any write barriers because we need to limit the amount of\nstack it uses.\n" []
+  ;; We can't grow the stack with untyped data from asyncPreempt, so switch to
+  ;; the system stack right away.
+  (mcall ^{:go/end 333} (fn [^{:tag (* g)} gp]
+      (set! (.-asyncSafePoint gp) true)
+
+      ;; Move the extended register state from the P to the G. We do this now that
+      ;; we're on the system stack to avoid stack splits.
+      (xRegSave gp)
+
+      (if (.-preemptStop gp)
+        (preemptPark gp)
+
+        (gopreempt_m gp))))
+
+  ;; The above functions never return.
+
+
+  ;; Do not grow the stack below here!
+
+  (let [gp (getg)]
+
+    ;; Put the extended register state back on the M so resumption can find it.
+    ;; We can't do this in asyncPreemptM because the park calls never return.
+    (xRegRestore gp)
+
+    (set! (.-asyncSafePoint gp) false)))
+
+
+
+
+(go/var ^{:doc "asyncPreemptStack is the bytes of stack space required to inject an\nasyncPreempt call.\n"} asyncPreemptStack (bit-not (conv uintptr 0)))
+
+^{:go/end 365} (go/func init []
+  (let [f (findfunc (abi/FuncPCABI0 asyncPreempt))
+      ^{:line 352} total (funcMaxSPDelta f)]
+    (set! f (findfunc (abi/FuncPCABIInternal asyncPreempt2)))
+    (set! total + (funcMaxSPDelta f))
+    (set! f (findfunc (abi/FuncPCABIInternal xRegRestore)))
+    (set! total + (funcMaxSPDelta f))
+    ;; Add some overhead for return PCs, etc.
+    (set! asyncPreemptStack (+ (conv uintptr total) (* 8 goarch/PtrSize)))
+    (when (> asyncPreemptStack stackNosplit)
+      ;; We need more than the nosplit limit. This isn't unsafe, but it may
+      ;; limit asynchronous preemption. Consider moving state into xRegState.
+      (print "runtime: asyncPreemptStack=" asyncPreemptStack "\n")
+      (throw "async stack too large"))))
+
+
+
+
+
+^{:go/end 372} (go/func wantAsyncPreempt "wantAsyncPreempt returns whether an asynchronous preemption is\nqueued for gp.\n" ^bool [^{:tag (* g)} gp]
+  ;; Check both the G and the P.
+  (and ^:go/paren (or (.-preempt gp) (and (!= (.-p (.-m gp)) 0) (.-preempt (.ptr (.-p (.-m gp)))))) (== (bit-and-not (readgstatus gp) _Gscan) _Grunning)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 497} (go/func isAsyncSafePoint "isAsyncSafePoint reports whether gp at instruction PC is an\nasynchronous safe point. This indicates that:\n\n1. It's safe to suspend gp and conservatively scan its stack and\nregisters. There are no potentially hidden pointer values and it's\nnot in the middle of an atomic sequence like a write barrier.\n\n2. gp has enough stack space to inject the asyncPreempt call.\n\n3. It's generally safe to interact with the runtime, even if we're\nin a signal handler stopped here. For example, there are no runtime\nlocks held, so acquiring a runtime lock won't self-deadlock.\n\nIn some cases the PC is safe for asynchronous preemption but it\nalso needs to adjust the resumption PC. The new PC is returned in\nthe second result.\n" [^{:tag (* g)} gp ^uintptr pc ^uintptr sp ^uintptr lr] :results [bool uintptr]
+  (let [mp (.-m gp)]
+
+    ;; Only user Gs can have safe-points. We check this first
+    ;; because it's extremely common that we'll catch mp in the
+    ;; scheduler processing this G preemption.
+    (when (!= (.-curg mp) gp)
+      (return false 0))
+
+
+    ;; Check M state.
+    (when (or (== (.-p mp) 0) (not (canPreemptM mp)))
+      (return false 0))
+
+
+    ;; Check stack space.
+    (when (or (< sp (.-lo (.-stack gp))) (< (- sp (.-lo (.-stack gp))) asyncPreemptStack))
+      (return false 0))
+
+
+    ;; If we're in the middle of a secret computation, we can't
+    ;; allow any conservative scanning of stacks, as that may lead
+    ;; to secrets leaking out from the stack into work buffers.
+    ;; Additionally, the preemption code will store the
+    ;; machine state (including registers which may contain confidential
+    ;; information) into the preemption buffers.
+    ;;
+    ;; TODO(dmo): there's technically nothing stopping us from doing the
+    ;; preemption, granted that don't conservatively scan and we clean up after
+    ;; ourselves. This is made slightly harder by the xRegs cached allocations
+    ;; that can move between Gs and Ps. In any case, for the intended users (cryptography code)
+    ;; they are unlikely get stuck in unterminating loops.
+    (when (and goexperiment/RuntimeSecret (> (.-secret gp) 0))
+      (return false 0))
+
+
+    ;; Check if PC is an unsafe-point.
+    (let [f (findfunc pc)]
+      (when (not (.valid f))
+        ;; Not Go code.
+        (return false 0))
+
+      (when (and ^:go/paren (or (== GOARCH "mips") (== GOARCH "mipsle") (== GOARCH "mips64") (== GOARCH "mips64le")) (== lr (+ pc 8)) (== (funcspdelta f pc) 0))
+        ;; We probably stopped at a half-executed CALL instruction,
+        ;; where the LR is updated but the PC has not. If we preempt
+        ;; here we'll see a seemingly self-recursive call, which is in
+        ;; fact not.
+        ;; This is normally ok, as we use the return address saved on
+        ;; stack for unwinding, not the LR value. But if this is a
+        ;; call to morestack, we haven't created the frame, and we'll
+        ;; use the LR for unwinding, which will be bad.
+        (return false 0))
+
+      (let [(values up startpc) (pcdatavalue2 f abi/PCDATA_UnsafePoint pc)]
+        (when (== up abi/UnsafePointUnsafe)
+          ;; Unsafe-point marked by compiler. This includes
+          ;; atomic sequences (e.g., write barrier) and nosplit
+          ;; functions (except at calls).
+          (return false 0))
+
+        (when [fd (funcdata f abi/FUNCDATA_LocalsPointerMaps)] (or (== fd nil) (!= (bit-and ^{:go/via [_func]} (.-flag f) abi/FuncFlagAsm) 0))
+          ;; This is assembly code. Don't assume it's well-formed.
+          ;; TODO: Empirically we still need the fd == nil check. Why?
+          ;;
+          ;; TODO: Are there cases that are safe but don't have a
+          ;; locals pointer map, like empty frame functions?
+          ;; It might be possible to preempt any assembly functions
+          ;; except the ones that have funcFlag_SPWRITE set in f.flag.
+          (return false 0))
+
+        ;; Check the inner-most name
+        (let [(values u uf) (newInlineUnwinder f pc)
+            ^{:line 462} name (.name (.srcFunc u uf))]
+          (when (or (stringslite/HasPrefix name "runtime.")
+              (stringslite/HasPrefix name "internal/runtime/")
+              (stringslite/HasPrefix name "reflect."))
+            ;; For now we never async preempt the runtime or
+            ;; anything closely tied to the runtime. Known issues
+            ;; include: various points in the scheduler ("don't
+            ;; preempt between here and here"), much of the defer
+            ;; implementation (untyped info on stack), bulk write
+            ;; barriers (write barrier check), atomic functions in
+            ;; internal/runtime/atomic, reflect.{makeFuncStub,methodValueCall}.
+            ;;
+            ;; Note that this is a subset of the runtimePkgs in pkgspecial.go
+            ;; and these checks are theoretically redundant because the compiler
+            ;; marks "all points" in runtime functions as unsafe for async preemption.
+            ;; But for some reason, we can't eliminate these checks until https://go.dev/issue/72031
+            ;; is resolved.
+            ;;
+            ;; TODO(austin): We should improve this, or opt things
+            ;; in incrementally.
+            (return false 0))
+
+          (switch up
+            (case [abi/UnsafePointRestart1 abi/UnsafePointRestart2]
+              ;; Restartable instruction sequence. Back off PC to
+              ;; the start PC.
+              (when (or (== startpc 0) (> startpc pc) (> (- pc startpc) 20))
+                (throw "bad restart PC"))
+
+              (return true startpc))
+            (case [abi/UnsafePointRestartAtEntry]
+              ;; Restart from the function entry at resumption.
+              (return true (.entry f))))
+
+          (return true pc))))))

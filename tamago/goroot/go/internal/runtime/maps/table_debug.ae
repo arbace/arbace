@@ -1,0 +1,128 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.runtime.maps) (go/file "table_debug.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+(go/const ^{:val false} debugLog false)
+
+^{:go/end 82} (go/method checkInvariants [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m]
+  (when (not debugLog)
+    (return))
+
+
+  ;; For every non-empty slot, verify we can retrieve the key using Get.
+  ;; Count the number of used and deleted slots.
+  (let [^uint16 used (zero uint16)
+      ^{:line 22 :tag uint16} deleted (zero uint16)
+      ^{:line 23 :tag uint16} empty (zero uint16)]
+    (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+      (let [g (.group (.-groups t) typ i)]
+        (for [j (conv uintptr 0)] (< j abi/MapGroupSlots) (inc! j)
+          (let [c (.get (.ctrls g) j)]
+            (switch
+              (case [(== c ctrlDeleted)]
+                (inc! deleted))
+              (case [(== c ctrlEmpty)]
+                (inc! empty))
+              (default
+                (inc! used)
+
+                (let [key (.key g typ j)]
+                  (when (.IndirectKey typ)
+                    (set! key @(conv (* unsafe/Pointer) key)))
+
+
+                  ;; Can't lookup keys that don't compare equal
+                  ;; to themselves (e.g., NaN).
+                  (when (not ((.-Equal (.-Key typ)) key key))
+                    (continue))
+
+
+                  (when [(values _ ok) (.Get t typ m key)] (not ok)
+                    (let [hash ((.-Hasher typ) key (.-seed m))]
+                      (print "invariant failed: slot(" i "/" j "): key ")
+                      (dump key (.-Size_ (.-Key typ)))
+                      (print " not found [hash=" hash ", h2=" (h2 hash) " h1=" (h1 hash) "]\n")
+                      (.Print t typ m)
+                      (panic "invariant failed: slot: key not found"))))))))))
+
+
+
+
+
+    (when (!= used (.-used t))
+      (print "invariant failed: found " used " used slots, but used count is " (.-used t) "\n")
+      (.Print t typ m)
+      (panic "invariant failed: found mismatched used slot count"))
+
+
+    (let [growthLeft (- (/ (* (.-capacity t) maxAvgGroupLoad) abi/MapGroupSlots) (.-used t) deleted)]
+      (when (!= growthLeft (.-growthLeft t))
+        (print "invariant failed: found " (.-growthLeft t) " growthLeft, but expected " growthLeft "\n")
+        (.Print t typ m)
+        (panic "invariant failed: found mismatched growthLeft"))
+
+      (when (!= deleted (.tombstones t))
+        (print "invariant failed: found " deleted " tombstones, but expected " (.tombstones t) "\n")
+        (.Print t typ m)
+        (panic "invariant failed: found mismatched tombstones"))
+
+
+      (when (== empty 0)
+        (print "invariant failed: found no empty slots (violates probe invariant)\n")
+        (.Print t typ m)
+        (panic "invariant failed: found no empty slots (violates probe invariant)")))))
+
+
+^{:go/end 120} (go/method Print [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m]
+  (print "table{\n\tindex: "
+    (.-index t) "\n\tlocalDepth: "
+    (.-localDepth t) "\n\tcapacity: "
+    (.-capacity t) "\n\tused: "
+    (.-used t) "\n\tgrowthLeft: "
+    (.-growthLeft t) "\n\tgroups:\n")
+
+
+
+  (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+    (print "\t\tgroup " i "\n")
+
+    (let [g (.group (.-groups t) typ i)
+        ^{:line 97} ctrls (.ctrls g)]
+      (for [j (conv uintptr 0)] (< j abi/MapGroupSlots) (inc! j)
+        (print "\t\t\tslot " j "\n")
+
+        (let [c (.get ctrls j)]
+          (print "\t\t\t\tctrl " c)
+          (switch c
+            (case [ctrlEmpty]
+              (print " (empty)\n"))
+            (case [ctrlDeleted]
+              (print " (deleted)\n"))
+            (default
+              (print "\n")))
+
+
+          (print "\t\t\t\tkey  ")
+          (dump (.key g typ j) (.-Size_ (.-Key typ)))
+          (println "")
+          (print "\t\t\t\telem ")
+          (dump (.elem g typ j) (.-Size_ (.-Elem typ)))
+          (println ""))))))
+
+
+
+
+
+
+^{:go/end 130} (go/func dump "TODO(prattmic): not in hex because print doesn't have a way to print in hex\noutside the runtime.\n" [^unsafe/Pointer ptr ^uintptr size]
+  (while (> size 0)
+    (print @(conv (* byte) ptr) " ")
+    (set! ptr (conv unsafe/Pointer (+ (conv uintptr ptr) 1)))
+    (dec! size)))

@@ -1,0 +1,143 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.trace) (go/file "recorder.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [slices "slices"]
+    ^{:line 10} [time "time"]
+    ^{:line 11} [_ "unsafe"]]) ; added for go linkname usage
+
+
+
+(go/type recorder "A recorder receives bytes from the runtime tracer, processes it.\n" (struct
+    ^{:line 16 :tag (* FlightRecorder)} r
+
+    ^{:line 18 :tag bool} headerReceived))
+
+
+^{:go/end 61} (go/method Write [^{:tag (* recorder)} w ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (let [r (.-r w)]
+
+    (defer (^{:go/end 31} (fn []
+          (when (!= err nil)
+            ;; Propagate errors to the flightrecorder.
+            (when (== (.-err r) nil)
+              (set! (.-err r) err))))))
+
+
+
+
+    (when (not (.-headerReceived w))
+      (when (< (len b) (len (.-header r)))
+        (return 0 (fmt/Errorf "expected at least %d bytes in the first write" (len (.-header r)))))
+
+      (set! (.-header r) (conv (array 16 byte) (subslice b _ 16)))
+      (set! n + 16)
+      (set! (.-headerReceived w) true))
+
+    (when (== (len b) n)
+      (return n nil))
+
+    (let [(values ba nb ^:assign err) (readBatch (subslice b n))] ; Every write from the runtime is guaranteed to be a complete batch.
+      (when (!= err nil)
+        (return (- (len b) (conv int nb) n) err))
+
+      (set! n + (conv int nb))
+
+      ;; Append the batch to the current generation.
+      (when (and (!= (.-gen ba) 0) (== (.-gen (.-active r)) 0))
+        (set! (.-gen (.-active r)) (.-gen ba)))
+
+      (when (and (!= (.-time ba) 0) ^:go/paren (or (== (.-minTime (.-active r)) 0) (> (.-minTime (.-active r)) (.mul (.-freq r) (.-time ba)))))
+        (set! (.-minTime (.-active r)) (.mul (.-freq r) (.-time ba))))
+
+      (set! (.-size (.-active r)) + (len (.-data ba)))
+      (set! (.-batches (.-active r)) (append (.-batches (.-active r)) (.-data ba)))
+
+      (return (len b) nil))))
+
+
+^{:go/end 96} (go/method endGeneration [^{:tag (* recorder)} w]
+  (let [r (.-r w)]
+
+    ;; Check if we're entering a new generation.
+    (.Lock (.-ringMu r))
+
+    ;; Get the current trace clock time.
+    (let [now (traceTimeNow (.-freq r))
+
+        ;; Add the current generation to the ring. Make sure we always have at least one
+        ;; complete generation by putting the active generation onto the new list, regardless
+        ;; of whatever our settings are.
+        ;;
+        ;; N.B. Let's completely replace the ring here, so that WriteTo can just make a copy
+        ;; and not worry about aliasing. This creates allocations, but at a very low rate.
+        ^{:line 78} newRing (lit (slice rawGeneration) (.-active r))
+        ^{:line 79} size (.-size (.-active r))]
+      (for [i (- (len (.-ring r)) 1)] (>= i 0) (dec! i)
+        ;; Stop adding older generations if the new ring already exceeds the thresholds.
+        ;; This ensures we keep generations that cross a threshold, but not any that lie
+        ;; entirely outside it.
+        (when (or (> (conv uint64 size) (.-wantSize r)) (> (.Sub now (.-minTime (aget newRing (- (len newRing) 1)))) (.-wantDur r)))
+          (break))
+
+        (set! size + (.-size (aget (.-ring r) i)))
+        (set! newRing (append newRing (aget (.-ring r) i))))
+
+      (^{:inst [(slice rawGeneration) rawGeneration]} slices/Reverse newRing)
+      (set! (.-ring r) newRing)
+      (.Unlock (.-ringMu r))
+
+      ;; Start a new active generation.
+      (set! (.-active r) (lit rawGeneration)))))
+
+
+(go/type rawGeneration (struct
+    ^{:line 99 :tag uint64} gen
+    ^{:line 100 :tag int} size
+    ^{:line 101 :tag eventTime} minTime
+    ^{:line 102 :tag (slice (slice byte))} batches))
+
+
+^{:go/end 107} (go/func traceTimeNow ^eventTime [^frequency freq]
+  (.mul freq (conv timestamp (runtime_traceClockNow))))
+
+
+
+(go/func ^:extern ^{:go/linkname "runtime_traceClockNow runtime.traceClockNow"} runtime_traceClockNow ^uint64 [])
+
+
+(go/type frequency "frequency is nanoseconds per timestamp unit.\n" float64)
+
+
+^{:go/end 118} (go/method mul "mul multiplies an unprocessed timestamp to produce a time in nanoseconds.\n" ^eventTime [^frequency f ^timestamp t]
+  (conv eventTime (* (conv float64 t) (conv float64 f))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type eventTime "eventTime is a timestamp in nanoseconds.\n\nIt corresponds to the monotonic clock on the platform that the\ntrace was taken, and so is possible to correlate with timestamps\nfor other traces taken on the same machine using the same clock\n(i.e. no reboots in between).\n\nThe actual absolute value of the timestamp is only meaningful in\nrelation to other timestamps from the same clock.\n\nBUG: Timestamps coming from traces on Windows platforms are\nonly comparable with timestamps from the same trace. Timestamps\nacross traces cannot be compared, because the system clock is\nnot used as of Go 1.22.\n\nBUG: Traces produced by Go versions 1.21 and earlier cannot be\ncompared with timestamps from other traces taken on the same\nmachine. This is because the system clock was not used at all\nto collect those timestamps.\n" int64)
+
+
+^{:go/end 144} (go/method Sub "Sub subtracts t0 from t, returning the duration in nanoseconds.\n" ^time/Duration [^eventTime t ^eventTime t0]
+  (conv time/Duration (- (conv int64 t) (conv int64 t0))))

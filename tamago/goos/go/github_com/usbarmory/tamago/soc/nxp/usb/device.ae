@@ -1,0 +1,130 @@
+;; USB device mode support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.usb) (go/file "device.go" :imports [
+
+
+    ^{:line 12} [sync "sync"]
+    ^{:line 13} [time "time"]
+
+    ^{:line 15} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+^{:go/end 53} (go/method DeviceMode "DeviceMode sets the USB controller in device mode.\n" [^{:tag (* USB)} hw]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (reg/Set (.-cmd hw) USBCMD_RST)
+  (reg/Wait (.-cmd hw) USBCMD_RST 1 0)
+
+  ;; p3872, 56.6.33 USB Device Mode (USB_nUSBMODE), IMX6ULLRM)
+  (let [m (reg/Read (.-mode hw))]
+
+    ;; set device only controller
+    (set! m (bit-or (bit-and m (bit-not (conv uint32 (<< 2r11 USBMODE_CM)))) (<< USBMODE_CM_DEVICE USBMODE_CM)))
+    ;; disable setup lockout
+    (set! m bit-or (<< 1 USBMODE_SLOM))
+    ;; disable stream mode
+    (set! m bit-and-not (<< 1 USBMODE_SDIS))
+
+    (reg/Write (.-mode hw) m)
+    (reg/Wait (.-mode hw) USBMODE_CM 2r11 USBMODE_CM_DEVICE)
+
+    ;; initialize endpoint queue head list
+    (.initQH hw)
+    ;; set control endpoint
+    (.set hw 0 IN 64 true 0)
+    (.set hw 0 OUT 64 true 0)
+
+    ;; set OTG termination
+    (reg/Set (.-otg hw) OTGSC_OT)
+
+    ;; clear pending interrupts
+    (reg/WriteBack (.-sts hw))
+
+    ;; run
+    (reg/Set (.-cmd hw) USBCMD_RS)))
+
+
+
+
+^{:go/end 92} (go/method Start "Start waits and handles configured USB endpoints in device mode, it should\nnever return. Note that isochronous endpoints are not supported.\n" [^{:tag (* USB)} hw ^{:tag (* Device)} dev]
+  (when (== dev nil)
+    (return))
+
+
+  (set! (.-Device hw) dev)
+
+  (while true
+    ;; check for bus reset
+    (when (== (reg/GetN (.-sts hw) USBSTS_URI 1) 1)
+      ;; set inactive configuration
+      (set! (.-ConfigurationValue (.-Device hw)) 0)
+
+      ;; perform controller reset procedure
+      (.Reset hw))
+
+
+    ;; wait for a setup packet
+    (when (not (reg/WaitFor (* 10 time/Millisecond) (.-setup hw) 0 1 1))
+      (continue))
+
+
+    (when [(values conf _) (.handleSetup hw)] (== conf 0)
+      (continue))
+
+
+    ;; stop configuration endpoints
+    (when (!= (.-exit hw) nil)
+      (close (.-exit hw))
+      (.Wait (.-wg hw)))
+
+
+    ;; start configuration endpoints
+    (.startEndpoints hw)))
+
+
+
+
+^{:go/end 132} (go/method ServiceInterrupts "ServiceInterrupts services pending endpoint transfer and bus reset events.\n" [^{:tag (* USB)} hw]
+  (defer (reg/WriteBack (.-sts hw)))
+
+  (when (== (.-Device hw) nil)
+    (return))
+
+
+  ;; check for bus reset
+  (when (== (reg/GetN (.-sts hw) USBSTS_URI 1) 1)
+    ;; set inactive configuration
+    (set! (.-ConfigurationValue (.-Device hw)) 0)
+
+    ;; perform controller reset procedure
+    (.Reset hw))
+
+
+  ;; process setup packets
+  (while (!= (reg/Read (.-setup hw)) 0)
+    (when [(values conf _) (.handleSetup hw)] (!= conf 0)
+      ;; stop configuration endpoints
+      (when (!= (.-exit hw) nil)
+        (close (.-exit hw))
+        (.Wait (.-wg hw)))
+
+
+      ;; set interrupt event announcement
+      (set! (.-event hw) (sync/NewCond hw))
+
+      ;; start configuration endpoints
+      (.startEndpoints hw)))
+
+
+
+  (when (!= (.-event hw) nil)
+    ;; announce interrupt event to endpoints waiting transfer
+    (.Broadcast (.-event hw))))

@@ -1,0 +1,167 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "idle.go" :imports [
+
+
+    ^{:line 8} [time "time"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type idleState "idleState tracks connection idle events.\n\nBefore the handshake is confirmed, the idle timeout is Config.HandshakeTimeout.\n\nAfter the handshake is confirmed, the idle timeout is\nthe minimum of Config.MaxIdleTimeout and the peer's max_idle_timeout transport parameter.\n\nIf KeepAlivePeriod is set, keep-alive pings are sent.\nKeep-alives are only sent after the handshake is confirmed.\n\nhttps://www.rfc-editor.org/rfc/rfc9000#section-10.1\n" (struct
+
+    ^{:line 24 :tag time/Duration :doc "idleDuration is the negotiated idle timeout for the connection.\n"} idleDuration
+
+
+    ^{:line 27 :tag time/Time :doc "idleTimeout is the time at which the connection will be closed due to inactivity.\n"} idleTimeout
+
+
+
+
+    ^{:line 32 :tag time/Time :doc "nextTimeout is the time of the next idle event.\nIf nextTimeout == idleTimeout, this is the idle timeout.\nOtherwise, this is the keep-alive timeout.\n"} nextTimeout
+
+
+
+    ^{:line 36 :tag bool :doc "sentSinceLastReceive is set if we have sent an ack-eliciting packet\nsince the last time we received and processed a packet from the peer.\n"} sentSinceLastReceive))
+
+
+
+^{:go/end 50} (go/method receivePeerMaxIdleTimeout "receivePeerMaxIdleTimeout handles the peer's max_idle_timeout transport parameter.\n" [^{:tag (* Conn)} c ^time/Duration peerMaxIdleTimeout]
+  (let [localMaxIdleTimeout (.maxIdleTimeout (.-config c))]
+    (switch
+      (case [(== localMaxIdleTimeout 0)]
+        (set! (.-idleDuration (.-idle c)) peerMaxIdleTimeout))
+      (case [(== peerMaxIdleTimeout 0)]
+        (set! (.-idleDuration (.-idle c)) localMaxIdleTimeout))
+      (default
+        (set! (.-idleDuration (.-idle c)) (min localMaxIdleTimeout peerMaxIdleTimeout))))))
+
+
+
+^{:go/end 61} (go/method idleHandlePacketReceived [^{:tag (* Conn)} c ^time/Time now]
+  (when (not (.isSet (.-handshakeConfirmed c)))
+    (return))
+
+  ;; "An endpoint restarts its idle timer when a packet from its peer is
+  ;; received and processed successfully."
+  ;; https://www.rfc-editor.org/rfc/rfc9000#section-10.1-3
+  (set! (.-sentSinceLastReceive (.-idle c)) false)
+  (.restartIdleTimer c now))
+
+
+^{:go/end 73} (go/method idleHandlePacketSent [^{:tag (* Conn)} c ^time/Time now ^{:tag (* sentPacket)} sent]
+  ;; "An endpoint also restarts its idle timer when sending an ack-eliciting packet
+  ;; if no other ack-eliciting packets have been sent since
+  ;; last receiving and processing a packet."
+  ;; https://www.rfc-editor.org/rfc/rfc9000#section-10.1-3
+  (when (or (.-sentSinceLastReceive (.-idle c)) (not (.-ackEliciting sent)) (not (.isSet (.-handshakeConfirmed c))))
+    (return))
+
+  (set! (.-sentSinceLastReceive (.-idle c)) true)
+  (.restartIdleTimer c now))
+
+
+^{:go/end 123} (go/method restartIdleTimer [^{:tag (* Conn)} c ^time/Time now]
+  (when (not (.isAlive c))
+    ;; Connection is closing, disable timeouts.
+    (set! (.-idleTimeout (.-idle c)) (lit time/Time))
+    (set! (.-nextTimeout (.-idle c)) (lit time/Time))
+    (return))
+
+  (let [^time/Duration idleDuration (zero time/Duration)]
+    (if (.isSet (.-handshakeConfirmed c))
+      (set! idleDuration (.-idleDuration (.-idle c)))
+
+      (set! idleDuration (.handshakeTimeout (.-config c))))
+
+    (if (== idleDuration 0)
+      (set! (.-idleTimeout (.-idle c)) (lit time/Time))
+      (do
+        ;; "[...] endpoints MUST increase the idle timeout period to be
+        ;; at least three times the current Probe Timeout (PTO)."
+        ;; https://www.rfc-editor.org/rfc/rfc9000#section-10.1-4
+        (set! idleDuration (max idleDuration (* 3 (.ptoPeriod (.-loss c)))))
+        (set! (.-idleTimeout (.-idle c)) (.Add now idleDuration))))
+
+    ;; Set the time of our next event:
+    ;; The idle timer if no keep-alive is set, or the keep-alive timer if one is.
+    (set! (.-nextTimeout (.-idle c)) (.-idleTimeout (.-idle c)))
+    (let [keepAlive (.keepAlivePeriod (.-config c))]
+      (switch
+        (case [(not (.isSet (.-handshakeConfirmed c)))])
+        ;; We do not send keep-alives before the handshake is complete.
+        (case [(<= keepAlive 0)])
+        ;; Keep-alives are not enabled.
+        (case [(.-sentSinceLastReceive (.-idle c))])
+        ;; We have sent an ack-eliciting packet to the peer.
+        ;; If they don't acknowledge it, loss detection will follow up with PTO probes,
+        ;; which will function as keep-alives.
+        ;; We don't need to send further pings.
+        (case [(== idleDuration 0)]
+          ;; The connection does not have a negotiated idle timeout.
+          ;; Send keep-alives anyway, since they may be required to keep middleboxes
+          ;; from losing state.
+          (set! (.-nextTimeout (.-idle c)) (.Add now keepAlive)))
+        (default
+          ;; Schedule our next keep-alive.
+          ;; If our configured keep-alive period is greater than half the negotiated
+          ;; connection idle timeout, we reduce the keep-alive period to half
+          ;; the idle timeout to ensure we have time for the ping to arrive.
+          (set! (.-nextTimeout (.-idle c)) (.Add now (min keepAlive (/ idleDuration 2)))))))))
+
+
+
+^{:go/end 140} (go/method appendKeepAlive ^bool [^{:tag (* Conn)} c ^time/Time now]
+  (when (or (.IsZero (.-nextTimeout (.-idle c))) (.After (.-nextTimeout (.-idle c)) now))
+    (return true)) ; timer has not expired
+
+  (when (.Equal (.-nextTimeout (.-idle c)) (.-idleTimeout (.-idle c)))
+    (return true)) ; no keepalive timer set, only idle
+
+  (when (.-sentSinceLastReceive (.-idle c))
+    (return true)) ; already sent an ack-eliciting packet
+
+  (when (.-ackEliciting (.-sent (.-w c)))
+    (return true)) ; this packet is already ack-eliciting
+
+  ;; Send an ack-eliciting PING frame to the peer to keep the connection alive.
+  (.appendPingFrame (.-w c)))
+
+
+(go/var ^error errHandshakeTimeout ^{:go/breaks [2 4]} (lit localTransportError
+    :code errConnectionRefused
+    :reason "handshake timeout"))
+
+
+^{:go/breaks [[9 167]] :go/end 168} (go/method idleAdvance [^{:tag (* Conn)} c ^time/Time now] :results [^bool shouldExit]
+  (when (or (.IsZero (.-idleTimeout (.-idle c))) (.Before now (.-idleTimeout (.-idle c))))
+    (return false))
+
+  (set! (.-idleTimeout (.-idle c)) (lit time/Time))
+  (set! (.-nextTimeout (.-idle c)) (lit time/Time))
+  (when (not (.isSet (.-handshakeConfirmed c)))
+    ;; Handshake timeout has expired.
+    ;; If we're a server, we're refusing the too-slow client.
+    ;; If we're a client, we're giving up.
+    ;; In either case, we're going to send a CONNECTION_CLOSE frame and
+    ;; enter the closing state rather than unceremoniously dropping the connection,
+    ;; since the peer might still be trying to complete the handshake.
+    (.abort c now errHandshakeTimeout)
+    (return false))
+
+  ;; Idle timeout has expired.
+  ;;
+  ;; "[...] the connection is silently closed and its state is discarded [...]"
+  ;; https://www.rfc-editor.org/rfc/rfc9000#section-10.1-1
+  true)

@@ -1,0 +1,145 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+;; Unix environment variables.
+
+(in-ns 'go.syscall) (go/file "env_unix.go" :build ["//go:build unix || (js && wasm) || plan9 || wasip1 || tamago"] :imports [
+
+
+    ^{:line 12} [runtime "runtime"]
+    ^{:line 13} [sync "sync"]])
+
+
+(go/var
+
+  ^{:line 18} [^{:tag sync/RWMutex :doc "envLock guards env and envs.\n"} envLock]
+
+
+  ^{:line 21} [^{:tag (map string int) :doc "env maps from an environment variable to its first occurrence in envs.\n"} env]
+
+
+
+
+  ^{:line 26} [^{:tag (slice string) :doc "envs is provided by the runtime. elements are expected to\nbe of the form \"key=value\". An empty string means deleted\n(or a duplicate to be ignored).\n"} envs (runtime_envs)])
+
+
+(go/func ^:extern runtime_envs ^{:tag (slice string)} []) ; in package runtime
+
+(go/var copyenv (sync/OnceFunc ^{:go/end 50} (fn []
+      (set! env (make (map string int)))
+      (range [i s envs]
+        (for [j 0] (< j (len s)) (inc! j)
+          (when (== (aget s j) \=)
+            (let [key (subslice s _ j)]
+              (if [(values _ ok) (aget env key)] (not ok)
+                (aset env key i) ; first mention of key
+
+                ;; Clear duplicate keys. This permits Unsetenv to
+                ;; safely delete only the first item without
+                ;; worrying about unshadowing a later one,
+                ;; which might be a security problem.
+                (aset envs i ""))
+
+              (break))))))))
+
+
+
+
+
+^{:go/breaks [8] :go/end 64} (go/func Unsetenv ^error [^string key]
+  (copyenv)
+
+  (.Lock envLock)
+  (defer (.Unlock envLock))
+
+  (when [(values i ok) (aget env key)] ok
+    (aset envs i "")
+    (delete env key))
+
+  (runtimeUnsetenv key)
+  nil)
+
+
+^{:go/end 86} (go/func Getenv [^string key] :results [^string value ^bool found]
+  (copyenv)
+  (when (== (len key) 0)
+    (return "" false))
+
+
+  (.RLock envLock)
+  (defer (.RUnlock envLock))
+
+  (let [(values i ok) (aget env key)]
+    (when (not ok)
+      (return "" false))
+
+    (let [s (aget envs i)]
+      (for [i 0] (< i (len s)) (inc! i)
+        (when (== (aget s i) \=)
+          (return (subslice s (+ i 1)) true)))
+
+
+      (return "" false))))
+
+
+^{:go/end 121} (go/func Setenv ^error [^string key ^string value]
+  (copyenv)
+  (when (== (len key) 0)
+    (return EINVAL))
+
+  (for [i 0] (< i (len key)) (inc! i)
+    (when (or (== (aget key i) \=) (== (aget key i) 0))
+      (return EINVAL)))
+
+
+  ;; On Plan 9, null is used as a separator, eg in $path.
+  (when (!= runtime/GOOS "plan9")
+    (for [i 0] (< i (len value)) (inc! i)
+      (when (== (aget value i) 0)
+        (return EINVAL))))
+
+
+
+
+  (.Lock envLock)
+  (defer (.Unlock envLock))
+
+  ^{:go/breaks [5]} (let [(values i ok) (aget env key)
+      ^{:line 111} kv (+ key "=" value)]
+    (if ok
+      (aset envs i kv)
+      (do
+        (set! i (len envs))
+        (set! envs (append envs kv))))
+
+    (aset env key i)
+    (runtimeSetenv key value)
+    nil))
+
+
+^{:go/end 133} (go/func Clearenv []
+  (copyenv)
+
+  (.Lock envLock)
+  (defer (.Unlock envLock))
+
+  (runtimeClearenv env)
+
+  (set! env (make (map string int)))
+  (set! envs (lit (slice string))))
+
+
+^{:go/end 146} (go/func Environ ^{:tag (slice string)} []
+  (copyenv)
+  (.RLock envLock)
+  (defer (.RUnlock envLock))
+  (let [a (make (slice string) 0 (len envs))]
+    (range [_ env envs]
+      (when (!= env "")
+        (set! a (append a env))))
+
+
+    ^{:line 145} a))

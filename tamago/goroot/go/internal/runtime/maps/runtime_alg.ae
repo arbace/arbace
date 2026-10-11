@@ -1,0 +1,92 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.runtime.maps) (go/file "runtime_alg.go" :imports [
+
+
+    ^{:line 8} [byteorder "internal/byteorder"]
+    ^{:line 9} [cpu "internal/cpu"]
+    ^{:line 10} [goarch "internal/goarch"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+(go/var ^{:tag bool :doc "runtime variable to check if the processor we're running on\nactually supports the instructions used by the AES-based\nhash implementation.\n"} UseAeshash)
+
+(go/const ^{:val 128} hashRandomBytes (* (/ goarch/PtrSize 4) 64))
+
+
+(go/var ^{:tag (array hashRandomBytes byte) :doc "used to seed the hash function\n"} aeskeysched)
+
+
+(go/var ^{:tag (array 4 uintptr) :doc "used in hash{32,64}.go to seed the hash function\n"} hashkey)
+
+^{:go/end 62} (go/func AlgInit []
+  ;; Always intialize hashkey.
+  ;;
+  ;; See #78073
+  (range [i hashkey]
+    (aset hashkey i (conv uintptr (bootstrapRand))))
+
+
+  ;; Install AES hash algorithms if the instructions needed are present.
+  (when (and ^:go/paren (or (== goarch/GOARCH "386") (== goarch/GOARCH "amd64"))
+      (.-HasAES cpu/X86) ; AESENC
+      (.-HasSSSE3 cpu/X86) ; PSHUFB
+      (.-HasSSE41 cpu/X86)) ; PINSR{D,Q}
+
+    ;; In memHashAES we have global variables that should be properly aligned.
+    ;;
+    ;; See #12415
+    (when (not (checkMasksAndShiftsAlignment))
+      (fatal "maps: global variables for AES hashing are not properly aligned!"))
+
+    (initAlgAES)
+
+    (when memHashUsesVAES
+      ;; We are using intrinsics hash implementation.
+      ;; Override the UseAeshash in this case, since it uses VAES (AVX) instructions.
+      ;; While assembly implementation used AES-NI instructions,
+      ;; simd intrinsics only provide access to AVX ones.
+      (set! UseAeshash (.-HasAVX cpu/X86)))
+
+    (return))
+
+  (when (and (== goarch/GOARCH "arm64") (.-HasAES cpu/ARM64))
+    (initAlgAES)
+    (return)))
+
+
+
+^{:go/end 71} (go/func initAlgAES []
+  (set! UseAeshash true)
+  ;; Initialize with random data so hash collisions will be hard to engineer.
+  (let [key (conv (* (array (/ hashRandomBytes 8) uint64)) (conv unsafe/Pointer (addr aeskeysched)))]
+    (range [i key]
+      (aset key i (bootstrapRand)))))
+
+
+
+
+^{:go/end 76} (go/func ^:go/nosplit add ^unsafe/Pointer [^unsafe/Pointer p ^uintptr x]
+  (conv unsafe/Pointer (+ (conv uintptr p) x)))
+
+
+
+^{:go/end 85} (go/func readUnaligned32 "Note: These routines perform the read with a native endianness.\n" ^uint32 [^unsafe/Pointer p]
+  (let [q (conv (* (array 4 byte)) p)]
+    (when goarch/BigEndian
+      (return (byteorder/BEUint32 (subslice q))))
+
+    (byteorder/LEUint32 (subslice q))))
+
+
+^{:go/end 93} (go/func readUnaligned64 ^uint64 [^unsafe/Pointer p]
+  (let [q (conv (* (array 8 byte)) p)]
+    (when goarch/BigEndian
+      (return (byteorder/BEUint64 (subslice q))))
+
+    (byteorder/LEUint64 (subslice q))))

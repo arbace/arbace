@@ -1,0 +1,304 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "congestion_reno.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [slog "log/slog"]
+    ^{:line 10} [math "math"]
+    ^{:line 11} [time "time"]])
+
+
+
+
+(go/type ccReno "ccReno is the NewReno-based congestion controller defined in RFC 9002.\nhttps://www.rfc-editor.org/rfc/rfc9002.html#section-7\n" (struct
+    ^{:line 17 :tag int} maxDatagramSize
+
+
+    ^{:line 20 :tag int :doc "Maximum number of bytes allowed to be in flight.\n"} congestionWindow
+
+
+
+
+    ^{:line 25 :tag int :doc "Sum of size of all packets that contain at least one ack-eliciting\nor PADDING frame (i.e., any non-ACK frame), and have neither been\nacknowledged nor declared lost.\n"} bytesInFlight
+
+
+
+    ^{:line 29 :tag int :doc "When the congestion window is below the slow start threshold,\nthe controller is in slow start.\n"} slowStartThreshold
+
+
+
+    ^{:line 33 :tag time/Time :doc "The time the current recovery period started, or zero when not\nin a recovery period.\n"} recoveryStartTime
+
+
+    ^{:line 36 :tag int :doc "Accumulated count of bytes acknowledged in congestion avoidance.\n"} congestionPendingAcks
+
+
+
+
+    ^{:line 41 :tag bool :doc "When entering a recovery period, we are allowed to send one packet\nbefore reducing the congestion window. sendOnePacketInRecovery is\ntrue if we haven't sent that packet yet.\n"} sendOnePacketInRecovery
+
+
+    ^{:line 44 :tag bool :doc "inRecovery is set when we are in the recovery state.\n"} inRecovery
+
+
+
+
+    ^{:line 49 :tag bool :doc "underutilized is set if the congestion window is underutilized\ndue to insufficient application data, flow control limits, or\nanti-amplification limits.\n"} underutilized
+
+
+
+    ^{:line 53 :tag time/Time :doc "ackLastLoss is the sent time of the newest lost packet processed\nin the current batch.\n"} ackLastLoss
+
+
+
+
+
+
+    ^{:line 60 :tag (array numberSpaceCount (struct ^time/Time start ^time/Time end ^packetNumber next)) :doc "Data tracking the duration of the most recently handled sequence of\ncontiguous lost packets. If this exceeds the persistent congestion duration,\npersistent congestion is declared.\n\nhttps://www.rfc-editor.org/rfc/rfc9002#section-7.6\n"} persistentCongestion))
+;; send time of first lost packet
+;; send time of last lost packet
+;; one plus the number of the last lost packet
+
+
+
+^{:go/end 82} (go/func newReno ^{:tag (* ccReno)} [^int maxDatagramSize]
+  (let [c (addr ^{:go/breaks [2]} (lit ccReno
+          :maxDatagramSize maxDatagramSize))]
+
+
+    ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-7.2-1
+    (set! (.-congestionWindow c) (min (* 10 maxDatagramSize) (max 14720 (.minimumCongestionWindow c))))
+
+    ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-7.3.1-1
+    (set! (.-slowStartThreshold c) math/MaxInt)
+
+    (range [space (.-persistentCongestion c)]
+      (set! (.-next (aget (.-persistentCongestion c) space)) -1))
+
+    ^{:line 81} c))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 97} (go/method canSend "canSend reports whether the congestion controller permits sending\na maximum-size datagram at this time.\n\n\"An endpoint MUST NOT send a packet if it would cause bytes_in_flight [...]\nto be larger than the congestion window [...]\"\nhttps://www.rfc-editor.org/rfc/rfc9002#section-7-7\n\nFor simplicity and efficiency, we don't permit sending undersized datagrams.\n" ^bool [^{:tag (* ccReno)} c]
+  (when (.-sendOnePacketInRecovery c)
+    (return true))
+
+  (<= (+ (.-bytesInFlight c) (.-maxDatagramSize c)) (.-congestionWindow c)))
+
+
+
+
+
+
+
+
+
+^{:go/end 115} (go/method setUnderutilized "setUnderutilized indicates that the congestion window is underutilized.\n\nThe congestion window is underutilized if bytes in flight is smaller than\nthe congestion window and sending is not pacing limited; that is, the\ncongestion controller permits sending data, but no data is sent.\n\nhttps://www.rfc-editor.org/rfc/rfc9002#section-7.8\n" [^{:tag (* ccReno)} c ^{:tag (* slog/Logger)} log ^bool v]
+  (when (== (.-underutilized c) v)
+    (return))
+
+  (let [oldState (.state c)]
+    (set! (.-underutilized c) v)
+    (when (logEnabled log QLogLevelPacket)
+      (logCongestionStateUpdated log oldState (.state c)))))
+
+
+
+
+^{:go/end 126} (go/method packetSent "packetSent indicates that a packet has been sent.\n" [^{:tag (* ccReno)} c ^time/Time now ^{:tag (* slog/Logger)} log ^numberSpace space ^{:tag (* sentPacket)} sent]
+  (when (not (.-inFlight sent))
+    (return))
+
+  (set! (.-bytesInFlight c) + (.-size sent))
+  (when (.-sendOnePacketInRecovery c)
+    (set! (.-sendOnePacketInRecovery c) false)))
+
+
+
+;; Acked and lost packets are processed in batches
+;; resulting from either a received ACK frame or
+;; the loss detection timer expiring.
+;;
+;; A batch consists of zero or more calls to packetAcked and packetLost,
+;; followed by a single call to packetBatchEnd.
+;;
+;; Acks may be reported in any order, but lost packets must
+;; be reported in strictly increasing order.
+
+
+^{:go/end 157} (go/method packetAcked "packetAcked indicates that a packet has been newly acknowledged.\n" [^{:tag (* ccReno)} c ^time/Time now ^{:tag (* sentPacket)} sent]
+  (when (not (.-inFlight sent))
+    (return))
+
+  (set! (.-bytesInFlight c) - (.-size sent))
+
+  (when (.-underutilized c)
+    ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-7.8
+    (return))
+
+  (when (.Before (.-time sent) (.-recoveryStartTime c))
+    ;; In recovery, and this packet was sent before we entered recovery.
+    ;; (If this packet was sent after we entered recovery, receiving an ack
+    ;; for it moves us out of recovery into congestion avoidance.)
+    ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-7.3.2
+    (return))
+
+  (set! (.-congestionPendingAcks c) + (.-size sent)))
+
+
+
+
+^{:go/end 195} (go/method packetLost "packetLost indicates that a packet has been newly marked as lost.\nLost packets must be reported in increasing order.\n" [^{:tag (* ccReno)} c ^time/Time now ^numberSpace space ^{:tag (* sentPacket)} sent ^{:tag (* rttState)} rtt]
+  ;; Record state to check for persistent congestion.
+  ;; https://www.rfc-editor.org/rfc/rfc9002#section-7.6
+  ;;
+  ;; Note that this relies on always receiving loss events in increasing order:
+  ;; All packets prior to the one we're examining now have either been
+  ;; acknowledged or declared lost.
+  (let [isValidPersistentCongestionSample (and (.-ackEliciting sent)
+        (not (.IsZero (.-firstSampleTime rtt)))
+        (not (.Before (.-time sent) (.-firstSampleTime rtt))))]
+    (if isValidPersistentCongestionSample (do
+        ;; This packet either extends an existing range of lost packets,
+        ;; or starts a new one.
+        (when (!= (.-num sent) (.-next (aget (.-persistentCongestion c) space)))
+          (set! (.-start (aget (.-persistentCongestion c) space)) (.-time sent)))
+
+        (set! (.-end (aget (.-persistentCongestion c) space)) (.-time sent))
+        (set! (.-next (aget (.-persistentCongestion c) space)) (+ (.-num sent) 1)))
+      (do
+        ;; This packet cannot establish persistent congestion on its own.
+        ;; However, if we have an existing range of lost packets,
+        ;; this does not break it.
+        (when (== (.-num sent) (.-next (aget (.-persistentCongestion c) space)))
+          (set! (.-next (aget (.-persistentCongestion c) space)) (+ (.-num sent) 1)))))
+
+
+
+    (when (not (.-inFlight sent))
+      (return))
+
+    (set! (.-bytesInFlight c) - (.-size sent))
+    (when (.After (.-time sent) (.-ackLastLoss c))
+      (set! (.-ackLastLoss c) (.-time sent)))))
+
+
+
+
+^{:go/end 258} (go/method packetBatchEnd "packetBatchEnd is called at the end of processing a batch of acked or lost packets.\n" [^{:tag (* ccReno)} c ^time/Time now ^{:tag (* slog/Logger)} log ^numberSpace space ^{:tag (* rttState)} rtt ^time/Duration maxAckDelay]
+  (when (logEnabled log QLogLevelPacket)
+    (let [oldState (.state c)]
+      (defer (^{:go/end 201} (fn [] (logCongestionStateUpdated log oldState (.state c)))))))
+
+  (cond (and (not (.IsZero (.-ackLastLoss c))) (not (.Before (.-ackLastLoss c) (.-recoveryStartTime c)))) (do
+      ;; Enter the recovery state.
+      ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-7.3.2
+      (set! (.-recoveryStartTime c) now)
+      (set! (.-slowStartThreshold c) (/ (.-congestionWindow c) 2))
+      (set! (.-congestionWindow c) (max (.-slowStartThreshold c) (.minimumCongestionWindow c)))
+      (set! (.-sendOnePacketInRecovery c) true)
+      ;; Clear congestionPendingAcks to avoid increasing the congestion
+      ;; window based on acks in a frame that sends us into recovery.
+      (set! (.-congestionPendingAcks c) 0)
+      (set! (.-inRecovery c) true))
+    (> (.-congestionPendingAcks c) 0) (do
+      ;; We are in slow start or congestion avoidance.
+      (set! (.-inRecovery c) false)
+      (when (< (.-congestionWindow c) (.-slowStartThreshold c))
+        ;; When the congestion window is less than the slow start threshold,
+        ;; we are in slow start and increase the window by the number of
+        ;; bytes acknowledged.
+        (let [d (min (- (.-slowStartThreshold c) (.-congestionWindow c)) (.-congestionPendingAcks c))]
+          (set! (.-congestionWindow c) + d)
+          (set! (.-congestionPendingAcks c) - d)))
+
+      ;; When the congestion window is at or above the slow start threshold,
+      ;; we are in congestion avoidance.
+      ;;
+      ;; RFC 9002 does not specify an algorithm here. The following is
+      ;; the recommended algorithm from RFC 5681, in which we increment
+      ;; the window by the maximum datagram size every time the number
+      ;; of bytes acknowledged reaches cwnd.
+      (while (> (.-congestionPendingAcks c) (.-congestionWindow c))
+        (set! (.-congestionPendingAcks c) - (.-congestionWindow c))
+        (set! (.-congestionWindow c) + (.-maxDatagramSize c)))))
+
+
+  (when (not (.IsZero (.-ackLastLoss c)))
+    ;; Check for persistent congestion.
+    ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-7.6
+    ;;
+    ;; "A sender [...] MAY use state for just the packet number space that
+    ;; was acknowledged."
+    ;; https://www.rfc-editor.org/rfc/rfc9002#section-7.6.2-5
+    ;;
+    ;; For simplicity, we consider each number space independently.
+    (let [^:const ^{:val 3} persistentCongestionThreshold 3
+        ^{:line 247} d (* (+ (.-smoothedRTT rtt) (max (* 4 (.-rttvar rtt)) timerGranularity) maxAckDelay)
+          ^{:line 248} persistentCongestionThreshold)
+        ^{:line 249} start (.-start (aget (.-persistentCongestion c) space))
+        ^{:line 250} end (.-end (aget (.-persistentCongestion c) space))]
+      (when (>= (.Sub end start) d)
+        (set! (.-congestionWindow c) (.minimumCongestionWindow c))
+        (set! (.-recoveryStartTime c) (lit time/Time))
+        (.establishPersistentCongestion rtt))))
+
+
+  (set! (.-ackLastLoss c) (lit time/Time)))
+
+
+
+^{:go/end 266} (go/method packetDiscarded "packetDiscarded indicates that the keys for a packet's space have been discarded.\n" [^{:tag (* ccReno)} c ^{:tag (* sentPacket)} sent]
+  ;; https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2-3
+  (when (.-inFlight sent)
+    (set! (.-bytesInFlight c) - (.-size sent))))
+
+
+
+^{:go/end 271} (go/method minimumCongestionWindow ^int [^{:tag (* ccReno)} c]
+  ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-7.2-4
+  (* 2 (.-maxDatagramSize c)))
+
+
+^{:go/end 282} (go/func logCongestionStateUpdated [^{:tag (* slog/Logger)} log ^congestionState oldState ^congestionState newState]
+  (when (== oldState newState)
+    (return))
+
+  ^{:go/breaks [4]} (.LogAttrs log (context/Background) QLogLevelPacket
+    "recovery:congestion_state_updated"
+    (slog/String "old" (.String oldState))
+    (slog/String "new" (.String newState))))
+
+
+
+(go/type congestionState string)
+
+^{:go/end 286} (go/method String ^string [^congestionState s] (conv string s))
+
+(go/const
+  ^{:line 289} [^{:val "slow_start"} congestionSlowStart (conv congestionState "slow_start")]
+  ^{:line 290} [^{:val "congestion_avoidance"} congestionCongestionAvoidance (conv congestionState "congestion_avoidance")]
+  ^{:line 291} [^{:val "application_limited"} congestionApplicationLimited (conv congestionState "application_limited")]
+  ^{:line 292} [^{:val "recovery"} congestionRecovery (conv congestionState "recovery")])
+
+
+^{:go/end 306} (go/method state ^congestionState [^{:tag (* ccReno)} c]
+  (switch
+    (case [(.-inRecovery c)]
+      (return congestionRecovery))
+    (case [(.-underutilized c)]
+      (return congestionApplicationLimited))
+    (case [(< (.-congestionWindow c) (.-slowStartThreshold c))]
+      (return congestionSlowStart))
+    (default
+      (return congestionCongestionAvoidance))))

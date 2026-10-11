@@ -108,6 +108,20 @@
             (pr-str (.getName f)) (class-expr t) mods n
             (if (Modifier/isFinal mods) "" (format "\n         :Set (fn [^any o ^any v] (set! %s %s))" n v)))))
 
+(def archived-classes
+  "The classes of the running JDK's default CDS archive (its lib/classlist; internal names),
+  when the JVM maps the archive, else #{}: the classes whose getMethods order is fixed for the
+  JDK build (HotSpot sorts a class's methods by the address of their name's Symbol, which for a
+  class it parses varies from one JVM process to the next). As arbace.a2g.out's (RP1)."
+  (delay
+    (let [f (java.io.File. (java.io.File. (System/getProperty "java.home") "lib") "classlist")]
+      (if (and (.isFile f) (str/includes? (str (System/getProperty "java.vm.info")) "sharing"))
+        (into #{} (remove #(re-find #"[\s@#]" %)) (str/split-lines (slurp f)))
+        (do (binding [*out* *err*]
+              (println "jrt.tables: warning: the JVM does not use the JDK's CDS archive: every"
+                       "class's overloads ordered by descriptor"))
+            #{})))))
+
 (defn class-table
   "The init forms setting the member table of the hand-written class cname."
   [defs [cname _ non-leaf?]]
@@ -116,9 +130,13 @@
                    (m/members cname non-leaf? defs))
         by (fn [k] (map :member (filter #(instance? k (:member %)) ms)))
         ;; by name; a name's overloads in the order the JVM's getMethods gives them, which
-        ;; Reflector's choice among applicable overloads follows (EVAL-NOTES.md)
-        jvm-order (into {} (map-indexed (fn [i ^Method x] [x i]) (.getMethods c)))
-        meths (keep #(method-entry defs c %) (sort-by (fn [^Method x] [(.getName x) (get jvm-order x Integer/MAX_VALUE)
+        ;; Reflector's choice among applicable overloads follows (EVAL-NOTES.md), when that
+        ;; order is stable: the class is in the JDK's CDS archive (archived-classes); else, and
+        ;; after it, by descriptor (A2G-SPEC §5.11, RP1, as a2g's tables)
+        jvm-order (when (contains? @archived-classes (str/replace cname "." "/"))
+                    (into {} (map-indexed (fn [i ^Method x] [x i]) (.getMethods c))))
+        meths (keep #(method-entry defs c %) (sort-by (fn [^Method x] [(.getName x)
+                                                                         (if jvm-order (get jvm-order x Integer/MAX_VALUE) 0)
                                                                          (m/descriptor (.getParameterTypes x) (.getReturnType x))])
                                                        (by Method)))
         ctors (keep #(ctor-entry defs c %) (sort-by (fn [^Constructor x] (m/descriptor (.getParameterTypes x) nil)) (by Constructor)))

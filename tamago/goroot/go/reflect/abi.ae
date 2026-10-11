@@ -1,0 +1,508 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.reflect) (go/file "abi.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goarch "internal/goarch"]
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var "These variables are used by the register assignment\nalgorithm in this file.\n\nThey should be modified with care (no other reflect code\nmay be executing) and are generally only modified\nwhen testing this package.\n\nThey should never be set higher than their internal/abi\nconstant counterparts, because the system relies on a\nstructure that is at least large enough to hold the\nregisters the system supports.\n\nCurrently they're set to zero because using the actual\nconstants will break every part of the toolchain that\nuses reflect to call functions (e.g. go test, or anything\nthat uses text/template). The values that are currently\ncommented out there should be the actual values once\nwe're ready to use the register ABI everywhere.\n"
+  ^{:line 32} [intArgRegs abi/IntArgRegs]
+  ^{:line 33} [floatArgRegs abi/FloatArgRegs]
+  ^{:line 34} [floatRegSize (conv uintptr abi/EffectiveFloatRegSize)])
+
+
+
+
+
+(go/type abiStep "abiStep represents an ABI \"instruction.\" Each instruction\ndescribes one part of how to translate between a Go value\nin memory and a call frame.\n" (struct
+    ^{:line 41 :tag abiStepKind} kind
+
+
+
+    ^{:line 45 :tag uintptr :doc "offset and size together describe a part of a Go value\nin memory.\n"} offset
+    ^{:line 46 :tag uintptr} size ; size in bytes of the part
+
+
+    ^{:line 49 :tag uintptr :doc "These fields describe the ABI side of the translation.\n"} stkOff ; stack offset, used if kind == abiStepStack
+    ^{:line 50 :tag int} ireg ; integer register index, used if kind == abiStepIntReg or kind == abiStepPointer
+    ^{:line 51 :tag int} freg)) ; FP register index, used if kind == abiStepFloatReg
+
+
+
+(go/type abiStepKind "abiStepKind is the \"op-code\" for an abiStep instruction.\n" int)
+
+(go/const
+  ^{:line 58} [^{:tag abiStepKind :val 0} abiStepBad iota]
+  ^{:line 59} [^{:val 1} abiStepStack] ; copy to/from stack
+  ^{:line 60} [^{:val 2} abiStepIntReg] ; copy to/from integer register
+  ^{:line 61} [^{:val 3} abiStepPointer] ; copy pointer to/from integer register
+  ^{:line 62} [^{:val 4} abiStepFloatReg]) ; copy to/from FP register
+
+
+
+
+
+
+
+(go/type abiSeq "abiSeq represents a sequence of ABI instructions for copying\nfrom a series of reflect.Values to a call frame (for call arguments)\nor vice-versa (for call results).\n\nAn abiSeq should be populated by calling its addArg method.\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 85 :tag (slice abiStep) :doc "steps is the set of instructions.\n\nThe instructions are grouped together by whole arguments,\nwith the starting index for the instructions\nof the i'th Go value available in valueStart.\n\nFor instance, if this abiSeq represents 3 arguments\npassed to a function, then the 2nd argument's steps\nbegin at steps[valueStart[1]].\n\nBecause reflect accepts Go arguments in distinct\nValues and each Value is stored separately, each abiStep\nthat begins a new argument will have its offset\nfield == 0.\n"} steps
+    ^{:line 86 :tag (slice int)} valueStart
+
+    ^{:line 88 :tag uintptr} stackBytes ; stack space used
+    ^{:line 89 :tag int} iregs ^int fregs)) ; registers used
+
+
+^{:go/end 104} (go/method dump [^{:tag (* abiSeq)} a]
+  (range [i p (.-steps a)]
+    (println "part" i (.-kind p) (.-offset p) (.-size p) (.-stkOff p) (.-ireg p) (.-freg p)))
+
+  (print "values ")
+  (range [_ i (.-valueStart a)]
+    (print i " "))
+
+  (println)
+  (println "stack" (.-stackBytes a))
+  (println "iregs" (.-iregs a))
+  (println "fregs" (.-fregs a)))
+
+
+
+
+
+^{:go/end 118} (go/method stepsForValue "stepsForValue returns the ABI instructions for translating\nthe i'th Go argument or return value represented by this\nabiSeq to the Go ABI.\n" ^{:tag (slice abiStep)} [^{:tag (* abiSeq)} a ^int i]
+  (let [s (aget (.-valueStart a) i)
+      ^{:line 111 :tag int} e (zero int)]
+    (if (== i (- (len (.-valueStart a)) 1))
+      (set! e (len (.-steps a)))
+
+      (set! e (aget (.-valueStart a) (+ i 1))))
+
+    (subslice (.-steps a) s e)))
+
+
+
+
+
+
+^{:go/end 157} (go/method addArg "addArg extends the abiSeq with a new Go value of type t.\n\nIf the value was stack-assigned, returns the single\nabiStep describing that translation, and nil otherwise.\n" ^{:tag (* abiStep)} [^{:tag (* abiSeq)} a ^{:tag (* abi/Type)} t]
+  ;; We'll always be adding a new value, so do that first.
+  (let [pStart (len (.-steps a))]
+    (set! (.-valueStart a) (append (.-valueStart a) pStart))
+    (when (== (.Size t) 0)
+      ;; If the size of the argument type is zero, then
+      ;; in order to degrade gracefully into ABI0, we need
+      ;; to stack-assign this type. The reason is that
+      ;; although zero-sized types take up no space on the
+      ;; stack, they do cause the next argument to be aligned.
+      ;; So just do that here, but don't bother actually
+      ;; generating a new ABI step for it (there's nothing to
+      ;; actually copy).
+      ;;
+      ;; We cannot handle this in the recursive case of
+      ;; regAssign because zero-sized *fields* of a
+      ;; non-zero-sized struct do not cause it to be
+      ;; stack-assigned. So we need a special case here
+      ;; at the top.
+      (set! (.-stackBytes a) (align (.-stackBytes a) (conv uintptr (.Align t))))
+      (return nil))
+
+    ;; Hold a copy of "a" so that we can roll back if
+    ;; register assignment fails.
+    ^{:go/breaks [[3 156]]} (let [aOld @a]
+      (when (not (.regAssign a t 0))
+        ;; Register assignment failed. Roll back any changes
+        ;; and stack-assign.
+        (set! @a aOld)
+        (.stackAssign a (.Size t) (conv uintptr (.Align t)))
+        (return (addr (aget (.-steps a) (- (len (.-steps a)) 1)))))
+
+      nil)))
+
+
+
+
+
+
+
+
+^{:go/end 187} (go/method addRcvr "addRcvr extends the abiSeq with a new method call\nreceiver according to the interface calling convention.\n\nIf the receiver was stack-assigned, returns the single\nabiStep describing that translation, and nil otherwise.\nReturns true if the receiver is a pointer.\n" [^{:tag (* abiSeq)} a ^{:tag (* abi/Type)} rcvr] :results [(* abiStep) bool]
+  ;; The receiver is always one word.
+  (set! (.-valueStart a) (append (.-valueStart a) (len (.-steps a))))
+  (let [(values ^bool ok ^bool ptr) (zero bool)]
+    (if (or (not (.IsDirectIface rcvr)) (.Pointers rcvr)) (do
+        (set! ok (.assignIntN a 0 goarch/PtrSize 1 2r1))
+        (set! ptr true))
+      (do
+        ;; TODO(mknyszek): Is this case even possible?
+        ;; The interface data work never contains a non-pointer
+        ;; value. This case was copied over from older code
+        ;; in the reflect package which only conditionally added
+        ;; a pointer bit to the reflect.(Value).Call stack frame's
+        ;; GC bitmap.
+        (set! ok (.assignIntN a 0 goarch/PtrSize 1 2r0))
+        (set! ptr false)))
+
+    (when (not ok)
+      (.stackAssign a goarch/PtrSize goarch/PtrSize)
+      (return (addr (aget (.-steps a) (- (len (.-steps a)) 1))) ptr))
+
+    (return nil ptr)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 250} (go/method regAssign "regAssign attempts to reserve argument registers for a value of\ntype t, stored at some offset.\n\nIt returns whether or not the assignment succeeded, but\nleaves any changes it made to a.steps behind, so the caller\nmust undo that work by adjusting a.steps if it fails.\n\nThis method along with the assign* methods represent the\ncomplete register-assignment algorithm for the Go ABI.\n" ^bool [^{:tag (* abiSeq)} a ^{:tag (* abi/Type)} t ^uintptr offset]
+  (switch (conv Kind (.Kind t))
+    (case [UnsafePointer Pointer Chan Map Func]
+      (return (.assignIntN a offset (.Size t) 1 2r1)))
+    (case [Bool Int Uint Int8 Uint8 Int16 Uint16 Int32 Uint32 Uintptr]
+      (return (.assignIntN a offset (.Size t) 1 2r0)))
+    (case [Int64 Uint64]
+      (switch goarch/PtrSize
+        (case [4]
+          (return (.assignIntN a offset 4 2 2r0)))
+        (case [8]
+          (return (.assignIntN a offset 8 1 2r0)))))
+
+    (case [Float32 Float64]
+      (return (.assignFloatN a offset (.Size t) 1)))
+    (case [Complex64]
+      (return (.assignFloatN a offset 4 2)))
+    (case [Complex128]
+      (return (.assignFloatN a offset 8 2)))
+    (case [String]
+      (return (.assignIntN a offset goarch/PtrSize 2 2r01)))
+    (case [Interface]
+      (return (.assignIntN a offset goarch/PtrSize 2 2r10)))
+    (case [Slice]
+      (return (.assignIntN a offset goarch/PtrSize 3 2r001)))
+    (case [Array]
+      (let [tt (conv (* arrayType) (conv unsafe/Pointer t))]
+        (switch (.-Len tt)
+          (case [0]
+            ;; There's nothing to assign, so don't modify
+            ;; a.steps but succeed so the caller doesn't
+            ;; try to stack-assign this value.
+            (return true))
+          (case [1]
+            (return (.regAssign a (.-Elem tt) offset)))
+          (default
+            (return false)))))
+
+    (case [Struct]
+      (let [st (conv (* structType) (conv unsafe/Pointer t))]
+        (range [i ^{:go/via [StructType]} (.-Fields st)]
+          (let [f (addr (aget ^{:go/via [StructType]} (.-Fields st) i))]
+            (when (not (.regAssign a (.-Typ f) (+ offset (.-Offset f))))
+              (return false))))
+
+
+        (return true)))
+    (default
+      (print "t.Kind == " (.Kind t) "\n")
+      (panic "unknown type kind")))
+
+  (panic "unhandled register assignment path"))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[8 284]] :go/end 285} (go/method assignIntN "assignIntN assigns n values to registers, each \"size\" bytes large,\nfrom the data at [offset, offset+n*size) in memory. Each value at\n[offset+i*size, offset+(i+1)*size) for i < n is assigned to the\nnext n integer registers.\n\nBit i in ptrMap indicates whether the i'th value is a pointer.\nn must be <= 8.\n\nReturns whether assignment succeeded.\n" ^bool [^{:tag (* abiSeq)} a ^uintptr offset ^uintptr size ^int n ^uint8 ptrMap]
+  (when (or (> n 8) (< n 0))
+    (panic "invalid n"))
+
+  (when (and (!= ptrMap 0) (!= size goarch/PtrSize))
+    (panic "non-empty pointer map passed for non-pointer-size values"))
+
+  (when (> (+ (.-iregs a) n) intArgRegs)
+    (return false))
+
+  (for [i 0] (< i n) (inc! i)
+    (let [kind abiStepIntReg]
+      (when (!= (bit-and ptrMap (<< (conv uint8 1) i)) 0)
+        (set! kind abiStepPointer))
+
+      (set! (.-steps a) (append (.-steps a) ^{:go/breaks [2 4 6 8]} (lit abiStep
+            :kind kind
+            :offset (+ offset (* (conv uintptr i) size))
+            :size size
+            :ireg (.-iregs a))))
+
+      (inc! (.-iregs a))))
+
+  true)
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 309]] :go/end 310} (go/method assignFloatN "assignFloatN assigns n values to registers, each \"size\" bytes large,\nfrom the data at [offset, offset+n*size) in memory. Each value at\n[offset+i*size, offset+(i+1)*size) for i < n is assigned to the\nnext n floating-point registers.\n\nReturns whether assignment succeeded.\n" ^bool [^{:tag (* abiSeq)} a ^uintptr offset ^uintptr size ^int n]
+  (when (< n 0)
+    (panic "invalid n"))
+
+  (when (or (> (+ (.-fregs a) n) floatArgRegs) (< floatRegSize size))
+    (return false))
+
+  (for [i 0] (< i n) (inc! i)
+    (set! (.-steps a) (append (.-steps a) ^{:go/breaks [2 4 6 8]} (lit abiStep
+          :kind abiStepFloatReg
+          :offset (+ offset (* (conv uintptr i) size))
+          :size size
+          :freg (.-fregs a))))
+
+    (inc! (.-fregs a)))
+
+  true)
+
+
+
+
+
+
+^{:go/end 325} (go/method stackAssign "stackAssign reserves space for one value that is \"size\" bytes\nlarge with alignment \"alignment\" to the stack.\n\nShould not be called directly; use addArg instead.\n" [^{:tag (* abiSeq)} a ^uintptr size ^uintptr alignment]
+  (set! (.-stackBytes a) (align (.-stackBytes a) alignment))
+  (set! (.-steps a) (append (.-steps a) ^{:go/breaks [2 4 6 8]} (lit abiStep
+        :kind abiStepStack
+        :offset 0 ; Only used for whole arguments, so the memory offset is 0.
+        :size size
+        :stkOff (.-stackBytes a))))
+
+  (set! (.-stackBytes a) + size))
+
+
+
+(go/type abiDesc "abiDesc describes the ABI for a function or method.\n" (struct
+
+
+    ^{:line 331 :tag abiSeq :doc "call and ret represent the translation steps for\nthe call and return paths of a Go function.\n"} call ^{:tag abiSeq :doc "call and ret represent the translation steps for\nthe call and return paths of a Go function.\n"} ret
+
+
+
+
+
+
+
+
+    ^{:line 340 :tag uintptr :doc "These fields describe the stack space allocated\nfor the call. stackCallArgsSize is the amount of space\nreserved for arguments but not return values. retOffset\nis the offset at which return values begin, and\nspill is the size in bytes of additional space reserved\nto spill argument registers into in case of preemption in\nreflectcall's stack frame.\n"} stackCallArgsSize ^{:tag uintptr :doc "These fields describe the stack space allocated\nfor the call. stackCallArgsSize is the amount of space\nreserved for arguments but not return values. retOffset\nis the offset at which return values begin, and\nspill is the size in bytes of additional space reserved\nto spill argument registers into in case of preemption in\nreflectcall's stack frame.\n"} retOffset ^{:tag uintptr :doc "These fields describe the stack space allocated\nfor the call. stackCallArgsSize is the amount of space\nreserved for arguments but not return values. retOffset\nis the offset at which return values begin, and\nspill is the size in bytes of additional space reserved\nto spill argument registers into in case of preemption in\nreflectcall's stack frame.\n"} spill
+
+
+
+
+
+
+    ^{:line 347 :tag (* bitVector) :doc "stackPtrs is a bitmap that indicates whether\neach word in the ABI stack space (stack-assigned\nargs + return values) is a pointer. Used\nas the heap pointer bitmap for stack space\npassed to reflectcall.\n"} stackPtrs
+
+
+
+
+
+
+
+
+
+    ^{:line 357 :tag abi/IntArgRegBitmap :doc "inRegPtrs is a bitmap whose i'th bit indicates\nwhether the i'th integer argument register contains\na pointer. Used by makeFuncStub and methodValueCall\nto make result pointers visible to the GC.\n\noutRegPtrs is the same, but for result values.\nUsed by reflectcall to make result pointers visible\nto the GC.\n"} inRegPtrs ^{:tag abi/IntArgRegBitmap :doc "inRegPtrs is a bitmap whose i'th bit indicates\nwhether the i'th integer argument register contains\na pointer. Used by makeFuncStub and methodValueCall\nto make result pointers visible to the GC.\n\noutRegPtrs is the same, but for result values.\nUsed by reflectcall to make result pointers visible\nto the GC.\n"} outRegPtrs))
+
+
+^{:go/end 375} (go/method dump [^{:tag (* abiDesc)} a]
+  (println "ABI")
+  (println "call")
+  (.dump (.-call a))
+  (println "ret")
+  (.dump (.-ret a))
+  (println "stackCallArgsSize" (.-stackCallArgsSize a))
+  (println "retOffset" (.-retOffset a))
+  (println "spill" (.-spill a))
+  (print "inRegPtrs:")
+  (dumpPtrBitMap (.-inRegPtrs a))
+  (println)
+  (print "outRegPtrs:")
+  (dumpPtrBitMap (.-outRegPtrs a))
+  (println))
+
+
+^{:go/end 385} (go/func dumpPtrBitMap [^abi/IntArgRegBitmap b]
+  (for [i 0] (< i intArgRegs) (inc! i)
+    (let [x 0]
+      (when (.Get b i)
+        (set! x 1))
+
+      (print " " x))))
+
+
+
+^{:go/end 468} (go/func newAbiDesc ^abiDesc [^{:tag (* funcType)} t ^{:tag (* abi/Type)} rcvr]
+  ;; We need to add space for this argument to
+  ;; the frame so that it can spill args into it.
+  ;;
+  ;; The size of this space is just the sum of the sizes
+  ;; of each register-allocated type.
+  ;;
+  ;; TODO(mknyszek): Remove this when we no longer have
+  ;; caller reserved spill space.
+  (let [spill (conv uintptr 0)
+
+      ;; Compute gc program & stack bitmap for stack arguments
+      ^{:line 399} stackPtrs (new bitVector)
+
+      ;; Compute the stack frame pointer bitmap and register
+      ;; pointer bitmap for arguments.
+      ^{:line 403} inRegPtrs (lit abi/IntArgRegBitmap)
+
+      ;; Compute abiSeq for input parameters.
+      ^{:line 406 :tag abiSeq} in (zero abiSeq)]
+    (when (!= rcvr nil)
+      (let [(values stkStep isPtr) (.addRcvr in rcvr)]
+        (if (!= stkStep nil)
+          (if isPtr
+            (.append stackPtrs 1)
+
+            (.append stackPtrs 0))
+
+
+          (set! spill + goarch/PtrSize))))
+
+
+    (range [i arg (.InSlice t)]
+      (let [stkStep (.addArg in arg)]
+        (if (!= stkStep nil)
+          (addTypeBits stackPtrs (.-stkOff stkStep) arg)
+          (do
+            (set! spill (align spill (conv uintptr (.Align arg))))
+            (set! spill + (.Size arg))
+            (range [_ st (.stepsForValue in i)]
+              (when (== (.-kind st) abiStepPointer)
+                (.Set inRegPtrs (.-ireg st))))))))
+
+
+
+
+    (set! spill (align spill goarch/PtrSize))
+
+    ;; From the input parameters alone, we now know
+    ;; the stackCallArgsSize and retOffset.
+    (let [stackCallArgsSize (.-stackBytes in)
+        ^{:line 438} retOffset (align (.-stackBytes in) goarch/PtrSize)
+
+        ;; Compute the stack frame pointer bitmap and register
+        ;; pointer bitmap for return values.
+        ^{:line 442} outRegPtrs (lit abi/IntArgRegBitmap)
+
+        ;; Compute abiSeq for output parameters.
+        ^{:line 445 :tag abiSeq} out (zero abiSeq)]
+      ;; Stack-assigned return values do not share
+      ;; space with arguments like they do with registers,
+      ;; so we need to inject a stack offset here.
+      ;; Fake it by artificially extending stackBytes by
+      ;; the return offset.
+      (set! (.-stackBytes out) retOffset)
+      (range [i res (.OutSlice t)]
+        (let [stkStep (.addArg out res)]
+          (if (!= stkStep nil)
+            (addTypeBits stackPtrs (.-stkOff stkStep) res)
+
+            (range [_ st (.stepsForValue out i)]
+              (when (== (.-kind st) abiStepPointer)
+                (.Set outRegPtrs (.-ireg st)))))))
+
+
+
+
+      ;; Undo the faking from earlier so that stackBytes
+      ;; is accurate.
+      (set! (.-stackBytes out) - retOffset)
+      (lit abiDesc in out stackCallArgsSize retOffset spill stackPtrs inRegPtrs outRegPtrs))))
+
+
+
+
+
+^{:go/end 475} (go/func intFromReg "intFromReg loads an argSize sized integer from reg and places it at to.\n\nargSize must be non-zero, fit in a register, and a power-of-two.\n" [^{:tag (* abi/RegArgs)} r ^int reg ^uintptr argSize ^unsafe/Pointer to]
+  (memmove to (.IntRegArgAddr r reg argSize) argSize))
+
+
+
+
+
+^{:go/end 482} (go/func intToReg "intToReg loads an argSize sized integer and stores it into reg.\n\nargSize must be non-zero, fit in a register, and a power-of-two.\n" [^{:tag (* abi/RegArgs)} r ^int reg ^uintptr argSize ^unsafe/Pointer from]
+  (memmove (.IntRegArgAddr r reg argSize) from argSize))
+
+
+
+
+
+^{:go/end 496} (go/func floatFromReg "floatFromReg loads a float value from its register representation in r.\n\nargSize must be 4 or 8.\n" [^{:tag (* abi/RegArgs)} r ^int reg ^uintptr argSize ^unsafe/Pointer to]
+  (switch argSize
+    (case [4]
+      (set! @(conv (* float32) to) (archFloat32FromReg (aget (.-Floats r) reg))))
+    (case [8]
+      (set! @(conv (* float64) to) @(conv (* float64) (conv unsafe/Pointer (addr (aget (.-Floats r) reg))))))
+    (default
+      (panic "bad argSize"))))
+
+
+
+
+
+
+^{:go/end 510} (go/func floatToReg "floatToReg stores a float value in its register representation in r.\n\nargSize must be either 4 or 8.\n" [^{:tag (* abi/RegArgs)} r ^int reg ^uintptr argSize ^unsafe/Pointer from]
+  (switch argSize
+    (case [4]
+      (aset (.-Floats r) reg (archFloat32ToReg @(conv (* float32) from))))
+    (case [8]
+      (aset (.-Floats r) reg @(conv (* uint64) from)))
+    (default
+      (panic "bad argSize"))))

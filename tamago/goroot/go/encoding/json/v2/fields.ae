@@ -1,0 +1,654 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.v2) (go/file "fields.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [cmp "cmp"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [reflect "reflect"]
+    ^{:line 15} [slices "slices"]
+    ^{:line 16} [strconv "strconv"]
+    ^{:line 17} [strings "strings"]
+    ^{:line 18} [unicode "unicode"]
+    ^{:line 19} [utf8 "unicode/utf8"]
+
+    ^{:line 21} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 22} [jsonwire "encoding/json/internal/jsonwire"]])
+
+
+(go/type isZeroer (interface
+    (IsZero ^bool [])))
+
+
+(go/var isZeroerType ((inst reflect/TypeFor isZeroer)))
+
+(go/type structFields (struct
+    ^{:line 32 :tag (slice structField)} flattened ; listed in depth-first ordering
+    ^{:line 33 :tag (map string (* structField))} byActualName
+    ^{:line 34 :tag (map string (slice (* structField)))} byFoldedName
+    ^{:line 35 :tag (* structField)} embeddedFallback
+
+    ^{:line 37 :tag (* SemanticError)} errUnsupportedFormat))
+
+
+
+
+
+
+
+^{:go/end 59} (go/method reindex "reindex recomputes index to avoid bounds check during runtime.\n\nDuring the construction of each [structField] in [makeStructFields],\nthe index field is 0-indexed. However, before it returns,\nthe 0th field is stored in index0 and index stores the remainder.\n" [^{:tag (* structFields)} sf]
+  (let [reindex ^{:go/end 52} (fn [^{:tag (* structField)} f]
+        (set! (.-index0 f) (aget (.-index f) 0))
+        (set! (.-index f) (subslice (.-index f) 1))
+        (when (== (len (.-index f)) 0)
+          (set! (.-index f) nil)))] ; avoid pinning the backing slice
+
+
+    (range [i (.-flattened sf)]
+      (reindex (addr (aget (.-flattened sf) i))))
+
+    (when (!= (.-embeddedFallback sf) nil)
+      (reindex (.-embeddedFallback sf)))))
+
+
+
+
+
+^{:go/end 65} (go/method lookupByFoldedName "lookupByFoldedName looks up name by a case-insensitive match\nthat also ignores the presence of dashes and underscores.\n" ^{:tag (slice (* structField))} [^{:tag (* structFields)} fs ^{:tag (slice byte)} name]
+  (aget (.-byFoldedName fs) (conv string (foldName name))))
+
+
+(go/type structField (struct
+    ^{:line 68 :tag int} id ; unique numeric ID in breadth-first ordering
+    ^{:line 69 :tag int} index0 ; 0th index into a struct according to [reflect.Type.FieldByIndex]
+    ^{:line 70 :tag (slice int)} index ; 1st index and remainder according to [reflect.Type.FieldByIndex]
+    ^{:line 71 :tag reflect/Type} typ
+    ^{:line 72 :tag (* arshaler)} fncs
+    ^{:line 73 :tag (func [addressableValue] [bool])} isZero
+    ^{:line 74 :tag (func [addressableValue] [bool])} isEmpty
+    ^{:line 75} fieldOptions))
+
+
+(go/var errNoExportedFields (errors/New "Go struct has no exported fields"))
+
+^{:go/end 355} (go/func makeStructFields [^reflect/Type root] :results [^structFields fs ^{:tag (* SemanticError)} serr]
+  (let [orErrorf ^{:go/end 83} (fn ^{:tag (* SemanticError)} [^{:tag (* SemanticError)} serr ^reflect/Type t ^string f & ^{:tag (slice any)} a]
+        (^{:inst [(* SemanticError)]} cmp/Or serr (addr (lit SemanticError :GoType t :Err (fmt/Errorf f (spread a))))))
+
+
+      ;; Setup a queue for a breadth-first search.
+      ^{:line 86 :tag int} queueIndex (zero int)]
+    (let-type [queueEntry (struct
+          ^{:line 88 :tag reflect/Type} typ
+          ^{:line 89 :tag (slice int)} index
+          ^{:line 90 :tag bool} visitChildren)] ; whether to recursively visit embedded field in this struct
+
+      (let [queue (lit (slice queueEntry) (lit _ root nil true))
+          ^{:line 93} seen (lit (map reflect/Type bool) [root true])
+
+          ;; Perform a breadth-first search over all reachable fields.
+          ;; This ensures that len(f.index) will be monotonically increasing.
+          (values ^{:tag (slice structField)} allFields ^{:tag (slice structField)} embeddedFallbacks) (zero (slice structField))]
+        (while (< queueIndex (len queue))
+          (let [qe (aget queue queueIndex)]
+            (inc! queueIndex)
+
+            (let [t (.-typ qe)
+                ^{:line 103} embeddedFallbackIndex -1 ; index of last embedded fallback field in current struct
+                ^{:line 104} namesIndex (make (map string int)) ; index of each field with a given JSON object name in current struct
+                ^{:line 105 :tag bool} hasAnyJSONTag (zero bool) ; whether any Go struct field has a `json` tag
+                ^{:line 106 :tag bool} hasAnyJSONField (zero bool)] ; whether any JSON serializable fields exist in current struct
+              (range [i (.NumField t)]
+                (let [sf (.Field t i)
+                    (values _ hasTag) (.Lookup (.-Tag sf) "json")]
+                  (set! hasAnyJSONTag (or hasAnyJSONTag hasTag))
+                  (let [(values options ignored err) (parseFieldOptions sf)]
+                    (when (!= err nil)
+                      (set! serr (^{:inst [(* SemanticError)]} cmp/Or serr (addr (lit SemanticError :GoType t :Err err)))))
+
+                    (when ignored
+                      (continue))
+
+                    (set! hasAnyJSONField true)
+                    (let [f ^{:go/breaks [[2 123] 4 6]} (lit structField
+                          ;; Allocate a new slice (len=N+1) to hold both
+                          ;; the parent index (len=N) and the current index (len=1).
+                          ;; Do this to avoid clobbering the memory of the parent index.
+                          :index (append (append (make (slice int) 0 (+ (len (.-index qe)) 1)) (spread (.-index qe))) i)
+                          :typ (.-Type sf)
+                          :fieldOptions options)]
+
+                      (when (and (.-Anonymous sf) (not ^{:go/via [fieldOptions]} (.-hasName f)))
+                        (if (!= (.Kind (indirectType (.-typ f))) reflect/Struct)
+                          (set! serr (orErrorf serr t "embedded Go struct field %s of non-struct type must be explicitly given a JSON name" (.-Name sf)))
+
+                          (set! ^{:go/via [fieldOptions]} (.-embed f) true))) ; implied by use of Go embedding without an explicit name
+
+
+
+                      (let [(values ^{:tag (func [])} handleEmbed ^{:tag (func [])} handleField) (zero (func []))]
+                        (set! handleEmbed ^{:go/end 196} (fn []
+                            ;; Handle an embedded field that serializes to/from
+                            ;; zero or more JSON object members.
+
+                            (when (!= (.-fieldOptions f) (lit fieldOptions :name ^{:go/via [fieldOptions]} (.-name f) :quotedName ^{:go/via [fieldOptions]} (.-quotedName f) :embed true))
+                              (set! serr (orErrorf serr t "Go struct field %s cannot have any options other than `embed` specified" (.-Name sf)))
+                              (when ^{:go/via [fieldOptions]} (.-hasName f)
+                                (handleField)
+                                (return)) ; invalid embedded field; treat as regular field
+
+                              (set! (.-fieldOptions f) (lit fieldOptions :name ^{:go/via [fieldOptions]} (.-name f) :quotedName ^{:go/via [fieldOptions]} (.-quotedName f) :embed ^{:go/via [fieldOptions]} (.-embed f))))
+
+
+                            ;; Reject any types with custom serialization otherwise
+                            ;; it becomes impossible to know what sub-fields to embed.
+                            (let [tf (indirectType (.-typ f))]
+                              (when (and (implementsAny tf (spread allMethodTypes)) (!= tf jsontextValueType))
+                                (set! serr (orErrorf serr t "embedded Go struct field %s of type %s must not implement marshal or unmarshal methods" (.-Name sf) tf)))
+
+
+                              ;; Handle an embedded field that serializes to/from
+                              ;; a finite number of JSON object members backed by a Go struct.
+                              (cond (== (.Kind tf) reflect/Struct) (do
+                                  (when (.-visitChildren qe)
+                                    (set! queue (append queue (lit queueEntry tf (.-index f) (not (aget seen tf))))))
+
+                                  (aset seen tf true)
+                                  (return))
+                                (not (.IsExported sf)) (do
+                                  (set! serr (orErrorf serr t "embedded Go struct field %s is not exported" (.-Name sf)))
+                                  (return))) ; invalid embedded field; treat as ignored
+
+
+                              ;; Handle an embedded field that serializes to/from any number of
+                              ;; JSON object members back by a Go map or jsontext.Value.
+                              (switch
+                                (case [(== tf jsontextValueType)]
+                                  (set! (.-fncs f) nil)) ; specially handled in arshal_embedded.go
+                                (case [(and (== (.Kind tf) reflect/Map) (== (.Kind (.Key tf)) reflect/String))]
+                                  (when (implementsAny (.Key tf) (spread allMethodTypes))
+                                    (set! serr (orErrorf serr t "embedded map field %s of type %s must have a string key that does not implement marshal or unmarshal methods" (.-Name sf) tf))
+                                    (handleField)
+                                    (return)) ; invalid embedded field; treat as regular field
+
+                                  (set! (.-fncs f) (lookupArshaler (.Elem tf))))
+                                (default
+                                  (set! serr (orErrorf serr t "embedded Go struct field %s of type %s must be a Go struct, Go map of string key, or jsontext.Value" (.-Name sf) tf))
+                                  (handleField)
+                                  (return))) ; invalid embedded field; treat as regular field
+
+
+                              ;; Reject multiple embedded fallback fields within the same struct.
+                              (when (>= embeddedFallbackIndex 0)
+                                (set! serr (orErrorf serr t "embedded Go struct fields %s and %s cannot both be a Go map or jsontext.Value" (.-Name (.Field t embeddedFallbackIndex)) (.-Name sf))))
+                              ;; Still append f to embeddedFallbacks as there is still a
+                              ;; check for a dominant embedded fallback before returning.
+
+                              (set! embeddedFallbackIndex i)
+
+                              (set! embeddedFallbacks (append embeddedFallbacks f)))))
+
+                        (set! handleField ^{:go/end 261} (fn []
+                            ;; Handle normal Go struct field that serializes to/from
+                            ;; a single JSON object member.
+
+                            ;; Unexported fields cannot be serialized except for
+                            ;; embedded fields of a struct type,
+                            ;; which might promote exported fields of their own.
+                            (when (not (.IsExported sf))
+                              (let [tf (indirectType (.-typ f))]
+                                (when (not (and (.-Anonymous sf) (== (.Kind tf) reflect/Struct)))
+                                  (set! serr (orErrorf serr t "Go struct field %s is not exported" (.-Name sf)))
+                                  (return))
+
+                                ;; Unfortunately, methods on the unexported field
+                                ;; still cannot be called.
+                                (when (or (implementsAny tf (spread allMethodTypes))
+                                    ^:go/paren (and ^{:go/via [fieldOptions]} (.-omitzero f) (implementsAny tf isZeroerType)))
+                                  (set! serr (orErrorf serr t "Go struct field %s is not exported for method calls" (.-Name sf)))
+                                  (return))))
+
+
+
+                            ;; Provide a function that uses a type's IsZero method.
+                            (switch
+                              (case [(and (== (.Kind (.-Type sf)) reflect/Interface) (.Implements (.-Type sf) isZeroerType))]
+                                (set! (.-isZero f) ^{:go/end 226} (fn ^bool [^addressableValue va]
+                                    ;; Avoid panics calling IsZero on a nil interface or
+                                    ;; non-nil interface with nil pointer.
+                                    (or ^{:go/via [Value]} (.IsNil va) ^:go/paren (and (== (.Kind ^{:go/via [Value]} (.Elem va)) reflect/Pointer) (.IsNil ^{:go/via [Value]} (.Elem va))) (.IsZero (assert isZeroer ^{:go/via [Value]} (.Interface va)))))))
+
+                              (case [(and (== (.Kind (.-Type sf)) reflect/Pointer) (.Implements (.-Type sf) isZeroerType))]
+                                (set! (.-isZero f) ^{:go/end 231} (fn ^bool [^addressableValue va]
+                                    ;; Avoid panics calling IsZero on nil pointer.
+                                    (or ^{:go/via [Value]} (.IsNil va) (.IsZero (assert isZeroer ^{:go/via [Value]} (.Interface va)))))))
+
+                              (case [(.Implements (.-Type sf) isZeroerType)]
+                                (set! (.-isZero f) ^{:go/end 233} (fn ^bool [^addressableValue va] (.IsZero (assert isZeroer ^{:go/via [Value]} (.Interface va))))))
+                              (case [(.Implements (reflect/PointerTo (.-Type sf)) isZeroerType)]
+                                (set! (.-isZero f) ^{:go/end 235} (fn ^bool [^addressableValue va] (.IsZero (assert isZeroer (.Interface ^{:go/via [Value]} (.Addr va))))))))
+
+
+                            ;; Provide a function that can determine whether the value would
+                            ;; serialize as an empty JSON value.
+                            (switch (.Kind (.-Type sf))
+                              (case [reflect/String reflect/Map reflect/Array reflect/Slice]
+                                (set! (.-isEmpty f) ^{:go/end 242} (fn ^bool [^addressableValue va] (== ^{:go/via [Value]} (.Len va) 0))))
+                              (case [reflect/Pointer reflect/Interface]
+                                (set! (.-isEmpty f) ^{:go/end 244} (fn ^bool [^addressableValue va] ^{:go/via [Value]} (.IsNil va)))))
+
+
+                            ;; Reject multiple fields with same name within the same struct.
+                            (when [(values j ok) (aget namesIndex ^{:go/via [fieldOptions]} (.-name f))] ok
+                              (set! serr (orErrorf serr t "Go struct fields %s and %s conflict over JSON object name %q" (.-Name (.Field t j)) (.-Name sf) ^{:go/via [fieldOptions]} (.-name f))))
+                            ;; Still append f to allFields as there is still a
+                            ;; check for a dominant field before returning.
+
+                            (aset namesIndex ^{:go/via [fieldOptions]} (.-name f) i)
+
+                            (set! (.-id f) (len allFields))
+                            (set! (.-fncs f) (lookupArshaler (.-Type sf)))
+                            (set! allFields (append allFields f))
+                            (when (and (!= ^{:go/via [fieldOptions]} (.-format f) "") (== (.-errUnsupportedFormat fs) nil))
+                              (set! (.-errUnsupportedFormat fs) (addr (lit SemanticError :GoType t :Err (fmt/Errorf "Go struct field %s has unsupported `format` tag option" (.-Name sf))))))))
+
+
+
+                        (if ^{:go/via [fieldOptions]} (.-embed f)
+                          (handleEmbed)
+
+                          (handleField)))))))
+
+
+
+              ;; NOTE: New users to the json package are occasionally surprised that
+              ;; unexported fields are ignored. This occurs by necessity due to our
+              ;; inability to directly introspect such fields with Go reflection
+              ;; without the use of unsafe.
+              ;;
+              ;; To reduce friction here, refuse to serialize any Go struct that
+              ;; has no JSON serializable fields, has at least one Go struct field,
+              ;; and does not have any `json` tags present. For example,
+              ;; errors returned by errors.New would fail to serialize.
+              (let [isEmptyStruct (== (.NumField t) 0)]
+                (when (and (not isEmptyStruct) (not hasAnyJSONTag) (not hasAnyJSONField))
+                  (set! serr (^{:inst [(* SemanticError)]} cmp/Or serr (addr (lit SemanticError :GoType t :Err errNoExportedFields)))))))))
+
+
+
+        ;; Sort the fields by exact name (breaking ties by depth and
+        ;; then by presence of an explicitly provided JSON name).
+        ;; Select the dominant field from each set of fields with the same name.
+        ;; If multiple fields have the same name, then the dominant field
+        ;; is the one that exists alone at the shallowest depth,
+        ;; or the one that is uniquely tagged with a JSON name.
+        ;; Otherwise, no dominant field exists for the set.
+        (let [flattened (subslice allFields _ 0)]
+          (^{:inst [(slice structField) structField]} slices/SortStableFunc allFields ^{:go/end 298} (fn ^int [^structField x ^structField y]
+              (^{:inst [int]} cmp/Or
+                (strings/Compare ^{:go/via [fieldOptions]} (.-name x) ^{:go/via [fieldOptions]} (.-name y))
+                (^{:inst [int]} cmp/Compare (len (.-index x)) (len (.-index y)))
+                (boolsCompare (not ^{:go/via [fieldOptions]} (.-hasName x)) (not ^{:go/via [fieldOptions]} (.-hasName y))))))
+
+          (while (> (len allFields) 0)
+            (let [n 1] ; number of fields with the same exact name
+              (while (and (< n (len allFields)) (== ^{:go/via [fieldOptions]} (.-name (aget allFields (- n 1))) ^{:go/via [fieldOptions]} (.-name (aget allFields n))))
+                (inc! n))
+
+              (when (or (== n 1) (!= (len (.-index (aget allFields 0))) (len (.-index (aget allFields 1)))) (!= ^{:go/via [fieldOptions]} (.-hasName (aget allFields 0)) ^{:go/via [fieldOptions]} (.-hasName (aget allFields 1))))
+                (set! flattened (append flattened (aget allFields 0)))) ; only keep field if there is a dominant field
+
+              (set! allFields (subslice allFields n))))
+
+
+          ;; Sort the fields according to a breadth-first ordering
+          ;; so that we can re-number IDs with the smallest possible values.
+          ;; This optimizes use of uintSet such that it fits in the 64-entry bit set.
+          (^{:inst [(slice structField) structField]} slices/SortFunc flattened ^{:go/end 315} (fn ^int [^structField x ^structField y]
+              (^{:inst [int]} cmp/Compare (.-id x) (.-id y))))
+
+          (range [i flattened]
+            (set! (.-id (aget flattened i)) i))
+
+
+          ;; Sort the fields according to a depth-first ordering
+          ;; as the typical order that fields are marshaled.
+          (^{:inst [(slice structField) structField]} slices/SortFunc flattened ^{:go/end 324} (fn ^int [^structField x ^structField y]
+              (^{:inst [(slice int) int]} slices/Compare (.-index x) (.-index y))))
+
+
+          ;; Compute the mapping of fields in the byActualName map.
+          ;; Pre-fold all names so that we can lookup folded names quickly.
+          (set! fs ^{:go/breaks [2 4 6 [8 333]]} (lit structFields
+              :flattened flattened
+              :byActualName (make (map string (* structField)) (len flattened))
+              :byFoldedName (make (map string (slice (* structField))) (len flattened))
+
+              :errUnsupportedFormat (.-errUnsupportedFormat fs)))
+
+          (range [i f (.-flattened fs)]
+            (let [foldedName (conv string (foldName (conv (slice byte) ^{:go/via [fieldOptions]} (.-name f))))]
+              (aset (.-byActualName fs) ^{:go/via [fieldOptions]} (.-name f) (addr (aget (.-flattened fs) i)))
+              (aset (.-byFoldedName fs) foldedName (append (aget (.-byFoldedName fs) foldedName) (addr (aget (.-flattened fs) i))))))
+
+          (range [foldedName fields (.-byFoldedName fs)]
+            (when (> (len fields) 1)
+              ;; The precedence order for conflicting case-insensitive names
+              ;; is by breadth-first order, rather than depth-first order.
+              (^{:inst [(slice (* structField)) (* structField)]} slices/SortFunc fields ^{:go/end 346} (fn ^int [^{:tag (* structField)} x ^{:tag (* structField)} y]
+                  (^{:inst [int]} cmp/Compare (.-id x) (.-id y))))
+
+              (aset (.-byFoldedName fs) foldedName fields)))
+
+
+          (when [n (len embeddedFallbacks)] (or (== n 1) ^:go/paren (and (> n 1) (!= (len (.-index (aget embeddedFallbacks 0))) (len (.-index (aget embeddedFallbacks 1))))))
+            (set! (.-embeddedFallback fs) (addr (aget embeddedFallbacks 0)))) ; dominant embedded fallback field
+
+          (.reindex fs)
+          (return fs serr))))))
+
+
+
+
+
+^{:go/end 365} (go/func indirectType "indirectType unwraps one level of pointer indirection\nsimilar to how Go only allows embedding either T or *T,\nbut not **T or P (which is a named pointer).\n" ^reflect/Type [^reflect/Type t]
+  (when (and (== (.Kind t) reflect/Pointer) (== (.Name t) ""))
+    (set! t (.Elem t)))
+
+  ^{:line 364} t)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 386]] :go/end 387} (go/method matchFoldedName "matchFoldedName matches a case-insensitive name depending on the options.\nIt assumes that foldName(f.name) == foldName(name).\n\nCase-insensitive matching is used if the `case:ignore` tag option is specified\nor the MatchCaseInsensitiveNames call option is specified\n(and the `case:strict` tag option is not specified).\nFunctionally, the `case:ignore` and `case:strict` tag options take precedence.\n\nThe v1 definition of case-insensitivity operated under strings.EqualFold\nand would strictly compare dashes and underscores,\nwhile the v2 definition would ignore the presence of dashes and underscores.\nThus, if the MatchCaseSensitiveDelimiter call option is specified,\nthe match is further restricted to using strings.EqualFold.\n" ^bool [^{:tag (* structField)} f ^{:tag (slice byte)} name ^{:tag (* jsonflags/Flags)} flags]
+  (when (or (== ^{:go/via [fieldOptions]} (.-casing f) caseIgnore) ^:go/paren (and (.Get flags jsonflags/MatchCaseInsensitiveNames) (!= ^{:go/via [fieldOptions]} (.-casing f) caseStrict)))
+    (when (or (not (.Get flags jsonflags/MatchCaseSensitiveDelimiter)) (strings/EqualFold (conv string name) ^{:go/via [fieldOptions]} (.-name f)))
+      (return true)))
+
+
+  false)
+
+
+(go/const
+  ^{:line 390} [^{:val 1} caseIgnore 1]
+  ^{:line 391} [^{:val 2} caseStrict 2])
+
+
+(go/type fieldOptions (struct
+    ^{:line 395 :tag string} name
+    ^{:line 396 :tag string} quotedName ; quoted name per RFC 8785, section 3.2.2.2.
+    ^{:line 397 :tag bool} hasName
+    ^{:line 398 :tag bool} nameNeedEscape
+    ^{:line 399 :tag int8} casing ; either 0, caseIgnore, or caseStrict
+    ^{:line 400 :tag bool} embed
+    ^{:line 401 :tag bool} omitzero
+    ^{:line 402 :tag bool} omitempty
+    ^{:line 403 :tag bool} string
+    ^{:line 404 :tag string} format))
+
+
+
+
+
+^{:go/end 570} (go/func parseFieldOptions "parseFieldOptions parses the `json` tag in a Go struct field as\na structured set of options configuring parameters such as\nthe JSON member name and other features.\n" [^reflect/StructField sf] :results [^fieldOptions out ^bool ignored ^error err]
+  (let [(values tag hasTag) (.Lookup (.-Tag sf) "json")]
+
+    ;; Check whether this field is explicitly ignored.
+    (when (== tag "-")
+      (return (lit fieldOptions) true nil))
+
+
+    ;; Check whether this field is unexported and not embedded,
+    ;; which Go reflection cannot mutate for the sake of serialization.
+    ;;
+    ;; An embedded field of an unexported type is still capable of
+    ;; forwarding exported fields, which may be JSON serialized.
+    ;; This technically operates on the edge of what is permissible by
+    ;; the Go language, but the most recent decision is to permit this.
+    ;;
+    ;; See https://go.dev/issue/24153 and https://go.dev/issue/32772.
+    (when (and (not (.IsExported sf)) (not (.-Anonymous sf)))
+      ;; Tag options specified on an unexported field suggests user error.
+      (when hasTag
+        (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "unexported Go struct field %s cannot have non-ignored `json:%q` tag" (.-Name sf) tag))))
+
+      (return (lit fieldOptions) true err))
+
+
+    ;; Determine the JSON member name for this Go field.
+    (set! (.-name out) (.-Name sf)) ; always starts with an uppercase character
+    (when (and (> (len tag) 0) (not (strings/HasPrefix tag ",")))
+      ;; For better compatibility with v1, accept almost any unescaped name.
+      (let [n (- (len tag) (len (strings/TrimLeftFunc tag ^{:go/end 441} (fn ^bool [^rune r]
+                  (not (strings/ContainsRune ",\\'\"`" r)))))) ; reserve comma, backslash, and quotes
+
+          ^{:line 442} name (subslice tag _ n)
+
+          ;; If the next character is not a comma, then the name is either
+          ;; malformed (if n > 0) or a single-quoted name.
+          ;; In either case, call consumeTagOption to handle it further.
+          ^{:line 447 :tag error} err2 (zero error)]
+        (when (and (not (strings/HasPrefix (subslice tag n) ",")) (!= (len name) (len tag)))
+          (set! (values name n err2) (consumeTagOption tag false))
+          (when (!= err2 nil)
+            (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has malformed `json` tag: %v" (.-Name sf) err2)))))
+
+
+        (when (not (utf8/ValidString name))
+          (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has JSON object name %q with invalid UTF-8" (.-Name sf) name)))
+          (set! name (conv string (conv (slice rune) name)))) ; replace invalid UTF-8 with utf8.RuneError
+
+        (when (== err2 nil)
+          (set! (.-hasName out) true)
+          (set! (.-name out) name))
+
+        (set! tag (subslice tag n))))
+
+    (let [(values b _) (jsonwire/AppendQuote nil (conv (slice byte) (.-name out)) (addr (lit jsonflags/Flags)))]
+      (set! (.-quotedName out) (conv string b))
+      (set! (.-nameNeedEscape out) (jsonwire/NeedEscape (conv (slice byte) (.-name out))))
+
+      ;; Handle any additional tag options (if any).
+      (let [^bool wasFormat (zero bool)
+          ^{:line 470} seenOpts (make (map string bool))]
+        (while (> (len tag) 0)
+          ;; Consume comma delimiter.
+          (if (!= (aget tag 0) \,)
+            (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has malformed `json` tag: invalid character %q before next option (expecting ',')" (.-Name sf) (aget tag 0))))
+            (do
+              (set! tag (subslice tag (len ",")))
+              (when (== (len tag) 0)
+                (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has malformed `json` tag: invalid trailing ',' character" (.-Name sf))))
+                (break))))
+
+
+
+          ;; Consume and process the tag option.
+          (let [(values opt n err2) (consumeTagOption tag false)]
+            (when (!= err2 nil)
+              (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has malformed `json` tag: %v" (.-Name sf) err2))))
+
+            (let [rawOpt (subslice tag _ n)]
+              (set! tag (subslice tag n))
+              (switch
+                (case [wasFormat]
+                  (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has `format` tag option that was not specified last" (.-Name sf)))))
+                (case [(and (strings/HasPrefix rawOpt "'") (== (strings/TrimFunc opt isLetterOrDigit) ""))]
+                  (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has unnecessarily quoted appearance of `%s` tag option; specify `%s` instead" (.-Name sf) rawOpt opt)))))
+
+              (switch opt
+                (case ["case"]
+                  (when (not (strings/HasPrefix tag ":"))
+                    (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s is missing value for `case` tag option; specify `case:ignore` or `case:strict` instead" (.-Name sf))))
+                    (break))
+
+                  (set! tag (subslice tag (len ":")))
+                  (let [(values opt n err2) (consumeTagOption tag false)]
+                    (when (!= err2 nil)
+                      (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has malformed value for `case` tag option: %v" (.-Name sf) err2)))
+                      (break))
+
+                    (let [rawOpt (subslice tag _ n)]
+                      (set! tag (subslice tag n))
+                      (when (strings/HasPrefix rawOpt "'")
+                        (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has unnecessarily quoted appearance of `case:%s` tag option; specify `case:%s` instead" (.-Name sf) rawOpt opt))))
+
+                      (switch opt
+                        (case ["ignore"]
+                          (set! (.-casing out) bit-or caseIgnore))
+                        (case ["strict"]
+                          (set! (.-casing out) bit-or caseStrict))
+                        (default
+                          (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has unknown `case:%s` tag value" (.-Name sf) rawOpt))))))))
+
+                (case ["embed"]
+                  (set! (.-embed out) true))
+                (case ["omitzero"]
+                  (set! (.-omitzero out) true))
+                (case ["omitempty"]
+                  (set! (.-omitempty out) true))
+                (case ["string"]
+                  (set! (.-string out) true))
+                (case ["format"]
+                  (when (not (strings/HasPrefix tag ":"))
+                    (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s is missing value for `format` tag option" (.-Name sf))))
+                    (break))
+
+                  (set! tag (subslice tag (len ":")))
+                  (let [(values opt n err2) (consumeTagOption tag true)]
+                    (cond (!= err2 nil) (do
+                        (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has malformed value for `format` tag option: %v" (.-Name sf) err2)))
+                        (break))
+                      (== opt "") (do
+                        (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s cannot have empty value for `format` tag option" (.-Name sf))))
+                        (break)))
+
+                    (set! tag (subslice tag n))
+                    (set! (.-format out) opt)
+                    (set! wasFormat true)))
+                (default
+                  ;; Reject keys that resemble one of the supported options.
+                  ;; This catches invalid mutants such as "omitEmpty" or "omit_empty".
+                  (let [normOpt (strings/ReplaceAll (strings/ToLower opt) "_" "")]
+                    (switch normOpt
+                      (case ["case" "embed" "omitzero" "omitempty" "string" "format"]
+                        (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has invalid appearance of `%s` tag option; specify `%s` instead" (.-Name sf) opt normOpt))))))))
+
+
+              ;; NOTE: Everything else is ignored. This does not mean it is
+              ;; forward compatible to insert arbitrary tag options since
+              ;; a future version of this package may understand that tag.
+
+
+              ;; Reject duplicates.
+              (switch
+                (case [(== (.-casing out) (bit-or caseIgnore caseStrict))]
+                  (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s cannot have both `case:ignore` and `case:strict` tag options" (.-Name sf)))))
+                (case [(aget seenOpts opt)]
+                  (set! err (^{:inst [error]} cmp/Or err (fmt/Errorf "Go struct field %s has duplicate appearance of `%s` tag option" (.-Name sf) rawOpt)))))
+
+              (aset seenOpts opt true))))
+
+        (return out false err)))))
+
+
+
+
+
+
+^{:go/end 640} (go/func consumeTagOption "consumeTagOption consumes the next option,\nwhich is either a Go identifier or a single-quoted string.\nIf the next option is invalid, it returns all of in until the next comma,\nand reports an error.\n" [^string in ^bool allowQuoted] :results [string int error]
+  ;; For legacy compatibility with v1, assume options are comma-separated.
+  (let [i (strings/IndexByte in \,)]
+    (when (< i 0)
+      (set! i (len in)))
+
+
+    (switch [(values r _) (utf8/DecodeRuneInString in)]
+      ;; Option as a Go identifier.
+      (case [(or (== r \_) (unicode/IsLetter r))]
+        (let [n (- (len in) (len (strings/TrimLeftFunc in isLetterOrDigit)))]
+          (return (subslice in _ n) n nil)))
+      ;; Option as a single-quoted string.
+      (case [(== r \')]
+        (when (not allowQuoted)
+          (return (subslice in _ i) i (fmt/Errorf "invalid character %q at start of option (expecting Unicode letter)" r)))
+
+
+        ;; The grammar is nearly identical to a double-quoted Go string literal,
+        ;; but uses single quotes as the terminators. The reason for a custom
+        ;; grammar is because both backtick and double quotes cannot be used
+        ;; verbatim in a struct tag.
+        ;;
+        ;; Convert a single-quoted string to a double-quote string and rely on
+        ;; strconv.Unquote to handle the rest.
+        (let [^bool inEscape (zero bool)
+            ^{:line 602} b (lit (slice byte) \")
+            ^{:line 603} n (len "'")]
+          (while (> (len in) n)
+            (let [(values r rn) (utf8/DecodeRuneInString (subslice in n))]
+              (switch
+                (case [inEscape]
+                  (when (== r \')
+                    (set! b (subslice b _ (- (len b) 1)))) ; remove escape character: `\'` => `'`
+
+                  (set! inEscape false))
+                (case [(== r \\)]
+                  (set! inEscape true))
+                (case [(== r \")]
+                  (set! b (append b \\))) ; insert escape character: `"` => `\"`
+                (case [(== r \')]
+                  (set! b (append b \"))
+                  (set! n + (len "'"))
+                  (let [(values out err) (strconv/Unquote (conv string b))]
+                    (when (!= err nil)
+                      (return (subslice in _ i) i (fmt/Errorf "invalid single-quoted string: %s" (subslice in _ n))))
+
+                    (return out n nil))))
+
+              (set! b (append b (spread (subslice (subslice in n) _ rn))))
+              (set! n + rn)))
+
+          (when (> n 10)
+            (set! n 10)) ; limit the amount of context printed in the error
+
+          (return (subslice in _ i) i (fmt/Errorf "single-quoted string not terminated: %s..." (subslice in _ n)))))
+      (case [(== (len in) 0)]
+        (return (subslice in _ i) i io/ErrUnexpectedEOF))
+      (default
+        (when (not allowQuoted)
+          (return (subslice in _ i) i (fmt/Errorf "invalid character %q at start of option (expecting Unicode letter)" r)))
+
+        (return (subslice in _ i) i (fmt/Errorf "invalid character %q at start of option (expecting Unicode letter or single quote)" r))))))
+
+
+
+^{:go/end 644} (go/func isLetterOrDigit ^bool [^rune r]
+  (or (== r \_) (unicode/IsLetter r) (unicode/IsNumber r)))
+
+
+
+^{:go/end 656} (go/func boolsCompare "boolsCompare compares x and y, ordering false before true.\n" ^int [^bool x ^bool y]
+  (switch
+    (case [(and (not x) y)]
+      (return -1))
+    (default
+      (return 0))
+    (case [(and x (not y))]
+      (return (+ 1)))))

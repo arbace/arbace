@@ -1,0 +1,611 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.parser) (go/file "resolver.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [ast "go/ast"]
+    ^{:line 10} [token "go/token"]
+    ^{:line 11} [strings "strings"]])
+
+
+(go/const ^{:val false} debugResolve false)
+
+
+
+
+
+
+^{:go/end 55} (go/func resolveFile "resolveFile walks the given file to resolve identifiers within the file\nscope, updating ast.Ident.Obj fields with declaration information.\n\nIf declErr is non-nil, it is used to report declaration errors during\nresolution. tok is used to format position in error messages.\n" [^{:tag (* ast/File)} file ^{:tag (* token/File)} handle ^{:tag (func [token/Pos string])} declErr]
+  (let [pkgScope (ast/NewScope nil)
+      ^{:line 23} r (addr ^{:go/breaks [2 4 6 8 10]} (lit resolver
+          :handle handle
+          :declErr declErr
+          :topScope pkgScope
+          :pkgScope pkgScope
+          :depth 1))]
+
+
+    (range [_ decl (.-Decls file)]
+      (ast/Walk r decl))
+
+
+    (.closeScope r)
+    (go/call assert (== (.-topScope r) nil) "unbalanced scopes")
+    (go/call assert (== (.-labelScope r) nil) "unbalanced label scopes")
+
+    ;; resolve global identifiers within the same file
+    (let [i 0]
+      (range [_ ident (.-unresolved r)]
+        ;; i <= index for current ident
+        (go/call assert (== (.-Obj ident) unresolved) "object already resolved")
+        (set! (.-Obj ident) (.Lookup (.-pkgScope r) (.-Name ident))) ; also removes unresolved sentinel
+        (cond (== (.-Obj ident) nil) (do
+            (aset (.-unresolved r) i ident)
+            (inc! i))
+          ^{:line 48} debugResolve
+          (let [pos (.Pos (assert (interface (Pos ^token/Pos [])) (.-Decl (.-Obj ident))))]
+            (.trace r "resolved %s@%v to package object %v" (.-Name ident) (.Pos ident) pos))))
+
+
+      (set! (.-Scope file) (.-pkgScope r))
+      (set! (.-Unresolved file) (subslice (.-unresolved r) 0 i)))))
+
+
+(go/const ^{:tag int :val 1000} maxScopeDepth 1000.0)
+
+(go/type resolver (struct
+    ^{:line 60 :tag (* token/File)} handle
+    ^{:line 61 :tag (func [token/Pos string])} declErr
+
+
+    ^{:line 64 :tag (* ast/Scope) :doc "Ordinary identifier scopes\n"} pkgScope ; pkgScope.Outer == nil
+    ^{:line 65 :tag (* ast/Scope)} topScope ; top-most scope; may be pkgScope
+    ^{:line 66 :tag (slice (* ast/Ident))} unresolved ; unresolved identifiers
+    ^{:line 67 :tag int} depth ; scope depth
+
+
+
+    ^{:line 71 :tag (* ast/Scope) :doc "Label scopes\n(maintained by open/close LabelScope)\n"} labelScope ; label scope for current function
+    ^{:line 72 :tag (slice (slice (* ast/Ident)))} targetStack)) ; stack of unresolved labels
+
+
+^{:go/end 77} (go/method trace [^{:tag (* resolver)} r ^string format & ^{:tag (slice any)} args]
+  (fmt/Println (+ (strings/Repeat ". " (.-depth r)) (.sprintf r format (spread args)))))
+
+
+^{:go/end 87} (go/method sprintf ^string [^{:tag (* resolver)} r ^string format & ^{:tag (slice any)} args]
+  (range [i arg args]
+    (type-switch [arg arg]
+      (case [token/Pos]
+        (aset args i (.Position (.-handle r) arg)))))
+
+
+  (fmt/Sprintf format (spread args)))
+
+
+^{:go/end 98} (go/method openScope [^{:tag (* resolver)} r ^token/Pos pos]
+  (inc! (.-depth r))
+  (when (> (.-depth r) maxScopeDepth)
+    (panic (lit bailout :pos pos :msg "exceeded max scope depth during object resolution")))
+
+  (when debugResolve
+    (.trace r "opening scope @%v" pos))
+
+  (set! (.-topScope r) (ast/NewScope (.-topScope r))))
+
+
+^{:go/end 106} (go/method closeScope [^{:tag (* resolver)} r]
+  (dec! (.-depth r))
+  (when debugResolve
+    (.trace r "closing scope"))
+
+  (set! (.-topScope r) (.-Outer (.-topScope r))))
+
+
+^{:go/end 111} (go/method openLabelScope [^{:tag (* resolver)} r]
+  (set! (.-labelScope r) (ast/NewScope (.-labelScope r)))
+  (set! (.-targetStack r) (append (.-targetStack r) nil)))
+
+
+^{:go/end 126} (go/method closeLabelScope [^{:tag (* resolver)} r]
+  ;; resolve labels
+  (let [n (- (len (.-targetStack r)) 1)
+      ^{:line 116} scope (.-labelScope r)]
+    (range [_ ident (aget (.-targetStack r) n)]
+      (set! (.-Obj ident) (.Lookup scope (.-Name ident)))
+      (when (and (== (.-Obj ident) nil) (!= (.-declErr r) nil))
+        ((.-declErr r) (.Pos ident) (fmt/Sprintf "label %s undefined" (.-Name ident)))))
+
+
+    ;; pop label scope
+    (set! (.-targetStack r) (subslice (.-targetStack r) 0 n))
+    (set! (.-labelScope r) (.-Outer (.-labelScope r)))))
+
+
+^{:go/end 156} (go/method declare [^{:tag (* resolver)} r ^any decl ^any data ^{:tag (* ast/Scope)} scope ^ast/ObjKind kind & ^{:tag (slice (* ast/Ident))} idents]
+  (range [_ ident idents]
+    (when (!= (.-Obj ident) nil)
+      (panic (fmt/Sprintf "%v: identifier %s already declared or resolved" (.Pos ident) (.-Name ident))))
+
+    (let [obj (ast/NewObj kind (.-Name ident))]
+      ;; remember the corresponding declaration for redeclaration
+      ;; errors and global variable resolution/typechecking phase
+      (set! (.-Decl obj) decl)
+      (set! (.-Data obj) data)
+      ;; Identifiers (for receiver type parameters) are written to the scope, but
+      ;; never set as the resolved object. See go.dev/issue/50956.
+      (when [(values _ ok) (assert (* ast/Ident) decl)] (not ok)
+        (set! (.-Obj ident) obj))
+
+      (when (!= (.-Name ident) "_")
+        (when debugResolve
+          (.trace r "declaring %s@%v" (.-Name ident) (.Pos ident)))
+
+        (when [alt (.Insert scope obj)] (and (!= alt nil) (!= (.-declErr r) nil))
+          (let [prevDecl ""]
+            (when [pos (.Pos alt)] (.IsValid pos)
+              (set! prevDecl (.sprintf r "\n\tprevious declaration at %v" pos)))
+
+            ((.-declErr r) (.Pos ident) (fmt/Sprintf "%s redeclared in this block%s" (.-Name ident) prevDecl))))))))
+
+
+
+
+
+^{:go/end 185} (go/method shortVarDecl [^{:tag (* resolver)} r ^{:tag (* ast/AssignStmt)} decl]
+  ;; Go spec: A short variable declaration may redeclare variables
+  ;; provided they were originally declared in the same block with
+  ;; the same type, and at least one of the non-blank variables is new.
+  (let [n 0] ; number of new variables
+    (range [_ x (.-Lhs decl)]
+      (when [(values ident isIdent) (assert (* ast/Ident) x)] isIdent
+        (go/call assert (== (.-Obj ident) nil) "identifier already declared or resolved")
+        (let [obj (ast/NewObj ast/Var (.-Name ident))]
+          ;; remember corresponding assignment for other tools
+          (set! (.-Decl obj) decl)
+          (set! (.-Obj ident) obj)
+          (when (!= (.-Name ident) "_")
+            (when debugResolve
+              (.trace r "declaring %s@%v" (.-Name ident) (.Pos ident)))
+
+            (if [alt (.Insert (.-topScope r) obj)] (!= alt nil)
+              (set! (.-Obj ident) alt) ; redeclaration
+
+              (inc! n)))))) ; new declaration
+
+
+
+
+    (when (and (== n 0) (!= (.-declErr r) nil))
+      ((.-declErr r) (.Pos (aget (.-Lhs decl) 0)) "no new variables on left side of :="))))
+
+
+
+
+
+
+(go/var ^{:doc "The unresolved object is a sentinel to mark identifiers that have been added\nto the list of unresolved identifiers. The sentinel is only used for verifying\ninternal consistency.\n"} unresolved (new ast/Object))
+
+
+
+
+
+^{:go/end 227} (go/method resolve "If x is an identifier, resolve attempts to resolve x by looking up\nthe object it denotes. If no object is found and collectUnresolved is\nset, x is marked as unresolved and collected in the list of unresolved\nidentifiers.\n" [^{:tag (* resolver)} r ^{:tag (* ast/Ident)} ident ^bool collectUnresolved]
+  (when (!= (.-Obj ident) nil)
+    (panic (.sprintf r "%v: identifier %s already declared or resolved" (.Pos ident) (.-Name ident))))
+
+  ;; '_' should never refer to existing declarations, because it has special
+  ;; handling in the spec.
+  (when (== (.-Name ident) "_")
+    (return))
+
+  (for [s (.-topScope r)] (!= s nil) (set! s (.-Outer s))
+    (when [obj (.Lookup s (.-Name ident))] (!= obj nil)
+      (when debugResolve
+        (.trace r "resolved %v:%s to %v" (.Pos ident) (.-Name ident) obj))
+
+      (go/call assert (!= (.-Name obj) "") "obj with no name")
+      ;; Identifiers (for receiver type parameters) are written to the scope,
+      ;; but never set as the resolved object. See go.dev/issue/50956.
+      (when [(values _ ok) (assert (* ast/Ident) (.-Decl obj))] (not ok)
+        (set! (.-Obj ident) obj))
+
+      (return)))
+
+
+  ;; all local scopes are known, so any unresolved identifier
+  ;; must be found either in the file scope, package scope
+  ;; (perhaps in another file), or universe scope --- collect
+  ;; them so that they can be resolved later
+  (when collectUnresolved
+    (set! (.-Obj ident) unresolved)
+    (set! (.-unresolved r) (append (.-unresolved r) ident))))
+
+
+
+^{:go/end 233} (go/method walkExprs [^{:tag (* resolver)} r ^{:tag (slice ast/Expr)} list]
+  (range [_ node list]
+    (ast/Walk r node)))
+
+
+
+^{:go/end 242} (go/method walkLHS [^{:tag (* resolver)} r ^{:tag (slice ast/Expr)} list]
+  (range [_ expr list]
+    (let [expr (ast/Unparen expr)]
+      (when [(values _ ok) (assert (* ast/Ident) expr)] (and (not ok) (!= expr nil))
+        (ast/Walk r expr)))))
+
+
+
+
+^{:go/end 248} (go/method walkStmts [^{:tag (* resolver)} r ^{:tag (slice ast/Stmt)} list]
+  (range [_ stmt list]
+    (ast/Walk r stmt)))
+
+
+
+^{:go/breaks [[5 512]] :go/end 513} (go/method Visit ^ast/Visitor [^{:tag (* resolver)} r ^ast/Node node]
+  (when (and debugResolve (!= node nil))
+    (.trace r "node %T@%v" node (.Pos node)))
+
+
+  (type-switch [n node]
+
+    ;; Expressions.
+    (case [(* ast/Ident)]
+      (.resolve r n true))
+
+    (case [(* ast/FuncLit)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (.walkFuncType r (.-Type n))
+      (.walkBody r (.-Body n)))
+
+    (case [(* ast/SelectorExpr)]
+      (ast/Walk r (.-X n)))
+    ;; Note: don't try to resolve n.Sel, as we don't support qualified
+    ;; resolution.
+
+    (case [(* ast/StructType)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (.walkFieldList r (.-Fields n) ast/Var))
+
+    (case [(* ast/FuncType)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (.walkFuncType r n))
+
+    (case [(* ast/CompositeLit)]
+      (when (!= (.-Type n) nil)
+        (ast/Walk r (.-Type n)))
+
+      (range [_ e (.-Elts n)]
+        (if [(values kv _) (assert (* ast/KeyValueExpr) e)] (!= kv nil) (do
+            ;; See go.dev/issue/45160: try to resolve composite lit keys, but don't
+            ;; collect them as unresolved if resolution failed. This replicates
+            ;; existing behavior when resolving during parsing.
+            (if [(values ident _) (assert (* ast/Ident) (.-Key kv))] (!= ident nil)
+              (.resolve r ident false)
+
+              (ast/Walk r (.-Key kv)))
+
+            (ast/Walk r (.-Value kv)))
+
+          (ast/Walk r e))))
+
+
+
+    (case [(* ast/InterfaceType)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (.walkFieldList r (.-Methods n) ast/Fun))
+
+    ;; Statements
+    (case [(* ast/LabeledStmt)]
+      (.declare r n nil (.-labelScope r) ast/Lbl (.-Label n))
+      (ast/Walk r (.-Stmt n)))
+
+    (case [(* ast/AssignStmt)]
+      (.walkExprs r (.-Rhs n))
+      (if (== (.-Tok n) token/DEFINE)
+        (.shortVarDecl r n)
+
+        (.walkExprs r (.-Lhs n))))
+
+
+    (case [(* ast/BranchStmt)]
+      ;; add to list of unresolved targets
+      (when (and (!= (.-Tok n) token/FALLTHROUGH) (!= (.-Label n) nil))
+        (let [depth (- (len (.-targetStack r)) 1)]
+          (aset (.-targetStack r) depth (append (aget (.-targetStack r) depth) (.-Label n))))))
+
+
+    (case [(* ast/BlockStmt)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (.walkStmts r (.-List n)))
+
+    (case [(* ast/IfStmt)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (when (!= (.-Init n) nil)
+        (ast/Walk r (.-Init n)))
+
+      (ast/Walk r (.-Cond n))
+      (ast/Walk r (.-Body n))
+      (when (!= (.-Else n) nil)
+        (ast/Walk r (.-Else n))))
+
+
+    (case [(* ast/CaseClause)]
+      (.walkExprs r (.-List n))
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (.walkStmts r (.-Body n)))
+
+    (case [(* ast/SwitchStmt)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (when (!= (.-Init n) nil)
+        (ast/Walk r (.-Init n)))
+
+      (when (!= (.-Tag n) nil)
+        ;; The scope below reproduces some unnecessary behavior of the parser,
+        ;; opening an extra scope in case this is a type switch. It's not needed
+        ;; for expression switches.
+        ;; TODO: remove this once we've matched the parser resolution exactly.
+        (when (!= (.-Init n) nil)
+          (.openScope r (.Pos (.-Tag n)))
+          (defer (.closeScope r)))
+
+        (ast/Walk r (.-Tag n)))
+
+      (when (!= (.-Body n) nil)
+        (.walkStmts r (.-List (.-Body n)))))
+
+
+    (case [(* ast/TypeSwitchStmt)]
+      (when (!= (.-Init n) nil)
+        (.openScope r (.Pos n))
+        (defer (.closeScope r))
+        (ast/Walk r (.-Init n)))
+
+      (.openScope r (.Pos (.-Assign n)))
+      (defer (.closeScope r))
+      (ast/Walk r (.-Assign n))
+      ;; s.Body consists only of case clauses, so does not get its own
+      ;; scope.
+      (when (!= (.-Body n) nil)
+        (.walkStmts r (.-List (.-Body n)))))
+
+
+    (case [(* ast/CommClause)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (when (!= (.-Comm n) nil)
+        (ast/Walk r (.-Comm n)))
+
+      (.walkStmts r (.-Body n)))
+
+    (case [(* ast/SelectStmt)]
+      ;; as for switch statements, select statement bodies don't get their own
+      ;; scope.
+      (when (!= (.-Body n) nil)
+        (.walkStmts r (.-List (.-Body n)))))
+
+
+    (case [(* ast/ForStmt)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (when (!= (.-Init n) nil)
+        (ast/Walk r (.-Init n)))
+
+      (when (!= (.-Cond n) nil)
+        (ast/Walk r (.-Cond n)))
+
+      (when (!= (.-Post n) nil)
+        (ast/Walk r (.-Post n)))
+
+      (ast/Walk r (.-Body n)))
+
+    (case [(* ast/RangeStmt)]
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+      (ast/Walk r (.-X n))
+      (let [^{:tag (slice ast/Expr)} lhs (zero (slice ast/Expr))]
+        (when (!= (.-Key n) nil)
+          (set! lhs (append lhs (.-Key n))))
+
+        (when (!= (.-Value n) nil)
+          (set! lhs (append lhs (.-Value n))))
+
+        (when (> (len lhs) 0)
+          (if (== (.-Tok n) token/DEFINE)
+            ;; Note: we can't exactly match the behavior of object resolution
+            ;; during the parsing pass here, as it uses the position of the RANGE
+            ;; token for the RHS OpPos. That information is not contained within
+            ;; the AST.
+            (let [as (addr ^{:go/breaks [2 4 6 8]} (lit ast/AssignStmt
+                    :Lhs lhs
+                    :Tok token/DEFINE
+                    :TokPos (.-TokPos n)
+                    :Rhs (lit (slice ast/Expr) (addr (lit ast/UnaryExpr :Op token/RANGE :X (.-X n))))))]
+
+              ;; TODO(rFindley): this walkLHS reproduced the parser resolution, but
+              ;; is it necessary? By comparison, for a normal AssignStmt we don't
+              ;; walk the LHS in case there is an invalid identifier list.
+              (.walkLHS r lhs)
+              (.shortVarDecl r as))
+
+            (.walkExprs r lhs)))
+
+
+        (ast/Walk r (.-Body n))))
+
+    ;; Declarations
+    (case [(* ast/GenDecl)]
+      (switch (.-Tok n)
+        (case [token/CONST token/VAR]
+          (range [i spec (.-Specs n)]
+            (let [spec (assert (* ast/ValueSpec) spec)
+                ^{:line 455} kind ast/Con]
+              (when (== (.-Tok n) token/VAR)
+                (set! kind ast/Var))
+
+              (.walkExprs r (.-Values spec))
+              (when (!= (.-Type spec) nil)
+                (ast/Walk r (.-Type spec)))
+
+              (.declare r spec i (.-topScope r) kind (spread (.-Names spec))))))
+
+        (case [token/TYPE]
+          (range [_ spec (.-Specs n)]
+            (let [spec (assert (* ast/TypeSpec) spec)]
+              ;; Go spec: The scope of a type identifier declared inside a function begins
+              ;; at the identifier in the TypeSpec and ends at the end of the innermost
+              ;; containing block.
+              (.declare r spec nil (.-topScope r) ast/Typ (.-Name spec))
+              (when (!= (.-TypeParams spec) nil)
+                (.openScope r (.Pos spec))
+                (defer (.closeScope r))
+                (.walkTParams r (.-TypeParams spec)))
+
+              (ast/Walk r (.-Type spec)))))))
+
+
+
+    (case [(* ast/FuncDecl)]
+      ;; Open the function scope.
+      (.openScope r (.Pos n))
+      (defer (.closeScope r))
+
+      (.walkRecv r (.-Recv n))
+
+      ;; Type parameters are walked normally: they can reference each other, and
+      ;; can be referenced by normal parameters.
+      (when (!= (.-TypeParams (.-Type n)) nil)
+        (.walkTParams r (.-TypeParams (.-Type n))))
+      ;; TODO(rFindley): need to address receiver type parameters.
+
+
+      ;; Resolve and declare parameters in a specific order to get duplicate
+      ;; declaration errors in the correct location.
+      (.resolveList r (.-Params (.-Type n)))
+      (.resolveList r (.-Results (.-Type n)))
+      (.declareList r (.-Recv n) ast/Var)
+      (.declareList r (.-Params (.-Type n)) ast/Var)
+      (.declareList r (.-Results (.-Type n)) ast/Var)
+
+      (.walkBody r (.-Body n))
+      (when (and (== (.-Recv n) nil) (!= (.-Name (.-Name n)) "init"))
+        (.declare r n nil (.-pkgScope r) ast/Fun (.-Name n))))
+
+
+    (default
+      (return r)))
+
+
+  nil)
+
+
+^{:go/end 521} (go/method walkFuncType [^{:tag (* resolver)} r ^{:tag (* ast/FuncType)} typ]
+  ;; typ.TypeParams must be walked separately for FuncDecls.
+  (.resolveList r (.-Params typ))
+  (.resolveList r (.-Results typ))
+  (.declareList r (.-Params typ) ast/Var)
+  (.declareList r (.-Results typ) ast/Var))
+
+
+^{:go/end 532} (go/method resolveList [^{:tag (* resolver)} r ^{:tag (* ast/FieldList)} list]
+  (when (== list nil)
+    (return))
+
+  (range [_ f (.-List list)]
+    (when (!= (.-Type f) nil)
+      (ast/Walk r (.-Type f)))))
+
+
+
+
+^{:go/end 541} (go/method declareList [^{:tag (* resolver)} r ^{:tag (* ast/FieldList)} list ^ast/ObjKind kind]
+  (when (== list nil)
+    (return))
+
+  (range [_ f (.-List list)]
+    (.declare r f nil (.-topScope r) kind (spread (.-Names f)))))
+
+
+
+^{:go/end 587} (go/method walkRecv [^{:tag (* resolver)} r ^{:tag (* ast/FieldList)} recv]
+  ;; If our receiver has receiver type parameters, we must declare them before
+  ;; trying to resolve the rest of the receiver, and avoid re-resolving the
+  ;; type parameter identifiers.
+  (when (or (== recv nil) (== (len (.-List recv)) 0))
+    (return)) ; nothing to do
+
+  (let [typ (.-Type (aget (.-List recv) 0))]
+    (when [(values ptr ok) (assert (* ast/StarExpr) typ)] ok
+      (set! typ (.-X ptr)))
+
+
+    (let [^{:tag (slice ast/Expr)} declareExprs (zero (slice ast/Expr)) ; exprs to declare
+        ^{:line 556 :tag (slice ast/Expr)} resolveExprs (zero (slice ast/Expr))] ; exprs to resolve
+      (type-switch [typ typ]
+        (case [(* ast/IndexExpr)]
+          (set! declareExprs (lit (slice ast/Expr) (.-Index typ)))
+          (set! resolveExprs (append resolveExprs (.-X typ))))
+        (case [(* ast/IndexListExpr)]
+          (set! declareExprs (.-Indices typ))
+          (set! resolveExprs (append resolveExprs (.-X typ))))
+        (default
+          (set! resolveExprs (append resolveExprs typ))))
+
+      (range [_ expr declareExprs]
+        (if [(values id _) (assert (* ast/Ident) expr)] (!= id nil)
+          (.declare r expr nil (.-topScope r) ast/Typ id)
+
+          ;; The receiver type parameter expression is invalid, but try to resolve
+          ;; it anyway for consistency.
+          (set! resolveExprs (append resolveExprs expr))))
+
+
+      (range [_ expr resolveExprs]
+        (when (!= expr nil)
+          (ast/Walk r expr)))
+
+
+      ;; The receiver is invalid, but try to resolve it anyway for consistency.
+      (range [_ f (subslice (.-List recv) 1)]
+        (when (!= (.-Type f) nil)
+          (ast/Walk r (.-Type f)))))))
+
+
+
+
+^{:go/end 595} (go/method walkFieldList [^{:tag (* resolver)} r ^{:tag (* ast/FieldList)} list ^ast/ObjKind kind]
+  (when (== list nil)
+    (return))
+
+  (.resolveList r list)
+  (.declareList r list kind))
+
+
+
+
+
+^{:go/end 603} (go/method walkTParams "walkTParams is like walkFieldList, but declares type parameters eagerly so\nthat they may be resolved in the constraint expressions held in the field\nType.\n" [^{:tag (* resolver)} r ^{:tag (* ast/FieldList)} list]
+  (.declareList r list ast/Typ)
+  (.resolveList r list))
+
+
+^{:go/end 612} (go/method walkBody [^{:tag (* resolver)} r ^{:tag (* ast/BlockStmt)} body]
+  (when (== body nil)
+    (return))
+
+  (.openLabelScope r)
+  (defer (.closeLabelScope r))
+  (.walkStmts r (.-List body)))

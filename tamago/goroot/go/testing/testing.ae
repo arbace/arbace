@@ -1,0 +1,3006 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package testing provides support for automated testing of Go packages.
+;; It is intended to be used in concert with the "go test" command, which automates
+;; execution of any function of the form
+;;
+;;	func TestXxx(*testing.T)
+;;
+;; where Xxx does not start with a lowercase letter. The function name
+;; serves to identify the test routine.
+;;
+;; Within these functions, use [T.Error], [T.Fail] or related methods to signal failure.
+;;
+;; To write a new test suite, create a file that
+;; contains the TestXxx functions as described here,
+;; and give that file a name ending in "_test.go".
+;; The file will be excluded from regular
+;; package builds but will be included when the "go test" command is run.
+;;
+;; The test file can be in the same package as the one being tested,
+;; or in a corresponding package with the suffix "_test".
+;;
+;; If the test file is in the same package, it may refer to unexported
+;; identifiers within the package, as in this example:
+;;
+;;	package abs
+;;
+;;	import "testing"
+;;
+;;	func TestAbs(t *testing.T) {
+;;	    got := abs(-1)
+;;	    if got != 1 {
+;;	        t.Errorf("abs(-1) = %d; want 1", got)
+;;	    }
+;;	}
+;;
+;; If the file is in a separate "_test" package, the package being tested
+;; must be imported explicitly and only its exported identifiers may be used.
+;; This is known as "black box" testing.
+;;
+;;	package abs_test
+;;
+;;	import (
+;;		"testing"
+;;
+;;		"path_to_pkg/abs"
+;;	)
+;;
+;;	func TestAbs(t *testing.T) {
+;;	    got := abs.Abs(-1)
+;;	    if got != 1 {
+;;	        t.Errorf("Abs(-1) = %d; want 1", got)
+;;	    }
+;;	}
+;;
+;; For more detail, run [go help test] and [go help testflag].
+;;
+;; # Benchmarks
+;;
+;; Functions of the form
+;;
+;;	func BenchmarkXxx(*testing.B)
+;;
+;; are considered benchmarks, and are executed by the "go test" command when
+;; its -bench flag is provided. Benchmarks are run sequentially.
+;;
+;; For a description of the testing flags, see [go help testflag].
+;;
+;; A sample benchmark function looks like this:
+;;
+;;	func BenchmarkRandInt(b *testing.B) {
+;;	    for b.Loop() {
+;;	        rand.Int()
+;;	    }
+;;	}
+;;
+;; The output
+;;
+;;	BenchmarkRandInt-8   	68453040	        17.8 ns/op
+;;
+;; means that the body of the loop ran 68453040 times at a speed of 17.8 ns per loop.
+;;
+;; Only the body of the loop is timed, so benchmarks may do expensive
+;; setup before calling b.Loop, which will not be counted toward the
+;; benchmark measurement:
+;;
+;;	func BenchmarkBigLen(b *testing.B) {
+;;	    big := NewBig()
+;;	    for b.Loop() {
+;;	        big.Len()
+;;	    }
+;;	}
+;;
+;; If a benchmark needs to test performance in a parallel setting, it may use
+;; the RunParallel helper function; such benchmarks are intended to be used with
+;; the go test -cpu flag:
+;;
+;;	func BenchmarkTemplateParallel(b *testing.B) {
+;;	    templ := template.Must(template.New("test").Parse("Hello, {{.}}!"))
+;;	    b.RunParallel(func(pb *testing.PB) {
+;;	        var buf bytes.Buffer
+;;	        for pb.Next() {
+;;	            buf.Reset()
+;;	            templ.Execute(&buf, "World")
+;;	        }
+;;	    })
+;;	}
+;;
+;; A detailed specification of the benchmark results format is given
+;; in https://go.dev/design/14313-benchmark-format.
+;;
+;; There are standard tools for working with benchmark results at
+;; [golang.org/x/perf/cmd].
+;; In particular, [golang.org/x/perf/cmd/benchstat] performs
+;; statistically robust A/B comparisons.
+;;
+;; # b.N-style benchmarks
+;;
+;; Prior to the introduction of [B.Loop], benchmarks were written in a
+;; different style using B.N. For example:
+;;
+;;	func BenchmarkRandInt(b *testing.B) {
+;;	    for range b.N {
+;;	        rand.Int()
+;;	    }
+;;	}
+;;
+;; In this style of benchmark, the benchmark function must run
+;; the target code b.N times. The benchmark function is called
+;; multiple times with b.N adjusted until the benchmark function
+;; lasts long enough to be timed reliably. This also means any setup
+;; done before the loop may be run several times.
+;;
+;; If a benchmark needs some expensive setup before running, the timer
+;; should be explicitly reset:
+;;
+;;	func BenchmarkBigLen(b *testing.B) {
+;;	    big := NewBig()
+;;	    b.ResetTimer()
+;;	    for range b.N {
+;;	        big.Len()
+;;	    }
+;;	}
+;;
+;; New benchmarks should prefer using [B.Loop], which is more robust
+;; and more efficient.
+;;
+;; # Examples
+;;
+;; The package also runs and verifies example code. Example functions may
+;; include a concluding line comment that begins with "Output:" and is compared with
+;; the standard output of the function when the tests are run. (The comparison
+;; ignores leading and trailing space.) These are examples of an example:
+;;
+;;	func ExampleHello() {
+;;	    fmt.Println("hello")
+;;	    // Output: hello
+;;	}
+;;
+;;	func ExampleSalutations() {
+;;	    fmt.Println("hello, and")
+;;	    fmt.Println("goodbye")
+;;	    // Output:
+;;	    // hello, and
+;;	    // goodbye
+;;	}
+;;
+;; The comment prefix "Unordered output:" is like "Output:", but matches any
+;; line order:
+;;
+;;	func ExamplePerm() {
+;;	    for _, value := range Perm(5) {
+;;	        fmt.Println(value)
+;;	    }
+;;	    // Unordered output: 4
+;;	    // 2
+;;	    // 1
+;;	    // 3
+;;	    // 0
+;;	}
+;;
+;; Example functions without output comments are compiled but not executed.
+;;
+;; The naming convention to declare examples for the package, a function F, a type T and
+;; method M on type T are:
+;;
+;;	func Example() { ... }
+;;	func ExampleF() { ... }
+;;	func ExampleT() { ... }
+;;	func ExampleT_M() { ... }
+;;
+;; Multiple example functions for a package/type/function/method may be provided by
+;; appending a distinct suffix to the name. The suffix must start with a
+;; lower-case letter.
+;;
+;;	func Example_suffix() { ... }
+;;	func ExampleF_suffix() { ... }
+;;	func ExampleT_suffix() { ... }
+;;	func ExampleT_M_suffix() { ... }
+;;
+;; The entire test file is presented as the example when it contains a single
+;; example function, at least one other function, type, variable, or constant
+;; declaration, and no test or benchmark functions.
+;;
+;; # Fuzzing
+;;
+;; 'go test' and the testing package support fuzzing, a testing technique where
+;; a function is called with randomly generated inputs to find bugs not
+;; anticipated by unit tests.
+;;
+;; Functions of the form
+;;
+;;	func FuzzXxx(*testing.F)
+;;
+;; are considered fuzz tests.
+;;
+;; For example:
+;;
+;;	func FuzzHex(f *testing.F) {
+;;	  for _, seed := range [][]byte{{}, {0}, {9}, {0xa}, {0xf}, {1, 2, 3, 4}} {
+;;	    f.Add(seed)
+;;	  }
+;;	  f.Fuzz(func(t *testing.T, in []byte) {
+;;	    enc := hex.EncodeToString(in)
+;;	    out, err := hex.DecodeString(enc)
+;;	    if err != nil {
+;;	      t.Fatalf("%v: decode: %v", in, err)
+;;	    }
+;;	    if !bytes.Equal(in, out) {
+;;	      t.Fatalf("%v: not equal after round trip: %v", in, out)
+;;	    }
+;;	  })
+;;	}
+;;
+;; A fuzz test maintains a seed corpus, or a set of inputs which are run by
+;; default, and can seed input generation. Seed inputs may be registered by
+;; calling [F.Add] or by storing files in the directory testdata/fuzz/<Name>
+;; (where <Name> is the name of the fuzz test) within the package containing
+;; the fuzz test. Seed inputs are optional, but the fuzzing engine may find
+;; bugs more efficiently when provided with a set of small seed inputs with good
+;; code coverage. These seed inputs can also serve as regression tests for bugs
+;; identified through fuzzing.
+;;
+;; The function passed to [F.Fuzz] within the fuzz test is considered the fuzz
+;; target. A fuzz target must accept a [*T] parameter, followed by one or more
+;; parameters for random inputs. The types of arguments passed to [F.Add] must
+;; be identical to the types of these parameters. The fuzz target may signal
+;; that it's found a problem the same way tests do: by calling [T.Fail] (or any
+;; method that calls it like [T.Error] or [T.Fatal]) or by panicking.
+;;
+;; When fuzzing is enabled (by setting the -fuzz flag to a regular expression
+;; that matches a specific fuzz test), the fuzz target is called with arguments
+;; generated by repeatedly making random changes to the seed inputs. On
+;; supported platforms, 'go test' compiles the test executable with fuzzing
+;; coverage instrumentation. The fuzzing engine uses that instrumentation to
+;; find and cache inputs that expand coverage, increasing the likelihood of
+;; finding bugs. If the fuzz target fails for a given input, the fuzzing engine
+;; writes the inputs that caused the failure to a file in the directory
+;; testdata/fuzz/<Name> within the package directory. This file later serves as
+;; a seed input. If the file can't be written at that location (for example,
+;; because the directory is read-only), the fuzzing engine writes the file to
+;; the fuzz cache directory within the build cache instead.
+;;
+;; When fuzzing is disabled, the fuzz target is called with the seed inputs
+;; registered with [F.Add] and seed inputs from testdata/fuzz/<Name>. In this
+;; mode, the fuzz test acts much like a regular test, with subtests started
+;; with [F.Fuzz] instead of [T.Run].
+;;
+;; See https://go.dev/doc/fuzz for documentation about fuzzing.
+;;
+;; # Skipping
+;;
+;; Tests or benchmarks may be skipped at run time with a call to
+;; [T.Skip] or [B.Skip]:
+;;
+;;	func TestTimeConsuming(t *testing.T) {
+;;	    if testing.Short() {
+;;	        t.Skip("skipping test in short mode.")
+;;	    }
+;;	    ...
+;;	}
+;;
+;; The [T.Skip] method can be used in a fuzz target if the input is invalid,
+;; but should not be considered a failing input. For example:
+;;
+;;	func FuzzJSONMarshaling(f *testing.F) {
+;;	    f.Fuzz(func(t *testing.T, b []byte) {
+;;	        var v interface{}
+;;	        if err := json.Unmarshal(b, &v); err != nil {
+;;	            t.Skip()
+;;	        }
+;;	        if _, err := json.Marshal(v); err != nil {
+;;	            t.Errorf("Marshal: %v", err)
+;;	        }
+;;	    })
+;;	}
+;;
+;; # Subtests and Sub-benchmarks
+;;
+;; The [T.Run] and [B.Run] methods allow defining subtests and sub-benchmarks,
+;; without having to define separate functions for each. This enables uses
+;; like table-driven benchmarks and creating hierarchical tests.
+;; It also provides a way to share common setup and tear-down code:
+;;
+;;	func TestFoo(t *testing.T) {
+;;	    // <setup code>
+;;	    t.Run("A=1", func(t *testing.T) { ... })
+;;	    t.Run("A=2", func(t *testing.T) { ... })
+;;	    t.Run("B=1", func(t *testing.T) { ... })
+;;	    // <tear-down code>
+;;	}
+;;
+;; Each subtest and sub-benchmark has a unique name: the combination of the name
+;; of the top-level test and the sequence of names passed to Run, separated by
+;; slashes, with an optional trailing sequence number for disambiguation.
+;;
+;; The argument to the -run, -bench, and -fuzz command-line flags is an unanchored regular
+;; expression that matches the test's name. For tests with multiple slash-separated
+;; elements, such as subtests, the argument is itself slash-separated, with
+;; expressions matching each name element in turn. Because it is unanchored, an
+;; empty expression matches any string.
+;; For example, using "matching" to mean "whose name contains":
+;;
+;;	go test -run ''        # Run all tests.
+;;	go test -run Foo       # Run top-level tests matching "Foo", such as "TestFooBar".
+;;	go test -run Foo/A=    # For top-level tests matching "Foo", run subtests matching "A=".
+;;	go test -run /A=1      # For all top-level tests, run subtests matching "A=1".
+;;	go test -fuzz FuzzFoo  # Fuzz the target matching "FuzzFoo"
+;;
+;; The -run argument can also be used to run a specific value in the seed
+;; corpus, for debugging. For example:
+;;
+;;	go test -run=FuzzFoo/9ddb952d9814
+;;
+;; The -fuzz and -run flags can both be set, in order to fuzz a target but
+;; skip the execution of all other tests.
+;;
+;; Subtests can also be used to control parallelism. A parent test will only
+;; complete once all of its subtests complete. In this example, all tests are
+;; run in parallel with each other, and only with each other, regardless of
+;; other top-level tests that may be defined:
+;;
+;;	func TestGroupedParallel(t *testing.T) {
+;;	    for _, tc := range tests {
+;;	        t.Run(tc.Name, func(t *testing.T) {
+;;	            t.Parallel()
+;;	            ...
+;;	        })
+;;	    }
+;;	}
+;;
+;; Run does not return until parallel subtests have completed, providing a way
+;; to clean up after a group of parallel tests:
+;;
+;;	func TestTeardownParallel(t *testing.T) {
+;;	    // This Run will not return until the parallel tests finish.
+;;	    t.Run("group", func(t *testing.T) {
+;;	        t.Run("Test1", parallelTest1)
+;;	        t.Run("Test2", parallelTest2)
+;;	        t.Run("Test3", parallelTest3)
+;;	    })
+;;	    // <tear-down code>
+;;	}
+;;
+;; # Main
+;;
+;; It is sometimes necessary for a test or benchmark program to do extra setup or teardown
+;; before or after it executes. It is also sometimes necessary to control
+;; which code runs on the main thread. To support these and other cases,
+;; if a test file contains a function:
+;;
+;;	func TestMain(m *testing.M)
+;;
+;; then the generated test will call TestMain(m) instead of running the tests or benchmarks
+;; directly. TestMain runs in the main goroutine and can do whatever setup
+;; and teardown is necessary around a call to m.Run. m.Run will return an exit
+;; code that may be passed to [os.Exit]. If TestMain returns, the test wrapper
+;; will pass the result of m.Run to [os.Exit] itself.
+;;
+;; When TestMain is called, flag.Parse has not been run. If TestMain depends on
+;; command-line flags, including those of the testing package, it should call
+;; [flag.Parse] explicitly. Command line flags are always parsed by the time test
+;; or benchmark functions run.
+;;
+;; A simple implementation of TestMain is:
+;;
+;;	func TestMain(m *testing.M) {
+;;		// call flag.Parse() here if TestMain uses flags
+;;		m.Run()
+;;	}
+;;
+;; TestMain is a low-level primitive and should not be necessary for casual
+;; testing needs, where ordinary test functions suffice.
+;;
+;; [go help test]: https://pkg.go.dev/cmd/go#hdr-Test_packages
+;; [go help testflag]: https://pkg.go.dev/cmd/go#hdr-Testing_flags
+(in-ns 'go.testing) (go/file "testing.go" :doc "Package testing provides support for automated testing of Go packages.\nIt is intended to be used in concert with the \"go test\" command, which automates\nexecution of any function of the form\n\n\tfunc TestXxx(*testing.T)\n\nwhere Xxx does not start with a lowercase letter. The function name\nserves to identify the test routine.\n\nWithin these functions, use [T.Error], [T.Fail] or related methods to signal failure.\n\nTo write a new test suite, create a file that\ncontains the TestXxx functions as described here,\nand give that file a name ending in \"_test.go\".\nThe file will be excluded from regular\npackage builds but will be included when the \"go test\" command is run.\n\nThe test file can be in the same package as the one being tested,\nor in a corresponding package with the suffix \"_test\".\n\nIf the test file is in the same package, it may refer to unexported\nidentifiers within the package, as in this example:\n\n\tpackage abs\n\n\timport \"testing\"\n\n\tfunc TestAbs(t *testing.T) {\n\t    got := abs(-1)\n\t    if got != 1 {\n\t        t.Errorf(\"abs(-1) = %d; want 1\", got)\n\t    }\n\t}\n\nIf the file is in a separate \"_test\" package, the package being tested\nmust be imported explicitly and only its exported identifiers may be used.\nThis is known as \"black box\" testing.\n\n\tpackage abs_test\n\n\timport (\n\t\t\"testing\"\n\n\t\t\"path_to_pkg/abs\"\n\t)\n\n\tfunc TestAbs(t *testing.T) {\n\t    got := abs.Abs(-1)\n\t    if got != 1 {\n\t        t.Errorf(\"Abs(-1) = %d; want 1\", got)\n\t    }\n\t}\n\nFor more detail, run [go help test] and [go help testflag].\n\n# Benchmarks\n\nFunctions of the form\n\n\tfunc BenchmarkXxx(*testing.B)\n\nare considered benchmarks, and are executed by the \"go test\" command when\nits -bench flag is provided. Benchmarks are run sequentially.\n\nFor a description of the testing flags, see [go help testflag].\n\nA sample benchmark function looks like this:\n\n\tfunc BenchmarkRandInt(b *testing.B) {\n\t    for b.Loop() {\n\t        rand.Int()\n\t    }\n\t}\n\nThe output\n\n\tBenchmarkRandInt-8   \t68453040\t        17.8 ns/op\n\nmeans that the body of the loop ran 68453040 times at a speed of 17.8 ns per loop.\n\nOnly the body of the loop is timed, so benchmarks may do expensive\nsetup before calling b.Loop, which will not be counted toward the\nbenchmark measurement:\n\n\tfunc BenchmarkBigLen(b *testing.B) {\n\t    big := NewBig()\n\t    for b.Loop() {\n\t        big.Len()\n\t    }\n\t}\n\nIf a benchmark needs to test performance in a parallel setting, it may use\nthe RunParallel helper function; such benchmarks are intended to be used with\nthe go test -cpu flag:\n\n\tfunc BenchmarkTemplateParallel(b *testing.B) {\n\t    templ := template.Must(template.New(\"test\").Parse(\"Hello, {{.}}!\"))\n\t    b.RunParallel(func(pb *testing.PB) {\n\t        var buf bytes.Buffer\n\t        for pb.Next() {\n\t            buf.Reset()\n\t            templ.Execute(&buf, \"World\")\n\t        }\n\t    })\n\t}\n\nA detailed specification of the benchmark results format is given\nin https://go.dev/design/14313-benchmark-format.\n\nThere are standard tools for working with benchmark results at\n[golang.org/x/perf/cmd].\nIn particular, [golang.org/x/perf/cmd/benchstat] performs\nstatistically robust A/B comparisons.\n\n# b.N-style benchmarks\n\nPrior to the introduction of [B.Loop], benchmarks were written in a\ndifferent style using B.N. For example:\n\n\tfunc BenchmarkRandInt(b *testing.B) {\n\t    for range b.N {\n\t        rand.Int()\n\t    }\n\t}\n\nIn this style of benchmark, the benchmark function must run\nthe target code b.N times. The benchmark function is called\nmultiple times with b.N adjusted until the benchmark function\nlasts long enough to be timed reliably. This also means any setup\ndone before the loop may be run several times.\n\nIf a benchmark needs some expensive setup before running, the timer\nshould be explicitly reset:\n\n\tfunc BenchmarkBigLen(b *testing.B) {\n\t    big := NewBig()\n\t    b.ResetTimer()\n\t    for range b.N {\n\t        big.Len()\n\t    }\n\t}\n\nNew benchmarks should prefer using [B.Loop], which is more robust\nand more efficient.\n\n# Examples\n\nThe package also runs and verifies example code. Example functions may\ninclude a concluding line comment that begins with \"Output:\" and is compared with\nthe standard output of the function when the tests are run. (The comparison\nignores leading and trailing space.) These are examples of an example:\n\n\tfunc ExampleHello() {\n\t    fmt.Println(\"hello\")\n\t    // Output: hello\n\t}\n\n\tfunc ExampleSalutations() {\n\t    fmt.Println(\"hello, and\")\n\t    fmt.Println(\"goodbye\")\n\t    // Output:\n\t    // hello, and\n\t    // goodbye\n\t}\n\nThe comment prefix \"Unordered output:\" is like \"Output:\", but matches any\nline order:\n\n\tfunc ExamplePerm() {\n\t    for _, value := range Perm(5) {\n\t        fmt.Println(value)\n\t    }\n\t    // Unordered output: 4\n\t    // 2\n\t    // 1\n\t    // 3\n\t    // 0\n\t}\n\nExample functions without output comments are compiled but not executed.\n\nThe naming convention to declare examples for the package, a function F, a type T and\nmethod M on type T are:\n\n\tfunc Example() { ... }\n\tfunc ExampleF() { ... }\n\tfunc ExampleT() { ... }\n\tfunc ExampleT_M() { ... }\n\nMultiple example functions for a package/type/function/method may be provided by\nappending a distinct suffix to the name. The suffix must start with a\nlower-case letter.\n\n\tfunc Example_suffix() { ... }\n\tfunc ExampleF_suffix() { ... }\n\tfunc ExampleT_suffix() { ... }\n\tfunc ExampleT_M_suffix() { ... }\n\nThe entire test file is presented as the example when it contains a single\nexample function, at least one other function, type, variable, or constant\ndeclaration, and no test or benchmark functions.\n\n# Fuzzing\n\n'go test' and the testing package support fuzzing, a testing technique where\na function is called with randomly generated inputs to find bugs not\nanticipated by unit tests.\n\nFunctions of the form\n\n\tfunc FuzzXxx(*testing.F)\n\nare considered fuzz tests.\n\nFor example:\n\n\tfunc FuzzHex(f *testing.F) {\n\t  for _, seed := range [][]byte{{}, {0}, {9}, {0xa}, {0xf}, {1, 2, 3, 4}} {\n\t    f.Add(seed)\n\t  }\n\t  f.Fuzz(func(t *testing.T, in []byte) {\n\t    enc := hex.EncodeToString(in)\n\t    out, err := hex.DecodeString(enc)\n\t    if err != nil {\n\t      t.Fatalf(\"%v: decode: %v\", in, err)\n\t    }\n\t    if !bytes.Equal(in, out) {\n\t      t.Fatalf(\"%v: not equal after round trip: %v\", in, out)\n\t    }\n\t  })\n\t}\n\nA fuzz test maintains a seed corpus, or a set of inputs which are run by\ndefault, and can seed input generation. Seed inputs may be registered by\ncalling [F.Add] or by storing files in the directory testdata/fuzz/<Name>\n(where <Name> is the name of the fuzz test) within the package containing\nthe fuzz test. Seed inputs are optional, but the fuzzing engine may find\nbugs more efficiently when provided with a set of small seed inputs with good\ncode coverage. These seed inputs can also serve as regression tests for bugs\nidentified through fuzzing.\n\nThe function passed to [F.Fuzz] within the fuzz test is considered the fuzz\ntarget. A fuzz target must accept a [*T] parameter, followed by one or more\nparameters for random inputs. The types of arguments passed to [F.Add] must\nbe identical to the types of these parameters. The fuzz target may signal\nthat it's found a problem the same way tests do: by calling [T.Fail] (or any\nmethod that calls it like [T.Error] or [T.Fatal]) or by panicking.\n\nWhen fuzzing is enabled (by setting the -fuzz flag to a regular expression\nthat matches a specific fuzz test), the fuzz target is called with arguments\ngenerated by repeatedly making random changes to the seed inputs. On\nsupported platforms, 'go test' compiles the test executable with fuzzing\ncoverage instrumentation. The fuzzing engine uses that instrumentation to\nfind and cache inputs that expand coverage, increasing the likelihood of\nfinding bugs. If the fuzz target fails for a given input, the fuzzing engine\nwrites the inputs that caused the failure to a file in the directory\ntestdata/fuzz/<Name> within the package directory. This file later serves as\na seed input. If the file can't be written at that location (for example,\nbecause the directory is read-only), the fuzzing engine writes the file to\nthe fuzz cache directory within the build cache instead.\n\nWhen fuzzing is disabled, the fuzz target is called with the seed inputs\nregistered with [F.Add] and seed inputs from testdata/fuzz/<Name>. In this\nmode, the fuzz test acts much like a regular test, with subtests started\nwith [F.Fuzz] instead of [T.Run].\n\nSee https://go.dev/doc/fuzz for documentation about fuzzing.\n\n# Skipping\n\nTests or benchmarks may be skipped at run time with a call to\n[T.Skip] or [B.Skip]:\n\n\tfunc TestTimeConsuming(t *testing.T) {\n\t    if testing.Short() {\n\t        t.Skip(\"skipping test in short mode.\")\n\t    }\n\t    ...\n\t}\n\nThe [T.Skip] method can be used in a fuzz target if the input is invalid,\nbut should not be considered a failing input. For example:\n\n\tfunc FuzzJSONMarshaling(f *testing.F) {\n\t    f.Fuzz(func(t *testing.T, b []byte) {\n\t        var v interface{}\n\t        if err := json.Unmarshal(b, &v); err != nil {\n\t            t.Skip()\n\t        }\n\t        if _, err := json.Marshal(v); err != nil {\n\t            t.Errorf(\"Marshal: %v\", err)\n\t        }\n\t    })\n\t}\n\n# Subtests and Sub-benchmarks\n\nThe [T.Run] and [B.Run] methods allow defining subtests and sub-benchmarks,\nwithout having to define separate functions for each. This enables uses\nlike table-driven benchmarks and creating hierarchical tests.\nIt also provides a way to share common setup and tear-down code:\n\n\tfunc TestFoo(t *testing.T) {\n\t    // <setup code>\n\t    t.Run(\"A=1\", func(t *testing.T) { ... })\n\t    t.Run(\"A=2\", func(t *testing.T) { ... })\n\t    t.Run(\"B=1\", func(t *testing.T) { ... })\n\t    // <tear-down code>\n\t}\n\nEach subtest and sub-benchmark has a unique name: the combination of the name\nof the top-level test and the sequence of names passed to Run, separated by\nslashes, with an optional trailing sequence number for disambiguation.\n\nThe argument to the -run, -bench, and -fuzz command-line flags is an unanchored regular\nexpression that matches the test's name. For tests with multiple slash-separated\nelements, such as subtests, the argument is itself slash-separated, with\nexpressions matching each name element in turn. Because it is unanchored, an\nempty expression matches any string.\nFor example, using \"matching\" to mean \"whose name contains\":\n\n\tgo test -run ''        # Run all tests.\n\tgo test -run Foo       # Run top-level tests matching \"Foo\", such as \"TestFooBar\".\n\tgo test -run Foo/A=    # For top-level tests matching \"Foo\", run subtests matching \"A=\".\n\tgo test -run /A=1      # For all top-level tests, run subtests matching \"A=1\".\n\tgo test -fuzz FuzzFoo  # Fuzz the target matching \"FuzzFoo\"\n\nThe -run argument can also be used to run a specific value in the seed\ncorpus, for debugging. For example:\n\n\tgo test -run=FuzzFoo/9ddb952d9814\n\nThe -fuzz and -run flags can both be set, in order to fuzz a target but\nskip the execution of all other tests.\n\nSubtests can also be used to control parallelism. A parent test will only\ncomplete once all of its subtests complete. In this example, all tests are\nrun in parallel with each other, and only with each other, regardless of\nother top-level tests that may be defined:\n\n\tfunc TestGroupedParallel(t *testing.T) {\n\t    for _, tc := range tests {\n\t        t.Run(tc.Name, func(t *testing.T) {\n\t            t.Parallel()\n\t            ...\n\t        })\n\t    }\n\t}\n\nRun does not return until parallel subtests have completed, providing a way\nto clean up after a group of parallel tests:\n\n\tfunc TestTeardownParallel(t *testing.T) {\n\t    // This Run will not return until the parallel tests finish.\n\t    t.Run(\"group\", func(t *testing.T) {\n\t        t.Run(\"Test1\", parallelTest1)\n\t        t.Run(\"Test2\", parallelTest2)\n\t        t.Run(\"Test3\", parallelTest3)\n\t    })\n\t    // <tear-down code>\n\t}\n\n# Main\n\nIt is sometimes necessary for a test or benchmark program to do extra setup or teardown\nbefore or after it executes. It is also sometimes necessary to control\nwhich code runs on the main thread. To support these and other cases,\nif a test file contains a function:\n\n\tfunc TestMain(m *testing.M)\n\nthen the generated test will call TestMain(m) instead of running the tests or benchmarks\ndirectly. TestMain runs in the main goroutine and can do whatever setup\nand teardown is necessary around a call to m.Run. m.Run will return an exit\ncode that may be passed to [os.Exit]. If TestMain returns, the test wrapper\nwill pass the result of m.Run to [os.Exit] itself.\n\nWhen TestMain is called, flag.Parse has not been run. If TestMain depends on\ncommand-line flags, including those of the testing package, it should call\n[flag.Parse] explicitly. Command line flags are always parsed by the time test\nor benchmark functions run.\n\nA simple implementation of TestMain is:\n\n\tfunc TestMain(m *testing.M) {\n\t\t// call flag.Parse() here if TestMain uses flags\n\t\tm.Run()\n\t}\n\nTestMain is a low-level primitive and should not be necessary for casual\ntesting needs, where ordinary test functions suffice.\n\n[go help test]: https://pkg.go.dev/cmd/go#hdr-Test_packages\n[go help testflag]: https://pkg.go.dev/cmd/go#hdr-Testing_flags\n" :imports [
+
+
+    ^{:line 402} [bytes "bytes"]
+    ^{:line 403} [context "context"]
+    ^{:line 404} [errors "errors"]
+    ^{:line 405} [flag "flag"]
+    ^{:line 406} [fmt "fmt"]
+    ^{:line 407} [race "internal/race"]
+    ^{:line 408} [io "io"]
+    ^{:line 409} [rand "math/rand"]
+    ^{:line 410} [os "os"]
+    ^{:line 411} [filepath "path/filepath"]
+    ^{:line 412} [reflect "reflect"]
+    ^{:line 413} [runtime "runtime"]
+    ^{:line 414} [debug "runtime/debug"]
+    ^{:line 415} [trace "runtime/trace"]
+    ^{:line 416} [slices "slices"]
+    ^{:line 417} [strconv "strconv"]
+    ^{:line 418} [strings "strings"]
+    ^{:line 419} [sync "sync"]
+    ^{:line 420} [atomic "sync/atomic"]
+    ^{:line 421} [time "time"]
+    ^{:line 422} [unicode "unicode"]
+    ^{:line 423} [_ "unsafe"]]) ; for linkname
+
+
+(go/var ^bool initRan)
+
+(go/var
+  ^{:line 429} [^atomic/Int64 parallelStart] ; number of parallel tests started
+  ^{:line 430} [^atomic/Int64 parallelStop]) ; number of parallel tests stopped
+
+
+
+
+
+
+
+^{:go/end 485} (go/func Init "Init registers testing flags. These flags are automatically registered by\nthe \"go test\" command before running test functions, so Init is only needed\nwhen calling functions such as Benchmark without using \"go test\".\n\nInit is not safe to call concurrently. It has no effect if it was already called.\n" []
+  (when initRan
+    (return))
+
+  (set! initRan true)
+  ;; The short flag requests that tests run more quickly, but its functionality
+  ;; is provided by test writers themselves. The testing package is just its
+  ;; home. The all.bash installation script sets it to make installation more
+  ;; efficient, but by default the flag is off so a plain "go test" will do a
+  ;; full test of the package.
+  (set! short (flag/Bool "test.short" false "run smaller test suite to save time"))
+
+  ;; The failfast flag requests that test execution stop after the first test failure.
+  (set! failFast (flag/Bool "test.failfast" false "do not start new tests after the first test failure"))
+
+  ;; The directory in which to create profile files and the like. When run from
+  ;; "go test", the binary always runs in the source directory for the package;
+  ;; this flag lets "go test" tell the binary to write the files in the directory where
+  ;; the "go test" command is run.
+  (set! outputDir (flag/String "test.outputdir" "" "write profiles to `dir`"))
+  (set! artifacts (flag/Bool "test.artifacts" false "store test artifacts in test.,outputdir"))
+  ;; Report as tests are run; default is silent for success.
+  (flag/Var (addr chatty) "test.v" "verbose: print additional output")
+  (set! count (flag/Uint "test.count" 1 "run tests and benchmarks `n` times"))
+  (set! coverProfile (flag/String "test.coverprofile" "" "write a coverage profile to `file`"))
+  (set! gocoverdir (flag/String "test.gocoverdir" "" "write coverage intermediate files to this directory"))
+  (set! matchList (flag/String "test.list" "" "list tests, examples, and benchmarks matching `regexp` then exit"))
+  (set! match (flag/String "test.run" "" "run only tests and examples matching `regexp`"))
+  (set! skip (flag/String "test.skip" "" "do not list or run tests matching `regexp`"))
+  (set! memProfile (flag/String "test.memprofile" "" "write an allocation profile to `file`"))
+  (set! memProfileRate (flag/Int "test.memprofilerate" 0 "set memory allocation profiling `rate` (see runtime.MemProfileRate)"))
+  (set! cpuProfile (flag/String "test.cpuprofile" "" "write a cpu profile to `file`"))
+  (set! blockProfile (flag/String "test.blockprofile" "" "write a goroutine blocking profile to `file`"))
+  (set! blockProfileRate (flag/Int "test.blockprofilerate" 1 "set blocking profile `rate` (see runtime.SetBlockProfileRate)"))
+  (set! mutexProfile (flag/String "test.mutexprofile" "" "write a mutex contention profile to the named file after execution"))
+  (set! mutexProfileFraction (flag/Int "test.mutexprofilefraction" 1 "if >= 0, calls runtime.SetMutexProfileFraction()"))
+  (set! panicOnExit0 (flag/Bool "test.paniconexit0" false "panic on call to os.Exit(0)"))
+  (set! traceFile (flag/String "test.trace" "" "write an execution trace to `file`"))
+  (set! timeout (flag/Duration "test.timeout" 0 "panic test binary after duration `d` (default 0, timeout disabled)"))
+  (set! cpuListStr (flag/String "test.cpu" "" "comma-separated `list` of cpu counts to run each test with"))
+  (set! parallel (flag/Int "test.parallel" (runtime/GOMAXPROCS 0) "run at most `n` tests in parallel"))
+  (set! testlog (flag/String "test.testlogfile" "" "write test action log to `file` (for use only by cmd/go)"))
+  (set! shuffle (flag/String "test.shuffle" "off" "randomize the execution order of tests and benchmarks"))
+  (set! fullPath (flag/Bool "test.fullpath" false "show full file names in error messages"))
+
+  (initBenchmarkFlags)
+  (initFuzzFlags))
+
+
+(go/var
+
+  ^{:line 489} [^{:tag (* bool) :doc "Flags, registered during Init.\n"} short]
+  ^{:line 490} [^{:tag (* bool)} failFast]
+  ^{:line 491} [^{:tag (* string)} outputDir]
+  ^{:line 492} [^{:tag (* bool)} artifacts]
+  ^{:line 493} [^chattyFlag chatty]
+  ^{:line 494} [^{:tag (* uint)} count]
+  ^{:line 495} [^{:tag (* string)} coverProfile]
+  ^{:line 496} [^{:tag (* string)} gocoverdir]
+  ^{:line 497} [^{:tag (* string)} matchList]
+  ^{:line 498} [^{:tag (* string)} match]
+  ^{:line 499} [^{:tag (* string)} skip]
+  ^{:line 500} [^{:tag (* string)} memProfile]
+  ^{:line 501} [^{:tag (* int)} memProfileRate]
+  ^{:line 502} [^{:tag (* string)} cpuProfile]
+  ^{:line 503} [^{:tag (* string)} blockProfile]
+  ^{:line 504} [^{:tag (* int)} blockProfileRate]
+  ^{:line 505} [^{:tag (* string)} mutexProfile]
+  ^{:line 506} [^{:tag (* int)} mutexProfileFraction]
+  ^{:line 507} [^{:tag (* bool)} panicOnExit0]
+  ^{:line 508} [^{:tag (* string)} traceFile]
+  ^{:line 509} [^{:tag (* time/Duration)} timeout]
+  ^{:line 510} [^{:tag (* string)} cpuListStr]
+  ^{:line 511} [^{:tag (* int)} parallel]
+  ^{:line 512} [^{:tag (* string)} shuffle]
+  ^{:line 513} [^{:tag (* string)} testlog]
+  ^{:line 514} [^{:tag (* bool)} fullPath]
+
+  ^{:line 516} [^bool haveExamples] ; are there examples?
+
+  ^{:line 518} [^{:tag (slice int)} cpuList]
+  ^{:line 519} [^{:tag (* os/File)} testlogFile]
+  ^{:line 520} [^string artifactDir]
+
+  ^{:line 522} [^atomic/Uint32 numFailed] ; number of test failures
+
+  ^{:line 524} [^sync/Map running]) ; map[string]time.Time of running, unpaused tests
+
+
+(go/type chattyFlag (struct
+    ^{:line 528 :tag bool} on ; -v is set in some form
+    ^{:line 529 :tag bool} json)) ; -v=test2json is set, to make output better for test2json
+
+
+^{:go/end 532} (go/method IsBoolFlag ^bool [(* chattyFlag)] true)
+
+^{:go/breaks [[4 545]] :go/end 546} (go/method Set ^error [^{:tag (* chattyFlag)} f ^string arg]
+  (switch arg
+    (default
+      (return (fmt/Errorf "invalid flag -test.v=%s" arg)))
+    (case ["true" "test2json"]
+      (set! (.-on f) true)
+      (set! (.-json f) (== arg "test2json")))
+    (case ["false"]
+      (set! (.-on f) false)
+      (set! (.-json f) false)))
+
+  nil)
+
+
+^{:go/breaks [[5 555]] :go/end 556} (go/method String ^string [^{:tag (* chattyFlag)} f]
+  (when (.-json f)
+    (return "test2json"))
+
+  (when (.-on f)
+    (return "true"))
+
+  "false")
+
+
+^{:go/end 563} (go/method Get ^any [^{:tag (* chattyFlag)} f]
+  (when (.-json f)
+    (return "test2json"))
+
+  (.-on f))
+
+
+(go/const
+  ^{:line 566} [^{:tag byte :val 22} markFraming (bit-and-not \V \@)] ; ^V: framing
+  ^{:line 567} [^{:tag byte :val 15} markErrBegin (bit-and-not \O \@)] ; ^O: start of error
+  ^{:line 568} [^{:tag byte :val 14} markErrEnd (bit-and-not \N \@)] ; ^N: end of error
+  ^{:line 569} [^{:tag byte :val 27} markEscape (bit-and-not \[ \@)]) ; ^[: escape
+
+
+^{:go/breaks [[4 576]] :go/end 577} (go/method prefix ^string [^{:tag (* chattyFlag)} f]
+  (when (.-json f)
+    (return (conv string markFraming)))
+
+  "")
+
+
+(go/type chattyPrinter (struct
+    ^{:line 580 :tag io/Writer} w
+    ^{:line 581 :tag sync/Mutex} lastNameMu ; guards lastName
+    ^{:line 582 :tag string} lastName ; last printed test name in chatty mode
+    ^{:line 583 :tag bool} json)) ; -v=json output mode
+
+
+^{:go/end 588} (go/func newChattyPrinter ^{:tag (* chattyPrinter)} [^io/Writer w]
+  (addr (lit chattyPrinter :w w :json (.-json chatty))))
+
+
+
+
+
+
+^{:go/breaks [[5 598]] :go/end 599} (go/method prefix "prefix is like chatty.prefix but using p.json instead of chatty.json.\nUsing p.json allows tests to check the json behavior without modifying\nthe global variable. For convenience, we allow p == nil and treat\nthat as not in json mode (because it's not chatty at all).\n" ^string [^{:tag (* chattyPrinter)} p]
+  (when (and (!= p nil) (.-json p))
+    (return (conv string markFraming)))
+
+  "")
+
+
+
+
+
+^{:go/end 614} (go/method Updatef "Updatef prints a message about the status of the named test to w.\n\nThe formatted message must include the test name itself.\n" [^{:tag (* chattyPrinter)} p ^string testName ^string format & ^{:tag (slice any)} args]
+  (.Lock (.-lastNameMu p))
+  (defer (.Unlock (.-lastNameMu p)))
+
+  ;; Since the message already implies an association with a specific new test,
+  ;; we don't need to check what the old test name was or log an extra NAME line
+  ;; for it. (We're updating it anyway, and the current message already includes
+  ;; the test name.)
+  (set! (.-lastName p) testName)
+  (fmt/Fprintf (.-w p) (+ (.prefix p) format) (spread args)))
+
+
+
+
+^{:go/end 630} (go/method Printf "Printf prints a message, generated by the named test, that does not\nnecessarily mention that tests's name itself.\n" [^{:tag (* chattyPrinter)} p ^string testName ^string format & ^{:tag (slice any)} args]
+  (.Lock (.-lastNameMu p))
+  (defer (.Unlock (.-lastNameMu p)))
+
+  (cond (== (.-lastName p) "")
+    (set! (.-lastName p) testName)
+    (!= (.-lastName p) testName) (do
+      (fmt/Fprintf (.-w p) "%s=== NAME  %s\n" (.prefix p) testName)
+      (set! (.-lastName p) testName)))
+
+
+  (fmt/Fprintf (.-w p) format (spread args)))
+
+
+(go/type stringWriter (interface
+    ^{:line 633} io/Writer
+    ^{:line 634} io/StringWriter))
+
+
+
+(go/type escapeWriter "escapeWriter is a [io.Writer] that escapes test framing markers.\n" (struct
+    ^{:line 639 :tag stringWriter} w))
+
+
+^{:go/end 644} (go/method WriteString [^escapeWriter w ^string s] :results [int error]
+  (.Write w (conv (slice byte) s)))
+
+
+^{:go/end 674} (go/method Write [^escapeWriter w ^{:tag (slice byte)} p] :results [int error]
+  (let [(values ^int n ^int m) (zero int)
+      ^{:line 648 :tag error} err (zero error)]
+    (while (> (len p) 0)
+      (let [i (.nextMark w p)]
+        (when (< i 0)
+          (break))
+
+
+        (set! (values m err) (.Write (.-w w) (subslice p _ i)))
+        (set! n + m)
+        (when (!= err nil)
+          (break))
+
+
+        (set! (values m err) (.Write (.-w w) (lit (slice byte) markEscape (aget p i))))
+        (when (!= err nil)
+          (break))
+
+        (when (!= m 2)
+          (return n (fmt/Errorf "short write")))
+
+        (inc! n)
+        (set! p (subslice p (+ i 1)))))
+
+    (set! (values m err) (.Write (.-w w) p))
+    (set! n + m)
+    (return n err)))
+
+
+^{:go/breaks [[4 683]] :go/end 684} (go/method nextMark ^int [escapeWriter ^{:tag (slice byte)} p]
+  (range [i b p]
+    (switch b
+      (case [markFraming markErrBegin markErrEnd markEscape]
+        (return i))))
+
+
+  -1)
+
+
+
+
+(go/const ^{:val 50 :doc "The maximum number of stack frames to go through when skipping helper functions for\nthe purpose of decorating log messages.\n"} maxStackLen 50)
+
+
+
+(go/type common "common holds the elements common between T and B and\ncaptures common methods such as Errorf.\n" (struct
+    ^{:line 693 :tag sync/RWMutex} mu ; guards this group of fields
+    ^{:line 694 :tag (slice byte)} output ; Output generated by test or benchmark.
+    ^{:line 695 :tag io/Writer} w ; For flushToParent.
+    ^{:line 696 :tag (* outputWriter)} o ; Writes output.
+    ^{:line 697 :tag bool} ran ; Test or benchmark (or one of its subtests) was executed.
+    ^{:line 698 :tag bool} failed ; Test or benchmark has failed.
+    ^{:line 699 :tag bool} skipped ; Test or benchmark has been skipped.
+    ^{:line 700 :tag bool} done ; Test is finished and all subtests have completed.
+    ^{:line 701 :tag (map uintptr (struct))} helperPCs ; functions to be skipped when writing file/line info
+    ^{:line 702 :tag (map string (struct))} helperNames ; helperPCs converted to function names
+    ^{:line 703 :tag (slice (func []))} cleanups ; optional functions to be called at the end of the test
+    ^{:line 704 :tag string} cleanupName ; Name of the cleanup function.
+    ^{:line 705 :tag (slice uintptr)} cleanupPc ; The stack trace at the point where Cleanup was called.
+    ^{:line 706 :tag bool} finished ; Test function has completed.
+    ^{:line 707 :tag bool} inFuzzFn ; Whether the fuzz target, if this is one, is running.
+    ^{:line 708 :tag bool} isSynctest
+
+    ^{:line 710 :tag (* chattyPrinter)} chatty ; A copy of chattyPrinter, if the chatty flag is set.
+    ^{:line 711 :tag bool} bench ; Whether the current test is a benchmark.
+    ^{:line 712 :tag atomic/Bool} hasSub ; whether there are sub-benchmarks.
+    ^{:line 713 :tag atomic/Bool} cleanupStarted ; Registered cleanup callbacks have started to execute
+    ^{:line 714 :tag string} runner ; Function name of tRunner running the test.
+    ^{:line 715 :tag bool} isParallel ; Whether the test is parallel.
+
+    ^{:line 717 :tag (* common)} parent
+    ^{:line 718 :tag int} level ; Nesting depth of test or benchmark.
+    ^{:line 719 :tag (slice uintptr)} creator ; If level > 0, the stack trace at the point where the parent called t.Run.
+    ^{:line 720 :tag string} modulePath
+    ^{:line 721 :tag string} importPath
+    ^{:line 722 :tag string} name ; Name of test or benchmark.
+    ^{:line 723 :tag highPrecisionTime} start ; Time test or benchmark started
+    ^{:line 724 :tag time/Duration} duration
+    ^{:line 725 :tag (chan bool)} barrier ; To signal parallel subtests they may start. Nil when T.Parallel is not present (B) or not usable (when fuzzing).
+    ^{:line 726 :tag (chan bool)} signal ; To signal a test is done.
+    ^{:line 727 :tag (slice (* T))} sub ; Queue of subtests to be run in parallel.
+
+    ^{:line 729 :tag atomic/Int64} lastRaceErrors ; Max value of race.Errors seen during the test or its subtests.
+    ^{:line 730 :tag atomic/Bool} raceErrorLogged
+
+    ^{:line 732 :tag sync/Mutex} tempDirMu
+    ^{:line 733 :tag string} tempDir
+    ^{:line 734 :tag error} tempDirErr
+    ^{:line 735 :tag int32} tempDirSeq
+
+    ^{:line 737 :tag sync/Once} artifactDirOnce
+    ^{:line 738 :tag string} artifactDir
+    ^{:line 739 :tag error} artifactDirErr
+
+    ^{:line 741 :tag context/Context} ctx
+    ^{:line 742 :tag context/CancelFunc} cancelCtx))
+
+
+
+^{:go/end 761} (go/func Short "Short reports whether the -test.short flag is set.\n" ^bool []
+  (when (== short nil)
+    (panic "testing: Short called before Init"))
+
+  ;; Catch code that calls this from TestMain without first calling flag.Parse.
+  (when (not (flag/Parsed))
+    (panic "testing: Short called before Parse"))
+
+
+  (when (== runtime/GOOS "tamago")
+    ;; flag cannot be passed due to lack of os.Args support
+    (return true))
+
+
+  ^{:line 760} @short)
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "testBinary is set by cmd/go to \"1\" if this is a binary built by \"go test\".\nThe value is set to \"1\" by a -X option to cmd/link. We assume that\nbecause this is possible, the compiler will not optimize testBinary\ninto a constant on the basis that it is an unexported package-scope\nvariable that is never changed. If the compiler ever starts implementing\nsuch an optimization, we will need some technique to mark this variable\nas \"changed by a cmd/link -X option\".\n"} testBinary "0")
+
+
+
+
+^{:go/end 777} (go/func Testing "Testing reports whether the current code is being run in a test.\nThis will report true in programs created by \"go test\",\nfalse in programs created by \"go build\".\n" ^bool []
+  (== testBinary "1"))
+
+
+
+
+
+^{:go/end 784} (go/func CoverMode "CoverMode reports what the test coverage mode is set to. The\nvalues are \"set\", \"count\", or \"atomic\". The return value will be\nempty if test coverage is not enabled.\n" ^string []
+  (.-mode cover))
+
+
+
+^{:go/end 793} (go/func Verbose "Verbose reports whether the -test.v flag is set.\n" ^bool []
+  ;; Same as in Short.
+  (when (not (flag/Parsed))
+    (panic "testing: Verbose called before Parse"))
+
+  (.-on chatty))
+
+
+^{:go/end 799} (go/method checkFuzzFn [^{:tag (* common)} c ^string name]
+  (when (.-inFuzzFn c)
+    (panic (fmt/Sprintf "testing: f.%s was called inside the fuzz target, use t.%s instead" name name))))
+
+
+
+
+
+
+
+
+^{:go/end 900} (go/method frameSkip "frameSkip searches, starting after skip frames, for the first caller frame\nin a function not marked as a helper and returns that frame.\nThe search stops if it finds a tRunner function that\nwas the entry point into the test and the test is not a subtest.\nThis function must be called with c.mu held.\n" ^runtime/Frame [^{:tag (* common)} c ^int skip]
+  ;; If the search continues into the parent test, we'll have to hold
+  ;; its mu temporarily. If we then return, we need to unlock it.
+  (let [shouldUnlock false]
+    (defer (^{:go/end 814} (fn []
+          (when shouldUnlock
+            (.Unlock (.-mu c))))))
+
+
+    (let [^{:tag (array maxStackLen uintptr)} pc (zero (array maxStackLen uintptr))
+        ;; Skip two extra frames to account for this function
+        ;; and runtime.Callers itself.
+        ^{:line 818} n (runtime/Callers (+ skip 2) (subslice pc))]
+      (when (== n 0)
+        (panic "testing: zero callers found"))
+
+      (let [frames (runtime/CallersFrames (subslice pc _ n))
+          (values ^runtime/Frame firstFrame ^runtime/Frame prevFrame ^runtime/Frame frame) (zero runtime/Frame)
+          ^{:line 824} skipRange false]
+        (for [more true] more (set! prevFrame frame)
+          (set! (values frame more) (.Next frames))
+          (when skipRange
+            ;; Skip the iterator function when a helper
+            ;; functions does a range over function.
+            (set! skipRange false)
+            (continue))
+
+          (when (== (.-Function frame) "runtime.gopanic")
+            (continue))
+
+          (when (== (.-Function frame) (.-cleanupName c))
+            (set! frames (runtime/CallersFrames (.-cleanupPc c)))
+            (continue))
+
+          (when (== (.-PC firstFrame) 0)
+            (set! firstFrame frame))
+
+          (when (== (.-Function frame) (.-runner c))
+            ;; We've gone up all the way to the tRunner calling
+            ;; the test function (so the user must have
+            ;; called tb.Helper from inside that test function).
+            ;; If this is a top-level test, only skip up to the test function itself.
+            ;; If we're in a subtest, continue searching in the parent test,
+            ;; starting from the point of the call to Run which created this subtest.
+            (when (> (.-level c) 1)
+              (set! frames (runtime/CallersFrames (.-creator c)))
+              (let [parent (.-parent c)]
+                ;; We're no longer looking at the current c after this point,
+                ;; so we should unlock its mu, unless it's the original receiver,
+                ;; in which case our caller doesn't expect us to do that.
+                (when shouldUnlock
+                  (.Unlock (.-mu c)))
+
+                (set! c parent)
+                ;; Remember to unlock c.mu when we no longer need it, either
+                ;; because we went up another nesting level, or because we
+                ;; returned.
+                (set! shouldUnlock true)
+                (.Lock (.-mu c))
+                (continue)))
+
+            (return prevFrame))
+
+          ;; If more helper PCs have been added since we last did the conversion
+          (when (== (.-helperNames c) nil)
+            (set! (.-helperNames c) (make (map string (struct))))
+            (range [pc (.-helperPCs c)]
+              (aset (.-helperNames c) (pcToName pc) (lit (struct)))))
+
+
+
+          (let [fnName (.-Function frame)
+              ;; Ignore trailing -rangeN used for iterator functions.
+              ^:const ^{:line 879 :val "-range"} rangeSuffix "-range"]
+            (when [suffixIdx (strings/LastIndex fnName rangeSuffix)] (> suffixIdx 0)
+              (let [ok true]
+                (for [i (+ suffixIdx (len rangeSuffix))] (< i (len fnName)) (inc! i)
+                  (when (or (< (aget fnName i) \0) (> (aget fnName i) \9))
+                    (set! ok false)
+                    (break)))
+
+
+                (when ok
+                  (set! fnName (subslice fnName _ suffixIdx))
+                  (set! skipRange true))))
+
+
+
+            (when [(values _ ok) (aget (.-helperNames c) fnName)] (not ok)
+              ;; Found a frame that wasn't inside a helper function.
+              (return frame))))
+
+
+        ^{:line 899} firstFrame))))
+
+
+
+
+^{:go/end 941} (go/method flushToParent "flushToParent writes c.output to the parent after first writing the header\nwith the given format and arguments.\n" [^{:tag (* common)} c ^string testName ^string format & ^{:tag (slice any)} args]
+  (let [p (.-parent c)]
+    (.Lock (.-mu p))
+    (defer (.Unlock (.-mu p)))
+
+    (.Lock (.-mu c))
+    (defer (.Unlock (.-mu c)))
+
+    (when (> (len (.-output c)) 0)
+      ;; Add the current c.output to the print,
+      ;; and then arrange for the print to replace c.output.
+      ;; (This displays the logged output after the --- FAIL line.)
+      (set! format + "%s")
+      (set! args (append (subslice args _ (len args) (len args)) (.-output c)))
+      (set! (.-output c) (subslice (.-output c) _ 0)))
+
+
+    (if (and (!= (.-chatty c) nil) ^:go/paren (or (== (.-w p) (.-w (.-chatty c))) (.-json (.-chatty c))))
+      ;; We're flushing to the actual output, so track that this output is
+      ;; associated with a specific test (and, specifically, that the next output
+      ;; is *not* associated with that test).
+      ;;
+      ;; Moreover, if c.output is non-empty it is important that this write be
+      ;; atomic with respect to the output of other tests, so that we don't end up
+      ;; with confusing '=== NAME' lines in the middle of our '--- PASS' block.
+      ;; Neither humans nor cmd/test2json can parse those easily.
+      ;; (See https://go.dev/issue/40771.)
+      ;;
+      ;; If test2json is used, we never flush to parent tests,
+      ;; so that the json stream shows subtests as they finish.
+      ;; (See https://go.dev/issue/29811.)
+      (.Updatef (.-chatty c) testName format (spread args))
+
+      ;; We're flushing to the output buffer of the parent test, which will
+      ;; itself follow a test-name header when it is finally flushed to stdout.
+      (fmt/Fprintf (.-w p) (+ (.prefix (.-chatty c)) format) (spread args)))))
+
+
+
+(go/type indenter (struct
+    ^{:line 944 :tag (* common)} c))
+
+
+(go/const ^{:val "    "} indent "    ")
+
+^{:go/end 970} (go/method Write [^indenter w ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (set! n (len b))
+  (while (> (len b) 0)
+    (let [end (bytes/IndexByte b \newline)]
+      (if (== end -1)
+        (set! end (len b))
+
+        (inc! end))
+
+      ;; An indent of 4 spaces will neatly align the dashes with the status
+      ;; indicator of the parent.
+      (let [line (subslice b _ end)]
+        (when (== (aget line 0) markFraming)
+          (set! (.-output (.-c w)) (append (.-output (.-c w)) markFraming))
+          (set! line (subslice line 1)))
+
+        (set! (.-output (.-c w)) (append (.-output (.-c w)) (spread indent)))
+        (set! (.-output (.-c w)) (append (.-output (.-c w)) (spread line)))
+        (set! b (subslice b end)))))
+
+  (return))
+
+
+
+^{:go/end 975} (go/func fmtDuration "fmtDuration returns a string representing d in the form \"87.00s\".\n" ^string [^time/Duration d]
+  (fmt/Sprintf "%.2fs" (.Seconds d)))
+
+
+
+(go/type TB "TB is the interface common to [T], [B], and [F].\n" (interface
+    (ArtifactDir ^string [])
+    (Attr [^string key ^string value])
+    (Cleanup [(func [])])
+    (Error [& ^{:tag (slice any)} args])
+    (Errorf [^string format & ^{:tag (slice any)} args])
+    (Fail [])
+    (FailNow [])
+    (Failed ^bool [])
+    (Fatal [& ^{:tag (slice any)} args])
+    (Fatalf [^string format & ^{:tag (slice any)} args])
+    (Helper [])
+    (Log [& ^{:tag (slice any)} args])
+    (Logf [^string format & ^{:tag (slice any)} args])
+    (Name ^string [])
+    (Setenv [^string key ^string value])
+    (Chdir [^string dir])
+    (Skip [& ^{:tag (slice any)} args])
+    (SkipNow [])
+    (Skipf [^string format & ^{:tag (slice any)} args])
+    (Skipped ^bool [])
+    (TempDir ^string [])
+    (Context ^context/Context [])
+    (Output ^io/Writer [])
+
+
+
+
+    (^{:doc "A private method to prevent users implementing the\ninterface and so future additions to it will not\nviolate Go 1 compatibility.\n"} private [])))
+
+
+(go/var
+  ^{:line 1010} [^TB _ (conv (* T) nil)]
+  ^{:line 1011} [^TB _ (conv (* B) nil)])
+
+
+
+
+
+
+
+
+
+
+
+(go/type T "T is a type passed to Test functions to manage test state and support formatted test logs.\n\nA test ends when its Test function returns or calls any of the methods\n[T.FailNow], [T.Fatal], [T.Fatalf], [T.SkipNow], [T.Skip], or [T.Skipf]. Those methods, as well as\nthe [T.Parallel] method, must be called only from the goroutine running the\nTest function.\n\nThe other reporting methods, such as the variations of [T.Log] and [T.Error],\nmay be called simultaneously from multiple goroutines.\n" (struct
+    ^{:line 1024} common
+    ^{:line 1025 :tag bool} denyParallel
+    ^{:line 1026 :tag (* testState)} tstate)) ; For running tests and subtests.
+
+
+^{:go/end 1029} (go/method private [^{:tag (* common)} c])
+
+
+
+
+
+
+^{:go/end 1038} (go/method Name "Name returns the name of the running (sub-) test or benchmark.\n\nThe name will include the name of the test along with the names of\nany nested sub-tests. If two sibling sub-tests have the same name,\nName will append a suffix to guarantee the returned name is unique.\n" ^string [^{:tag (* common)} c]
+  (.-name c))
+
+
+^{:go/end 1047} (go/method setRan [^{:tag (* common)} c]
+  (when (!= (.-parent c) nil)
+    (.setRan (.-parent c)))
+
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  (set! (.-ran c) true))
+
+
+
+^{:go/end 1061} (go/method Fail "Fail marks the function as having failed but continues execution.\n" [^{:tag (* common)} c]
+  (when (!= (.-parent c) nil)
+    (.Fail (.-parent c)))
+
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  ;; c.done needs to be locked to synchronize checks to c.done in parent tests.
+  (when (.-done c)
+    (panic (+ "Fail in goroutine after " (.-name c) " has completed")))
+
+  (set! (.-failed c) true))
+
+
+
+^{:go/end 1075} (go/method Failed "Failed reports whether the function has failed.\n" ^bool [^{:tag (* common)} c]
+  (.RLock (.-mu c))
+  (defer (.RUnlock (.-mu c)))
+
+  (when (and (not (.-done c)) (> (conv int64 (race/Errors)) (.Load (.-lastRaceErrors c))))
+    (.RUnlock (.-mu c))
+    (.checkRaces c)
+    (.RLock (.-mu c)))
+
+
+  (.-failed c))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1112} (go/method FailNow "FailNow marks the function as having failed and stops its execution\nby calling [runtime.Goexit] (which then runs all deferred calls in the\ncurrent goroutine).\nExecution will continue at the next test or benchmark.\nFailNow must be called from the goroutine running the\ntest or benchmark function, not from other goroutines\ncreated during the test. Calling FailNow does not stop\nthose other goroutines.\n" [^{:tag (* common)} c]
+  (.checkFuzzFn c "FailNow")
+  (.Fail c)
+
+  ;; Calling runtime.Goexit will exit the goroutine, which
+  ;; will run the deferred functions in this goroutine,
+  ;; which will eventually run the deferred lines in tRunner,
+  ;; which will signal to the test loop that this test is done.
+  ;;
+  ;; A previous version of this code said:
+  ;;
+  ;;	c.duration = ...
+  ;;	c.signal <- c.self
+  ;;	runtime.Goexit()
+  ;;
+  ;; This previous version duplicated code (those lines are in
+  ;; tRunner no matter what), but worse the goroutine teardown
+  ;; implicit in runtime.Goexit was not guaranteed to complete
+  ;; before the test exited. If a test deferred an important cleanup
+  ;; function (like removing temporary files), there was no guarantee
+  ;; it would run on a test failure. Because we send on c.signal during
+  ;; a top-of-stack deferred function now, we know that the send
+  ;; only happens after any other stacked defers have completed.
+  (.Lock (.-mu c))
+  (set! (.-finished c) true)
+  (.Unlock (.-mu c))
+  (runtime/Goexit))
+
+
+
+
+
+^{:go/end 1139} (go/method log "log generates the output. It is always at the same stack depth. log inserts\nindentation and the final newline if necessary. It prefixes the string\nwith the file and line of the call site.\n" [^{:tag (* common)} c ^string s ^bool isErr]
+  (set! s (strings/TrimSuffix s "\n"))
+
+  ;; Second and subsequent lines are indented 4 spaces. This is in addition to
+  ;; the indentation provided by outputWriter.
+  (set! s (strings/ReplaceAll s "\n" (+ "\n" indent)))
+  (set! s + "\n")
+
+  (let [n (.destination c)]
+    (when (== n nil)
+      ;; The test and all its parents are done. The log cannot be output.
+      (panic (+ "Log in goroutine after " (.-name c) " has completed: " s)))
+
+
+    ;; Prefix with the call site. It is located by skipping 3 functions:
+    ;; callSite + log + public function
+    (set! s (+ (.callSite n 3) s))
+
+    ;; Output buffered logs.
+    (.flushPartial n)
+
+    (.write (.-o n) (conv (slice byte) s) isErr)))
+
+
+
+
+^{:go/breaks [[8 1157]] :go/end 1158} (go/method destination "destination selects the test to which output should be appended. It returns the\ntest if it is incomplete. Otherwise, it finds its closest incomplete parent.\n" ^{:tag (* common)} [^{:tag (* common)} c]
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+
+  (when (and (not (.-done c)) (not (.-isSynctest c)))
+    (return c))
+
+  (for [parent (.-parent c)] (!= parent nil) (set! parent (.-parent parent))
+    (.Lock (.-mu parent))
+    (defer (.Unlock (.-mu parent)))
+    (when (not (.-done parent))
+      (return parent)))
+
+
+  nil)
+
+
+
+^{:go/end 1182} (go/method callSite "callSite retrieves and formats the file and line of the call site.\n" ^string [^{:tag (* common)} c ^int skip]
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+
+  (let [frame (.frameSkip c skip)
+      ^{:line 1166} file (.-File frame)
+      ^{:line 1167} line (.-Line frame)]
+    (if (!= file "")
+      (if @fullPath (do)
+        ;; If relative path, truncate file name at last file name separator.
+
+        (set! file (filepath/Base file)))
+
+
+      (set! file "???"))
+
+    (when (== line 0)
+      (set! line 1))
+
+
+    (fmt/Sprintf "%s:%d: " file line)))
+
+
+
+^{:go/end 1195} (go/method flushPartial "flushPartial checks the buffer for partial logs and outputs them.\n" [^{:tag (* common)} c]
+  (let [partial ^{:go/end 1190} (fn ^bool []
+        (.Lock (.-mu c))
+        (defer (.Unlock (.-mu c)))
+        (and ^:go/paren (!= (.-o c) nil) ^:go/paren (> (len (.-partial (.-o c))) 0)))]
+
+
+    (when (partial)
+      (.Write (.-o c) (conv (slice byte) "\n")))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1210} (go/method Output "Output returns a Writer that writes to the same test output stream as TB.Log.\nThe output is indented like TB.Log lines, but Output does not\nadd source locations or newlines. The output is internally line\nbuffered, and a call to TB.Log or the end of the test will implicitly\nflush the buffer, followed by a newline. After a test function and all its\nparents return, neither Output nor the Write method may be called.\n" ^io/Writer [^{:tag (* common)} c]
+  (.checkFuzzFn c "Output")
+  (let [n (.destination c)]
+    (when (== n nil)
+      (panic (+ "Output called after " (.-name c) " has completed")))
+
+    (.-o n)))
+
+
+
+^{:go/end 1215} (go/method setOutputWriter "setOutputWriter initializes an outputWriter and sets it as a common field.\n" [^{:tag (* common)} c]
+  (set! (.-o c) (addr (lit outputWriter :c c))))
+
+
+
+(go/type outputWriter "outputWriter buffers, formats and writes log messages.\n" (struct
+    ^{:line 1219 :tag (* common)} c
+    ^{:line 1220 :tag (slice byte)} partial)) ; incomplete ('\n'-free) suffix of last Write
+
+
+
+
+^{:go/end 1227} (go/method Write "Write writes a log message to the test's output stream, properly formatted and\nindented. It may not be called after a test function and all its parents return.\n" [^{:tag (* outputWriter)} o ^{:tag (slice byte)} p] :results [int error]
+  (.write o p false))
+
+
+^{:go/end 1257} (go/method write [^{:tag (* outputWriter)} o ^{:tag (slice byte)} p ^bool isErr] :results [int error]
+  ;; o can be nil if this is called from a top-level *TB that is no longer active.
+  ;; Just ignore the message in that case.
+  (when (or (== o nil) (== (.-c o) nil))
+    (return 0 nil))
+
+  (when (== (.destination (.-c o)) nil)
+    (panic (+ "Write called after " (.-name (.-c o)) " has completed")))
+
+
+  (.Lock (.-mu (.-c o)))
+  (defer (.Unlock (.-mu (.-c o))))
+
+  ;; The last element is a partial line.
+  (let [lines (bytes/SplitAfter p (conv (slice byte) "\n"))
+      ^{:line 1244} last (- (len lines) 1)] ; Inv: 0 <= last
+    (range [i line (subslice lines _ last)]
+      ;; Emit partial line from previous call.
+      (when (and (== i 0) (> (len (.-partial o)) 0))
+        (set! line (^{:inst [(slice byte) byte]} slices/Concat (.-partial o) line))
+        (set! (.-partial o) (subslice (.-partial o) _ 0)))
+
+      (.writeLine o line (and isErr (== i 0)) (and isErr (== i (- last 1)))))
+
+    ;; Save partial line for next call.
+    (set! (.-partial o) (append (.-partial o) (spread (aget lines last))))
+
+    (return (len p) nil)))
+
+
+
+^{:go/end 1295} (go/method writeLine "writeLine generates the output for a given line.\n" [^{:tag (* outputWriter)} o ^{:tag (slice byte)} b ^bool errBegin ^bool errEnd]
+  (when (or (.-done (.-c o)) ^:go/paren (== (.-chatty (.-c o)) nil))
+    (set! (.-output (.-c o)) (append (.-output (.-c o)) (spread indent)))
+    (set! (.-output (.-c o)) (append (.-output (.-c o)) (spread b)))
+    (return))
+
+
+  ;; Escape the framing marker.
+  (set! b (escapeMarkers b))
+
+  ;; If this is the start of an error, add ^O to the start of the output.
+  (let [(values ^string strErrBegin ^string strErrEnd) (zero string)]
+    (when (and errBegin (.-json (.-chatty (.-c o))))
+      (set! strErrBegin (conv string markErrBegin)))
+
+
+    ;; If this is the end of an error, add ^N to the end of the output. If the
+    ;; last character of the output is \n, add ^N before the \n, otherwise
+    ;; test2json will not handle it correctly.
+    (let [^{:tag (slice byte)} c (zero (slice byte))]
+      (when (and errEnd (.-json (.-chatty (.-c o))))
+        (let [i (len b)]
+          (when (and (> (len b) 0) (== (aget b (- i 1)) \newline))
+            (set! (values b c) (values (subslice b _ (- i 1)) (subslice b (- i 1)))))
+
+          (set! strErrEnd (conv string markErrEnd))))
+
+
+      (if (.-bench (.-c o))
+        ;; Benchmarks don't print === CONT, so we should skip the test
+        ;; printer and just print straight to stdout.
+        (fmt/Printf "%s%s%s%s%s" strErrBegin indent b strErrEnd c)
+
+        (.Printf (.-chatty (.-c o)) (.-name (.-c o)) "%s%s%s%s%s" strErrBegin indent b strErrEnd c)))))
+
+
+
+^{:go/end 1318} (go/func escapeMarkers ^{:tag (slice byte)} [^{:tag (slice byte)} b]
+  (let [j (nextMark b)]
+    (when (< j 0)
+      ;; Allocation-free fast path.
+      (return b))
+
+
+    (let [c (make (slice byte) 0 (+ (len b) 10))
+        ^{:line 1305} i 0]
+      (while (and (< i (len b)) (>= j i))
+        (when (> j i)
+          (set! c (append c (spread (subslice b i j)))))
+
+        (set! c (append c markEscape (aget b j)))
+        (set! i (+ j 1))
+        (set! j (+ i (nextMark (subslice b i)))))
+
+      (when (< i (len b))
+        (set! c (append c (spread (subslice b i)))))
+
+      ^{:line 1317} c)))
+
+
+^{:go/breaks [[4 1327]] :go/end 1328} (go/func nextMark ^int [^{:tag (slice byte)} b]
+  (range [i b b]
+    (switch b
+      (case [markFraming markEscape markErrBegin markErrEnd]
+        (return i))))
+
+
+  -1)
+
+
+
+
+
+
+
+^{:go/end 1338} (go/method Log "Log formats its arguments using default formatting, analogous to [fmt.Println],\nand records the text in the error log. For tests, the text will be printed only if\nthe test fails or the -test.v flag is set. For benchmarks, the text is always\nprinted to avoid having performance depend on the value of the -test.v flag.\nIt is an error to call Log after a test or benchmark returns.\n" [^{:tag (* common)} c & ^{:tag (slice any)} args]
+  (.checkFuzzFn c "Log")
+  (.log c (fmt/Sprintln (spread args)) false))
+
+
+
+
+
+
+
+
+^{:go/end 1349} (go/method Logf "Logf formats its arguments according to the format, analogous to [fmt.Printf], and\nrecords the text in the error log. A final newline is added if not provided. For\ntests, the text will be printed only if the test fails or the -test.v flag is\nset. For benchmarks, the text is always printed to avoid having performance\ndepend on the value of the -test.v flag.\nIt is an error to call Logf after a test or benchmark returns.\n" [^{:tag (* common)} c ^string format & ^{:tag (slice any)} args]
+  (.checkFuzzFn c "Logf")
+  (.log c (fmt/Sprintf format (spread args)) false))
+
+
+
+^{:go/end 1356} (go/method Error "Error is equivalent to Log followed by Fail.\n" [^{:tag (* common)} c & ^{:tag (slice any)} args]
+  (.checkFuzzFn c "Error")
+  (.log c (fmt/Sprintln (spread args)) true)
+  (.Fail c))
+
+
+
+^{:go/end 1363} (go/method Errorf "Errorf is equivalent to Logf followed by Fail.\n" [^{:tag (* common)} c ^string format & ^{:tag (slice any)} args]
+  (.checkFuzzFn c "Errorf")
+  (.log c (fmt/Sprintf format (spread args)) true)
+  (.Fail c))
+
+
+
+^{:go/end 1370} (go/method Fatal "Fatal is equivalent to Log followed by FailNow.\n" [^{:tag (* common)} c & ^{:tag (slice any)} args]
+  (.checkFuzzFn c "Fatal")
+  (.log c (fmt/Sprintln (spread args)) true)
+  (.FailNow c))
+
+
+
+^{:go/end 1377} (go/method Fatalf "Fatalf is equivalent to Logf followed by FailNow.\n" [^{:tag (* common)} c ^string format & ^{:tag (slice any)} args]
+  (.checkFuzzFn c "Fatalf")
+  (.log c (fmt/Sprintf format (spread args)) true)
+  (.FailNow c))
+
+
+
+^{:go/end 1384} (go/method Skip "Skip is equivalent to Log followed by SkipNow.\n" [^{:tag (* common)} c & ^{:tag (slice any)} args]
+  (.checkFuzzFn c "Skip")
+  (.log c (fmt/Sprintln (spread args)) false)
+  (.SkipNow c))
+
+
+
+^{:go/end 1391} (go/method Skipf "Skipf is equivalent to Logf followed by SkipNow.\n" [^{:tag (* common)} c ^string format & ^{:tag (slice any)} args]
+  (.checkFuzzFn c "Skipf")
+  (.log c (fmt/Sprintf format (spread args)) false)
+  (.SkipNow c))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1408} (go/method SkipNow "SkipNow marks the test as having been skipped and stops its execution\nby calling [runtime.Goexit].\nIf a test fails (see Error, Errorf, Fail) and is then skipped,\nit is still considered to have failed.\nExecution will continue at the next test or benchmark. See also FailNow.\nSkipNow must be called from the goroutine running the test, not from\nother goroutines created during the test. Calling SkipNow does not stop\nthose other goroutines.\n" [^{:tag (* common)} c]
+  (.checkFuzzFn c "SkipNow")
+  (.Lock (.-mu c))
+  (set! (.-skipped c) true)
+  (set! (.-finished c) true)
+  (.Unlock (.-mu c))
+  (runtime/Goexit))
+
+
+
+^{:go/end 1415} (go/method Skipped "Skipped reports whether the test was skipped.\n" ^bool [^{:tag (* common)} c]
+  (.RLock (.-mu c))
+  (defer (.RUnlock (.-mu c)))
+  (.-skipped c))
+
+
+
+
+
+^{:go/end 1439} (go/method Helper "Helper marks the calling function as a test helper function.\nWhen printing file and line information, that function will be skipped.\nHelper may be called simultaneously from multiple goroutines.\n" [^{:tag (* common)} c]
+  (when (.-isSynctest c)
+    (set! c (.-parent c)))
+
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  (when (== (.-helperPCs c) nil)
+    (set! (.-helperPCs c) (make (map uintptr (struct)))))
+
+  ;; repeating code from callerName here to save walking a stack frame
+  (let [^{:tag (array 1 uintptr)} pc (zero (array 1 uintptr))
+      ^{:line 1431} n (runtime/Callers 2 (subslice pc))] ; skip runtime.Callers + Helper
+    (when (== n 0)
+      (panic "testing: zero callers found"))
+
+    (when [(values _ found) (aget (.-helperPCs c) (aget pc 0))] (not found)
+      (aset (.-helperPCs c) (aget pc 0) (lit (struct)))
+      (set! (.-helperNames c) nil)))) ; map will be recreated next time it is needed
+
+
+
+
+
+
+^{:go/end 1471} (go/method Cleanup "Cleanup registers a function to be called when the test (or subtest) and all its\nsubtests complete. Cleanup functions will be called in last added,\nfirst called order.\n" [^{:tag (* common)} c ^{:tag (func [])} f]
+  (.checkFuzzFn c "Cleanup")
+  (let [^{:tag (array maxStackLen uintptr)} pc (zero (array maxStackLen uintptr))
+      ;; Skip two extra frames to account for this function and runtime.Callers itself.
+      ^{:line 1448} n (runtime/Callers 2 (subslice pc))
+      ^{:line 1449} cleanupPc (subslice pc _ n)
+
+      ^{:line 1451} fn ^{:go/end 1466} (fn []
+        (defer (^{:go/end 1457} (fn []
+              (.Lock (.-mu c))
+              (defer (.Unlock (.-mu c)))
+              (set! (.-cleanupName c) "")
+              (set! (.-cleanupPc c) nil))))
+
+
+        (let [name (callerName 0)]
+          (.Lock (.-mu c))
+          (set! (.-cleanupName c) name)
+          (set! (.-cleanupPc c) cleanupPc)
+          (.Unlock (.-mu c))
+
+          (f)))]
+
+
+    (.Lock (.-mu c))
+    (defer (.Unlock (.-mu c)))
+    (set! (.-cleanups c) (append (.-cleanups c) fn))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1490} (go/method ArtifactDir "ArtifactDir returns a directory in which the test should store output files.\nWhen the -artifacts flag is provided, this directory is located\nunder the output directory. Otherwise, ArtifactDir returns a temporary directory\nthat is removed after the test completes.\n\nEach test or subtest within each test package has a unique artifact directory.\nRepeated calls to ArtifactDir in the same test or subtest return the same directory.\nSubtest outputs are not located under the parent test's output directory.\n" ^string [^{:tag (* common)} c]
+  (.checkFuzzFn c "ArtifactDir")
+  (.Do (.-artifactDirOnce c) ^{:go/end 1485} (fn []
+      (set! (values (.-artifactDir c) (.-artifactDirErr c)) (.makeArtifactDir c))))
+
+  (when (!= (.-artifactDirErr c) nil)
+    (.Fatalf c "ArtifactDir: %v" (.-artifactDirErr c)))
+
+  (.-artifactDir c))
+
+
+^{:go/end 1499} (go/func hashString [^string s] :results [^uint64 h]
+  ;; FNV, used here to avoid a dependency on maphash.
+  (for [i 0] (< i (len s)) (inc! i)
+    (set! h bit-xor (conv uint64 (aget s i)))
+    (set! h * 1099511628211))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1526} (go/method makeArtifactDir "makeArtifactDir creates the artifact directory for a test.\nThe artifact directory is:\n\n\t<output dir>/_artifacts/<test package>/<test name>/<random>\n\nThe test package is the package import path with the module name prefix removed.\nThe test name is truncated if too long.\nSpecial characters are removed from the path.\n" [^{:tag (* common)} c] :results [string error]
+  (when (not @artifacts)
+    (return (.makeTempDir c)))
+
+
+  (let [artifactBase (filepath/Join artifactDir (.relativeArtifactBase c))]
+    (when [err (os/MkdirAll artifactBase 0777)] (!= err nil)
+      (return "" err))
+
+    (let [(values dir err) (os/MkdirTemp artifactBase "")]
+      (when (!= err nil)
+        (return "" err))
+
+      (when (!= (.-chatty c) nil)
+        (.Updatef (.-chatty c) (.-name c) "=== ARTIFACTS %s %v\n" (.-name c) dir))
+
+      (return dir nil))))
+
+
+^{:go/end 1559} (go/method relativeArtifactBase ^string [^{:tag (* common)} c]
+  ;; If the test name is longer than maxNameSize, truncate it and replace the last
+  ;; hashSize bytes with a hash of the full name.
+  (let [^:const ^{:val 64} maxNameSize 64
+      ^{:line 1532} name (strings/ReplaceAll (.-name c) "/" "__")]
+    (when (> (len name) maxNameSize)
+      (let [h (fmt/Sprintf "%0x" (hashString name))]
+        (set! name (+ (subslice name _ (- maxNameSize (len h))) h))))
+
+
+    ;; Remove the module path prefix from the import path.
+    ;; If this is the root package, pkg will be empty.
+    (let [pkg (strings/TrimPrefix (.-importPath c) (.-modulePath c))]
+      ;; Remove the leading slash.
+      (set! pkg (strings/TrimPrefix pkg "/"))
+
+      (let [base name]
+        (when (!= pkg "")
+          ;; Join with /, not filepath.Join: the import path is /-separated,
+          ;; and we don't want removeSymbolsExcept to strip \ separators on Windows.
+          (set! base (+ pkg "/" name)))
+
+        (set! base (removeSymbolsExcept base "!#$%&()+,-.=@^_{}~ /"))
+        (let [(values ^:assign base err) (filepath/Localize base)]
+          (when (!= err nil)
+            ;; This name can't be safely converted into a local filepath.
+            ;; Drop it and just use _artifacts/<random>.
+            (set! base ""))
+
+
+          ^{:line 1558} base)))))
+
+
+^{:go/end 1571} (go/func removeSymbolsExcept ^string [^string s ^string allowed]
+  (let [mapper ^{:go/breaks [[3 1568]] :go/end 1569} (fn ^rune [^rune r]
+        (when (or (unicode/IsLetter r)
+            (unicode/IsNumber r)
+            (strings/ContainsRune allowed r))
+          (return r))
+
+        -1)] ; disallowed symbol
+
+    (strings/Map mapper s)))
+
+
+
+
+
+
+
+
+
+^{:go/end 1587} (go/method TempDir "TempDir returns a temporary directory for the test to use.\nThe directory is automatically removed when the test and\nall its subtests complete.\nEach subsequent call to TempDir returns a unique directory;\nif the directory creation fails, TempDir terminates the test by calling Fatal.\nIf the environment variable GOTMPDIR is set, the temporary directory will\nbe created somewhere beneath it.\n" ^string [^{:tag (* common)} c]
+  (.checkFuzzFn c "TempDir")
+  (let [(values dir err) (.makeTempDir c)]
+    (when (!= err nil)
+      (.Fatalf c "TempDir: %v" err))
+
+    ^{:line 1586} dir))
+
+
+^{:go/end 1643} (go/method makeTempDir [^{:tag (* common)} c] :results [string error]
+  ;; Use a single parent directory for all the temporary directories
+  ;; created by a test, each numbered sequentially.
+  (.Lock (.-tempDirMu c))
+  (let [^bool nonExistent (zero bool)]
+    (if (== (.-tempDir c) "") ; Usually the case with js/wasm
+      (set! nonExistent true)
+
+      (let [(values _ err) (os/Stat (.-tempDir c))]
+        (set! nonExistent (os/IsNotExist err))
+        (when (and (!= err nil) (not nonExistent))
+          (return "" err))))
+
+
+
+    (when nonExistent
+      (.Helper c)
+
+      (let [pattern (.Name c)]
+        ;; Limit length of file names on disk.
+        ;; Invalid runes from slicing are dropped by strings.Map below.
+        (set! pattern (subslice pattern _ (min (len pattern) 64)))
+
+        ;; Drop unusual characters (such as path separators or
+        ;; characters interacting with globs) from the directory name to
+        ;; avoid surprising os.MkdirTemp behavior.
+        (let [^:const ^{:val "!#$%&()+,-.=@^_{}~ "} allowed "!#$%&()+,-.=@^_{}~ "]
+          (set! pattern (removeSymbolsExcept pattern allowed))
+
+          (set! (values (.-tempDir c) (.-tempDirErr c)) (os/MkdirTemp (os/Getenv "GOTMPDIR") pattern))
+          (when (== (.-tempDirErr c) nil)
+            (.Cleanup c ^{:go/end 1624} (fn []
+                (when [err (removeAll (.-tempDir c))] (!= err nil)
+                  (.Errorf c "TempDir RemoveAll cleanup: %v" err))))))))
+
+
+
+
+
+    (when (== (.-tempDirErr c) nil)
+      (inc! (.-tempDirSeq c)))
+
+    (let [seq (.-tempDirSeq c)]
+      (.Unlock (.-tempDirMu c))
+
+      (when (!= (.-tempDirErr c) nil)
+        (return "" (.-tempDirErr c)))
+
+
+      (let [dir (fmt/Sprintf "%s%c%03d" (.-tempDir c) os/PathSeparator seq)]
+        (when [err (os/Mkdir dir 0777)] (!= err nil)
+          (return "" err))
+
+        (return dir nil)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1673} (go/func removeAll "removeAll is like os.RemoveAll, but retries Windows \"Access is denied.\"\nerrors up to an arbitrary timeout.\n\nThose errors have been known to occur spuriously on at least the\nwindows-amd64-2012 builder (https://go.dev/issue/50051), and can only occur\nlegitimately if the test leaves behind a temp file that either is still open\nor the test otherwise lacks permission to delete. In the case of legitimate\nfailures, a failing test may take a bit longer to fail, but once the test is\nfixed the extra latency will go away.\n" ^error [^string path]
+  (let [^:const ^{:val 2000000000} arbitraryTimeout (* 2 time/Second)
+
+      ^{:line 1657 :tag time/Time} start (zero time/Time)
+      ^:var ^{:line 1658} nextSleep (* 1 time/Millisecond)]
+
+    (while true
+      (let [err (os/RemoveAll path)]
+        (when (not (isWindowsRetryable err))
+          (return err))
+
+        (if (.IsZero start)
+          (set! start (time/Now))
+          (when [d (+ (time/Since start) nextSleep)] (>= d arbitraryTimeout)
+            (return err)))
+
+        (time/Sleep nextSleep)
+        (set! nextSleep + (conv time/Duration (rand/Int63n (conv int64 nextSleep))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1698} (go/method Setenv "Setenv calls [os.Setenv] and uses Cleanup to\nrestore the environment variable to its original value\nafter the test.\n\nBecause Setenv affects the whole process, it cannot be used\nin parallel tests or tests with parallel ancestors.\n" [^{:tag (* common)} c ^string key ^string value]
+  (.checkFuzzFn c "Setenv")
+  (let [(values prevValue ok) (os/LookupEnv key)]
+
+    (when [err (os/Setenv key value)] (!= err nil)
+      (.Fatalf c "cannot set environment variable: %v" err))
+
+
+    (if ok
+      (.Cleanup c ^{:go/end 1692} (fn []
+          (os/Setenv key prevValue)))
+
+
+      (.Cleanup c ^{:go/end 1696} (fn []
+          (os/Unsetenv key))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1740} (go/method Chdir "Chdir calls [os.Chdir] and uses Cleanup to restore the current\nworking directory to its original value after the test. On Unix, it\nalso sets PWD environment variable for the duration of the test.\n\nBecause Chdir affects the whole process, it cannot be used\nin parallel tests or tests with parallel ancestors.\n" [^{:tag (* common)} c ^string dir]
+  (.checkFuzzFn c "Chdir")
+  (let [(values oldwd err) (os/Open ".")]
+    (when (!= err nil)
+      (.Fatal c err))
+
+    (when [err (os/Chdir dir)] (!= err nil)
+      (.Fatal c err))
+
+    ;; On POSIX platforms, PWD represents “an absolute pathname of the
+    ;; current working directory.” Since we are changing the working
+    ;; directory, we should also set or update PWD to reflect that.
+    (switch runtime/GOOS
+      (case ["windows" "plan9"])
+      ;; Windows and Plan 9 do not use the PWD variable.
+      (default
+        (when (not (filepath/IsAbs dir))
+          (set! (values dir err) (os/Getwd))
+          (when (!= err nil)
+            (.Fatal c err)))
+
+
+        (.Setenv c "PWD" dir)))
+
+    (.Cleanup c ^{:go/end 1739} (fn []
+        (let [err (.Chdir oldwd)]
+          (.Close oldwd)
+          (when (!= err nil)
+            ;; It's not safe to continue with tests if we can't
+            ;; get back to the original working directory. Since
+            ;; we are holding a dirfd, this is highly unlikely.
+            (panic (+ "testing.Chdir: " (.Error err)))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1750} (go/method Context "Context returns a context that is canceled just before\nCleanup-registered functions are called.\n\nCleanup functions can wait for any resources\nthat shut down on [context.Context.Done] before the test or benchmark completes.\n" ^context/Context [^{:tag (* common)} c]
+  (.checkFuzzFn c "Context")
+  (.-ctx c))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1775} (go/method Attr "Attr emits a test attribute associated with this test.\n\nThe key must not contain whitespace.\nThe value must not contain newlines or carriage returns.\n\nThe meaning of different attribute keys is left up to\ncontinuous integration systems and test frameworks.\n\nTest attributes are emitted immediately in the test log,\nbut they are intended to be treated as unordered.\n" [^{:tag (* common)} c ^string key ^string value]
+  (when (strings/ContainsFunc key unicode/IsSpace)
+    (.Errorf c "disallowed whitespace in attribute key %q" key)
+    (return))
+
+  (when (strings/ContainsAny value "\r\n")
+    (.Errorf c "disallowed newline in attribute value %q" value)
+    (return))
+
+  (when (== (.-chatty c) nil)
+    (return))
+
+  (.Updatef (.-chatty c) (.-name c) "=== ATTR  %s %v %v\n" (.-name c) key value))
+
+
+
+(go/type panicHandling "panicHandling controls the panic handling used by runCleanup.\n" int)
+
+(go/const
+  ^{:line 1781} [^{:tag panicHandling :val 0} normalPanic iota]
+  ^{:line 1782} [^{:val 1} recoverAndReturnPanic])
+
+
+
+
+
+^{:go/end 1827} (go/method runCleanup "runCleanup is called at the end of the test.\nIf ph is recoverAndReturnPanic, it will catch panics, and return the\nrecovered value if any.\n" [^{:tag (* common)} c ^panicHandling ph] :results [^any panicVal]
+  (.Store (.-cleanupStarted c) true)
+  (defer (.Store (.-cleanupStarted c) false))
+
+  (when (== ph recoverAndReturnPanic)
+    (defer (^{:go/end 1795} (fn []
+          (set! panicVal (recover))))))
+
+
+
+  ;; Make sure that if a cleanup function panics,
+  ;; we still run the remaining cleanup functions.
+  (defer (^{:go/end 1807} (fn []
+        (.Lock (.-mu c))
+        (let [recur (> (len (.-cleanups c)) 0)]
+          (.Unlock (.-mu c))
+          (when recur
+            (.runCleanup c normalPanic))))))
+
+
+
+  (when (!= (.-cancelCtx c) nil)
+    ((.-cancelCtx c)))
+
+
+  (while true
+    (let [^{:tag (func [])} cleanup (zero (func []))]
+      (.Lock (.-mu c))
+      (when (> (len (.-cleanups c)) 0)
+        (let [last (- (len (.-cleanups c)) 1)]
+          (set! cleanup (aget (.-cleanups c) last))
+          (set! (.-cleanups c) (subslice (.-cleanups c) _ last))))
+
+      (.Unlock (.-mu c))
+      (when (== cleanup nil)
+        (return nil))
+
+      (cleanup))))
+
+
+
+
+
+
+
+
+^{:go/end 1840} (go/method resetRaces "resetRaces updates c.parent's count of data race errors (or the global count,\nif c has no parent), and updates c.lastRaceErrors to match.\n\nAny races that occurred prior to this call to resetRaces will\nnot be attributed to c.\n" [^{:tag (* common)} c]
+  (if (== (.-parent c) nil)
+    (.Store (.-lastRaceErrors c) (conv int64 (race/Errors)))
+
+    (.Store (.-lastRaceErrors c) (.checkRaces (.-parent c)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1890} (go/method checkRaces "checkRaces checks whether the global count of data race errors has increased\nsince c's count was last reset.\n\nIf so, it marks c as having failed due to those races (logging an error for\nthe first such race), and updates the race counts for the parents of c so\nthat if they are currently suspended (such as in a call to T.Run) they will\nnot log separate errors for the race(s).\n\nNote that multiple tests may be marked as failed due to the same race if they\nare executing in parallel.\n" [^{:tag (* common)} c] :results [^int64 raceErrors]
+  (set! raceErrors (conv int64 (race/Errors)))
+  (while true
+    (let [last (.Load (.-lastRaceErrors c))]
+      (when (<= raceErrors last)
+        ;; All races have already been reported.
+        (return raceErrors))
+
+      (when (.CompareAndSwap (.-lastRaceErrors c) last raceErrors)
+        (break))))
+
+
+
+  (when (.CompareAndSwap (.-raceErrorLogged c) false true)
+    ;; This is the first race we've encountered for this test.
+    ;; Mark the test as failed, and log the reason why only once.
+    ;; (Note that the race detector itself will still write a goroutine
+    ;; dump for any further races it detects.)
+    (.Errorf c "race detected during execution of test"))
+
+
+  ;; Update the parent(s) of this test so that they don't re-report the race.
+  (let [parent (.-parent c)]
+    (while (!= parent nil)
+      (while true
+        (let [last (.Load (.-lastRaceErrors parent))]
+          (when (<= raceErrors last)
+            ;; This race was already reported by another (likely parallel) subtest.
+            (return raceErrors))
+
+          (when (.CompareAndSwap (.-lastRaceErrors parent) last raceErrors)
+            (break))))
+
+
+      (set! parent (.-parent parent)))
+
+
+    ^{:line 1889} raceErrors))
+
+
+
+
+^{:go/end 1901} (go/func callerName "callerName gives the function name (qualified with a package path)\nfor the caller after skip frames (where 0 means the current function).\n" ^string [^int skip]
+  (let [^{:tag (array 1 uintptr)} pc (zero (array 1 uintptr))
+      ^{:line 1896} n (runtime/Callers (+ skip 2) (subslice pc))] ; skip + runtime.Callers + callerName
+    (when (== n 0)
+      (panic "testing: zero callers found"))
+
+    (pcToName (aget pc 0))))
+
+
+^{:go/end 1908} (go/func pcToName ^string [^uintptr pc]
+  (let [pcs (lit (slice uintptr) pc)
+      ^{:line 1905} frames (runtime/CallersFrames pcs)
+      (values frame _) (.Next frames)]
+    (.-Function frame)))
+
+
+(go/const ^{:val "testing: test using t.Setenv, t.Chdir, or cryptotest.SetGlobalRandom can not use t.Parallel"} parallelConflict "testing: test using t.Setenv, t.Chdir, or cryptotest.SetGlobalRandom can not use t.Parallel")
+
+
+
+
+
+
+^{:go/end 1980} (go/method Parallel "Parallel signals that this test is to be run in parallel with (and only with)\nother parallel tests, and pauses until all non-parallel tests have finished.\n\nWhen a test is run multiple times due to use of -test.count or -test.cpu,\nmultiple instances of a single test never run in parallel with each other.\n" [^{:tag (* T)} t]
+  (when ^{:go/via [common]} (.-isParallel t)
+    (panic "testing: t.Parallel called multiple times"))
+
+  (when ^{:go/via [common]} (.-isSynctest t)
+    (panic "testing: t.Parallel called inside synctest bubble"))
+
+  (when (.-denyParallel t)
+    (panic parallelConflict))
+
+  (when (== (.-barrier ^{:go/via [common]} (.-parent t)) nil)
+    ;; T.Parallel has no effect when fuzzing.
+    ;; Multiple processes may run in parallel, but only one input can run at a
+    ;; time per process so we can attribute crashes to specific inputs.
+    (return))
+
+
+  (set! ^{:go/via [common]} (.-isParallel t) true)
+
+  ;; We don't want to include the time we spend waiting for serial tests
+  ;; in the test duration. Record the elapsed time thus far and reset the
+  ;; timer afterwards.
+  (set! ^{:go/via [common]} (.-duration t) + (highPrecisionTimeSince ^{:go/via [common]} (.-start t)))
+
+  ;; Add to the list of tests to be released by the parent.
+  (set! (.-sub ^{:go/via [common]} (.-parent t)) (append (.-sub ^{:go/via [common]} (.-parent t)) t))
+
+  ;; Report any races during execution of this test up to this point.
+  ;;
+  ;; We will assume that any races that occur between here and the point where
+  ;; we unblock are not caused by this subtest. That assumption usually holds,
+  ;; although it can be wrong if the test spawns a goroutine that races in the
+  ;; background while the rest of the test is blocked on the call to Parallel.
+  ;; If that happens, we will misattribute the background race to some other
+  ;; test, or to no test at all — but that false-negative is so unlikely that it
+  ;; is not worth adding race-report noise for the common case where the test is
+  ;; completely suspended during the call to Parallel.
+  ^{:go/via [common]} (.checkRaces t)
+
+  (when (!= ^{:go/via [common]} (.-chatty t) nil)
+    (.Updatef ^{:go/via [common]} (.-chatty t) ^{:go/via [common]} (.-name t) "=== PAUSE %s\n" ^{:go/via [common]} (.-name t)))
+
+  (.Delete running ^{:go/via [common]} (.-name t))
+
+  (>! ^{:go/via [common]} (.-signal t) true) ; Release calling test.
+  (<! (.-barrier ^{:go/via [common]} (.-parent t))) ; Wait for the parent test to complete.
+  (.waitParallel (.-tstate t))
+  (.Add parallelStart 1)
+
+  (when (!= ^{:go/via [common]} (.-chatty t) nil)
+    (.Updatef ^{:go/via [common]} (.-chatty t) ^{:go/via [common]} (.-name t) "=== CONT  %s\n" ^{:go/via [common]} (.-name t)))
+
+  (.Store running ^{:go/via [common]} (.-name t) (highPrecisionTimeNow))
+  (set! ^{:go/via [common]} (.-start t) (highPrecisionTimeNow))
+
+  ;; Reset the local race counter to ignore any races that happened while this
+  ;; goroutine was blocked, such as in the parent test or in other parallel
+  ;; subtests.
+  ;;
+  ;; (Note that we don't call parent.checkRaces here:
+  ;; if other parallel subtests have already introduced races, we want to
+  ;; let them report those races instead of attributing them to the parent.)
+  (.Store ^{:go/via [common]} (.-lastRaceErrors t) (conv int64 (race/Errors))))
+
+
+
+
+
+^{:go/end 1987} (go/func ^{:go/linkname "checkParallel testing.checkParallel"} checkParallel "checkParallel is called by [testing/cryptotest.SetGlobalRandom].\n" [^{:tag (* T)} t]
+  (.checkParallel t))
+
+
+^{:go/end 2002} (go/method checkParallel [^{:tag (* T)} t]
+  ;; Non-parallel subtests that have parallel ancestors may still
+  ;; run in parallel with other tests: they are only non-parallel
+  ;; with respect to the other subtests of the same parent.
+  ;; Since calls like SetEnv or Chdir affects the whole process, we need
+  ;; to deny those if the current test or any parent is parallel.
+  (for [c (addr (.-common t))] (!= c nil) (set! c (.-parent c))
+    (when (.-isParallel c)
+      (panic parallelConflict)))
+
+
+
+  (set! (.-denyParallel t) true))
+
+
+
+
+
+
+
+
+^{:go/end 2013} (go/method Setenv "Setenv calls os.Setenv(key, value) and uses Cleanup to\nrestore the environment variable to its original value\nafter the test.\n\nBecause Setenv affects the whole process, it cannot be used\nin parallel tests or tests with parallel ancestors.\n" [^{:tag (* T)} t ^string key ^string value]
+  (.checkParallel t)
+  (.Setenv (.-common t) key value))
+
+
+
+
+
+
+
+
+^{:go/end 2024} (go/method Chdir "Chdir calls [os.Chdir] and uses Cleanup to restore the current\nworking directory to its original value after the test. On Unix, it\nalso sets PWD environment variable for the duration of the test.\n\nBecause Chdir affects the whole process, it cannot be used\nin parallel tests or tests with parallel ancestors.\n" [^{:tag (* T)} t ^string dir]
+  (.checkParallel t)
+  (.Chdir (.-common t) dir))
+
+
+
+
+(go/type InternalTest "InternalTest is an internal type but exported because it is cross-package;\nit is part of the implementation of the \"go test\" command.\n" (struct
+    ^{:line 2029 :tag string} Name
+    ^{:line 2030 :tag (func [(* T)])} F))
+
+
+(go/var errNilPanicOrGoexit (errors/New "test executed panic(nil) or runtime.Goexit"))
+
+^{:go/end 2204} (go/func tRunner [^{:tag (* T)} t ^{:tag (func [^{:tag (* T)} t])} fn]
+  (set! ^{:go/via [common]} (.-runner t) (callerName 0))
+
+  ;; When this goroutine is done, either because fn(t)
+  ;; returned normally or because a test failure triggered
+  ;; a call to runtime.Goexit, record the duration and send
+  ;; a signal saying that the test is done.
+  (defer (^{:go/end 2189} (fn []
+        ^{:go/via [common]} (.checkRaces t)
+
+        ;; Check if the test panicked or Goexited inappropriately.
+        ;;
+        ;; If this happens in a normal test, print output but continue panicking.
+        ;; tRunner is called in its own goroutine, so this terminates the process.
+        ;;
+        ;; If this happens while fuzzing, recover from the panic and treat it like a
+        ;; normal failure. It's important that the process keeps running in order to
+        ;; find short inputs that cause panics.
+        (let [err (recover)
+            ^{:line 2054} signal true]
+
+          (.RLock ^{:go/via [common]} (.-mu t))
+          (let [finished ^{:go/via [common]} (.-finished t)]
+            (.RUnlock ^{:go/via [common]} (.-mu t))
+            (when (and (not finished) (== err nil))
+              (set! err errNilPanicOrGoexit)
+              (for [p ^{:go/via [common]} (.-parent t)] (!= p nil) (set! p (.-parent p))
+                (.RLock (.-mu p))
+                (set! finished (.-finished p))
+                (.RUnlock (.-mu p))
+                (when finished
+                  (when (not ^{:go/via [common]} (.-isParallel t))
+                    ^{:go/via [common]} (.Errorf t "%v: subtest may have called FailNow on a parent test" err)
+                    (set! err nil))
+
+                  (set! signal false)
+                  (break))))
+
+
+
+
+            (when (and (!= err nil) (.-isFuzzing (.-tstate t)))
+              (let [prefix "panic: "]
+                (when (== err errNilPanicOrGoexit)
+                  (set! prefix ""))
+
+                ^{:go/via [common]} (.Errorf t "%s%s\n%s\n" prefix err (conv string (debug/Stack)))
+                (.Lock ^{:go/via [common]} (.-mu t))
+                (set! ^{:go/via [common]} (.-finished t) true)
+                (.Unlock ^{:go/via [common]} (.-mu t))
+                (set! err nil)))
+
+
+            ;; Use a deferred call to ensure that we report that the test is
+            ;; complete even if a cleanup function calls t.FailNow. See issue 41355.
+            (let [didPanic false]
+              (defer (^{:go/end 2106} (fn []
+                    ;; Only report that the test is complete if it doesn't panic,
+                    ;; as otherwise the test binary can exit before the panic is
+                    ;; reported to the user. See issue 41479.
+                    (when didPanic
+                      (return))
+
+                    (when (!= err nil)
+                      (panic err))
+
+                    (.Delete running ^{:go/via [common]} (.-name t))
+                    (when ^{:go/via [common]} (.-isParallel t)
+                      (.Add parallelStop 1))
+
+                    (>! ^{:go/via [common]} (.-signal t) signal))))
+
+
+              (let [doPanic ^{:go/end 2129} (fn [^any err]
+                    ^{:go/via [common]} (.Fail t)
+                    (when [r ^{:go/via [common]} (.runCleanup t recoverAndReturnPanic)] (!= r nil)
+                      ^{:go/via [common]} (.Logf t "cleanup panicked with %v" r))
+
+                    ;; Flush the output log up to the root before dying.
+                    ;; Skip this if this *T is a synctest bubble, because we're not a subtest.
+                    (for [root (addr (.-common t))] (and (not (.-isSynctest root)) (!= (.-parent root) nil)) (set! root (.-parent root))
+                      (.Lock (.-mu root))
+                      (set! (.-duration root) + (highPrecisionTimeSince (.-start root)))
+                      (let [d (.-duration root)]
+                        (.Unlock (.-mu root))
+                        ;; Output buffered logs.
+                        (.flushPartial root)
+                        (.flushToParent root (.-name root) "--- FAIL: %s (%s)\n" (.-name root) (fmtDuration d))
+                        (when [r (.runCleanup (.-parent root) recoverAndReturnPanic)] (!= r nil)
+                          (fmt/Fprintf (.-w (.-parent root)) "cleanup panicked with %v" r))))
+
+
+                    (set! didPanic true)
+                    (panic err))]
+
+                (when (!= err nil)
+                  (doPanic err))
+
+
+                (set! ^{:go/via [common]} (.-duration t) + (highPrecisionTimeSince ^{:go/via [common]} (.-start t)))
+
+                (cond (> (len ^{:go/via [common]} (.-sub t)) 0) (do
+                    ;; Run parallel subtests.
+
+                    ;; Decrease the running count for this test and mark it as no longer running.
+                    (.release (.-tstate t))
+                    (.Delete running ^{:go/via [common]} (.-name t))
+
+                    ;; Release the parallel subtests.
+                    (close ^{:go/via [common]} (.-barrier t))
+                    ;; Wait for subtests to complete.
+                    (range [_ sub ^{:go/via [common]} (.-sub t)]
+                      (<! ^{:go/via [common]} (.-signal sub)))
+
+
+                    ;; Run any cleanup callbacks, marking the test as running
+                    ;; in case the cleanup hangs.
+                    (let [cleanupStart (highPrecisionTimeNow)]
+                      (.Store running ^{:go/via [common]} (.-name t) cleanupStart)
+                      (let [err ^{:go/via [common]} (.runCleanup t recoverAndReturnPanic)]
+                        (set! ^{:go/via [common]} (.-duration t) + (highPrecisionTimeSince cleanupStart))
+                        (when (!= err nil)
+                          (doPanic err))
+
+                        ^{:go/via [common]} (.checkRaces t)
+                        (when (not ^{:go/via [common]} (.-isParallel t))
+                          ;; Reacquire the count for sequential tests. See comment in Run.
+                          (.waitParallel (.-tstate t))))))
+
+                  ^{:go/via [common]} (.-isParallel t)
+                  ;; Only release the count for this test if it was run as a parallel
+                  ;; test. See comment in Run method.
+                  (.release (.-tstate t)))
+
+                ;; Output buffered logs.
+                (for [root (addr (.-common t))] (!= (.-parent root) nil) (set! root (.-parent root))
+                  (.flushPartial root))
+
+
+                ;; Record this test's failure for -failfast. This must happen after the
+                ;; test's cleanup functions have run, since a cleanup may call t.Fail.
+                ;; See go.dev/issue/61034.
+                (when ^{:go/via [common]} (.Failed t)
+                  (.Add numFailed 1))
+
+
+                (.report t) ; Report after all subtests have finished.
+
+                ;; Do not lock t.done to allow race detector to detect race in case
+                ;; the user does not appropriately synchronize a goroutine.
+                (set! ^{:go/via [common]} (.-done t) true)
+                (when (and (!= ^{:go/via [common]} (.-parent t) nil) (not (.Load ^{:go/via [common]} (.-hasSub t))))
+                  ^{:go/via [common]} (.setRan t)))))))))
+
+
+  (defer (^{:go/end 2194} (fn []
+        (when (== (len ^{:go/via [common]} (.-sub t)) 0)
+          ^{:go/via [common]} (.runCleanup t normalPanic)))))
+
+
+
+  (set! ^{:go/via [common]} (.-start t) (highPrecisionTimeNow))
+  ^{:go/via [common]} (.resetRaces t)
+  (go/call fn t)
+
+  ;; code beyond here will not be executed when FailNow is invoked
+  (.Lock ^{:go/via [common]} (.-mu t))
+  (set! ^{:go/via [common]} (.-finished t) true)
+  (.Unlock ^{:go/via [common]} (.-mu t)))
+
+
+
+
+
+
+
+
+^{:go/end 2281} (go/method Run "Run runs f as a subtest of t called name. It runs f in a separate goroutine\nand blocks until f returns or calls t.Parallel to become a parallel test.\nRun reports whether f succeeded (or at least did not fail before calling t.Parallel).\n\nRun may be called simultaneously from multiple goroutines, but all such calls\nmust return before the outer test function for t returns.\n" ^bool [^{:tag (* T)} t ^string name ^{:tag (func [^{:tag (* T)} t])} f]
+  (when ^{:go/via [common]} (.-isSynctest t)
+    (panic "testing: t.Run called inside synctest bubble"))
+
+  (when (.Load ^{:go/via [common]} (.-cleanupStarted t))
+    (panic "testing: t.Run called during t.Cleanup"))
+
+
+  (.Store ^{:go/via [common]} (.-hasSub t) true)
+  (let [(values testName ok _) (.fullName (.-match (.-tstate t)) (addr (.-common t)) name)]
+    (when (or (not ok) (shouldFailFast))
+      (return true))
+
+    ;; Record the stack trace at the point of this call so that if the subtest
+    ;; function - which runs in a separate stack - is marked as a helper, we can
+    ;; continue walking the stack into the parent test.
+    (let [^{:tag (array maxStackLen uintptr)} pc (zero (array maxStackLen uintptr))
+        ^{:line 2229} n (runtime/Callers 2 (subslice pc))
+
+        ;; There's no reason to inherit this context from parent. The user's code can't observe
+        ;; the difference between the background context and the one from the parent test.
+        (values ctx cancelCtx) (context/WithCancel (context/Background))]
+      (set! t (addr ^{:go/breaks [2 [4 2248]]} (lit T
+            :common ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22]} (lit common
+              :barrier (make (chan bool))
+              :signal (make (chan bool) 1)
+              :name testName
+              :modulePath ^{:go/via [common]} (.-modulePath t)
+              :importPath ^{:go/via [common]} (.-importPath t)
+              :parent (addr (.-common t))
+              :level (+ ^{:go/via [common]} (.-level t) 1)
+              :creator (subslice pc _ n)
+              :chatty ^{:go/via [common]} (.-chatty t)
+              :ctx ctx
+              :cancelCtx cancelCtx)
+
+            :tstate (.-tstate t))))
+
+      (set! ^{:go/via [common]} (.-w t) (lit indenter (addr (.-common t))))
+      ^{:go/via [common]} (.setOutputWriter t)
+
+      (when (!= ^{:go/via [common]} (.-chatty t) nil)
+        (.Updatef ^{:go/via [common]} (.-chatty t) ^{:go/via [common]} (.-name t) "=== RUN   %s\n" ^{:go/via [common]} (.-name t)))
+
+      (.Store running ^{:go/via [common]} (.-name t) (highPrecisionTimeNow))
+
+      ;; Instead of reducing the running count of this test before calling the
+      ;; tRunner and increasing it afterwards, we rely on tRunner keeping the
+      ;; count correct. This ensures that a sequence of sequential tests runs
+      ;; without being preempted, even when their parent is a parallel test. This
+      ;; may especially reduce surprises if *parallel == 1.
+      (go (tRunner t f))
+
+      ;; The parent goroutine will block until the subtest either finishes or calls
+      ;; Parallel, but in general we don't know whether the parent goroutine is the
+      ;; top-level test function or some other goroutine it has spawned.
+      ;; To avoid confusing false-negatives, we leave the parent in the running map
+      ;; even though in the typical case it is blocked.
+
+      (when (not (<! ^{:go/via [common]} (.-signal t)))
+        ;; At this point, it is likely that FailNow was called on one of the
+        ;; parent tests by one of the subtests. Continue aborting up the chain.
+        (runtime/Goexit))
+
+
+      (when (and (!= ^{:go/via [common]} (.-chatty t) nil) (.-json ^{:go/via [common]} (.-chatty t)))
+        (.Updatef ^{:go/via [common]} (.-chatty t) (.-name ^{:go/via [common]} (.-parent t)) "=== NAME  %s\n" (.-name ^{:go/via [common]} (.-parent t))))
+
+      (not ^{:go/via [common]} (.-failed t)))))
+
+
+
+
+
+
+^{:go/end 2319} (go/func ^{:go/linkname "testingSynctestTest testing/synctest.testingSynctestTest"} testingSynctestTest "testingSynctestTest runs f within a synctest bubble.\nIt is called by synctest.Test, from within an already-created bubble.\n" [^{:tag (* T)} t ^{:tag (func [(* T)])} f] :results [^bool ok]
+  (when (.Load ^{:go/via [common]} (.-cleanupStarted t))
+    (panic "testing: synctest.Run called during t.Cleanup"))
+
+
+  (let [^{:tag (array maxStackLen uintptr)} pc (zero (array maxStackLen uintptr))
+      ^{:line 2293} n (runtime/Callers 2 (subslice pc))
+
+      (values ctx cancelCtx) (context/WithCancel (context/Background))
+      ^{:line 2296} t2 (addr ^{:go/breaks [2 [4 2309]]} (lit T
+          :common ^{:go/breaks [2 4 6 8 10 12 14 16 18 20]} (lit common
+            :barrier (make (chan bool))
+            :signal (make (chan bool) 1)
+            :name ^{:go/via [common]} (.-name t)
+            :parent (addr (.-common t))
+            :level (+ ^{:go/via [common]} (.-level t) 1)
+            :creator (subslice pc _ n)
+            :chatty ^{:go/via [common]} (.-chatty t)
+            :ctx ctx
+            :cancelCtx cancelCtx
+            :isSynctest true)
+
+          :tstate (.-tstate t)))]
+
+
+    (go (tRunner t2 f))
+    (when (not (<! ^{:go/via [common]} (.-signal t2)))
+      ;; At this point, it is likely that FailNow was called on one of the
+      ;; parent tests by one of the subtests. Continue aborting up the chain.
+      (runtime/Goexit))
+
+    (not ^{:go/via [common]} (.-failed t2))))
+
+
+
+
+
+
+^{:go/end 2334} (go/method Deadline "Deadline reports the time at which the test binary will have\nexceeded the timeout specified by the -timeout flag.\n\nThe ok result is false if the -timeout flag indicates “no timeout” (0).\n" [^{:tag (* T)} t] :results [^time/Time deadline ^bool ok]
+  (when ^{:go/via [common]} (.-isSynctest t)
+    ;; There's no point in returning a real-clock deadline to
+    ;; a test using a fake clock. We could return "no timeout",
+    ;; but panicking makes it easier for users to catch the error.
+    (panic "testing: t.Deadline called inside synctest bubble"))
+
+  (set! deadline (.-deadline (.-tstate t)))
+  (return deadline (not (.IsZero deadline))))
+
+
+
+
+(go/type testState "testState holds all fields that are common to all tests. This includes\nsynchronization primitives to run at most *parallel tests.\n" (struct
+    ^{:line 2339 :tag (* matcher)} match
+    ^{:line 2340 :tag time/Time} deadline
+
+
+
+
+
+    ^{:line 2346 :tag bool :doc "isFuzzing is true in the state used when generating random inputs\nfor fuzz targets. isFuzzing is false when running normal tests and\nwhen running fuzz tests as unit tests (without -fuzz or when -fuzz\ndoes not match).\n"} isFuzzing
+
+    ^{:line 2348 :tag sync/Mutex} mu
+
+
+    ^{:line 2351 :tag (chan bool) :doc "Channel used to signal tests that are ready to be run in parallel.\n"} startParallel
+
+
+
+    ^{:line 2355 :tag int :doc "running is the number of tests currently running in parallel.\nThis does not include tests that are waiting for subtests to complete.\n"} running
+
+
+    ^{:line 2358 :tag int :doc "numWaiting is the number tests waiting to be run in parallel.\n"} numWaiting
+
+
+    ^{:line 2361 :tag int :doc "maxParallel is a copy of the parallel flag.\n"} maxParallel))
+
+
+^{:go/end 2371} (go/func newTestState ^{:tag (* testState)} [^int maxParallel ^{:tag (* matcher)} m]
+  (addr ^{:go/breaks [2 4 6 8]} (lit testState
+      :match m
+      :startParallel (make (chan bool))
+      :maxParallel maxParallel
+      :running 1))) ; Set the count to 1 for the main (sequential) test.
+
+
+
+^{:go/end 2383} (go/method waitParallel [^{:tag (* testState)} s]
+  (.Lock (.-mu s))
+  (when (< (.-running s) (.-maxParallel s))
+    (inc! (.-running s))
+    (.Unlock (.-mu s))
+    (return))
+
+  (inc! (.-numWaiting s))
+  (.Unlock (.-mu s))
+  (<! (.-startParallel s)))
+
+
+^{:go/end 2395} (go/method release [^{:tag (* testState)} s]
+  (.Lock (.-mu s))
+  (when (== (.-numWaiting s) 0)
+    (dec! (.-running s))
+    (.Unlock (.-mu s))
+    (return))
+
+  (dec! (.-numWaiting s))
+  (.Unlock (.-mu s))
+  (>! (.-startParallel s) true)) ; Pick a waiting test to be run.
+
+
+
+
+(go/var ^{:doc "No one should be using func Main anymore.\nSee the doc comment on func Main and use MainStart instead.\n"} errMain (errors/New "testing: unexpected use of func Main"))
+
+(go/type matchStringOnly (func [^string pat ^string str] [bool error]))
+
+^{:go/end 2403} (go/method MatchString [^matchStringOnly f ^string pat ^string str] :results [bool error] (f pat str))
+^{:go/end 2404} (go/method StartCPUProfile ^error [^matchStringOnly f ^io/Writer w] errMain)
+^{:go/end 2405} (go/method StopCPUProfile [^matchStringOnly f])
+^{:go/end 2406} (go/method WriteProfileTo ^error [^matchStringOnly f string io/Writer int] errMain)
+^{:go/end 2407} (go/method ModulePath ^string [^matchStringOnly f] "")
+^{:go/end 2408} (go/method ImportPath ^string [^matchStringOnly f] "")
+^{:go/end 2409} (go/method StartTestLog [^matchStringOnly f io/Writer])
+^{:go/end 2410} (go/method StopTestLog ^error [^matchStringOnly f] errMain)
+^{:go/end 2411} (go/method SetPanicOnExit0 [^matchStringOnly f bool])
+^{:go/end 2414} (go/method CoordinateFuzzing ^error [^matchStringOnly f time/Duration int64 time/Duration int64 int (slice corpusEntry) (slice reflect/Type) string string]
+  ^{:line 2413} errMain)
+
+^{:go/end 2415} (go/method RunFuzzWorker ^error [^matchStringOnly f (func [corpusEntry] [error])] errMain)
+^{:go/end 2418} (go/method ReadCorpus [^matchStringOnly f string (slice reflect/Type)] :results [(slice corpusEntry) error]
+  (return nil errMain))
+
+^{:go/end 2419} (go/method CheckCorpus ^error [^matchStringOnly f (slice any) (slice reflect/Type)] nil)
+^{:go/end 2420} (go/method ResetCoverage [^matchStringOnly f])
+^{:go/end 2421} (go/method SnapshotCoverage [^matchStringOnly f])
+
+^{:go/end 2425} (go/method InitRuntimeCoverage [^matchStringOnly f] :results [^string mode ^{:tag (func [string string] [string error])} tearDown ^{:tag (func [] [float64])} snapcov]
+  (return))
+
+
+
+
+
+
+
+
+^{:go/end 2435} (go/func Main "Main is an internal function, part of the implementation of the \"go test\" command.\nIt was exported because it is cross-package and predates \"internal\" packages.\nIt is no longer used by \"go test\" but preserved, as much as possible, for other\nsystems that simulate \"go test\" using Main, but Main sometimes cannot be updated as\nnew functionality is added to the testing package.\nSystems simulating \"go test\" should be updated to use [MainStart].\n" [^{:tag (func [^string pat ^string str] [bool error])} matchString ^{:tag (slice InternalTest)} tests ^{:tag (slice InternalBenchmark)} benchmarks ^{:tag (slice InternalExample)} examples]
+  (os/Exit (.Run (MainStart (conv matchStringOnly matchString) tests benchmarks nil examples))))
+
+
+
+(go/type M "M is a type passed to a TestMain function to run the actual tests.\n" (struct
+    ^{:line 2439 :tag testDeps} deps
+    ^{:line 2440 :tag (slice InternalTest)} tests
+    ^{:line 2441 :tag (slice InternalBenchmark)} benchmarks
+    ^{:line 2442 :tag (slice InternalFuzzTarget)} fuzzTargets
+    ^{:line 2443 :tag (slice InternalExample)} examples
+
+    ^{:line 2445 :tag (* time/Timer)} timer
+    ^{:line 2446 :tag sync/Once} afterOnce
+
+    ^{:line 2448 :tag int} numRun
+
+
+
+    ^{:line 2452 :tag int :doc "value to pass to os.Exit, the outer test func main\nharness calls os.Exit with this code. See #34129.\n"} exitCode))
+
+
+
+
+
+
+(go/type testDeps "testDeps is an internal interface of functionality that is\npassed into this package by a test's generated main package.\nThe canonical implementation of this interface is\ntesting/internal/testdeps's TestDeps.\n" (interface
+    (ImportPath ^string [])
+    (ModulePath ^string [])
+    (MatchString [^string pat ^string str] :results [bool error])
+    (SetPanicOnExit0 [bool])
+    (StartCPUProfile ^error [io/Writer])
+    (StopCPUProfile [])
+    (StartTestLog [io/Writer])
+    (StopTestLog ^error [])
+    (WriteProfileTo ^error [string io/Writer int])
+    (CoordinateFuzzing ^error [time/Duration int64 time/Duration int64 int (slice corpusEntry) (slice reflect/Type) string string])
+    (RunFuzzWorker ^error [(func [corpusEntry] [error])])
+    (ReadCorpus [string (slice reflect/Type)] :results [(slice corpusEntry) error])
+    (CheckCorpus ^error [(slice any) (slice reflect/Type)])
+    (ResetCoverage [])
+    (SnapshotCoverage [])
+    (InitRuntimeCoverage [] :results [^string mode ^{:tag (func [^string coverprofile ^string gocoverdir] [string error])} tearDown ^{:tag (func [] [float64])} snapcov])))
+
+
+
+
+
+^{:go/end 2491} (go/func MainStart "MainStart is meant for use by tests generated by 'go test'.\nIt is not meant to be called directly and is not subject to the Go 1 compatibility document.\nIt may change signature from release to release.\n" ^{:tag (* M)} [^testDeps deps ^{:tag (slice InternalTest)} tests ^{:tag (slice InternalBenchmark)} benchmarks ^{:tag (slice InternalFuzzTarget)} fuzzTargets ^{:tag (slice InternalExample)} examples]
+  (registerCover (.InitRuntimeCoverage deps))
+  (Init)
+  (addr ^{:go/breaks [2 4 6 8 10]} (lit M
+      :deps deps
+      :tests tests
+      :benchmarks benchmarks
+      :fuzzTargets fuzzTargets
+      :examples examples)))
+
+
+
+(go/var
+  ^{:line 2494} [^bool testingTesting]
+  ^{:line 2495} [^{:tag (* os/File)} realStderr])
+
+
+
+
+
+
+^{:go/end 2649} (go/method Run "Run runs the tests. It returns an exit code to pass to os.Exit.\nThe exit code is zero when all tests pass, and non-zero for any kind\nof failure. For machine readable test results, parse the output of\n'go test -json'.\n" [^{:tag (* M)} m] :results [^int code]
+  (defer (^{:go/end 2505} (fn []
+        (set! code (.-exitCode m)))))
+
+
+  ;; Count the number of calls to m.Run.
+  ;; We only ever expected 1, but we didn't enforce that,
+  ;; and now there are tests in the wild that call m.Run multiple times.
+  ;; Sigh. go.dev/issue/23129.
+  (inc! (.-numRun m))
+
+  ;; TestMain may have already called flag.Parse.
+  (when (not (flag/Parsed))
+    (flag/Parse))
+
+
+  (when (.-json chatty)
+    ;; With -v=json, stdout and stderr are pointing to the same pipe,
+    ;; which is leading into test2json. In general, operating systems
+    ;; do a good job of ensuring that writes to the same pipe through
+    ;; different file descriptors are delivered whole, so that writing
+    ;; AAA to stdout and BBB to stderr simultaneously produces
+    ;; AAABBB or BBBAAA on the pipe, not something like AABBBA.
+    ;; However, the exception to this is when the pipe fills: in that
+    ;; case, Go's use of non-blocking I/O means that writing AAA
+    ;; or BBB might be split across multiple system calls, making it
+    ;; entirely possible to get output like AABBBA. The same problem
+    ;; happens inside the operating system kernel if we switch to
+    ;; blocking I/O on the pipe. This interleaved output can do things
+    ;; like print unrelated messages in the middle of a TestFoo line,
+    ;; which confuses test2json. Setting os.Stderr = os.Stdout will make
+    ;; them share a single pfd, which will hold a lock for each program
+    ;; write, preventing any interleaving.
+    ;;
+    ;; It might be nice to set Stderr = Stdout always, or perhaps if
+    ;; we can tell they are the same file, but for now -v=json is
+    ;; a very clear signal. Making the two files the same may cause
+    ;; surprises if programs close os.Stdout but expect to be able
+    ;; to continue to write to os.Stderr, but it's hard to see why a
+    ;; test would think it could take over global state that way.
+    ;;
+    ;; This fix only helps programs where the output is coming directly
+    ;; from Go code. It does not help programs in which a subprocess is
+    ;; writing to stderr or stdout at the same time that a Go test is writing output.
+    ;; It also does not help when the output is coming from the runtime,
+    ;; such as when using the print/println functions, since that code writes
+    ;; directly to fd 2 without any locking.
+    ;; We keep realStderr around to prevent fd 2 from being closed.
+    ;;
+    ;; See go.dev/issue/33419.
+    (set! realStderr os/Stderr)
+    (set! os/Stderr os/Stdout))
+
+
+  (when (< @parallel 1)
+    (fmt/Fprintln os/Stderr "testing: -parallel can only be given a positive integer")
+    (flag/Usage)
+    (set! (.-exitCode m) 2)
+    (return))
+
+  (when (and (!= @matchFuzz "") (== @fuzzCacheDir ""))
+    (fmt/Fprintln os/Stderr "testing: -test.fuzzcachedir must be set if -test.fuzz is set")
+    (flag/Usage)
+    (set! (.-exitCode m) 2)
+    (return))
+
+
+  (when (!= @matchList "")
+    (listTests (.-MatchString (.-deps m)) (.-tests m) (.-benchmarks m) (.-fuzzTargets m) (.-examples m))
+    (set! (.-exitCode m) 0)
+    (return))
+
+
+  (when (!= @shuffle "off")
+    (let [^int64 n (zero int64)
+        ^{:line 2577 :tag error} err (zero error)]
+      (if (== @shuffle "on")
+        (set! n (.UnixNano (time/Now)))
+        (do
+          (set! (values n err) (strconv/ParseInt @shuffle 10 64))
+          (when (!= err nil)
+            (fmt/Fprintln os/Stderr "testing: -shuffle should be \"off\", \"on\", or a valid integer:" err)
+            (set! (.-exitCode m) 2)
+            (return))))
+
+
+      (fmt/Println "-test.shuffle" n)
+      (let [rng (rand/New (rand/NewSource n))]
+        (.Shuffle rng (len (.-tests m)) ^{:go/end 2590} (fn [^int i ^int j] (set! (values (aget (.-tests m) i) (aget (.-tests m) j)) (values (aget (.-tests m) j) (aget (.-tests m) i)))))
+        (.Shuffle rng (len (.-benchmarks m)) ^{:go/end 2591} (fn [^int i ^int j] (set! (values (aget (.-benchmarks m) i) (aget (.-benchmarks m) j)) (values (aget (.-benchmarks m) j) (aget (.-benchmarks m) i))))))))
+
+
+  (parseCpuList)
+
+  (.before m)
+  (defer (.after m))
+
+  ;; Run tests, examples, and benchmarks unless this is a fuzz worker process.
+  ;; Workers start after this is done by their parent process, and they should
+  ;; not repeat this work.
+  (when (not @isFuzzWorker)
+    (let [deadline (.startAlarm m)]
+      (set! haveExamples (> (len (.-examples m)) 0))
+      (let [(values testRan testOk) (runTests (.ModulePath (.-deps m)) (.ImportPath (.-deps m)) (.-MatchString (.-deps m)) (.-tests m) deadline)
+          (values fuzzTargetsRan fuzzTargetsOk) (runFuzzTests (.-deps m) (.-fuzzTargets m) deadline)
+          (values exampleRan exampleOk) (runExamples (.-MatchString (.-deps m)) (.-examples m))]
+        (.stopAlarm m)
+        (when (and (not testRan) (not exampleRan) (not fuzzTargetsRan) (== @matchBenchmarks "") (== @matchFuzz ""))
+          (fmt/Fprintln os/Stderr "testing: warning: no tests to run")
+          (when (and testingTesting (!= @match "^$"))
+            ;; If this happens during testing of package testing it could be that
+            ;; package testing's own logic for when to run a test is broken,
+            ;; in which case every test will run nothing and succeed,
+            ;; with no obvious way to detect this problem (since no tests are running).
+            ;; So make 'no tests to run' a hard failure when testing package testing itself.
+            (fmt/Print (.prefix chatty) "FAIL: package testing must run tests\n")
+            (set! testOk false)))
+
+
+        (let [anyFailed (or (not testOk) (not exampleOk) (not fuzzTargetsOk) (not (runBenchmarks (.ImportPath (.-deps m)) (.-MatchString (.-deps m)) (.-benchmarks m))))]
+          (when (and (not anyFailed) (> (race/Errors) 0))
+            (fmt/Print (.prefix chatty) "testing: race detected outside of test execution\n")
+            (set! anyFailed true))
+
+          (when anyFailed
+            (fmt/Print (.prefix chatty) "FAIL\n")
+            (set! (.-exitCode m) 1)
+            (return))))))
+
+
+
+  (let [fuzzingOk (runFuzzing (.-deps m) (.-fuzzTargets m))]
+    (when (not fuzzingOk)
+      (fmt/Print (.prefix chatty) "FAIL\n")
+      (if @isFuzzWorker
+        (set! (.-exitCode m) fuzzWorkerExitCode)
+
+        (set! (.-exitCode m) 1))
+
+      (return))
+
+
+    (set! (.-exitCode m) 0)
+    (when (not @isFuzzWorker)
+      (fmt/Print (.prefix chatty) "PASS\n"))
+
+    (return)))
+
+
+^{:go/end 2669} (go/method report [^{:tag (* T)} t]
+  (when (== ^{:go/via [common]} (.-parent t) nil)
+    (return))
+
+  (when ^{:go/via [common]} (.-isSynctest t)
+    (return)) ; t.parent will handle reporting
+
+  (let [dstr (fmtDuration ^{:go/via [common]} (.-duration t))
+      ^{:line 2659} format "--- %s: %s (%s)\n"]
+    (cond ^{:go/via [common]} (.Failed t)
+      ^{:go/via [common]} (.flushToParent t ^{:go/via [common]} (.-name t) format "FAIL" ^{:go/via [common]} (.-name t) dstr)
+      (!= ^{:go/via [common]} (.-chatty t) nil)
+      (if ^{:go/via [common]} (.Skipped t)
+        ^{:go/via [common]} (.flushToParent t ^{:go/via [common]} (.-name t) format "SKIP" ^{:go/via [common]} (.-name t) dstr)
+
+        ^{:go/via [common]} (.flushToParent t ^{:go/via [common]} (.-name t) format "PASS" ^{:go/via [common]} (.-name t) dstr)))))
+
+
+
+
+^{:go/end 2697} (go/func listTests [^{:tag (func [^string pat ^string str] [bool error])} matchString ^{:tag (slice InternalTest)} tests ^{:tag (slice InternalBenchmark)} benchmarks ^{:tag (slice InternalFuzzTarget)} fuzzTargets ^{:tag (slice InternalExample)} examples]
+  (when [(values _ err) (matchString @matchList "non-empty")] (!= err nil)
+    (fmt/Fprintf os/Stderr "testing: invalid regexp in -test.list (%q): %s\n" @matchList err)
+    (os/Exit 1))
+
+
+  (range [_ test tests]
+    (when [(values ok _) (matchString @matchList (.-Name test))] ok
+      (fmt/Println (.-Name test))))
+
+
+  (range [_ bench benchmarks]
+    (when [(values ok _) (matchString @matchList (.-Name bench))] ok
+      (fmt/Println (.-Name bench))))
+
+
+  (range [_ fuzzTarget fuzzTargets]
+    (when [(values ok _) (matchString @matchList (.-Name fuzzTarget))] ok
+      (fmt/Println (.-Name fuzzTarget))))
+
+
+  (range [_ example examples]
+    (when [(values ok _) (matchString @matchList (.-Name example))] ok
+      (fmt/Println (.-Name example)))))
+
+
+
+
+
+
+^{:go/end 2711} (go/func RunTests "RunTests is an internal function but exported because it is cross-package;\nit is part of the implementation of the \"go test\" command.\n" [^{:tag (func [^string pat ^string str] [bool error])} matchString ^{:tag (slice InternalTest)} tests] :results [^bool ok]
+  (let [^time/Time deadline (zero time/Time)]
+    (when (> @timeout 0)
+      (set! deadline (.Add (time/Now) @timeout)))
+
+    (let [(values ran ^:assign ok) (runTests "" "" matchString tests deadline)]
+      (when (and (not ran) (not haveExamples))
+        (fmt/Fprintln os/Stderr "testing: warning: no tests to run"))
+
+      ^{:line 2710} ok)))
+
+
+^{:go/end 2760} (go/func runTests [^string modulePath ^string importPath ^{:tag (func [^string pat ^string str] [bool error])} matchString ^{:tag (slice InternalTest)} tests ^time/Time deadline] :results [^bool ran ^bool ok]
+  (set! ok true)
+  (range [_ procs cpuList]
+    (runtime/GOMAXPROCS procs)
+    (for [i (conv uint 0)] (< i @count) (inc! i)
+      (when (shouldFailFast)
+        (break))
+
+      (when (and (> i 0) (not ran))
+        ;; There were no tests to run on the first
+        ;; iteration. This won't change, so no reason
+        ;; to keep trying.
+        (break))
+
+      (let [(values ctx cancelCtx) (context/WithCancel (context/Background))
+          ^{:line 2728} tstate (newTestState @parallel (newMatcher matchString @match "-test.run" @skip))]
+        (set! (.-deadline tstate) deadline)
+        (let [t (addr ^{:go/breaks [2 [4 2740]]} (lit T
+                :common ^{:go/breaks [2 4 6 8 10 12 14]} (lit common
+                  :signal (make (chan bool) 1)
+                  :barrier (make (chan bool))
+                  :w os/Stdout
+                  :ctx ctx
+                  :cancelCtx cancelCtx
+                  :modulePath modulePath
+                  :importPath importPath)
+
+                :tstate tstate))]
+
+          (when (Verbose)
+            (set! ^{:go/via [common]} (.-chatty t) (newChattyPrinter ^{:go/via [common]} (.-w t))))
+
+          (tRunner t ^{:go/end 2749} (fn [^{:tag (* T)} t]
+              (range [_ test tests]
+                (.Run t (.-Name test) (.-F test)))))
+
+
+          (select
+            (case (<! ^{:go/via [common]} (.-signal t)))
+            (default
+              (panic "internal error: tRunner exited without sending on t.signal")))
+
+          (set! ok (and ok (not ^{:go/via [common]} (.Failed t))))
+          (set! ran (or ran ^{:go/via [common]} (.-ran t)))))))
+
+
+  (return ran ok))
+
+
+
+^{:go/end 2842} (go/method before "before runs before all testing.\n" [^{:tag (* M)} m]
+  (when (> @memProfileRate 0)
+    (set! runtime/MemProfileRate @memProfileRate))
+
+  (when (!= @cpuProfile "")
+    (let [(values f err) (os/Create (toOutputDir @cpuProfile))]
+      (when (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: %s\n" err)
+        (return))
+
+      (when [err (.StartCPUProfile (.-deps m) f)] (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: can't start cpu profile: %s\n" err)
+        (.Close f)
+        (return))))
+
+  ;; Could save f so after can call f.Close; not worth the effort.
+
+  (when (!= @traceFile "")
+    (let [(values f err) (os/Create (toOutputDir @traceFile))]
+      (when (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: %s\n" err)
+        (return))
+
+      (when [err (trace/Start f)] (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: can't start tracing: %s\n" err)
+        (.Close f)
+        (return))))
+
+  ;; Could save f so after can call f.Close; not worth the effort.
+
+  (when (and (!= @blockProfile "") (>= @blockProfileRate 0))
+    (runtime/SetBlockProfileRate @blockProfileRate))
+
+  (when (and (!= @mutexProfile "") (>= @mutexProfileFraction 0))
+    (runtime/SetMutexProfileFraction @mutexProfileFraction))
+
+  (when (and (!= @coverProfile "") (== (CoverMode) ""))
+    (fmt/Fprintf os/Stderr "testing: cannot use -test.coverprofile because test binary was not built with coverage enabled\n")
+    (os/Exit 2))
+
+  (when (and (!= @gocoverdir "") (== (CoverMode) ""))
+    (fmt/Fprintf os/Stderr "testing: cannot use -test.gocoverdir because test binary was not built with coverage enabled\n")
+    (os/Exit 2))
+
+  (when @artifacts
+    (let [^error err (zero error)]
+      (set! (values artifactDir err) (filepath/Abs (toOutputDir "_artifacts")))
+      (when (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: cannot make -test.outputdir absolute: %v\n" err)
+        (os/Exit 2))
+
+      (when [err (os/Mkdir artifactDir 0777)] (and (!= err nil) (not (errors/Is err os/ErrExist)))
+        (fmt/Fprintf os/Stderr "testing: %v\n" err)
+        (os/Exit 2))))
+
+
+  (when (!= @testlog "")
+    ;; Note: Not using toOutputDir.
+    ;; This file is for use by cmd/go, not users.
+    (let [^{:tag (* os/File)} f (zero (* os/File))
+        ^{:line 2823 :tag error} err (zero error)]
+      (if (== (.-numRun m) 1)
+        (set! (values f err) (os/Create @testlog))
+        (do
+          (set! (values f err) (os/OpenFile @testlog os/O_WRONLY 0))
+          (when (== err nil)
+            (.Seek f 0 io/SeekEnd))))
+
+
+      (when (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: %s\n" err)
+        (os/Exit 2))
+
+      (.StartTestLog (.-deps m) f)
+      (set! testlogFile f)))
+
+  (when @panicOnExit0
+    (.SetPanicOnExit0 (.-deps m) true)))
+
+
+
+
+^{:go/end 2856} (go/method after "after runs after all testing.\n" [^{:tag (* M)} m]
+  (.Do (.-afterOnce m) ^{:go/end 2848} (fn []
+      (.writeProfiles m)))
+
+
+  ;; Restore PanicOnExit0 after every run, because we set it to true before
+  ;; every run. Otherwise, if m.Run is called multiple times the behavior of
+  ;; os.Exit(0) will not be restored after the second run.
+  (when @panicOnExit0
+    (.SetPanicOnExit0 (.-deps m) false)))
+
+
+
+^{:go/end 2915} (go/method writeProfiles [^{:tag (* M)} m]
+  (when (!= @testlog "")
+    (when [err (.StopTestLog (.-deps m))] (!= err nil)
+      (fmt/Fprintf os/Stderr "testing: can't write %s: %s\n" @testlog err)
+      (os/Exit 2))
+
+    (when [err (.Close testlogFile)] (!= err nil)
+      (fmt/Fprintf os/Stderr "testing: can't write %s: %s\n" @testlog err)
+      (os/Exit 2)))
+
+
+  (when (!= @cpuProfile "")
+    (.StopCPUProfile (.-deps m))) ; flushes profile to disk
+
+  (when (!= @traceFile "")
+    (trace/Stop)) ; flushes trace to disk
+
+  (when (!= @memProfile "")
+    (let [(values f err) (os/Create (toOutputDir @memProfile))]
+      (when (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: %s\n" err)
+        (os/Exit 2))
+
+      (runtime/GC) ; materialize all statistics
+      (when [(set! err (.WriteProfileTo (.-deps m) "allocs" f 0))] (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: can't write %s: %s\n" @memProfile err)
+        (os/Exit 2))
+
+      (.Close f)))
+
+  (when (and (!= @blockProfile "") (>= @blockProfileRate 0))
+    (let [(values f err) (os/Create (toOutputDir @blockProfile))]
+      (when (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: %s\n" err)
+        (os/Exit 2))
+
+      (when [(set! err (.WriteProfileTo (.-deps m) "block" f 0))] (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: can't write %s: %s\n" @blockProfile err)
+        (os/Exit 2))
+
+      (.Close f)))
+
+  (when (and (!= @mutexProfile "") (>= @mutexProfileFraction 0))
+    (let [(values f err) (os/Create (toOutputDir @mutexProfile))]
+      (when (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: %s\n" err)
+        (os/Exit 2))
+
+      (when [(set! err (.WriteProfileTo (.-deps m) "mutex" f 0))] (!= err nil)
+        (fmt/Fprintf os/Stderr "testing: can't write %s: %s\n" @mutexProfile err)
+        (os/Exit 2))
+
+      (.Close f)))
+
+  (when (!= (CoverMode) "")
+    (coverReport)))
+
+
+
+
+
+^{:go/end 2941} (go/func toOutputDir "toOutputDir returns the file name relocated, if required, to outputDir.\nSimple implementation to avoid pulling in path/filepath.\n" ^string [^string path]
+  (when (or (== @outputDir "") (== path ""))
+    (return path))
+
+  ;; On Windows, it's clumsy, but we can be almost always correct
+  ;; by just looking for a drive letter and a colon.
+  ;; Absolute paths always have a drive letter (ignoring UNC).
+  ;; Problem: if path == "C:A" and outputdir == "C:\Go" it's unclear
+  ;; what to do, but even then path/filepath doesn't help.
+  ;; TODO: Worth doing better? Probably not, because we're here only
+  ;; under the management of go test.
+  (when (and (== runtime/GOOS "windows") (>= (len path) 2))
+    (let [(values letter colon) (values (aget path 0) (aget path 1))]
+      (when (and ^:go/paren (or (and (<= \a letter) (<= letter \z)) (and (<= \A letter) (<= letter \Z))) (== colon \:))
+        ;; If path starts with a drive letter we're stuck with it regardless.
+        (return path))))
+
+
+  (when (os/IsPathSeparator (aget path 0))
+    (return path))
+
+  (fmt/Sprintf "%s%c%s" @outputDir os/PathSeparator path))
+
+
+
+^{:go/end 2967} (go/method startAlarm "startAlarm starts an alarm if requested.\n" ^time/Time [^{:tag (* M)} m]
+  (when (<= @timeout 0)
+    (return (lit time/Time)))
+
+
+  (let [deadline (.Add (time/Now) @timeout)]
+    (set! (.-timer m) (time/AfterFunc @timeout ^{:go/end 2965} (fn []
+          (.after m)
+          (debug/SetTraceback "all")
+          (let [extra ""]
+
+            (when [list (runningList)] (> (len list) 0)
+              (let [^strings/Builder b (zero strings/Builder)]
+                (.WriteString b "\nrunning tests:")
+                (range [_ name list]
+                  (.WriteString b "\n\t")
+                  (.WriteString b name))
+
+                (set! extra (.String b))))
+
+            (panic (fmt/Sprintf "test timed out after %v%s" @timeout extra))))))
+
+    ^{:line 2966} deadline))
+
+
+
+^{:go/end 2978} (go/func runningList "runningList returns the list of running tests.\n" ^{:tag (slice string)} []
+  (let [^{:tag (slice string)} list (zero (slice string))]
+    (.Range running ^{:go/breaks [3] :go/end 2975} (fn ^bool [^any k ^any v]
+        (set! list (append list (fmt/Sprintf "%s (%v)" (assert string k) (.Round (highPrecisionTimeSince (assert highPrecisionTime v)) time/Second))))
+        true))
+
+    (^{:inst [(slice string) string]} slices/Sort list)
+    ^{:line 2977} list))
+
+
+
+^{:go/end 2985} (go/method stopAlarm "stopAlarm turns off the alarm.\n" [^{:tag (* M)} m]
+  (when (> @timeout 0)
+    (.Stop (.-timer m))))
+
+
+
+^{:go/end 3003} (go/func parseCpuList []
+  (range [val (strings/SplitSeq @cpuListStr ",")]
+    (set! val (strings/TrimSpace val))
+    (when (== val "")
+      (continue))
+
+    (let [(values cpu err) (strconv/Atoi val)]
+      (when (or (!= err nil) (<= cpu 0))
+        (fmt/Fprintf os/Stderr "testing: invalid value %q for -test.cpu\n" val)
+        (os/Exit 1))
+
+      (set! cpuList (append cpuList cpu))))
+
+  (when (== cpuList nil)
+    (set! cpuList (append cpuList (runtime/GOMAXPROCS -1)))))
+
+
+
+^{:go/end 3007} (go/func shouldFailFast ^bool []
+  (and @failFast (> (.Load numFailed) 0)))

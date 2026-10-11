@@ -1,0 +1,1166 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; DWARF debug information entry parser.
+;; An entry is a sequence of data items of a given format.
+;; The first word in the entry is an index into what DWARF
+;; calls the ``abbreviation table.''  An abbreviation is really
+;; just a type descriptor: it's an array of attribute tag/value format pairs.
+
+(in-ns 'go.debug.dwarf) (go/file "entry.go" :imports [
+
+
+    ^{:line 14} [binary "encoding/binary"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [strconv "strconv"]])
+
+
+
+(go/type abbrev "a single entry's description: a sequence of attributes\n" (struct
+    ^{:line 22 :tag Tag} tag
+    ^{:line 23 :tag bool} children
+    ^{:line 24 :tag (slice afield)} field))
+
+
+(go/type afield (struct
+    ^{:line 28 :tag Attr} attr
+    ^{:line 29 :tag format} fmt
+    ^{:line 30 :tag Class} class
+    ^{:line 31 :tag int64} val)) ; for formImplicitConst
+
+
+
+(go/type abbrevTable "a map from entry format ids to their descriptions\n" (map uint32 abbrev))
+
+
+
+^{:go/end 105} (go/method parseAbbrev "parseAbbrev returns the abbreviation table that starts at byte off\nin the .debug_abbrev section.\n" [^{:tag (* Data)} d ^uint64 off ^int vers] :results [abbrevTable error]
+  (when [(values m ok) (aget (.-abbrevCache d) off)] ok
+    (return m nil))
+
+
+  (let [data (.-abbrev d)]
+    (if (> off (conv uint64 (len data)))
+      (set! data nil)
+
+      (set! data (subslice data off)))
+
+    (let [b (makeBuf d (lit unknownFormat) "abbrev" 0 data)
+
+        ;; Error handling is simplified by the buf getters
+        ;; returning an endless stream of 0s after an error.
+        ^{:line 54} m (make abbrevTable)]
+      (while true
+        ;; Table ends with id == 0.
+        (let [id (conv uint32 (.uint b))]
+          (when (== id 0)
+            (break))
+
+
+          ;; Walk over attributes, counting.
+          (let [n 0
+              ^{:line 64} b1 b] ; Read from copy of b.
+            (.uint b1)
+            (.uint8 b1)
+            (while true
+              (let [tag (.uint b1)
+                  ^{:line 69} fmt (.uint b1)]
+                (when (and (== tag 0) (== fmt 0))
+                  (break))
+
+                (when (== (conv format fmt) formImplicitConst)
+                  (.int b1))
+
+                (inc! n)))
+
+            (when (!= (.-err b1) nil)
+              (return nil (.-err b1)))
+
+
+            ;; Walk over attributes again, this time writing them down.
+            (let [^abbrev a (zero abbrev)]
+              (set! (.-tag a) (conv Tag (.uint b)))
+              (set! (.-children a) (!= (.uint8 b) 0))
+              (set! (.-field a) (make (slice afield) n))
+              (range [i (.-field a)]
+                (set! (.-attr (aget (.-field a) i)) (conv Attr (.uint b)))
+                (set! (.-fmt (aget (.-field a) i)) (conv format (.uint b)))
+                (set! (.-class (aget (.-field a) i)) (formToClass (.-fmt (aget (.-field a) i)) (.-attr (aget (.-field a) i)) vers (addr b)))
+                (when (== (.-fmt (aget (.-field a) i)) formImplicitConst)
+                  (set! (.-val (aget (.-field a) i)) (.int b))))
+
+
+              (.uint b)
+              (.uint b)
+
+              (aset m id a)))))
+
+      (when (!= (.-err b) nil)
+        (return nil (.-err b)))
+
+      (aset (.-abbrevCache d) off m)
+      (return m nil))))
+
+
+
+
+
+(go/var ^{:doc "attrIsExprloc indicates attributes that allow exprloc values that\nare encoded as block values in DWARF 2 and 3. See DWARF 4, Figure\n20.\n"} attrIsExprloc (lit (map Attr bool)
+    ^{:line 111} [AttrLocation true]
+    ^{:line 112} [AttrByteSize true]
+    ^{:line 113} [AttrBitOffset true]
+    ^{:line 114} [AttrBitSize true]
+    ^{:line 115} [AttrStringLength true]
+    ^{:line 116} [AttrLowerBound true]
+    ^{:line 117} [AttrReturnAddr true]
+    ^{:line 118} [AttrStrideSize true]
+    ^{:line 119} [AttrUpperBound true]
+    ^{:line 120} [AttrCount true]
+    ^{:line 121} [AttrDataMemberLoc true]
+    ^{:line 122} [AttrFrameBase true]
+    ^{:line 123} [AttrSegment true]
+    ^{:line 124} [AttrStaticLink true]
+    ^{:line 125} [AttrUseLocation true]
+    ^{:line 126} [AttrVtableElemLoc true]
+    ^{:line 127} [AttrAllocated true]
+    ^{:line 128} [AttrAssociated true]
+    ^{:line 129} [AttrDataLocation true]
+    ^{:line 130} [AttrStride true]))
+
+
+
+
+(go/var ^{:doc "attrPtrClass indicates the *ptr class of attributes that have\nencoding formSecOffset in DWARF 4 or formData* in DWARF 2 and 3.\n"} attrPtrClass (lit (map Attr Class)
+    ^{:line 136} [AttrLocation ClassLocListPtr]
+    ^{:line 137} [AttrStmtList ClassLinePtr]
+    ^{:line 138} [AttrStringLength ClassLocListPtr]
+    ^{:line 139} [AttrReturnAddr ClassLocListPtr]
+    ^{:line 140} [AttrStartScope ClassRangeListPtr]
+    ^{:line 141} [AttrDataMemberLoc ClassLocListPtr]
+    ^{:line 142} [AttrFrameBase ClassLocListPtr]
+    ^{:line 143} [AttrMacroInfo ClassMacPtr]
+    ^{:line 144} [AttrSegment ClassLocListPtr]
+    ^{:line 145} [AttrStaticLink ClassLocListPtr]
+    ^{:line 146} [AttrUseLocation ClassLocListPtr]
+    ^{:line 147} [AttrVtableElemLoc ClassLocListPtr]
+    ^{:line 148} [AttrRanges ClassRangeListPtr]
+    ;; The following are new in DWARF 5.
+    ^{:line 150} [AttrStrOffsetsBase ClassStrOffsetsPtr]
+    ^{:line 151} [AttrAddrBase ClassAddrPtr]
+    ^{:line 152} [AttrRnglistsBase ClassRngListsPtr]
+    ^{:line 153} [AttrLoclistsBase ClassLocListPtr]))
+
+
+
+
+
+^{:go/end 230} (go/func formToClass "formToClass returns the DWARF 4 Class for the given form. If the\nDWARF version is less then 4, it will disambiguate some forms\ndepending on the attribute.\n" ^Class [^format form ^Attr attr ^int vers ^{:tag (* buf)} b]
+  (switch form
+    (default
+      (.error b "cannot determine class of unknown attribute form")
+      (return 0))
+
+    (case [formIndirect]
+      (return ClassUnknown))
+
+    (case [formAddr formAddrx formAddrx1 formAddrx2 formAddrx3 formAddrx4]
+      (return ClassAddress))
+
+    (case [formDwarfBlock1 formDwarfBlock2 formDwarfBlock4 formDwarfBlock]
+      ;; In DWARF 2 and 3, ClassExprLoc was encoded as a
+      ;; block. DWARF 4 distinguishes ClassBlock and
+      ;; ClassExprLoc, but there are no attributes that can
+      ;; be both, so we also promote ClassBlock values in
+      ;; DWARF 4 that should be ClassExprLoc in case
+      ;; producers get this wrong.
+      (when (aget attrIsExprloc attr)
+        (return ClassExprLoc))
+
+      (return ClassBlock))
+
+    (case [formData1 formData2 formData4 formData8 formSdata formUdata formData16 formImplicitConst]
+      ;; In DWARF 2 and 3, ClassPtr was encoded as a
+      ;; constant. Unlike ClassExprLoc/ClassBlock, some
+      ;; DWARF 4 attributes need to distinguish Class*Ptr
+      ;; from ClassConstant, so we only do this promotion
+      ;; for versions 2 and 3.
+      (when [(values class ok) (aget attrPtrClass attr)] (and (< vers 4) ok)
+        (return class))
+
+      (return ClassConstant))
+
+    (case [formFlag formFlagPresent]
+      (return ClassFlag))
+
+    (case [formRefAddr formRef1 formRef2 formRef4 formRef8 formRefUdata formRefSup4 formRefSup8]
+      (return ClassReference))
+
+    (case [formRefSig8]
+      (return ClassReferenceSig))
+
+    (case [formString formStrp formStrx formStrpSup formLineStrp formStrx1 formStrx2 formStrx3 formStrx4]
+      (return ClassString))
+
+    (case [formSecOffset]
+      ;; DWARF 4 defines four *ptr classes, but doesn't
+      ;; distinguish them in the encoding. Disambiguate
+      ;; these classes using the attribute.
+      (when [(values class ok) (aget attrPtrClass attr)] ok
+        (return class))
+
+      (return ClassUnknown))
+
+    (case [formExprloc]
+      (return ClassExprLoc))
+
+    (case [formGnuRefAlt]
+      (return ClassReferenceAlt))
+
+    (case [formGnuStrpAlt]
+      (return ClassStringAlt))
+
+    (case [formLoclistx]
+      (return ClassLocList))
+
+    (case [formRnglistx]
+      (return ClassRngList))))
+
+
+
+
+(go/type Entry "An Entry is a sequence of attribute/value pairs.\n" (struct
+    ^{:line 234 :tag Offset} Offset ; offset of Entry in DWARF info
+    ^{:line 235 :tag Tag} Tag ; tag (kind of Entry)
+    ^{:line 236 :tag bool} Children ; whether Entry is followed by children
+    ^{:line 237 :tag (slice Field)} Field))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Field "A Field is a single attribute/value pair in an [Entry].\n\nA value can be one of several \"attribute classes\" defined by DWARF.\nThe Go types corresponding to each class are:\n\n\tDWARF class       Go type        Class\n\t-----------       -------        -----\n\taddress           uint64         ClassAddress\n\tblock             []byte         ClassBlock\n\tconstant          int64          ClassConstant\n\tflag              bool           ClassFlag\n\treference\n\t  to info         dwarf.Offset   ClassReference\n\t  to type unit    uint64         ClassReferenceSig\n\tstring            string         ClassString\n\texprloc           []byte         ClassExprLoc\n\tlineptr           int64          ClassLinePtr\n\tloclistptr        int64          ClassLocListPtr\n\tmacptr            int64          ClassMacPtr\n\trangelistptr      int64          ClassRangeListPtr\n\nFor unrecognized or vendor-defined attributes, [Class] may be\n[ClassUnknown].\n" (struct
+    ^{:line 264 :tag Attr} Attr
+    ^{:line 265 :tag any} Val
+    ^{:line 266 :tag Class} Class))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Class "A Class is the DWARF 4 class of an attribute value.\n\nIn general, a given attribute's value may take on one of several\npossible classes defined by DWARF, each of which leads to a\nslightly different interpretation of the attribute.\n\nDWARF version 4 distinguishes attribute value classes more finely\nthan previous versions of DWARF. The reader will disambiguate\ncoarser classes from earlier versions of DWARF into the appropriate\nDWARF 4 class. For example, DWARF 2 uses \"constant\" for constants\nas well as all types of section offsets, but the reader will\ncanonicalize attributes in DWARF 2 files that refer to section\noffsets to one of the Class*Ptr classes, even though these classes\nwere only defined in DWARF 3.\n" int)
+
+(go/const
+
+  ^{:line 287} [^{:tag Class :val 0 :doc "ClassUnknown represents values of unknown DWARF class.\n"} ClassUnknown iota]
+
+
+
+  ^{:line 291} [^{:val 1 :doc "ClassAddress represents values of type uint64 that are\naddresses on the target machine.\n"} ClassAddress]
+
+
+
+  ^{:line 295} [^{:val 2 :doc "ClassBlock represents values of type []byte whose\ninterpretation depends on the attribute.\n"} ClassBlock]
+
+
+
+
+  ^{:line 300} [^{:val 3 :doc "ClassConstant represents values of type int64 that are\nconstants. The interpretation of this constant depends on\nthe attribute.\n"} ClassConstant]
+
+
+
+  ^{:line 304} [^{:val 4 :doc "ClassExprLoc represents values of type []byte that contain\nan encoded DWARF expression or location description.\n"} ClassExprLoc]
+
+
+  ^{:line 307} [^{:val 5 :doc "ClassFlag represents values of type bool.\n"} ClassFlag]
+
+
+
+  ^{:line 311} [^{:val 6 :doc "ClassLinePtr represents values that are an int64 offset\ninto the \"line\" section.\n"} ClassLinePtr]
+
+
+
+  ^{:line 315} [^{:val 7 :doc "ClassLocListPtr represents values that are an int64 offset\ninto the \"loclist\" section.\n"} ClassLocListPtr]
+
+
+
+  ^{:line 319} [^{:val 8 :doc "ClassMacPtr represents values that are an int64 offset into\nthe \"mac\" section.\n"} ClassMacPtr]
+
+
+
+  ^{:line 323} [^{:val 9 :doc "ClassRangeListPtr represents values that are an int64 offset into\nthe \"rangelist\" section.\n"} ClassRangeListPtr]
+
+
+
+
+
+  ^{:line 329} [^{:val 10 :doc "ClassReference represents values that are an Offset offset\nof an Entry in the info section (for use with Reader.Seek).\nThe DWARF specification combines ClassReference and\nClassReferenceSig into class \"reference\".\n"} ClassReference]
+
+
+
+  ^{:line 333} [^{:val 11 :doc "ClassReferenceSig represents values that are a uint64 type\nsignature referencing a type Entry.\n"} ClassReferenceSig]
+
+
+
+
+
+  ^{:line 339} [^{:val 12 :doc "ClassString represents values that are strings. If the\ncompilation unit specifies the AttrUseUTF8 flag (strongly\nrecommended), the string value will be encoded in UTF-8.\nOtherwise, the encoding is unspecified.\n"} ClassString]
+
+
+
+
+  ^{:line 344} [^{:val 13 :doc "ClassReferenceAlt represents values of type int64 that are\nan offset into the DWARF \"info\" section of an alternate\nobject file.\n"} ClassReferenceAlt]
+
+
+
+
+  ^{:line 349} [^{:val 14 :doc "ClassStringAlt represents values of type int64 that are an\noffset into the DWARF string section of an alternate object\nfile.\n"} ClassStringAlt]
+
+
+
+  ^{:line 353} [^{:val 15 :doc "ClassAddrPtr represents values that are an int64 offset\ninto the \"addr\" section.\n"} ClassAddrPtr]
+
+
+
+  ^{:line 357} [^{:val 16 :doc "ClassLocList represents values that are an int64 offset\ninto the \"loclists\" section.\n"} ClassLocList]
+
+
+
+  ^{:line 361} [^{:val 17 :doc "ClassRngList represents values that are a uint64 offset\nfrom the base of the \"rnglists\" section.\n"} ClassRngList]
+
+
+
+
+  ^{:line 366} [^{:val 18 :doc "ClassRngListsPtr represents values that are an int64 offset\ninto the \"rnglists\" section. These are used as the base for\nClassRngList values.\n"} ClassRngListsPtr]
+
+
+
+  ^{:line 370} [^{:val 19 :doc "ClassStrOffsetsPtr represents values that are an int64\noffset into the \"str_offsets\" section.\n"} ClassStrOffsetsPtr])
+
+
+(go/directive "//go:generate stringer -type=Class")
+
+^{:go/end 377} (go/method GoString ^string [^Class i]
+  (+ "dwarf." (.String i)))
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 390]] :go/end 391} (go/method Val "Val returns the value associated with attribute [Attr] in [Entry],\nor nil if there is no such attribute.\n\nA common idiom is to merge the check for nil return with\nthe check that the value has the expected dynamic type, as in:\n\n\tv, ok := e.Val(AttrSibling).(int64)\n" ^any [^{:tag (* Entry)} e ^Attr a]
+  (when [f (.AttrField e a)] (!= f nil)
+    (return (.-Val f)))
+
+  nil)
+
+
+
+
+^{:go/breaks [[5 401]] :go/end 402} (go/method AttrField "AttrField returns the [Field] associated with attribute [Attr] in\n[Entry], or nil if there is no such attribute.\n" ^{:tag (* Field)} [^{:tag (* Entry)} e ^Attr a]
+  (range [i f (.-Field e)]
+    (when (== (.-Attr f) a)
+      (return (addr (aget (.-Field e) i)))))
+
+
+  nil)
+
+
+
+
+(go/type Offset "An Offset represents the location of an [Entry] within the DWARF info.\n(See [Reader.Seek].)\n" uint32)
+
+
+
+^{:go/end 724} (go/method entry "Entry reads a single entry from buf, decoding\naccording to the given abbreviation table.\n" ^{:tag (* Entry)} [^{:tag (* buf)} b ^{:tag (* Entry)} cu ^{:tag (* unit)} u]
+  (let [(values atab ubase vers) (values (.-atable u) (.-base u) (.-vers u))
+      ^{:line 412} off (.-off b)
+      ^{:line 413} id (conv uint32 (.uint b))]
+    (when (== id 0)
+      (return (addr (lit Entry))))
+
+    (let [(values a ok) (aget atab id)]
+      (when (not ok)
+        (.error b "unknown abbreviation table index")
+        (return nil))
+
+      (let [e (addr ^{:go/breaks [2 4 6 8]} (lit Entry
+              :Offset off
+              :Tag (.-tag a)
+              :Children (.-children a)
+              :Field (make (slice Field) (len (.-field a)))))
+
+
+          ^{:line 429} resolveStrx ^{:go/end 457} (fn ^string [^uint64 strBase ^uint64 off]
+            (set! off + strBase)
+            (when (!= (conv uint64 (conv int off)) off)
+              (.error b "DW_FORM_strx offset out of range"))
+
+
+            (let [b1 (makeBuf (.-dwarf b) (.-format b) "str_offsets" 0 (.-strOffsets (.-dwarf b)))]
+              (.skip b1 (conv int off))
+              (let [(values is64 _) (.dwarf64 (.-format b))]
+                (if is64
+                  (set! off (.uint64 b1))
+
+                  (set! off (conv uint64 (.uint32 b1))))
+
+                (when (!= (.-err b1) nil)
+                  (set! (.-err b) (.-err b1))
+                  (return ""))
+
+                (when (!= (conv uint64 (conv int off)) off)
+                  (.error b "DW_FORM_strx indirect offset out of range"))
+
+                (set! b1 (makeBuf (.-dwarf b) (.-format b) "str" 0 (.-str (.-dwarf b))))
+                (.skip b1 (conv int off))
+                (let [val (.string b1)]
+                  (when (!= (.-err b1) nil)
+                    (set! (.-err b) (.-err b1)))
+
+                  ^{:line 456} val))))
+
+
+          ^{:line 459} resolveRnglistx ^{:go/end 486} (fn ^uint64 [^uint64 rnglistsBase ^uint64 off]
+            (let [(values is64 _) (.dwarf64 (.-format b))]
+              (if is64
+                (set! off * 8)
+
+                (set! off * 4))
+
+              (set! off + rnglistsBase)
+              (when (!= (conv uint64 (conv int off)) off)
+                (.error b "DW_FORM_rnglistx offset out of range"))
+
+
+              (let [b1 (makeBuf (.-dwarf b) (.-format b) "rnglists" 0 (.-rngLists (.-dwarf b)))]
+                (.skip b1 (conv int off))
+                (if is64
+                  (set! off (.uint64 b1))
+
+                  (set! off (conv uint64 (.uint32 b1))))
+
+                (when (!= (.-err b1) nil)
+                  (set! (.-err b) (.-err b1))
+                  (return 0))
+
+                (when (!= (conv uint64 (conv int off)) off)
+                  (.error b "DW_FORM_rnglistx indirect offset out of range"))
+
+                (+ rnglistsBase off))))]
+
+
+        (range [i (.-Field e)]
+          (set! (.-Attr (aget (.-Field e) i)) (.-attr (aget (.-field a) i)))
+          (set! (.-Class (aget (.-Field e) i)) (.-class (aget (.-field a) i)))
+          (let [fmt (.-fmt (aget (.-field a) i))]
+            (when (== fmt formIndirect)
+              (set! fmt (conv format (.uint b)))
+              (set! (.-Class (aget (.-Field e) i)) (formToClass fmt (.-attr (aget (.-field a) i)) vers b)))
+
+            (let [^any val (zero any)]
+              (switch fmt
+                (default
+                  (.error b (+ "unknown entry attr format 0x" (strconv/FormatInt (conv int64 fmt) 16))))
+
+                ;; address
+                (case [formAddr]
+                  (set! val (.addr b)))
+                (case [formAddrx formAddrx1 formAddrx2 formAddrx3 formAddrx4]
+                  (let [^uint64 off (zero uint64)]
+                    (switch fmt
+                      (case [formAddrx]
+                        (set! off (.uint b)))
+                      (case [formAddrx1]
+                        (set! off (conv uint64 (.uint8 b))))
+                      (case [formAddrx2]
+                        (set! off (conv uint64 (.uint16 b))))
+                      (case [formAddrx3]
+                        (set! off (conv uint64 (.uint24 b))))
+                      (case [formAddrx4]
+                        (set! off (conv uint64 (.uint32 b)))))
+
+                    (when (== (.-addr (.-dwarf b)) nil)
+                      (.error b "DW_FORM_addrx with no .debug_addr section"))
+
+                    (when (!= (.-err b) nil)
+                      (return nil))
+
+
+                    (let [addrBase (conv int64 (.addrBase u))
+                        ^{:line 526 :tag error} err (zero error)]
+                      (set! (values val err) (.debugAddr (.-dwarf b) (.-format b) (conv uint64 addrBase) off))
+                      (when (!= err nil)
+                        (when (== (.-err b) nil)
+                          (set! (.-err b) err))
+
+                        (return nil)))))
+
+
+                ;; block
+                (case [formDwarfBlock1]
+                  (set! val (.bytes b (conv int (.uint8 b)))))
+                (case [formDwarfBlock2]
+                  (set! val (.bytes b (conv int (.uint16 b)))))
+                (case [formDwarfBlock4]
+                  (set! val (.bytes b (conv int (.uint32 b)))))
+                (case [formDwarfBlock]
+                  (set! val (.bytes b (conv int (.uint b)))))
+
+                ;; constant
+                (case [formData1]
+                  (set! val (conv int64 (.uint8 b))))
+                (case [formData2]
+                  (set! val (conv int64 (.uint16 b))))
+                (case [formData4]
+                  (set! val (conv int64 (.uint32 b))))
+                (case [formData8]
+                  (set! val (conv int64 (.uint64 b))))
+                (case [formData16]
+                  (set! val (.bytes b 16)))
+                (case [formSdata]
+                  (set! val (.int b)))
+                (case [formUdata]
+                  (set! val (conv int64 (.uint b))))
+                (case [formImplicitConst]
+                  (set! val (.-val (aget (.-field a) i))))
+
+                ;; flag
+                (case [formFlag]
+                  (set! val (== (.uint8 b) 1)))
+                ;; New in DWARF 4.
+                (case [formFlagPresent]
+                  ;; The attribute is implicitly indicated as present, and no value is
+                  ;; encoded in the debugging information entry itself.
+                  (set! val true))
+
+                ;; reference to other entry
+                (case [formRefAddr]
+                  (let [vers (.version (.-format b))]
+                    (cond (== vers 0)
+                      (.error b "unknown version for DW_FORM_ref_addr")
+                      (== vers 2)
+                      (set! val (conv Offset (.addr b))) :else
+
+                      (let [(values is64 known) (.dwarf64 (.-format b))]
+                        (cond (not known)
+                          (.error b "unknown size for DW_FORM_ref_addr")
+                          ^{:line 583} is64
+                          (set! val (conv Offset (.uint64 b))) :else
+
+                          (set! val (conv Offset (.uint32 b))))))))
+
+
+                (case [formRef1]
+                  (set! val (+ (conv Offset (.uint8 b)) ubase)))
+                (case [formRef2]
+                  (set! val (+ (conv Offset (.uint16 b)) ubase)))
+                (case [formRef4]
+                  (set! val (+ (conv Offset (.uint32 b)) ubase)))
+                (case [formRef8]
+                  (set! val (+ (conv Offset (.uint64 b)) ubase)))
+                (case [formRefUdata]
+                  (set! val (+ (conv Offset (.uint b)) ubase)))
+
+                ;; string
+                (case [formString]
+                  (set! val (.string b)))
+                (case [formStrp formLineStrp]
+                  (let [^uint64 off (zero uint64) ; offset into .debug_str
+                      (values is64 known) (.dwarf64 (.-format b))]
+                    (cond (not known)
+                      (.error b "unknown size for DW_FORM_strp/line_strp")
+                      ^{:line 608} is64
+                      (set! off (.uint64 b)) :else
+
+                      (set! off (conv uint64 (.uint32 b))))
+
+                    (when (!= (conv uint64 (conv int off)) off)
+                      (.error b "DW_FORM_strp/line_strp offset out of range"))
+
+                    (when (!= (.-err b) nil)
+                      (return nil))
+
+                    (let [^buf b1 (zero buf)]
+                      (if (== fmt formStrp)
+                        (set! b1 (makeBuf (.-dwarf b) (.-format b) "str" 0 (.-str (.-dwarf b))))
+                        (do
+                          (when (== (len (.-lineStr (.-dwarf b))) 0)
+                            (.error b "DW_FORM_line_strp with no .debug_line_str section")
+                            (return nil))
+
+                          (set! b1 (makeBuf (.-dwarf b) (.-format b) "line_str" 0 (.-lineStr (.-dwarf b))))))
+
+                      (.skip b1 (conv int off))
+                      (set! val (.string b1))
+                      (when (!= (.-err b1) nil)
+                        (set! (.-err b) (.-err b1))
+                        (return nil)))))
+
+                (case [formStrx formStrx1 formStrx2 formStrx3 formStrx4]
+                  (let [^uint64 off (zero uint64)]
+                    (switch fmt
+                      (case [formStrx]
+                        (set! off (.uint b)))
+                      (case [formStrx1]
+                        (set! off (conv uint64 (.uint8 b))))
+                      (case [formStrx2]
+                        (set! off (conv uint64 (.uint16 b))))
+                      (case [formStrx3]
+                        (set! off (conv uint64 (.uint24 b))))
+                      (case [formStrx4]
+                        (set! off (conv uint64 (.uint32 b)))))
+
+                    (when (== (len (.-strOffsets (.-dwarf b))) 0)
+                      (.error b "DW_FORM_strx with no .debug_str_offsets section"))
+
+                    (let [(values is64 known) (.dwarf64 (.-format b))]
+                      (when (not known)
+                        (.error b "unknown offset size for DW_FORM_strx"))
+
+                      (when (!= (.-err b) nil)
+                        (return nil))
+
+                      (if is64
+                        (set! off * 8)
+
+                        (set! off * 4))
+
+
+                      (let [strBase (conv int64 (.strOffsetsBase u))]
+                        (set! val (resolveStrx (conv uint64 strBase) off))))))
+
+                (case [formStrpSup]
+                  (let [(values is64 known) (.dwarf64 (.-format b))]
+                    (cond (not known)
+                      (.error b "unknown size for DW_FORM_strp_sup")
+                      ^{:line 672} is64
+                      (set! val (.uint64 b)) :else
+
+                      (set! val (.uint32 b)))))
+
+
+                ;; lineptr, loclistptr, macptr, rangelistptr
+                ;; New in DWARF 4, but clang can generate them with -gdwarf-2.
+                ;; Section reference, replacing use of formData4 and formData8.
+                (case [formSecOffset formGnuRefAlt formGnuStrpAlt]
+                  (let [(values is64 known) (.dwarf64 (.-format b))]
+                    (cond (not known)
+                      (.error b (+ "unknown size for form 0x" (strconv/FormatInt (conv int64 fmt) 16)))
+                      ^{:line 685} is64
+                      (set! val (conv int64 (.uint64 b))) :else
+
+                      (set! val (conv int64 (.uint32 b))))))
+
+
+                ;; exprloc
+                ;; New in DWARF 4.
+                (case [formExprloc]
+                  (set! val (.bytes b (conv int (.uint b)))))
+
+                ;; reference
+                ;; New in DWARF 4.
+                (case [formRefSig8]
+                  ;; 64-bit type signature.
+                  (set! val (.uint64 b)))
+                (case [formRefSup4]
+                  (set! val (.uint32 b)))
+                (case [formRefSup8]
+                  (set! val (.uint64 b)))
+
+                ;; loclist
+                (case [formLoclistx]
+                  (set! val (.uint b)))
+
+                ;; rnglist
+                (case [formRnglistx]
+                  (let [off (.uint b)
+
+                      ^{:line 714} rnglistsBase (conv int64 (.rngListsBase u))]
+                    (set! val (resolveRnglistx (conv uint64 rnglistsBase) off)))))
+
+
+              (set! (.-Val (aget (.-Field e) i)) val))))
+
+        (when (!= (.-err b) nil)
+          (return nil))
+
+        ^{:line 723} e))))
+
+
+
+
+
+
+
+(go/type Reader "A Reader allows reading [Entry] structures from a DWARF “info” section.\nThe [Entry] structures are arranged in a tree. The [Reader.Next] function\nreturn successive entries from a pre-order traversal of the tree.\nIf an entry has children, its Children field will be true, and the children\nfollow, terminated by an [Entry] with [Tag] 0.\n" (struct
+    ^{:line 732 :tag buf} b
+    ^{:line 733 :tag (* Data)} d
+    ^{:line 734 :tag error} err
+    ^{:line 735 :tag int} unit
+    ^{:line 736 :tag bool} lastUnit ; set if last entry returned by Next is TagCompileUnit/TagPartialUnit
+    ^{:line 737 :tag bool} lastChildren ; .Children of last entry returned by Next
+    ^{:line 738 :tag Offset} lastSibling ; .Val(AttrSibling) of last entry returned by Next
+    ^{:line 739 :tag (* Entry)} cu)) ; current compilation unit
+
+
+
+
+^{:go/end 748} (go/method Reader "Reader returns a new Reader for [Data].\nThe reader is positioned at byte offset 0 in the DWARF “info” section.\n" ^{:tag (* Reader)} [^{:tag (* Data)} d]
+  (let [r (addr (lit Reader :d d))]
+    (.Seek r 0)
+    ^{:line 747} r))
+
+
+
+
+^{:go/end 754} (go/method AddressSize "AddressSize returns the size in bytes of addresses in the current compilation\nunit.\n" ^int [^{:tag (* Reader)} r]
+  (.-asize (aget (.-unit (.-d r)) (.-unit r))))
+
+
+
+^{:go/end 759} (go/method ByteOrder "ByteOrder returns the byte order in the current compilation unit.\n" ^binary/ByteOrder [^{:tag (* Reader)} r]
+  (.-order (.-b r)))
+
+
+
+
+^{:go/end 791} (go/method Seek "Seek positions the [Reader] at offset off in the encoded entry stream.\nOffset 0 can be used to denote the first entry.\n" [^{:tag (* Reader)} r ^Offset off]
+  (let [d (.-d r)]
+    (set! (.-err r) nil)
+    (set! (.-lastChildren r) false)
+    (when (== off 0)
+      (when (== (len (.-unit d)) 0)
+        (return))
+
+      (let [u (addr (aget (.-unit d) 0))]
+        (set! (.-unit r) 0)
+        (set! (.-b r) (makeBuf (.-d r) u "info" (.-off u) (.-data u)))
+        (.collectDwarf5BaseOffsets r u)
+        (set! (.-cu r) nil)
+        (return)))
+
+
+    (let [i (.offsetToUnit d off)]
+      (when (== i -1)
+        (set! (.-err r) (errors/New "offset out of range"))
+        (return))
+
+      (when (!= i (.-unit r))
+        (set! (.-cu r) nil))
+
+      (let [u (addr (aget (.-unit d) i))]
+        (set! (.-unit r) i)
+        (set! (.-b r) (makeBuf (.-d r) u "info" off (subslice (.-data u) (- off (.-off u)))))
+        (.collectDwarf5BaseOffsets r u)))))
+
+
+
+^{:go/end 798} (go/method maybeNextUnit "maybeNextUnit advances to the next unit if this one is finished.\n" [^{:tag (* Reader)} r]
+  (while (and (== (len (.-data (.-b r))) 0) (< (+ (.-unit r) 1) (len (.-unit (.-d r)))))
+    (.nextUnit r)))
+
+
+
+
+^{:go/end 807} (go/method nextUnit "nextUnit advances to the next unit.\n" [^{:tag (* Reader)} r]
+  (inc! (.-unit r))
+  (let [u (addr (aget (.-unit (.-d r)) (.-unit r)))]
+    (set! (.-b r) (makeBuf (.-d r) u "info" (.-off u) (.-data u)))
+    (set! (.-cu r) nil)
+    (.collectDwarf5BaseOffsets r u)))
+
+
+^{:go/end 817} (go/method collectDwarf5BaseOffsets [^{:tag (* Reader)} r ^{:tag (* unit)} u]
+  (when (or (< (.-vers u) 5) (!= (.-unit5 u) nil))
+    (return))
+
+  (set! (.-unit5 u) (new unit5))
+  (when [err (.collectDwarf5BaseOffsets (.-d r) u)] (!= err nil)
+    (set! (.-err r) err)))
+
+
+
+
+
+
+
+^{:go/end 851} (go/method Next "Next reads the next entry from the encoded entry stream.\nIt returns nil, nil when it reaches the end of the section.\nIt returns an error if the current offset is invalid or the data at the\noffset cannot be decoded as a valid [Entry].\n" [^{:tag (* Reader)} r] :results [(* Entry) error]
+  (when (!= (.-err r) nil)
+    (return nil (.-err r)))
+
+  (.maybeNextUnit r)
+  (when (== (len (.-data (.-b r))) 0)
+    (return nil nil))
+
+  (let [u (addr (aget (.-unit (.-d r)) (.-unit r)))
+      ^{:line 832} e (.entry (.-b r) (.-cu r) u)]
+    (when (!= (.-err (.-b r)) nil)
+      (set! (.-err r) (.-err (.-b r)))
+      (return nil (.-err r)))
+
+    (set! (.-lastUnit r) false)
+    (if (!= e nil) (do
+        (set! (.-lastChildren r) (.-Children e))
+        (when (.-lastChildren r)
+          (set! (values (.-lastSibling r) _) (assert Offset (.Val e AttrSibling))))
+
+        (when (or (== (.-Tag e) TagCompileUnit) (== (.-Tag e) TagPartialUnit))
+          (set! (.-lastUnit r) true)
+          (set! (.-cu r) e)))
+
+
+      (set! (.-lastChildren r) false))
+
+    (return e nil)))
+
+
+
+
+
+^{:go/end 884} (go/method SkipChildren "SkipChildren skips over the child entries associated with\nthe last [Entry] returned by [Reader.Next]. If that [Entry] did not have\nchildren or [Reader.Next] has not been called, SkipChildren is a no-op.\n" [^{:tag (* Reader)} r]
+  (when (or (!= (.-err r) nil) (not (.-lastChildren r)))
+    (return))
+
+
+  ;; If the last entry had a sibling attribute,
+  ;; that attribute gives the offset of the next
+  ;; sibling, so we can avoid decoding the
+  ;; child subtrees.
+  (when (>= (.-lastSibling r) (.-off (.-b r)))
+    (.Seek r (.-lastSibling r))
+    (return))
+
+
+  (when (and (.-lastUnit r) (< (+ (.-unit r) 1) (len (.-unit (.-d r)))))
+    (.nextUnit r)
+    (return))
+
+
+  (while true
+    (let [(values e err) (.Next r)]
+      (when (or (!= err nil) (== e nil) (== (.-Tag e) 0))
+        (break))
+
+      (when (.-Children e)
+        (.SkipChildren r)))))
+
+
+
+
+
+
+^{:go/end 890} (go/method clone "clone returns a copy of the reader. This is used by the typeReader\ninterface.\n" ^typeReader [^{:tag (* Reader)} r]
+  (.Reader (.-d r)))
+
+
+
+
+^{:go/end 896} (go/method offset "offset returns the current buffer offset. This is used by the\ntypeReader interface.\n" ^Offset [^{:tag (* Reader)} r]
+  (.-off (.-b r)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 942} (go/method SeekPC "SeekPC returns the [Entry] for the compilation unit that includes pc,\nand positions the reader to read the children of that unit.  If pc\nis not covered by any unit, SeekPC returns [ErrUnknownPC] and the\nposition of the reader is undefined.\n\nBecause compilation units can describe multiple regions of the\nexecutable, in the worst case SeekPC must search through all the\nranges in all the compilation units. Each call to SeekPC starts the\nsearch at the compilation unit of the last call, so in general\nlooking up a series of PCs will be faster if they are sorted. If\nthe caller wishes to do repeated fast PC lookups, it should build\nan appropriate index using the Ranges method.\n" [^{:tag (* Reader)} r ^uint64 pc] :results [(* Entry) error]
+  (let [unit (.-unit r)]
+    (for [i 0] (< i (len (.-unit (.-d r)))) (inc! i)
+      (when (>= unit (len (.-unit (.-d r))))
+        (set! unit 0))
+
+      (set! (.-err r) nil)
+      (set! (.-lastChildren r) false)
+      (set! (.-unit r) unit)
+      (set! (.-cu r) nil)
+      (let [u (addr (aget (.-unit (.-d r)) unit))]
+        (set! (.-b r) (makeBuf (.-d r) u "info" (.-off u) (.-data u)))
+        (.collectDwarf5BaseOffsets r u)
+        (let [(values e err) (.Next r)]
+          (when (!= err nil)
+            (return nil err))
+
+          (when (or (== e nil) (== (.-Tag e) 0))
+            (return nil ErrUnknownPC))
+
+          (let [(values ranges ^:assign err) (.Ranges (.-d r) e)]
+            (when (!= err nil)
+              (return nil err))
+
+            (range [_ pcs ranges]
+              (when (and (<= (aget pcs 0) pc) (< pc (aget pcs 1)))
+                (return e nil)))
+
+
+            (inc! unit)))))
+
+    (return nil ErrUnknownPC)))
+
+
+
+
+
+^{:go/end 1022} (go/method Ranges "Ranges returns the PC ranges covered by e, a slice of [low,high) pairs.\nOnly some entry types, such as [TagCompileUnit] or [TagSubprogram], have PC\nranges; for others, this will return nil with no error.\n" [^{:tag (* Data)} d ^{:tag (* Entry)} e] :results [(slice (array 2 uint64)) error]
+  (let [^{:tag (slice (array 2 uint64))} ret (zero (slice (array 2 uint64)))
+
+      (values low lowOK) (assert uint64 (.Val e AttrLowpc))
+
+      ^{:line 952 :tag uint64} high (zero uint64)
+      ^{:line 953 :tag bool} highOK (zero bool)
+      ^{:line 954} highField (.AttrField e AttrHighpc)]
+    (when (!= highField nil)
+      (switch (.-Class highField)
+        (case [ClassAddress]
+          (set! (values high highOK) (assert uint64 (.-Val highField))))
+        (case [ClassConstant]
+          (let [(values off ok) (assert int64 (.-Val highField))]
+            (when ok
+              (set! high (+ low (conv uint64 off)))
+              (set! highOK true))))))
+
+
+
+
+    (when (and lowOK highOK)
+      (set! ret (append ret (lit (array 2 uint64) low high))))
+
+
+    (let [^{:tag (* unit)} u (zero (* unit))]
+      (when [uidx (.offsetToUnit d (.-Offset e))] (and (>= uidx 0) (< uidx (len (.-unit d))))
+        (set! u (addr (aget (.-unit d) uidx))))
+
+
+      (when (and (!= u nil) (>= (.-vers u) 5) (!= (.-rngLists d) nil))
+        ;; DWARF version 5 and later
+        (let [field (.AttrField e AttrRanges)]
+          (when (== field nil)
+            (return ret nil))
+
+          (switch (.-Class field)
+            (case [ClassRangeListPtr]
+              (let [(values ranges rangesOK) (assert int64 (.-Val field))]
+                (when (not rangesOK)
+                  (return ret nil))
+
+                (let [(values cu base err) (.baseAddressForEntry d e)]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (return (.dwarf5Ranges d u cu base ranges ret)))))
+
+            (case [ClassRngList]
+              (let [(values rnglist ok) (assert uint64 (.-Val field))]
+                (when (not ok)
+                  (return ret nil))
+
+                (let [(values cu base err) (.baseAddressForEntry d e)]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (return (.dwarf5Ranges d u cu base (conv int64 rnglist) ret)))))
+
+            (default
+              (return ret nil)))))
+
+
+
+      ;; DWARF version 2 through 4
+      (let [(values ranges rangesOK) (assert int64 (.Val e AttrRanges))]
+        (when (and rangesOK (!= (.-ranges d) nil))
+          (let [(values _ base err) (.baseAddressForEntry d e)]
+            (when (!= err nil)
+              (return nil err))
+
+            (return (.dwarf2Ranges d u base ranges ret))))
+
+
+        (return ret nil)))))
+
+
+
+
+
+
+
+^{:go/end 1053} (go/method baseAddressForEntry "baseAddressForEntry returns the initial base address to be used when\nlooking up the range list of entry e.\nDWARF specifies that this should be the lowpc attribute of the enclosing\ncompilation unit, however comments in gdb/dwarf2read.c say that some\nversions of GCC use the entrypc attribute, so we check that too.\n" [^{:tag (* Data)} d ^{:tag (* Entry)} e] :results [(* Entry) uint64 error]
+  (let [^{:tag (* Entry)} cu (zero (* Entry))]
+    (if (== (.-Tag e) TagCompileUnit)
+      (set! cu e)
+
+      (let [i (.offsetToUnit d (.-Offset e))]
+        (when (== i -1)
+          (return nil 0 (errors/New "no unit for entry")))
+
+        (let [u (addr (aget (.-unit d) i))
+            ^{:line 1039} b (makeBuf d u "info" (.-off u) (.-data u))]
+          (set! cu (.entry b nil u))
+          (when (!= (.-err b) nil)
+            (return nil 0 (.-err b))))))
+
+
+
+    (if [(values cuEntry cuEntryOK) (assert uint64 (.Val cu AttrEntrypc))] cuEntryOK
+      (return cu cuEntry nil)
+      (when [(values cuLow cuLowOK) (assert uint64 (.Val cu AttrLowpc))] cuLowOK
+        (return cu cuLow nil)))
+
+
+    (return cu 0 nil)))
+
+
+^{:go/end 1076} (go/method dwarf2Ranges [^{:tag (* Data)} d ^{:tag (* unit)} u ^uint64 base ^int64 ranges ^{:tag (slice (array 2 uint64))} ret] :results [(slice (array 2 uint64)) error]
+  (when (or (< ranges 0) (> ranges (conv int64 (len (.-ranges d)))))
+    (return nil (fmt/Errorf "invalid range offset %d (max %d)" ranges (len (.-ranges d)))))
+
+  (let [buf (makeBuf d u "ranges" (conv Offset ranges) (subslice (.-ranges d) ranges))]
+    (while (> (len (.-data buf)) 0)
+      (let [low (.addr buf)
+          ^{:line 1062} high (.addr buf)]
+
+        (when (and (== low 0) (== high 0))
+          (break))
+
+
+        (if (== low (>> (bit-not (conv uint64 0)) (conv uint (* (- 8 (.addrsize u)) 8))))
+          (set! base high)
+
+          (set! ret (append ret (lit (array 2 uint64) (+ base low) (+ base high)))))))
+
+
+
+    (return ret nil)))
+
+
+
+
+^{:go/end 1150} (go/method dwarf5Ranges "dwarf5Ranges interprets a debug_rnglists sequence, see DWARFv5 section\n2.17.3 (page 53).\n" [^{:tag (* Data)} d ^{:tag (* unit)} u ^{:tag (* Entry)} cu ^uint64 base ^int64 ranges ^{:tag (slice (array 2 uint64))} ret] :results [(slice (array 2 uint64)) error]
+  (when (or (< ranges 0) (> ranges (conv int64 (len (.-rngLists d)))))
+    (return nil (fmt/Errorf "invalid rnglist offset %d (max %d)" ranges (len (.-ranges d)))))
+
+  (let [^int64 addrBase (zero int64)]
+    (when (!= cu nil)
+      (set! (values addrBase _) (assert int64 (.Val cu AttrAddrBase))))
+
+
+    (let [buf (makeBuf d u "rnglists" 0 (.-rngLists d))]
+      (.skip buf (conv int ranges))
+      (while true
+        (let [opcode (.uint8 buf)]
+          (switch opcode
+            (case [rleEndOfList]
+              (when (!= (.-err buf) nil)
+                (return nil (.-err buf)))
+
+              (return ret nil))
+
+            (case [rleBaseAddressx]
+              (let [baseIdx (.uint buf)
+                  ^{:line 1102 :tag error} err (zero error)]
+                (set! (values base err) (.debugAddr d u (conv uint64 addrBase) baseIdx))
+                (when (!= err nil)
+                  (return nil err))))
+
+
+            (case [rleStartxEndx]
+              (let [startIdx (.uint buf)
+                  ^{:line 1110} endIdx (.uint buf)
+
+                  (values start err) (.debugAddr d u (conv uint64 addrBase) startIdx)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (let [(values end ^:assign err) (.debugAddr d u (conv uint64 addrBase) endIdx)]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (set! ret (append ret (lit (array 2 uint64) start end))))))
+
+            (case [rleStartxLength]
+              (let [startIdx (.uint buf)
+                  ^{:line 1124} len (.uint buf)
+                  (values start err) (.debugAddr d u (conv uint64 addrBase) startIdx)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (set! ret (append ret (lit (array 2 uint64) start (+ start len))))))
+
+            (case [rleOffsetPair]
+              (let [off1 (.uint buf)
+                  ^{:line 1133} off2 (.uint buf)]
+                (set! ret (append ret (lit (array 2 uint64) (+ base off1) (+ base off2))))))
+
+            (case [rleBaseAddress]
+              (set! base (.addr buf)))
+
+            (case [rleStartEnd]
+              (let [start (.addr buf)
+                  ^{:line 1141} end (.addr buf)]
+                (set! ret (append ret (lit (array 2 uint64) start end)))))
+
+            (case [rleStartLength]
+              (let [start (.addr buf)
+                  ^{:line 1146} len (.uint buf)]
+                (set! ret (append ret (lit (array 2 uint64) start (+ start len))))))))))))
+
+
+
+
+
+^{:go/end 1167} (go/method debugAddr "debugAddr returns the address at idx in debug_addr\n" [^{:tag (* Data)} d ^dataFormat format ^uint64 addrBase ^uint64 idx] :results [uint64 error]
+  (let [off (+ (* idx (conv uint64 (.addrsize format))) addrBase)]
+
+    (when (!= (conv uint64 (conv int off)) off)
+      (return 0 (errors/New "offset out of range")))
+
+
+    (let [b (makeBuf d format "addr" 0 (.-addr d))]
+      (.skip b (conv int off))
+      (let [val (.addr b)]
+        (when (!= (.-err b) nil)
+          (return 0 (.-err b)))
+
+        (return val nil)))))

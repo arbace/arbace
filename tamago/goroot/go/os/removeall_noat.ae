@@ -1,0 +1,147 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.os) (go/file "removeall_noat.go" :build ["//go:build (js && wasm) || plan9 || tamago"] :imports [
+
+
+    ^{:line 10} [io "io"]
+    ^{:line 11} [runtime "runtime"]
+    ^{:line 12} [syscall "syscall"]])
+
+
+^{:go/end 148} (go/func removeAll ^error [^string path]
+  (when (== path "")
+    ;; fail silently to retain compatibility with previous behavior
+    ;; of RemoveAll. See issue 28830.
+    (return nil))
+
+
+  ;; Consistency with Root.RemoveAll: Strip trailing /s from the path,
+  ;; so RemoveAll("not_a_directory/") succeeds.
+  (while (and (> (len path) 1) (IsPathSeparator (aget path (- (len path) 1))))
+    (set! path (subslice path _ (- (len path) 1))))
+
+
+  ;; The rmdir system call permits removing "." on Plan 9,
+  ;; so we don't permit it to remain consistent with the
+  ;; "at" implementation of RemoveAll.
+  (when (endsWithDot path)
+    (return (addr (lit PathError :Op "RemoveAll" :Path path :Err syscall/EINVAL))))
+
+
+  ;; Simple case: if Remove works, we're done.
+  (let [err (Remove path)]
+    (when (or (== err nil) (IsNotExist err))
+      (return nil))
+
+
+    ;; Otherwise, is this a directory we need to recurse into?
+    (let [(values dir serr) (Lstat path)]
+      (when (!= serr nil)
+        (when [(values serr ok) (assert (* PathError) serr)] (and ok ^:go/paren (or (IsNotExist (.-Err serr)) (== (.-Err serr) syscall/ENOTDIR)))
+          (return nil))
+
+        (return serr))
+
+      (when (not (.IsDir dir))
+        ;; Not a directory; return the error from Remove.
+        (return err))
+
+
+      ;; Remove contents & return first error.
+      (set! err nil)
+      (while true
+        (let [(values fd err) (Open path)]
+          (when (!= err nil)
+            (when (IsNotExist err)
+              ;; Already deleted by someone else.
+              (return nil))
+
+            (return err))
+
+
+          (let [^:const ^{:val 1024} reqSize 1024
+              ^{:line 67 :tag (slice string)} names (zero (slice string))
+              ^{:line 68 :tag error} readErr (zero error)]
+
+            (while true
+              (let [numErr 0]
+                (set! (values names readErr) (.Readdirnames fd reqSize))
+
+                (range [_ name names]
+                  (let [err1 (RemoveAll (+ path (conv string PathSeparator) name))]
+                    (when (== err nil)
+                      (set! err err1))
+
+                    (when (!= err1 nil)
+                      (inc! numErr))))
+
+
+
+                ;; If we can delete any entry, break to start new iteration.
+                ;; Otherwise, we discard current names, get next entries and try deleting them.
+                (when (!= numErr reqSize)
+                  (break))))
+
+
+
+            ;; Removing files from the directory may have caused
+            ;; the OS to reshuffle it. Simply calling Readdirnames
+            ;; again may skip some entries. The only reliable way
+            ;; to avoid this is to close and re-open the
+            ;; directory. See issue 20841.
+            (.Close fd)
+
+            (when (== readErr io/EOF)
+              (break))
+
+            ;; If Readdirnames returned an error, use it.
+            (when (== err nil)
+              (set! err readErr))
+
+            (when (== (len names) 0)
+              (break))
+
+
+            ;; We don't want to re-open unnecessarily, so if we
+            ;; got fewer than request names from Readdirnames, try
+            ;; simply removing the directory now. If that
+            ;; succeeds, we are done.
+            (when (< (len names) reqSize)
+              (let [err1 (Remove path)]
+                (when (or (== err1 nil) (IsNotExist err1))
+                  (return nil))
+
+
+                (when (!= err nil)
+                  ;; We got some error removing the
+                  ;; directory contents, and since we
+                  ;; read fewer names than we requested
+                  ;; there probably aren't more files to
+                  ;; remove. Don't loop around to read
+                  ;; the directory again. We'll probably
+                  ;; just get the same error.
+                  (return err)))))))
+
+
+
+
+      ;; Remove directory.
+      (let [err1 (Remove path)]
+        (when (or (== err1 nil) (IsNotExist err1))
+          (return nil))
+
+        (when (and (== runtime/GOOS "windows") (IsPermission err1))
+          (when [(values fs err) (Stat path)] (== err nil)
+            (when [(set! err (Chmod path (conv FileMode (bit-or 0200 (conv int (.Mode fs))))))] (== err nil)
+              (set! err1 (Remove path)))))
+
+
+
+        (when (== err nil)
+          (set! err err1))
+
+        ^{:line 147} err))))

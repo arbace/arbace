@@ -1,0 +1,139 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package txtar implements a trivial text-based file archive format.
+;;
+;; The goals for the format are:
+;;
+;;   - be trivial enough to create and edit by hand.
+;;   - be able to store trees of text files describing go command test cases.
+;;   - diff nicely in git history and code reviews.
+;;
+;; Non-goals include being a completely general archive format,
+;; storing binary data, storing file modes, storing special files like
+;; symbolic links, and so on.
+;;
+;; # Txtar format
+;;
+;; A txtar archive is zero or more comment lines and then a sequence of file entries.
+;; Each file entry begins with a file marker line of the form "-- FILENAME --"
+;; and is followed by zero or more file content lines making up the file data.
+;; The comment or file content ends at the next file marker line.
+;; The file marker line must begin with the three-byte sequence "-- "
+;; and end with the three-byte sequence " --", but the enclosed
+;; file name can be surrounding by additional white space,
+;; all of which is stripped.
+;;
+;; If the txtar file is missing a trailing newline on the final line,
+;; parsers should consider a final newline to be present anyway.
+;;
+;; There are no possible syntax errors in a txtar archive.
+(in-ns 'go.internal.txtar) (go/file "archive.go" :doc "Package txtar implements a trivial text-based file archive format.\n\nThe goals for the format are:\n\n  - be trivial enough to create and edit by hand.\n  - be able to store trees of text files describing go command test cases.\n  - diff nicely in git history and code reviews.\n\nNon-goals include being a completely general archive format,\nstoring binary data, storing file modes, storing special files like\nsymbolic links, and so on.\n\n# Txtar format\n\nA txtar archive is zero or more comment lines and then a sequence of file entries.\nEach file entry begins with a file marker line of the form \"-- FILENAME --\"\nand is followed by zero or more file content lines making up the file data.\nThe comment or file content ends at the next file marker line.\nThe file marker line must begin with the three-byte sequence \"-- \"\nand end with the three-byte sequence \" --\", but the enclosed\nfile name can be surrounding by additional white space,\nall of which is stripped.\n\nIf the txtar file is missing a trailing newline on the final line,\nparsers should consider a final newline to be present anyway.\n\nThere are no possible syntax errors in a txtar archive.\n" :imports [
+
+
+    ^{:line 35} [bytes "bytes"]
+    ^{:line 36} [fmt "fmt"]
+    ^{:line 37} [os "os"]
+    ^{:line 38} [strings "strings"]])
+
+
+
+(go/type Archive "An Archive is a collection of files.\n" (struct
+    ^{:line 43 :tag (slice byte)} Comment
+    ^{:line 44 :tag (slice File)} Files))
+
+
+
+(go/type File "A File is a single file in an archive.\n" (struct
+    ^{:line 49 :tag string} Name ; name of file ("foo/bar.txt")
+    ^{:line 50 :tag (slice byte)} Data)) ; text content of file
+
+
+
+
+
+
+^{:go/end 65} (go/func Format "Format returns the serialized form of an Archive.\nIt is assumed that the Archive data structure is well-formed:\na.Comment and all a.File[i].Data contain no file marker lines,\nand all a.File[i].Name is non-empty.\n" ^{:tag (slice byte)} [^{:tag (* Archive)} a]
+  (let [^bytes/Buffer buf (zero bytes/Buffer)]
+    (.Write buf (fixNL (.-Comment a)))
+    (range [_ f (.-Files a)]
+      (fmt/Fprintf (addr buf) "-- %s --\n" (.-Name f))
+      (.Write buf (fixNL (.-Data f))))
+
+    (.Bytes buf)))
+
+
+
+^{:go/end 74} (go/func ParseFile "ParseFile parses the named file as an archive.\n" [^string file] :results [(* Archive) error]
+  (let [(values data err) (os/ReadFile file)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (Parse data) nil)))
+
+
+
+
+^{:go/end 88} (go/func Parse "Parse parses the serialized form of an Archive.\nThe returned Archive holds slices of data.\n" ^{:tag (* Archive)} [^{:tag (slice byte)} data]
+  (let [a (new Archive)
+      ^{:line 80 :tag string} name (zero string)]
+    (set! (values (.-Comment a) name data) (findFileMarker data))
+    (while (!= name "")
+      (let [f (lit File name nil)]
+        (set! (values (.-Data f) name data) (findFileMarker data))
+        (set! (.-Files a) (append (.-Files a) f))))
+
+    ^{:line 87} a))
+
+
+(go/var
+  ^{:line 91} [newlineMarker (conv (slice byte) "\n-- ")]
+  ^{:line 92} [marker (conv (slice byte) "-- ")]
+  ^{:line 93} [markerEnd (conv (slice byte) " --")])
+
+
+
+
+
+
+^{:go/end 112} (go/func findFileMarker "findFileMarker finds the next file marker in data,\nextracts the file name, and returns the data before the marker,\nthe file name, and the data after the marker.\nIf there is no next marker, findFileMarker returns before = fixNL(data), name = \"\", after = nil.\n" [^{:tag (slice byte)} data] :results [^{:tag (slice byte)} before ^string name ^{:tag (slice byte)} after]
+  (let [^int i (zero int)]
+    (while true
+      (when [(set! (values name after) (isMarker (subslice data i)))] (!= name "")
+        (return (subslice data _ i) name after))
+
+      (let [j (bytes/Index (subslice data i) newlineMarker)]
+        (when (< j 0)
+          (return (fixNL data) "" nil))
+
+        (set! i + (+ j 1)))))) ; positioned at start of new possible marker
+
+
+
+
+
+
+^{:go/end 128} (go/func isMarker "isMarker checks whether data begins with a file marker line.\nIf so, it returns the name from the line and the data after the line.\nOtherwise it returns name == \"\" with an unspecified after.\n" [^{:tag (slice byte)} data] :results [^string name ^{:tag (slice byte)} after]
+  (when (not (bytes/HasPrefix data marker))
+    (return "" nil))
+
+  (when [i (bytes/IndexByte data \newline)] (>= i 0)
+    (set! (values data after) (values (subslice data _ i) (subslice data (+ i 1)))))
+
+  (when (not (and (bytes/HasSuffix data markerEnd) (>= (len data) (+ (len marker) (len markerEnd)))))
+    (return "" nil))
+
+  (return (strings/TrimSpace (conv string (subslice data (len marker) (- (len data) (len markerEnd))))) after))
+
+
+
+
+^{:go/end 140} (go/func fixNL "If data is empty or ends in \\n, fixNL returns data.\nOtherwise fixNL returns a new slice consisting of data with a final \\n added.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} data]
+  (when (or (== (len data) 0) (== (aget data (- (len data) 1)) \newline))
+    (return data))
+
+  (let [d (make (slice byte) (+ (len data) 1))]
+    (copy d data)
+    (aset d (len data) \newline)
+    ^{:line 139} d))

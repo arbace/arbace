@@ -1,0 +1,87 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.pbkdf2) (go/file "pbkdf2.go" :imports [
+
+
+    ^{:line 8} [fips140 "crypto/internal/fips140"]
+    ^{:line 9} [hmac "crypto/internal/fips140/hmac"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [hash "hash"]])
+
+
+
+
+
+
+
+^{:go/end 21} (go/func divRoundUp "divRoundUp divides x+y-1 by y, rounding up if the result is not whole.\nThis function casts x and y to int64 in order to avoid cases where\nx+y would overflow int on systems where int is an int32. The result\nis an int, which is safe as (x+y-1)/y should always fit, regardless\nof the integer size.\n" ^int [^int x ^int y]
+  (conv int (/ (- (+ (conv int64 x) (conv int64 y)) 1) (conv int64 y))))
+
+
+^{:go/end 69} (go/func Key :type-params [^hash/Hash Hash] [^{:tag (func [] [Hash])} h ^string password ^{:tag (slice byte)} salt ^int iter ^:go/grouped ^int keyLength] :results [(slice byte) error]
+  (setServiceIndicator salt keyLength)
+
+  (when (<= keyLength 0)
+    (return nil (errors/New "pbkdf2: keyLength must be larger than 0")))
+
+
+  (let [prf (^{:inst [Hash]} hmac/New h (conv (slice byte) password))]
+    (hmac/MarkAsUsedInKDF prf)
+    (let [hashLen (.Size prf)
+        ^{:line 33} numBlocks (divRoundUp keyLength hashLen)
+        ^:const ^{:line 34 :val 4294967295} maxBlocks (conv int64 (- (<< 1 32) 1))]
+      (when (or (< (+ keyLength hashLen) keyLength) (> (conv int64 numBlocks) maxBlocks))
+        (return nil (errors/New "pbkdf2: keyLength too long")))
+
+
+      (let [^{:tag (array 4 byte)} buf (zero (array 4 byte))
+          ^{:line 40} dk (make (slice byte) 0 (* numBlocks hashLen))
+          ^{:line 41} U (make (slice byte) hashLen)]
+        (for [block 1] (<= block numBlocks) (inc! block)
+          ;; N.B.: || means concatenation, ^ means XOR
+          ;; for each block T_i = U_1 ^ U_2 ^ ... ^ U_iter
+          ;; U_1 = PRF(password, salt || uint(i))
+          (.Reset prf)
+          (.Write prf salt)
+          (aset buf 0 (conv byte (>> block 24)))
+          (aset buf 1 (conv byte (>> block 16)))
+          (aset buf 2 (conv byte (>> block 8)))
+          (aset buf 3 (conv byte block))
+          (.Write prf (subslice buf _ 4))
+          (set! dk (.Sum prf dk))
+          (let [T (subslice dk (- (len dk) hashLen))]
+            (copy U T)
+
+            ;; U_n = PRF(password, U_(n-1))
+            (for [n 2] (<= n iter) (inc! n)
+              (.Reset prf)
+              (.Write prf U)
+              (set! U (subslice U _ 0))
+              (set! U (.Sum prf U))
+              (range [x U]
+                (set! (aget T x) bit-xor (aget U x))))))
+
+
+
+        (return (subslice dk _ keyLength) nil)))))
+
+
+^{:go/end 88} (go/func setServiceIndicator [^{:tag (slice byte)} salt ^int keyLength]
+  ;; The HMAC construction will handle the hash function considerations for the service
+  ;; indicator. The remaining PBKDF2 considerations outlined by SP 800-132 pertain to
+  ;; salt and keyLength.
+
+  ;; The length of the randomly-generated portion of the salt shall be at least 128 bits.
+  (when (< (len salt) (/ 128 8))
+    (fips140/RecordNonApproved))
+
+
+  ;; Per FIPS 140-3 IG C.M, key lengths below 112 bits are only allowed for
+  ;; legacy use (i.e. verification only) and we don't support that.
+  (when (< keyLength (/ 112 8))
+    (fips140/RecordNonApproved))
+
+
+  (fips140/RecordApproved))

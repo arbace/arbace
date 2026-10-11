@@ -1,0 +1,140 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "symtabinl.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [_ "unsafe"]]) ; for linkname
+
+
+
+(go/type inlinedCall "inlinedCall is the encoding of entries in the FUNCDATA_InlTree table.\n" (struct
+    ^{:line 14 :tag abi/FuncID} funcID ; type of the called function
+    ^{:line 15 :tag (array 3 byte)} _
+    ^{:line 16 :tag int32} nameOff ; offset into pclntab for name of called function
+    ^{:line 17 :tag int32} parentPc ; position of an instruction whose source position is the call site (offset from entry)
+    ^{:line 18 :tag int32} startLine)) ; line number of start of function (func keyword/TEXT directive)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type inlineUnwinder "An inlineUnwinder iterates over the stack of inlined calls at a PC by\ndecoding the inline table. The last step of iteration is always the frame of\nthe physical function, so there's always at least one frame.\n\nThis is typically used as:\n\n\tfor u, uf := newInlineUnwinder(...); uf.valid(); uf = u.next(uf) { ... }\n\nImplementation note: This is used in contexts that disallow write barriers.\nHence, the constructor returns this by value and pointer receiver methods\nmust not mutate pointer fields. Also, we keep the mutable state in a separate\nstruct mostly to keep both structs SSA-able, which generates much better\ncode.\n" (struct
+    ^{:line 35 :tag funcInfo} f
+    ^{:line 36 :tag (* (array (<< 1 20) inlinedCall))} inlTree))
+
+
+
+(go/type inlineFrame "An inlineFrame is a position in an inlineUnwinder.\n" (struct
+
+
+
+    ^{:line 44 :tag uintptr :doc "pc is the PC giving the file/line metadata of the current frame. This is\nalways a \"call PC\" (not a \"return PC\"). This is 0 when the iterator is\nexhausted.\n"} pc
+
+
+
+    ^{:line 48 :tag int32 :doc "index is the index of the current record in inlTree, or -1 if we are in\nthe outermost function.\n"} index))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 75} (go/func ^{:go/linkname "newInlineUnwinder"} newInlineUnwinder "newInlineUnwinder creates an inlineUnwinder initially set to the inner-most\ninlined frame at PC. PC should be a \"call PC\" (not a \"return PC\").\n\nThis unwinder uses non-strict handling of PC because it's assumed this is\nonly ever used for symbolic debugging. If things go really wrong, it'll just\nfall back to the outermost frame.\n\nnewInlineUnwinder should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/phuslu/log\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^funcInfo f ^uintptr pc] :results [inlineUnwinder inlineFrame]
+  (let [inldata (funcdata f abi/FUNCDATA_InlTree)]
+    (when (== inldata nil)
+      (return (lit inlineUnwinder :f f) (lit inlineFrame :pc pc :index -1)))
+
+    (let [inlTree (conv (* (array (<< 1 20) inlinedCall)) inldata)
+        ^{:line 73} u (lit inlineUnwinder :f f :inlTree inlTree)]
+      (return u (.resolveInternal u pc)))))
+
+
+^{:go/end 84} (go/method resolveInternal ^inlineFrame [^{:tag (* inlineUnwinder)} u ^uintptr pc]
+  ^{:go/breaks [2 [4 82]]} (lit inlineFrame
+    :pc pc
+    ;; Conveniently, this returns -1 if there's an error, which is the same
+    ;; value we use for the outermost frame.
+    :index (pcdatavalue1 (.-f u) abi/PCDATA_InlTreeIndex pc false)))
+
+
+
+^{:go/end 88} (go/method valid ^bool [^inlineFrame uf]
+  (!= (.-pc uf) 0))
+
+
+
+^{:go/end 98} (go/method next "next returns the frame representing uf's logical caller.\n" ^inlineFrame [^{:tag (* inlineUnwinder)} u ^inlineFrame uf]
+  (when (< (.-index uf) 0)
+    (set! (.-pc uf) 0)
+    (return uf))
+
+  (let [parentPc (.-parentPc (aget (.-inlTree u) (.-index uf)))]
+    (.resolveInternal u (+ (.entry (.-f u)) (conv uintptr parentPc)))))
+
+
+
+^{:go/end 103} (go/method isInlined "isInlined returns whether uf is an inlined frame.\n" ^bool [^{:tag (* inlineUnwinder)} u ^inlineFrame uf]
+  (>= (.-index uf) 0))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 127} (go/method srcFunc "srcFunc returns the srcFunc representing the given frame.\n\nsrcFunc should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/phuslu/log\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n\nThe go:linkname is below.\n" ^srcFunc [^{:tag (* inlineUnwinder)} u ^inlineFrame uf]
+  (when (< (.-index uf) 0)
+    (return (.srcFunc (.-f u))))
+
+  (let [t (addr (aget (.-inlTree u) (.-index uf)))]
+    (lit srcFunc
+      (.-datap (.-f u))
+      (.-nameOff t)
+      (.-startLine t)
+      (.-funcID t))))
+
+
+
+
+(go/func ^:extern ^{:go/linkname "badSrcFunc runtime.(*inlineUnwinder).srcFunc"} badSrcFunc ^srcFunc [(* inlineUnwinder) inlineFrame])
+
+
+
+
+
+
+
+^{:go/end 141} (go/method fileLine "fileLine returns the file name and line number of the call within the given\nframe. As a convenience, for the innermost frame, it returns the file and\nline of the PC this unwinder was started at (often this is a call to another\nphysical function).\n\nIt returns \"?\", 0 if something goes wrong.\n" [^{:tag (* inlineUnwinder)} u ^inlineFrame uf] :results [^string file ^int line]
+  (let [(values ^:assign file line32) (funcline1 (.-f u) (.-pc uf) false)]
+    (return file (conv int line32))))

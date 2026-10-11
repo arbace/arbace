@@ -48,6 +48,9 @@
 #                     default: tools/elfsyms)
 #   ARBACE_BOX_ARCHES the box's architectures built (default amd64; arm64 builds, and runs on
 #                     KVM/arm64 or Hypervisor.framework only: stage S4)
+#   ARBACE_BOX_GO     the box guest's own Go (amd64): forms (default), TamaGo's std and goos
+#                     module printed from tamago/ (bin/tamago-vendor print, into
+#                     target/arbace-go/tamago); orig, the toolchain's tree and Go's module cache
 #   ARBACE_BOX_*      the launcher's settings (box/go/arbace/box/cmd/arbace_box/main.ae: CPUS,
 #                     WATCHDOG, STATS, IMAGE, ...)
 #   ARBACE_PATH       directories (separated by :) where RT.load finds namespaces after the
@@ -383,6 +386,11 @@ gate() {
 # The box (B1b; doc/go/BOX-NOTES.md, S1)
 
 box_arches=${ARBACE_BOX_ARCHES:-amd64}
+# the guest's own Go (B1b S6, doc/go/BOX-NOTES.md): forms (the default), TamaGo's std and goos
+# module printed from tamago/ (bin/tamago-vendor print), or orig, the toolchain's tree and Go's
+# module cache, from which the forms were converted (the two give the same image but for its
+# build ID: bin/tamago-vendor check)
+box_go=${ARBACE_BOX_GO:-forms}
 # a box guest's link (arbace.g2a.build/tamago-ldflags): text at 0x201000, 4 KiB segments,
 # the symbol table kept (the monitor reads it), DWARF dropped
 box_ldflags="-T 0x201000 -R 0x1000 -w"
@@ -401,22 +409,33 @@ box_key() {
 # box_build: the guest image and the launcher for each of $box_arches, from the last --build's
 # a2g output and image (a --build for the host's architecture first, when there is none)
 box_build() {
-  local main=$dir/a2g/prog/go/arbace/cmd/arbace overlay a t0 v
+  local main=$dir/a2g/prog/go/arbace/cmd/arbace overlay ovl0 a t0 v goroot goos go
   if [ ! -s "$main/image.bin" ] || [ ! -x "$dir/$(host_arch)/arbace" ]; then
     echo "== no image of prepared namespaces: --build for $(host_arch) first" >&2
     arches=$(host_arch) build || return 1
   fi
-  overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  ovl0=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  if [ "$box_go" = forms ] && [[ ,$box_arches, = *,amd64,* ]]; then
+    # the guest's own Go from its forms (B1b S6): tamago/ printed into $dir/tamago, a GOROOT
+    # (std) and TamaGo's goos module, with jrt's runtime overlay for that GOROOT
+    (cd "$root" && bin/tamago-vendor print "$dir/tamago") || return 1
+  fi
   v=$(arbace_version "$root") || return 1
   for a in ${box_arches//,/ }; do
     mkdir -p "$dir/box-$a"
     t0=$(date +%s)
-    echo "== bin/g2a build --goos tamago $a (the guest)" >&2
-    (cd "$root" && bin/g2a build --goos tamago --root "$root/box" --line-file --arch "$a" --work "$dir/work-box-$a" \
-       -o "$dir/box-$a/arbace.elf" --overlay "$overlay" "$dir/a2g/prog") > "$dir/build-box-$a.log" 2>&1 \
+    # tamago/ holds tamago/amd64's Go (S6's amd64 half): arm64 from the toolchain's tree
+    goroot=${G2A_GOROOT:-/root/tamago-go} overlay=$ovl0 goos=() go=orig
+    if [ "$box_go" = forms ] && [ "$a" = amd64 ]; then
+      goroot=$dir/tamago/goroot overlay=$dir/tamago/overlay.json goos=(--goos-dir "$dir/tamago/goos") go=forms
+    fi
+    echo "== bin/g2a build --goos tamago $a (the guest; its Go: $go)" >&2
+    (cd "$root" && G2A_GOROOT=$goroot bin/g2a build --goos tamago ${goos[@]+"${goos[@]}"} --root "$root/box" --line-file \
+       --arch "$a" --work "$dir/work-box-$a" -o "$dir/box-$a/arbace.elf" --overlay "$overlay" "$dir/a2g/prog") \
+       > "$dir/build-box-$a.log" 2>&1 \
       || { grep -v '^==' "$dir/build-box-$a.log" | tail -20 >&2; echo "arbace-go: box $a: build failed" >&2; return 1; }
     # linked again with Arbace's version (as the executables' final links)
-    (cd "$dir/work-box-$a/mod" && env $(go_env "$a" tamago) "${G2A_GOROOT:-/root/tamago-go}/bin/go" build -trimpath \
+    (cd "$dir/work-box-$a/mod" && env $(G2A_GOROOT=$goroot go_env "$a" tamago) "$goroot/bin/go" build -trimpath \
        -buildvcs=false "-ldflags=$box_ldflags -X 'main.arbaceVersion=$v'" -overlay "$overlay" -o "$dir/box-$a/arbace.elf" arbace/cmd/arbace) \
        >> "$dir/build-box-$a.log" 2>&1 \
       || { tail -20 "$dir/build-box-$a.log" >&2; echo "arbace-go: box $a: link failed" >&2; return 1; }

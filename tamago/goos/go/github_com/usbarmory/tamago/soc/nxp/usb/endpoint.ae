@@ -1,0 +1,419 @@
+;; NXP USBOH3USBO2 / USBPHY driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.usb) (go/file "endpoint.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [fmt "fmt"]
+
+    ^{:line 16} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 17} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 18} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "Endpoint constants\n"
+
+
+  ^{:line 25} [^{:val 8 :doc "The USB OTG device controller hardware supports up to 8 endpoint\nnumbers.\n"} MAX_ENDPOINTS 8]
+
+
+  ^{:line 28} [^{:val 0 :doc "Host -> Device\n"} OUT 0]
+
+  ^{:line 30} [^{:val 1 :doc "Device -> Host\n"} IN 1]
+
+
+  ^{:line 33} [^{:val 0 :doc "Transfer Type\n"} CONTROL 0]
+  ^{:line 34} [^{:val 1} ISOCHRONOUS 1]
+  ^{:line 35} [^{:val 2} BULK 2]
+  ^{:line 36} [^{:val 3} INTERRUPT 3]
+
+
+  ^{:line 39} [^{:val 2048 :doc "p3784, 56.4.5.1 Endpoint Queue Head (dQH), IMX6ULLRM\n"} DQH_LIST_ALIGN 2048]
+  ^{:line 40} [^{:val 64} DQH_ALIGN 64]
+  ^{:line 41} [^{:val 64} DQH_SIZE 64]
+
+  ^{:line 43} [^{:val 0} DQH_INFO 0]
+  ^{:line 44} [^{:val 30} INFO_MULT 30]
+  ^{:line 45} [^{:val 29} INFO_ZLT 29]
+  ^{:line 46} [^{:val 16} INFO_MPL 16]
+  ^{:line 47} [^{:val 15} INFO_IOS 15]
+
+  ^{:line 49} [^{:val 4} DQH_CURRENT 4]
+  ^{:line 50} [^{:val 8} DQH_NEXT 8]
+  ^{:line 51} [^{:val 12} DQH_TOKEN 12]
+
+
+  ^{:line 54} [^{:val 32 :doc "p3787, 56.4.5.2 Endpoint Transfer Descriptor (dTD), IMX6ULLRM\n"} DTD_ALIGN 32]
+  ^{:line 55} [^{:val 28} DTD_SIZE 28]
+  ^{:line 56} [^{:val 5} DTD_PAGES 5]
+  ^{:line 57} [^{:val 4096} DTD_PAGE_SIZE 4096]
+  ^{:line 58} [^{:val 0} DTD_NEXT 0]
+
+  ^{:line 60} [^{:val 4} DTD_TOKEN 4]
+  ^{:line 61} [^{:val 16} TOKEN_TOTAL 16]
+  ^{:line 62} [^{:val 15} TOKEN_IOC 15]
+  ^{:line 63} [^{:val 10} TOKEN_MULTO 10]
+  ^{:line 64} [^{:val 7} TOKEN_ACTIVE 7]
+  ^{:line 65} [^{:val 0} TOKEN_STATUS 0])
+
+
+
+
+(go/type dTD "dTD implements\np3787, 56.4.5.2 Endpoint Transfer Descriptor (dTD), IMX6ULLRM.\n" (struct
+    ^{:line 71 :tag uint32} Next
+    ^{:line 72 :tag uint32} Token
+    ^{:line 73 :tag (array 5 uint32)} Buffer
+
+
+    ^{:line 76 :tag uint32 :doc "DMA pointer for dTD structure\n"} _dtd
+
+    ^{:line 78 :tag uint32 :doc "DMA pointer for dTD transfer buffer\n"} _buf
+
+    ^{:line 80 :tag uint32 :doc "transfer buffer size\n"} _size))
+
+
+
+
+(go/type dQH "dQH implements\np3784, 56.4.5.1 Endpoint Queue Head (dQH), IMX6ULLRM.\n" (struct
+    ^{:line 86 :tag uint32} Info
+    ^{:line 87 :tag uint32} Current
+    ^{:line 88 :tag uint32} Next
+    ^{:line 89 :tag uint32} Token
+    ^{:line 90 :tag (array 5 uint32)} Buffer
+
+
+    ^{:line 93 :tag uint32 :doc "reserved\n"} _
+
+
+
+    ^{:line 97 :tag SetupData :doc "The Set-up Buffer will be filled by hardware, note that after this\nhappens endianess needs to be adjusted with SetupData.swap().\n"} Setup
+
+
+
+    ^{:line 101 :tag (array 4 uint32) :doc "We align only the first queue entry, so we need a 4*uint32 gap to\nmaintain 64-byte boundaries.\n"} _))
+
+
+
+
+(go/type endpointList "endpointList implements\np3783, 56.4.5 Device Data Structures, IMX6ULLRM.\n" (array (* MAX_ENDPOINTS 2) dQH))
+
+
+^{:go/end 118} (go/method initQH "initQH initializes the endpoint queue head list\n" [^{:tag (* USB)} hw]
+  (let [^endpointList epList (zero endpointList)
+      ^{:line 111} buf (new bytes/Buffer)]
+
+    (binary/Write buf binary/LittleEndian (addr epList))
+    (set! (.-epListAddr hw) (conv uint32 (dma/Alloc (.Bytes buf) DQH_LIST_ALIGN)))
+
+    ;; set endpoint queue head
+    (reg/Write (.-eplist hw) (.-epListAddr hw))))
+
+
+
+
+^{:go/end 155} (go/method set "set configures an endpoint queue head as described in\np3784, 56.4.5.1 Endpoint Queue Head, IMX6ULLRM.\n" [^{:tag (* USB)} hw ^int n ^int dir ^int max ^bool zlt ^int mult]
+  (let [dqh (lit dQH)]
+
+    ;; Mult
+    (bits/SetN (addr (.-Info dqh)) INFO_MULT 2r11 (conv uint32 mult))
+    ;; Maximum Packet Length
+    (bits/SetN (addr (.-Info dqh)) INFO_MPL 0x7ff (conv uint32 max))
+
+    (when (not zlt)
+      ;; Zero Length Termination must be disabled for multi dTD
+      ;; requests.
+      (bits/SetN (addr (.-Info dqh)) INFO_ZLT 1 1))
+
+
+    (when (== n 0)
+      ;; interrupt on setup (ios)
+      (bits/Set (addr (.-Info dqh)) INFO_IOS))
+
+
+    ;; Total bytes
+    (bits/SetN (addr (.-Token dqh)) TOKEN_TOTAL 0xffff 0)
+    ;; interrupt on completion (ioc)
+    (bits/Set (addr (.-Token dqh)) TOKEN_IOC)
+    ;; multiplier override (MultO)
+    (bits/SetN (addr (.-Token dqh)) TOKEN_MULTO 2r11 0)
+
+    (let [buf (new bytes/Buffer)]
+      (binary/Write buf binary/LittleEndian (addr dqh))
+
+      (let [offset (* (+ (* n 2) dir) DQH_SIZE)]
+        (dma/Write (conv uint (.-epListAddr hw)) offset (.Bytes buf))
+
+        (aset (aget (.-dQH hw) n) dir (+ (.-epListAddr hw) (conv uint32 offset)))))))
+
+
+
+^{:go/end 190} (go/method enable "enable enables an endpoint.\n" [^{:tag (* USB)} hw ^int n ^int dir ^int transferType]
+  (when (== n 0)
+    ;; EP0 does not need enabling (p3790, IMX6ULLRM)
+    (return))
+
+
+  (let [ctrl (+ (.-epctrl hw) (conv uint32 (* 4 n)))
+      ^{:line 165} c (reg/Read ctrl)]
+
+    (if (== dir IN) (do
+        (bits/Set (addr c) ENDPTCTRL_TXE)
+        (bits/Set (addr c) ENDPTCTRL_TXR)
+        (bits/SetN (addr c) ENDPTCTRL_TXT 2r11 (conv uint32 transferType))
+        (bits/Clear (addr c) ENDPTCTRL_TXS)
+
+        (when (== (reg/GetN ctrl ENDPTCTRL_RXE 1) 0)
+          ;; see note at p3879 of IMX6ULLRM
+          (bits/SetN (addr c) ENDPTCTRL_RXT 2r11 BULK)))
+
+      (do
+        (bits/Set (addr c) ENDPTCTRL_RXE)
+        (bits/Set (addr c) ENDPTCTRL_RXR)
+        (bits/SetN (addr c) ENDPTCTRL_RXT 2r11 (conv uint32 transferType))
+        (bits/Clear (addr c) ENDPTCTRL_RXS)
+
+        (when (== (reg/GetN ctrl ENDPTCTRL_TXE 1) 0)
+          ;; see note at p3879 of IMX6ULLRM
+          (bits/SetN (addr c) ENDPTCTRL_TXT 2r11 BULK))))
+
+
+
+    (reg/Write ctrl c)))
+
+
+
+^{:go/end 196} (go/method clear "clear resets the endpoint status (active and halt bits)\n" [^{:tag (* USB)} hw ^int n ^int dir]
+  (let [token (+ (aget (aget (.-dQH hw) n) dir) DQH_TOKEN)]
+    (reg/SetN token TOKEN_STATUS 0xc0 0)))
+
+
+
+^{:go/end 210} (go/method qh "qh returns the Endpoint Queue Head (dQH)\n" [^{:tag (* USB)} hw ^int n ^int dir] :results [^dQH dqh]
+  (let [buf (make (slice byte) DQH_SIZE)]
+    (dma/Read (conv uint (aget (aget (.-dQH hw) n) dir)) 0 buf)
+
+    (let [err (binary/Read (bytes/NewReader buf) binary/LittleEndian (addr dqh))]
+
+      (when (!= err nil)
+        (panic err))
+
+
+      (return))))
+
+
+
+^{:go/end 221} (go/method nextDTD "nextDTD sets the next endpoint transfer pointer\n" [^{:tag (* USB)} hw ^int n ^int dir ^uint32 dtd]
+  (let [dqh (aget (aget (.-dQH hw) n) dir)
+      ^{:line 215} next (+ dqh DQH_NEXT)]
+
+    ;; wait for endpoint status to be cleared
+    (reg/Wait (+ dqh DQH_TOKEN) TOKEN_STATUS 0xc0 0)
+    ;; set next dTD
+    (reg/Write next dtd)))
+
+
+
+
+^{:go/end 255} (go/func buildDTD "buildDTD configures an endpoint transfer descriptor as described in\np3787, 56.4.5.2 Endpoint Transfer Descriptor (dTD), IMX6ULLRM.\n" [^int n ^int dir ^uint32 addr ^int size] :results [^{:tag (* dTD)} dtd]
+  ;; p3809, 56.4.6.6.2 Building a Transfer Descriptor, IMX6ULLRM
+  (set! dtd (addr (lit dTD)))
+
+  ;; interrupt on completion (ioc)
+  (bits/Set (addr (.-Token dtd)) TOKEN_IOC)
+
+  ;; invalidate next pointer
+  (set! (.-Next dtd) 1)
+  ;; multiplier override (MultO)
+  (bits/SetN (addr (.-Token dtd)) TOKEN_MULTO 2r11 0)
+  ;; active status
+  (bits/Set (addr (.-Token dtd)) TOKEN_ACTIVE)
+  ;; total bytes
+  (bits/SetN (addr (.-Token dtd)) TOKEN_TOTAL 0xffff (conv uint32 size))
+
+  (set! (.-_buf dtd) addr)
+  (set! (.-_size dtd) (conv uint32 size))
+
+  (range [n DTD_PAGES]
+    (aset (.-Buffer dtd) n (+ (.-_buf dtd) (* DTD_PAGE_SIZE (conv uint32 n)))))
+
+
+  (let [buf (new bytes/Buffer)]
+    (binary/Write buf binary/LittleEndian dtd)
+
+    ;; skip internal DMA buffer pointers
+    (set! (.-_dtd dtd) (conv uint32 (dma/Alloc (subslice (.Bytes buf) 0 DTD_SIZE) DTD_ALIGN)))
+
+    (return)))
+
+
+
+
+
+^{:go/end 287} (go/method checkDTD "checkDTD verifies transfer descriptor completion as describe in\np3800, 56.4.6.4.1 Interrupt/Bulk Endpoint Operational Model, IMX6ULLRM\np3811, 56.4.6.6.4 Transfer Completion, IMX6ULLRM.\n" [^{:tag (* USB)} hw ^int n ^int dir ^{:tag (slice (* dTD))} dtds] :results [^int size ^error err]
+  (range [i dtd dtds]
+    ;; treat dtd.token as a register within the dtd DMA buffer
+    (let [token (+ (.-_dtd dtd) DTD_TOKEN)]
+
+      ;; wait for active bit to be cleared
+      (reg/WaitSignal (.-exit hw) token TOKEN_ACTIVE 1 0)
+
+      (let [dtdToken (reg/Read token)]
+
+        (when (!= (bit-and dtdToken 0xff) 0)
+          (return 0 (fmt/Errorf "dTD[%d] error status, token:%#x" i dtdToken)))
+
+
+        ;; p3787 "This field is decremented by the number of bytes
+        ;; actually moved during the transaction", IMX6ULLRM.
+        (let [rest (>> dtdToken TOKEN_TOTAL)
+            ^{:line 277} n (conv int (- (.-_size dtd) rest))]
+
+          (when (and (== dir IN) (> rest 0))
+            (return 0 (fmt/Errorf "dTD[%d] partial transfer (%d/%d bytes)" i n (.-_size dtd))))
+
+
+          (set! size + n)))))
+
+
+  (return))
+
+
+
+
+^{:go/end 371} (go/method transfer "transfer initates a transfer using transfer descriptors (dTDs) as described in\np3810, 56.4.6.6.3 Executing A Transfer Descriptor, IMX6ULLRM.\n" [^{:tag (* USB)} hw ^int n ^int dir ^{:tag (slice byte)} buf] :results [^{:tag (slice byte)} out ^error err]
+  (let [^{:tag (slice (* dTD))} dtds (zero (slice (* dTD)))
+      ^{:line 293 :tag (* dTD)} prev (zero (* dTD))
+      ^{:line 294 :tag int} i (zero int)
+
+      ;; hw.prime IN:ENDPTPRIME_PETB+n    OUT:ENDPTPRIME_PERB+n
+      ;; hw.pos   IN:ENDPTCOMPLETE_ETCE+n OUT:ENDPTCOMPLETE_ERCE+n
+      ^{:line 298} pos (+ (* dir 16) n)
+
+      ^{:line 300} dtdLength (* DTD_PAGES DTD_PAGE_SIZE)]
+
+    (when (and (== dir OUT) (== buf nil))
+      (set! buf (make (slice byte) dtdLength)))
+
+
+    (let [transferSize (len buf)
+
+        ^{:line 308} pages (dma/Alloc buf DTD_PAGE_SIZE)]
+      (defer (dma/Free pages))
+
+      ;; loop condition to account for zero transferSize
+      (for [add true] add (set! add (< i transferSize))
+        (let [prime false
+            ^{:line 314} size dtdLength]
+
+          (when (> (+ i size) transferSize)
+            (set! size (- transferSize i)))
+
+
+          (let [dtd (buildDTD n dir (+ (conv uint32 pages) (conv uint32 i)) size)]
+            (defer (dma/Free (conv uint (.-_dtd dtd))))
+
+            (if (== i 0)
+              (set! prime true)
+              (do
+                ;; treat dtd.next as a register within the dtd DMA buffer
+                (reg/Write (+ (.-_dtd prev) DTD_NEXT) (.-_dtd dtd))
+                (set! prime (and (== (reg/GetN (.-prime hw) pos 1) 0) (== (reg/GetN (.-stat hw) pos 1) 0)))))
+
+
+            (when prime
+              ;; reset endpoint status
+              (.clear hw n dir)
+              ;; set dQH head pointer
+              (.nextDTD hw n dir (.-_dtd dtd))
+              ;; prime endpoint
+              (reg/Set (.-prime hw) pos))
+
+
+            (set! prev dtd)
+            (set! dtds (append dtds dtd))
+
+            (set! i + dtdLength))))
+
+
+      ;; wait for priming completion
+      (reg/Wait (.-prime hw) pos 1 0)
+
+      ;; wait for completion
+      (if (and (!= (.-event hw) nil) (!= n 0))
+        (while (!= (reg/GetN (.-complete hw) pos 1) 1)
+          (.Lock (.-L (.-event hw)))
+          (.Wait (.-event hw))
+          (.Unlock (.-L (.-event hw))))
+
+
+        (reg/WaitSignal (.-exit hw) (.-complete hw) pos 1 1))
+
+
+      ;; clear completion
+      (reg/Write (.-complete hw) ^uint32 (<< 1 pos))
+
+      (let [(values size ^:assign err) (.checkDTD hw n dir dtds)]
+
+        (when (and (!= n 0) (== dir OUT) (!= buf nil))
+          (set! out (subslice buf 0 size))
+          (dma/Read pages 0 out))
+
+
+        (return)))))
+
+
+
+^{:go/end 377} (go/method ack "ack transmits a zero length packet to the host through an IN endpoint\n" [^{:tag (* USB)} hw ^int n] :results [^error err]
+  (set! (values _ err) (.transfer hw n IN nil))
+  (return))
+
+
+
+^{:go/end 389} (go/method tx "tx transmits a data buffer to the host through an IN endpoint\n" [^{:tag (* USB)} hw ^int n ^{:tag (slice byte)} in] :results [^error err]
+  (set! (values _ err) (.transfer hw n IN in))
+
+  ;; p3803, 56.4.6.4.2.3 Status Phase, IMX6ULLRM
+  (when (and (== err nil) (== n 0))
+    (set! (values _ err) (.transfer hw n OUT nil)))
+
+
+  (return))
+
+
+
+^{:go/end 394} (go/method rx "rx receives a data buffer from the host through an OUT endpoint\n" [^{:tag (* USB)} hw ^int n ^{:tag (slice byte)} buf] :results [^{:tag (slice byte)} out ^error err]
+  (.transfer hw n OUT buf))
+
+
+
+^{:go/end 405} (go/method stall "stall forces the endpoint to return a STALL handshake to the host\n" [^{:tag (* USB)} hw ^int n ^int dir]
+  (let [ctrl (+ (.-epctrl hw) (conv uint32 (* 4 n)))]
+
+    (if (== dir IN)
+      (reg/Set ctrl ENDPTCTRL_TXS)
+
+      (reg/Set ctrl ENDPTCTRL_RXS))))
+
+
+
+
+^{:go/end 421} (go/method reset "reset forces data PID synchronization between host and device\n" [^{:tag (* USB)} hw ^int n ^int dir]
+  (when (== n 0)
+    ;; EP0 does not have data toggle reset
+    (return))
+
+
+  (let [ctrl (+ (.-epctrl hw) (conv uint32 (* 4 n)))]
+
+    (if (== dir IN)
+      (reg/Set ctrl ENDPTCTRL_TXR)
+
+      (reg/Set ctrl ENDPTCTRL_RXR))))

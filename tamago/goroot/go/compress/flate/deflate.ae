@@ -1,0 +1,892 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.flate) (go/file "deflate.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [math "math"]
+    ^{:line 12} [slices "slices"]])
+
+
+(go/const
+  ^{:line 16} [^{:val 0} NoCompression 0]
+  ^{:line 17} [^{:val 1} BestSpeed 1]
+  ^{:line 18} [^{:val 9} BestCompression 9]
+  ^{:line 19} [^{:val -1} DefaultCompression -1]
+
+
+
+
+
+
+
+
+
+
+  ^{:line 30} [^{:val -2 :doc "HuffmanOnly disables Lempel-Ziv match searching and only performs Huffman\nentropy encoding. This mode is useful in compressing data that has\nalready been compressed with an LZ style algorithm (e.g. Snappy or LZ4)\nthat lacks an entropy encoder. Compression gains are achieved when\ncertain bytes in the input stream occur more frequently than others.\n\nNote that HuffmanOnly produces a compressed output that is\nRFC 1951 compliant. That is, any valid DEFLATE decompressor will\ncontinue to be able to decompress this output.\n"} HuffmanOnly -2])
+
+
+(go/const
+  ^{:line 34} [^{:val 15} logWindowSize 15]
+  ^{:line 35} [^{:val 32768} windowSize (<< 1 logWindowSize)]
+  ^{:line 36} [^{:val 32767} windowMask (- windowSize 1)]
+  ^{:line 37} [^{:val 4} minMatchLength 4] ; The smallest match that the compressor looks for
+  ^{:line 38} [^{:val 258} maxMatchLength 258] ; The longest match for the compressor
+  ^{:line 39} [^{:val 1} minOffsetSize 1] ; The shortest offset that makes any sense
+
+
+
+
+
+  ^{:line 45} [^{:val 32768 :doc "The maximum number of tokens we will encode at the time.\nSmaller sizes usually creates less optimal blocks.\nBigger can make context switching slow.\nWe use this for levels 7-9, so we make it big.\n"} maxFlateBlockTokens (<< 1 15)]
+  ^{:line 46} [^{:val 65535} maxStoreBlockSize 65535]
+  ^{:line 47} [^{:val 17} hashBits 17] ; After 17 performance degrades
+  ^{:line 48} [^{:val 131072} hashSize (<< 1 hashBits)]
+  ^{:line 49} [^{:val 131071} hashMask (- (<< 1 hashBits) 1)]
+  ^{:line 50} [^{:val 268435456} maxHashOffset (<< 1 28)]
+
+  ^{:line 52} [^{:val 2147483647} skipNever math/MaxInt32])
+
+
+
+(go/type compressionLevel "compressionLevel holds the parameters for levels 7-9.\n" (struct
+    ^{:line 57 :tag int32} good ; "good enough" match length
+    ^{:line 58 :tag int32} lazy ; don't try to find a later, better match above this length
+    ^{:line 59 :tag int32} nice ; stop looking for a better match above this length
+    ^{:line 60 :tag int32} chain ; maximum number of hash chain entries to search
+    ^{:line 61 :tag int} level))
+
+
+(go/var levels (lit (slice compressionLevel)
+    (lit _) ; 0
+    ;; Level 1-6 uses specialized algorithm - values not used
+    (lit _ 0 0 0 0 1)
+    (lit _ 0 0 0 0 2)
+    (lit _ 0 0 0 0 3)
+    (lit _ 0 0 0 0 4)
+    (lit _ 0 0 0 0 5)
+    (lit _ 0 0 0 0 6)
+    ;; Levels 7-9 use increasingly more lazy matching
+    ;; and increasingly stringent conditions for "good enough".
+    (lit _ 8 12 16 24 7)
+    (lit _ 16 30 40 64 8)
+    (lit _ 32 258 258 1024 9)))
+
+
+
+(go/type advancedState "advancedState contains state for levels 7-9, with bigger hash tables, etc.\n" (struct
+
+    ^{:line 83 :tag int32 :doc "deflate state\n"} length
+    ^{:line 84 :tag int32} offset
+    ^{:line 85 :tag int32} maxInsertIndex
+    ^{:line 86 :tag int32} chainHead
+    ^{:line 87 :tag int32} hashOffset
+
+    ^{:line 89 :tag uint16} literalCounter ; consecutive literal count; overflows to reset after 64KB.
+
+
+    ^{:line 92 :tag int32 :doc "input window: unprocessed data is window[index:windowEnd]\n"} index
+    ^{:line 93 :tag (array (+ maxMatchLength minMatchLength) uint32)} hashMatch
+
+
+
+
+
+
+    ^{:line 100 :tag (array hashSize int32) :doc "Input hash chains\nhashHead[hashValue] contains the largest inputIndex with the specified hash value\nIf hashHead[hashValue] is within the current window, then\nhashPrev[hashHead[hashValue] & windowMask] contains the previous index\nwith the same hash value.\n"} hashHead
+    ^{:line 101 :tag (array windowSize int32)} hashPrev))
+
+
+(go/type compressor (struct
+    ^{:line 105} compressionLevel
+
+    ^{:line 107 :tag (* huffmanEncoder)} h ; huffman encoder, with state
+    ^{:line 108 :tag (* huffmanBitWriter)} w ; writer for blocks
+
+
+    ^{:line 111 :tag (func [(* compressor) (slice byte)] [int]) :doc "compression algorithm\n"} fill ; copy data to window
+    ^{:line 112 :tag (func [(* compressor)])} step ; process window
+
+    ^{:line 114 :tag (slice byte)} window ; current window - size depends on encoder level
+    ^{:line 115 :tag int32} windowEnd ; filled bytes in window
+    ^{:line 116 :tag int32} blockStart ; window index where current tokens start
+    ^{:line 117 :tag error} err ; stateful error
+
+
+    ^{:line 120 :tag tokens :doc "queued output tokens\n"} tokens ; tokens store for each block
+    ^{:line 121 :tag fastEnc} fast ; encoder to use for blocks
+    ^{:line 122 :tag (* advancedState)} state ; chained encoder for level 7-9
+
+    ^{:line 124 :tag bool} sync ; requesting flush
+    ^{:line 125 :tag bool} byteAvailable)) ; if true, still need to process window[index-1].
+
+
+
+^{:go/end 158} (go/method fillDeflate "fillDeflate will add b to the current window for levels 7-9.\n" ^int [^{:tag (* compressor)} d ^{:tag (slice byte)} b]
+  (let [s (.-state d)]
+    (when (>= (.-index s) (- (* 2 windowSize) (+ minMatchLength maxMatchLength)))
+      ;; shift the window by windowSize
+      (copy (subslice (.-window d)) (subslice (.-window d) windowSize (* 2 windowSize)))
+      (set! (.-index s) - windowSize)
+      (set! (.-windowEnd d) - windowSize)
+      (if (>= (.-blockStart d) windowSize)
+        (set! (.-blockStart d) - windowSize)
+
+        (set! (.-blockStart d) math/MaxInt32))
+
+      (set! (.-hashOffset s) + windowSize)
+      (when (> (.-hashOffset s) maxHashOffset)
+        (let [delta (- (.-hashOffset s) 1)]
+          (set! (.-hashOffset s) - delta)
+          (set! (.-chainHead s) - delta)
+          ;; Note: range over &array to avoid copy (see go.dev/issue/18625).
+          (range [i v (addr (.-hashPrev s))]
+            (aset (.-hashPrev s) i (max (- v delta) 0)))
+
+          (range [i v (addr (.-hashHead s))]
+            (aset (.-hashHead s) i (max (- v delta) 0))))))
+
+
+
+    (let [n (copy (subslice (.-window d) (.-windowEnd d)) b)]
+      (set! (.-windowEnd d) + (conv int32 n))
+      ^{:line 157} n)))
+
+
+
+
+^{:go/breaks [[5 172]] :go/end 173} (go/method writeBlock "writeBlock will write tokens to output.\nThe provided index is where the block starts in d.window.\n" ^error [^{:tag (* compressor)} d ^{:tag (* tokens)} tok ^int32 index ^bool eof]
+  (when (or (> index 0) eof)
+    (let [^{:tag (slice byte)} window (zero (slice byte))]
+      (when (<= (.-blockStart d) index)
+        (set! window (subslice (.-window d) (.-blockStart d) index)))
+
+      (set! (.-blockStart d) index)
+      (.writeBlockDynamic (.-w d) tok eof window (.-sync d))
+      (return (.-err (.-w d)))))
+
+  nil)
+
+
+
+
+
+^{:go/breaks [[5 196]] :go/end 197} (go/method writeBlockSkip "writeBlockSkip writes the current block and uses the number of tokens\nto determine if the block should be stored when there are no matches, or\nonly Huffman encoded.\n" ^error [^{:tag (* compressor)} d ^{:tag (* tokens)} tok ^int32 index ^bool eof]
+  (when (or (> index 0) eof)
+    (if (<= (.-blockStart d) index)
+      (let [window (subslice (.-window d) (.-blockStart d) index)]
+        ;; If we removed less than a 64th of all literals
+        ;; we huffman compress the block.
+        (if (> (conv int (.-n tok)) (- (len window) (>> (len window) 6)))
+          (.writeBlockHuff (.-w d) eof window (.-sync d))
+
+          ;; Write a dynamic huffman block.
+          (.writeBlockDynamic (.-w d) tok eof window (.-sync d))))
+
+
+      (.writeBlock (.-w d) tok eof nil))
+
+    (set! (.-blockStart d) index)
+    (return (.-err (.-w d))))
+
+  nil)
+
+
+
+
+
+
+^{:go/end 253} (go/method fillWindow "fillWindow will fill the current window with the supplied\ndictionary and calculate all hashes.\nThis is much faster than doing a full encode.\nShould only be used after a start/reset.\n" [^{:tag (* compressor)} d ^{:tag (slice byte)} b]
+  ;; Do not fill window if we are in store-only or huffman mode.
+  (when (<= ^{:go/via [compressionLevel]} (.-level d) 0)
+    (return))
+
+  (when (!= (.-fast d) nil)
+    ;; encode the last data, but discard the result
+    (when (> (len b) maxMatchOffset)
+      (set! b (subslice b (- (len b) maxMatchOffset))))
+
+    (.encode (.-fast d) (addr (.-tokens d)) b)
+    (.Reset (.-tokens d))
+    (return))
+
+  (let [s (.-state d)]
+    ;; If we are given too much, cut it.
+    (when (> (len b) windowSize)
+      (set! b (subslice b (- (len b) windowSize))))
+
+    ;; Add all to window.
+    (let [n (conv int32 (copy (subslice (.-window d) (.-windowEnd d)) b))
+
+        ;; Calculate 256 hashes at the time (more L1 cache hits)
+        ^{:line 226} loops (/ (- (+ n 256) minMatchLength) 256)]
+      (range [j loops]
+        (let [startindex (* j 256)
+            ^{:line 229} end (min (- (+ startindex 256 minMatchLength) 1) n)
+            ^{:line 230} tocheck (subslice (.-window d) startindex end)
+            ^{:line 231} dstSize (+ (- (len tocheck) minMatchLength) 1)]
+
+          (when (<= dstSize 0)
+            (continue))
+
+
+          (let [dst (subslice (.-hashMatch s) _ dstSize)]
+            (bulkHash4 tocheck dst)
+            (let [^uint32 newH (zero uint32)]
+              (range [i val dst]
+                (let [di (+ (conv int32 i) startindex)]
+                  (set! newH (bit-and val hashMask))
+                  ;; Get previous value with the same hash.
+                  ;; Our chain should point to the previous value.
+                  (aset (.-hashPrev s) (bit-and di windowMask) (aget (.-hashHead s) newH))
+                  ;; Set the head of the hash chain to us.
+                  (aset (.-hashHead s) newH (+ di (.-hashOffset s)))))))))
+
+
+      ;; Update window information.
+      (set! (.-windowEnd d) + n)
+      (set! (.-index s) n))))
+
+
+
+
+^{:go/end 315} (go/method findMatch "findMatch finds the longest match starting at pos in the hash chain starting\nat prevHead. It searches up to d.chain entries in the chain.\n" [^{:tag (* compressor)} d ^int32 pos ^int32 prevHead ^int32 lookahead] :results [^int32 length ^int32 offset ^bool ok]
+  (let [minMatchLook (min lookahead maxMatchLength)
+
+      ^{:line 260} win (subslice (.-window d) 0 (+ pos minMatchLook))
+
+      ;; We quit when we get a match that's at least nice long
+      ^{:line 263} nice (min ^{:go/via [compressionLevel]} (.-nice d) (- (conv int32 (len win)) pos))
+
+      ;; If we've got a match that's good enough, only look in 1/4 the chain.
+      ^{:line 266} tries ^{:go/via [compressionLevel]} (.-chain d)]
+    (set! length (- minMatchLength 1))
+
+    (let [wEnd (aget win (+ pos length))
+        ^{:line 270} wPos (subslice win pos)
+        ^{:line 271} minIndex (max (- pos windowSize) 0)]
+      (set! offset 0)
+
+      ;; Minimum gain to accept a match.
+      (let [cGain 4
+
+          ;; Some like it higher (CSV), some like it lower (JSON)
+          ^:const ^{:line 278 :val 3} baseCost 3]
+        ;; Base is 4 bytes at with an additional cost.
+        ;; Matches must be better than this.
+
+        (for [i prevHead] (> tries 0) (dec! tries)
+          (when (== wEnd (aget win (+ i length)))
+            (let [n (conv int32 (matchLen (subslice win i (+ i minMatchLook)) wPos))]
+              (when (> n length)
+                (when (>= ^{:go/via [compressionLevel]} (.-chain d) 100)
+                  ;; Calculate gain. Estimates the gains of the new match compared to emitting as literals.
+                  (let [newGain (- (.bitLengthRaw (.-h d) (subslice wPos _ n)) (conv int (aget offsetExtraBits (offsetCode (conv uint32 (- pos i))))) baseCost (conv int (aget lengthExtraBits (aget lengthCodes (bit-and (- n 3) 255)))))]
+                    (when (<= newGain cGain)
+                      (goto :next))
+
+                    (set! cGain newGain)))
+
+                (set! length n)
+                (set! offset (- pos i))
+                (set! ok true)
+                (when (>= n nice)
+                  ;; The match is good enough that we don't try to find a better one.
+                  (break))
+
+                (set! wEnd (aget win (+ pos n))))))
+
+
+          (label :next
+            (when (<= i minIndex)
+              ;; hashPrev[i & windowMask] has already been overwritten, so stop now.
+              (break)))
+
+          (set! i (- (aget (.-hashPrev (.-state d)) (bit-and i windowMask)) (.-hashOffset (.-state d))))
+          (when (< i minIndex)
+            (break)))
+
+
+        (return)))))
+
+
+
+^{:go/end 324} (go/method writeStoredBlock "writeStoredBlock writes an uncompressed block to the stream.\n" ^error [^{:tag (* compressor)} d ^{:tag (slice byte)} buf]
+  (when [(.writeStoredHeader (.-w d) (len buf) false)] (!= (.-err (.-w d)) nil)
+    (return (.-err (.-w d))))
+
+  (.writeBytes (.-w d) buf)
+  (.-err (.-w d)))
+
+
+
+
+
+^{:go/end 331} (go/func hash4 "hash4 returns a hash representation of the first 4 bytes\nof the supplied slice.\nThe caller must ensure that len(b) >= 4.\n" ^uint32 [^{:tag (slice byte)} b]
+  (hash4u (^{:inst [int]} loadLE32 b 0) hashBits))
+
+
+
+
+^{:go/end 337} (go/func hash4u "hash4 returns the hash of u to fit in a hash table with h bits.\nPreferably h should be a constant and should always be <32.\n" ^uint32 [^uint32 u ^uint8 h]
+  (>> (* u prime4bytes) (- 32 h)))
+
+
+
+^{:go/end 352} (go/func bulkHash4 "bulkHash4 sets dst[i] = hash4(b[i:i+4]) for all i <= len(b)-4.\n" [^{:tag (slice byte)} b ^{:tag (slice uint32)} dst]
+  (when (< (len b) 4)
+    (return))
+
+  (let [hb (^{:inst [int]} loadLE32 b 0)]
+
+    (aset dst 0 (hash4u hb hashBits))
+    (let [end (+ (- (len b) 4) 1)]
+      (for [i 1] (< i end) (inc! i)
+        (set! hb (bit-or (>> hb 8) (<< (conv uint32 (aget b (+ i 3))) 24)))
+        (aset dst i (hash4u hb hashBits))))))
+
+
+
+
+^{:go/end 368} (go/method initDeflate "initDeflate initializes d for levels 7-9.\n" [^{:tag (* compressor)} d]
+  (set! (.-window d) (make (slice byte) (* 2 windowSize)))
+  (set! (.-byteAvailable d) false)
+  (set! (.-err d) nil)
+  (when (== (.-state d) nil)
+    (return))
+
+  (let [s (.-state d)]
+    (set! (.-index s) 0)
+    (set! (.-hashOffset s) 1)
+    (set! (.-length s) (- minMatchLength 1))
+    (set! (.-offset s) 0)
+    (set! (.-chainHead s) -1)))
+
+
+
+
+
+^{:go/end 430} (go/method tryBetterMatchAtEnd "tryBetterMatchAtEnd checks whether a better match exists at the end of the\nprevious match and, if so, emits the skipped literals and adjusts the match.\nReturns the (possibly updated) prevLength and prevOffset.\n" [^{:tag (* compressor)} d ^int32 prevLength ^int32 prevOffset ^int32 lookahead] :results [^int32 newLen ^int32 newOff]
+  ;; We start checking at checkOff from the current match position.
+  ;; This allows up to two additional literals, but that could be
+  ;; compensated by a higher quality match.
+  ;; If the match looks better, we extend backwards.
+  (let [^:const ^{:val 2} checkOff 2
+      ^{:line 379} s (.-state d)]
+
+    (when (>= prevLength (- maxMatchLength checkOff))
+      (return prevLength prevOffset))
+
+    (let [prevIndex (- (.-index s) 1)]
+      (when (>= (+ prevIndex prevLength) (.-maxInsertIndex s))
+        (return prevLength prevOffset))
+
+
+      (let [end (+ (min lookahead (+ maxMatchLength checkOff)) prevIndex)
+          ^{:line 390} minIndex (max (- (.-index s) windowSize) 0)
+
+          ^{:line 392} h (hash4 (subslice (.-window d) (+ prevIndex prevLength)))
+          ^{:line 393} ch2 (- (aget (.-hashHead s) h) (.-hashOffset s) prevLength)]
+        (when (or (== (- prevIndex ch2) prevOffset) (<= ch2 (+ minIndex checkOff)))
+          (return prevLength prevOffset))
+
+
+        (let [length (conv int32 (matchLen (subslice (.-window d) (+ prevIndex checkOff) end) (subslice (.-window d) (+ ch2 checkOff))))]
+          (when (<= length prevLength)
+            (return prevLength prevOffset))
+
+
+          (set! prevLength length)
+          (set! prevOffset (- prevIndex ch2))
+
+          (for [i (conv int32 (- checkOff 1))] (>= i 0) (dec! i)
+            (when (or (>= prevLength maxMatchLength) (!= (aget (.-window d) (+ prevIndex i)) (aget (.-window d) (+ ch2 i))))
+              (range [j (+ i 1)]
+                (.AddLiteral (.-tokens d) (aget (.-window d) (+ prevIndex j)))
+                (when (== (.-n (.-tokens d)) maxFlateBlockTokens)
+                  (when [(set! (.-err d) (.writeBlock d (addr (.-tokens d)) (.-index s) false))] (!= (.-err d) nil)
+                    (return prevLength prevOffset))
+
+                  (.Reset (.-tokens d)))
+
+                (inc! (.-index s))
+                (when (< (.-index s) (.-maxInsertIndex s))
+                  (let [h (hash4 (subslice (.-window d) (.-index s)))
+                      ^{:line 419} ch (aget (.-hashHead s) h)]
+                    (set! (.-chainHead s) ch)
+                    (aset (.-hashPrev s) (bit-and (.-index s) windowMask) ch)
+                    (aset (.-hashHead s) h (+ (.-index s) (.-hashOffset s))))))
+
+
+              (break))
+
+            (inc! prevLength))
+
+          (return prevLength prevOffset))))))
+
+
+
+
+^{:go/end 470} (go/method skipLiterals "skipLiterals emits extra literal bytes during long runs of incompressible data,\nskipping ahead to avoid futile match searches. Returns false on write error.\n" ^bool [^{:tag (* compressor)} d]
+  ^{:go/breaks [[8 469]]} (let [s (.-state d)
+      ^{:line 436} n (- (conv int32 (.-literalCounter s)) ^{:go/via [compressionLevel]} (.-chain d))]
+    (when (<= n 0)
+      (return true))
+
+    (set! n (+ 1 (>> n 6)))
+    (range [n]
+      (when (>= (.-index s) (- (.-windowEnd d) 1))
+        (break))
+
+      (.AddLiteral (.-tokens d) (aget (.-window d) (- (.-index s) 1)))
+      (when (== (.-n (.-tokens d)) maxFlateBlockTokens)
+        (when [(set! (.-err d) (.writeBlock d (addr (.-tokens d)) (.-index s) false))] (!= (.-err d) nil)
+          (return false))
+
+        (.Reset (.-tokens d)))
+
+      (when (< (.-index s) (.-maxInsertIndex s))
+        (let [h (hash4 (subslice (.-window d) (.-index s)))
+            ^{:line 454} ch (aget (.-hashHead s) h)]
+          (set! (.-chainHead s) ch)
+          (aset (.-hashPrev s) (bit-and (.-index s) windowMask) ch)
+          (aset (.-hashHead s) h (+ (.-index s) (.-hashOffset s)))))
+
+      (inc! (.-index s)))
+
+    (.AddLiteral (.-tokens d) (aget (.-window d) (- (.-index s) 1)))
+    (set! (.-byteAvailable d) false)
+    (when (== (.-n (.-tokens d)) maxFlateBlockTokens)
+      (when [(set! (.-err d) (.writeBlock d (addr (.-tokens d)) (.-index s) false))] (!= (.-err d) nil)
+        (return false))
+
+      (.Reset (.-tokens d)))
+
+    true))
+
+
+
+
+
+
+^{:go/end 606} (go/method deflateLazy "deflateLazy encodes the current window using lazy matching.\nLazy matching defers emitting a match to see if the next position yields a better one.\nUnique to levels 7-9 is that more than 2 matches are potentially checked\nuntil a good/nice one is found.\n" [^{:tag (* compressor)} d]
+  (let [s (.-state d)]
+
+    (when (and (< (- (.-windowEnd d) (.-index s)) (+ minMatchLength maxMatchLength)) (not (.-sync d)))
+      (return))
+
+    (when (and (!= (.-windowEnd d) (.-index s)) (> ^{:go/via [compressionLevel]} (.-chain d) 100))
+      ;; Get literal huffman coder.
+      ;; This is used to estimate the cost of emitting a literal.
+      (when (== (.-h d) nil)
+        (set! (.-h d) (newHuffmanEncoder maxFlateBlockTokens)))
+
+      (let [^{:tag (array 256 uint16)} tmp (zero (array 256 uint16))
+          ^{:line 489} toIndex (subslice (.-window d) (.-index s) (.-windowEnd d))]
+        (set! toIndex (subslice toIndex _ (min (len toIndex) maxFlateBlockTokens)))
+        (range [_ v toIndex]
+          (inc! (aget tmp v)))
+
+        (.generate (.-h d) (subslice tmp) 15)))
+
+
+    (set! (.-maxInsertIndex s) (- (.-windowEnd d) (- minMatchLength 1)))
+
+    (while true
+      (let [lookahead (- (.-windowEnd d) (.-index s))]
+        (when (< lookahead (+ minMatchLength maxMatchLength))
+          (when (not (.-sync d))
+            (return))
+
+          (when (== lookahead 0)
+            ;; Flush current output block if any.
+            (when (.-byteAvailable d)
+              ;; There is still one pending token that needs to be flushed
+              (.AddLiteral (.-tokens d) (aget (.-window d) (- (.-index s) 1)))
+              (set! (.-byteAvailable d) false))
+
+            (when (> (.-n (.-tokens d)) 0)
+              (when [(set! (.-err d) (.writeBlock d (addr (.-tokens d)) (.-index s) false))] (!= (.-err d) nil)
+                (return))
+
+              (.Reset (.-tokens d)))
+
+            (return)))
+
+
+        (when (< (.-index s) (.-maxInsertIndex s))
+          (let [h (hash4 (subslice (.-window d) (.-index s)))
+              ^{:line 523} ch (aget (.-hashHead s) h)]
+            (set! (.-chainHead s) ch)
+            (aset (.-hashPrev s) (bit-and (.-index s) windowMask) ch)
+            (aset (.-hashHead s) h (+ (.-index s) (.-hashOffset s)))))
+
+        (let [prevLength (.-length s)
+            ^{:line 529} prevOffset (.-offset s)]
+          (set! (.-length s) (- minMatchLength 1))
+          (set! (.-offset s) 0)
+          (let [minIndex (max (- (.-index s) windowSize) 0)]
+
+            (when (and (>= (- (.-chainHead s) (.-hashOffset s)) minIndex) (> lookahead prevLength) (< prevLength ^{:go/via [compressionLevel]} (.-lazy d)))
+              (when [(values newLength newOffset ok) (.findMatch d (.-index s) (- (.-chainHead s) (.-hashOffset s)) lookahead)] ok
+                (set! (.-length s) newLength)
+                (set! (.-offset s) newOffset)))
+
+
+
+            (when (and (>= prevLength minMatchLength) (<= (.-length s) prevLength))
+              (set! (values prevLength prevOffset) (.tryBetterMatchAtEnd d prevLength prevOffset lookahead))
+              (when (!= (.-err d) nil)
+                (return))
+
+
+              ;; There was a match at the previous step, and the current match is
+              ;; not better. Output the previous match.
+              (.AddMatch (.-tokens d) (conv uint32 (- prevLength 3)) (conv uint32 (- prevOffset minOffsetSize)))
+
+              ;; Insert in the hash table all strings up to the end of the match.
+              ;; index and index-1 are already inserted. If there is not enough
+              ;; lookahead, the last two strings are not inserted into the hash
+              ;; table.
+              (let [newIndex (- (+ (.-index s) prevLength) 1)
+                  ^{:line 556} end (min newIndex (.-maxInsertIndex s))]
+                (set! end + (- minMatchLength 1))
+                (let [startindex (min (+ (.-index s) 1) (.-maxInsertIndex s))
+                    ^{:line 559} tocheck (subslice (.-window d) startindex end)
+                    ^{:line 560} dstSize (+ (- (len tocheck) minMatchLength) 1)]
+                  (when (> dstSize 0)
+                    (let [dst (subslice (.-hashMatch s) _ dstSize)]
+                      (bulkHash4 tocheck dst)
+                      (let [^uint32 newH (zero uint32)]
+                        (range [i val dst]
+                          (let [di (+ (conv int32 i) startindex)]
+                            (set! newH (bit-and val hashMask))
+                            (aset (.-hashPrev s) (bit-and di windowMask) (aget (.-hashHead s) newH))
+                            (aset (.-hashHead s) newH (+ di (.-hashOffset s))))))))
+
+
+
+                  (set! (.-index s) newIndex)
+                  (set! (.-byteAvailable d) false)
+                  (set! (.-length s) (- minMatchLength 1))
+                  (when (== (.-n (.-tokens d)) maxFlateBlockTokens)
+                    (when [(set! (.-err d) (.writeBlock d (addr (.-tokens d)) (.-index s) false))] (!= (.-err d) nil)
+                      (return))
+
+                    (.Reset (.-tokens d)))
+
+                  (set! (.-literalCounter s) 0)
+                  (continue))))
+
+            (when (>= (.-length s) minMatchLength)
+              (set! (.-literalCounter s) 0))
+
+            (if (.-byteAvailable d) (do
+                (inc! (.-literalCounter s))
+                (.AddLiteral (.-tokens d) (aget (.-window d) (- (.-index s) 1)))
+                (when (== (.-n (.-tokens d)) maxFlateBlockTokens)
+                  (when [(set! (.-err d) (.writeBlock d (addr (.-tokens d)) (.-index s) false))] (!= (.-err d) nil)
+                    (return))
+
+                  (.Reset (.-tokens d)))
+
+                (inc! (.-index s))
+                (when (not (.skipLiterals d))
+                  (return)))
+
+              (do
+                (inc! (.-index s))
+                (set! (.-byteAvailable d) true)))))))))
+
+
+
+
+
+^{:go/end 614} (go/method store "store will store the current window if it has filled or if we are in sync.\n" [^{:tag (* compressor)} d]
+  (when (and (> (.-windowEnd d) 0) ^:go/paren (or (== (.-windowEnd d) maxStoreBlockSize) (.-sync d)))
+    (set! (.-err d) (.writeStoredBlock d (subslice (.-window d) _ (.-windowEnd d))))
+    (set! (.-windowEnd d) 0)))
+
+
+
+
+
+^{:go/end 622} (go/method fillBlock "fillBlock appends b to d.window, returning the number of bytes copied.\nIf n < len(b), the window is filled.\n" ^int [^{:tag (* compressor)} d ^{:tag (slice byte)} b]
+  (let [n (copy (subslice (.-window d) (.-windowEnd d)) b)]
+    (set! (.-windowEnd d) + (conv int32 n))
+    ^{:line 621} n))
+
+
+
+
+
+^{:go/end 634} (go/method deflateHuff "deflateHuff compresses and stores the current window\n(if it has filled or if we are in sync or flush).\nIt uses Huffman-only encoding.\n" [^{:tag (* compressor)} d]
+  (when (or (and (< (conv int (.-windowEnd d)) (len (.-window d))) (not (.-sync d))) (== (.-windowEnd d) 0))
+    (return))
+
+  (.writeBlockHuff (.-w d) false (subslice (.-window d) _ (.-windowEnd d)) (.-sync d))
+  (set! (.-err d) (.-err (.-w d)))
+  (set! (.-windowEnd d) 0))
+
+
+
+
+
+^{:go/end 677} (go/method deflateFast "deflateFast encodes the current window\nif it has filled or if we are doing sync/flush.\nIt uses the level 1-6 fast encoding.\n" [^{:tag (* compressor)} d]
+  ;; We only compress if we have maxStoreBlockSize.
+  (when (< (conv int (.-windowEnd d)) (len (.-window d)))
+    (when (not (.-sync d))
+      (return))
+
+    ;; Handle extremely small sizes.
+    (when (< (.-windowEnd d) 128)
+      (when (== (.-windowEnd d) 0)
+        (return))
+
+      (if (<= (.-windowEnd d) 32)
+        (set! (.-err d) (.writeStoredBlock d (subslice (.-window d) _ (.-windowEnd d))))
+        (do
+          (.writeBlockHuff (.-w d) false (subslice (.-window d) _ (.-windowEnd d)) true)
+          (set! (.-err d) (.-err (.-w d)))))
+
+      (.Reset (.-tokens d))
+      (set! (.-windowEnd d) 0)
+      (.reset (.-fast d))
+      (return)))
+
+
+
+  (.encode (.-fast d) (addr (.-tokens d)) (subslice (.-window d) _ (.-windowEnd d)))
+  ;; If we made zero matches, store the block as is.
+  (cond (== (.-n (.-tokens d)) 0)
+    (set! (.-err d) (.writeStoredBlock d (subslice (.-window d) _ (.-windowEnd d))))
+    ;; If we removed less than 1/16th, huffman compress the block.
+    (> (conv int32 (.-n (.-tokens d))) (- (.-windowEnd d) (>> (.-windowEnd d) 4))) (do
+      (.writeBlockHuff (.-w d) false (subslice (.-window d) _ (.-windowEnd d)) (.-sync d))
+      (set! (.-err d) (.-err (.-w d)))) :else
+    (do
+      (.writeBlockDynamic (.-w d) (addr (.-tokens d)) false (subslice (.-window d) _ (.-windowEnd d)) (.-sync d))
+      (set! (.-err d) (.-err (.-w d)))))
+
+  (.Reset (.-tokens d))
+  (set! (.-windowEnd d) 0))
+
+
+
+
+^{:go/end 696} (go/method write "write adds b to the compressor.\nIt can only return a short length if an error occurs.\n" [^{:tag (* compressor)} d ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (when (!= (.-err d) nil)
+    (return 0 (.-err d)))
+
+  (set! n (len b))
+  (while (> (len b) 0)
+    (when (or (== (conv int (.-windowEnd d)) (len (.-window d))) (.-sync d))
+      ((.-step d) d))
+
+    (set! b (subslice b ((.-fill d) d b)))
+    (when (!= (.-err d) nil)
+      (return 0 (.-err d))))
+
+
+  (return n (.-err d)))
+
+
+
+
+
+^{:go/end 714} (go/method syncFlush "syncFlush will flush the compressor by writing\nany remaining window and writing a stored block\nto byte-align the output.\n" ^error [^{:tag (* compressor)} d]
+  (when (!= (.-err d) nil)
+    (return (.-err d)))
+
+  (set! (.-sync d) true)
+  ((.-step d) d)
+  (when (== (.-err d) nil)
+    (.writeStoredHeader (.-w d) 0 false)
+    (.flush (.-w d))
+    (set! (.-err d) (.-err (.-w d))))
+
+  (set! (.-sync d) false)
+  (.-err d))
+
+
+
+^{:go/breaks [9] :go/end 751} (go/method init "init a new encode with new writer and compression level.\n" [^{:tag (* compressor)} d ^io/Writer w ^int level] :results [^error err]
+  (set! (.-w d) (newHuffmanBitWriter w))
+
+  (switch
+    (case [(== level NoCompression)]
+      (set! (.-window d) (make (slice byte) maxStoreBlockSize))
+      (set! (.-fill d) (method-expr (* compressor) fillBlock))
+      (set! (.-step d) (method-expr (* compressor) store)))
+    (case [(== level HuffmanOnly)]
+      (set! (.-logNewTablePenalty (.-w d)) 10)
+      (set! (.-window d) (make (slice byte) (<< 32 10)))
+      (set! (.-fill d) (method-expr (* compressor) fillBlock))
+      (set! (.-step d) (method-expr (* compressor) deflateHuff)))
+    (case [(== level DefaultCompression)]
+      (set! level 6)
+      (fallthrough))
+    (case [(and (<= 1 level) (<= level 6))]
+      (set! (.-logNewTablePenalty (.-w d)) 7)
+      (set! (.-fast d) (newFastEnc level))
+      (set! (.-window d) (make (slice byte) maxStoreBlockSize))
+      (set! (.-fill d) (method-expr (* compressor) fillBlock))
+      (set! (.-step d) (method-expr (* compressor) deflateFast)))
+    (case [(and (<= 7 level) (<= level 9))]
+      (set! (.-logNewTablePenalty (.-w d)) 8)
+      (set! (.-state d) (addr (lit advancedState)))
+      (set! (.-compressionLevel d) (aget levels level))
+      (.initDeflate d)
+      (set! (.-fill d) (method-expr (* compressor) fillDeflate))
+      (set! (.-step d) (method-expr (* compressor) deflateLazy)))
+    (default
+      (return (fmt/Errorf "flate: invalid compression level %d: want value in range [-2, 9]" level))))
+
+  (set! ^{:go/via [compressionLevel]} (.-level d) level)
+  nil)
+
+
+
+^{:go/end 780} (go/method reset "reset resets the compressor with a new output writer.\n" [^{:tag (* compressor)} d ^io/Writer w]
+  (.reset (.-w d) w)
+  (set! (.-sync d) false)
+  (set! (.-err d) nil)
+  (set! (.-windowEnd d) 0)
+  ;; We only need to reset a few things for fast encoders.
+  (when (!= (.-fast d) nil)
+    (.reset (.-fast d))
+    (.Reset (.-tokens d))
+    (return))
+
+  (when (== (.-chain (.-compressionLevel d)) 0)
+    (return))
+
+  (let [s (.-state d)]
+    (set! (.-chainHead s) -1)
+    (clear (subslice (.-hashHead s)))
+    (clear (subslice (.-hashPrev s)))
+    (set! (.-hashOffset s) 1)
+    (set! (.-index s) 0)
+    (set! (values (.-blockStart d) (.-byteAvailable d)) (values 0 false))
+    (.Reset (.-tokens d))
+    (set! (.-length s) (- minMatchLength 1))
+    (set! (.-offset s) 0)
+    (set! (.-literalCounter s) 0)
+    (set! (.-maxInsertIndex s) 0)))
+
+
+(go/var errWriterClosed (errors/New "flate: closed writer"))
+
+
+^{:go/breaks [14] :go/end 807} (go/method close "close flushes any uncompressed data and writes an EOF block.\n" ^error [^{:tag (* compressor)} d]
+  (when (== (.-err d) errWriterClosed)
+    (return nil))
+
+  (when (!= (.-err d) nil)
+    (return (.-err d)))
+
+  (set! (.-sync d) true)
+  ((.-step d) d)
+  (when (!= (.-err d) nil)
+    (return (.-err d)))
+
+  (when [(.writeStoredHeader (.-w d) 0 true)] (!= (.-err (.-w d)) nil)
+    (return (.-err (.-w d))))
+
+  (.flush (.-w d))
+  (when (!= (.-err (.-w d)) nil)
+    (return (.-err (.-w d))))
+
+  (set! (.-err d) errWriterClosed)
+  (.reset (.-w d) nil)
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 831} (go/func NewWriter "NewWriter returns a new [Writer] compressing data at the given level.\nFollowing zlib, levels range from 1 ([BestSpeed]) to 9 ([BestCompression]);\nhigher levels typically run slower but compress more. Level 0\n([NoCompression]) does not attempt any compression; it only adds the\nnecessary DEFLATE framing.\nLevel -1 ([DefaultCompression]) uses the default compression level.\nLevel -2 ([HuffmanOnly]) will use Huffman compression only, giving\na very fast compression for all types of input, but sacrificing considerable\ncompression efficiency.\n\nIf level is in the range [-2, 9] then the error returned will be nil.\nOtherwise the error returned will be non-nil.\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" [^io/Writer w ^int level] :results [(* Writer) error]
+  (let [^Writer dw (zero Writer)]
+    (when [err (.init (.-d dw) w level)] (!= err nil)
+      (return nil err))
+
+    (return (addr dw) nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 852} (go/func NewWriterDict "NewWriterDict is like [NewWriter] but initializes the new\n[Writer] with a preset dictionary. The returned [Writer] behaves\nas if the dictionary had been written to it without producing\nany compressed output. The compressed data written to w\ncan only be decompressed by a reader initialized with the\nsame dictionary (see [NewReaderDict]).\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" [^io/Writer w ^int level ^{:tag (slice byte)} dict] :results [(* Writer) error]
+  (let [(values zw err) (NewWriter w level)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.fillWindow (.-d zw) dict)
+    ;; Clone dict so we can Reset without changing the provided slice.
+    (set! (.-dict zw) (^{:inst [(slice byte) byte]} slices/Clone dict))
+    (return zw err)))
+
+
+
+
+(go/type Writer "A Writer takes data written to it and writes the compressed\nform of that data to an underlying writer (see [NewWriter]).\n" (struct
+    ^{:line 857 :tag compressor} d
+    ^{:line 858 :tag (slice byte)} dict))
+
+
+
+
+^{:go/end 865} (go/method Write "Write writes data to w, which will eventually write the\ncompressed form of data to its underlying writer.\n" [^{:tag (* Writer)} w ^{:tag (slice byte)} data] :results [^int n ^error err]
+  (.write (.-d w) data))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 880} (go/method Flush "Flush flushes any pending data to the underlying writer.\nIt is useful mainly in compressed network protocols, to ensure that\na remote reader has enough data to reconstruct a packet.\nFlush does not return until the data has been written.\nCalling Flush when there is no pending data still causes the [Writer]\nto emit a sync marker of at least 4 bytes.\nIf the underlying writer returns an error, Flush returns that error.\n\nIn the terminology of the zlib library, Flush is equivalent to Z_SYNC_FLUSH.\n" ^error [^{:tag (* Writer)} w]
+  ;; For more about flushing:
+  ;; https://www.bolet.org/~pornin/deflate-flush.html
+  (.syncFlush (.-d w)))
+
+
+
+^{:go/end 885} (go/method Close "Close flushes and closes the writer.\n" ^error [^{:tag (* Writer)} w]
+  (.close (.-d w)))
+
+
+
+
+
+^{:go/end 893} (go/method Reset "Reset discards the writer's state and makes it equivalent to\nthe result of NewWriter or NewWriterDict called with dst\nand w's level and dictionary.\n" [^{:tag (* Writer)} w ^io/Writer dst]
+  (.reset (.-d w) dst)
+  (.fillWindow (.-d w) (.-dict w)))

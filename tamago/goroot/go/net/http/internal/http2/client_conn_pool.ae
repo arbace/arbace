@@ -1,0 +1,284 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Transport code's client connection pooling.
+
+(in-ns 'go.net.http.internal.http2) (go/file "client_conn_pool.go" :imports [
+
+
+    ^{:line 10} [context "context"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [net "net"]
+    ^{:line 13} [slices "slices"]
+    ^{:line 14} [sync "sync"]])
+
+
+
+(go/type clientConnPool "TODO: use singleflight for dialing and addConnCalls?\n" (struct
+    ^{:line 19 :tag (* Transport)} t
+
+    ^{:line 21 :tag sync/Mutex} mu ; TODO: maybe switch to RWMutex
+
+
+    ^{:line 24 :tag (map string (slice (* ClientConn))) :doc "TODO: add support for sharing conns based on cert names\n(e.g. share conn for googleapis.com and appspot.com)\n"} conns ; key is host:port
+    ^{:line 25 :tag (map string (* dialCall))} dialing ; currently in-flight dials
+    ^{:line 26 :tag (map (* ClientConn) (slice string))} keys
+    ^{:line 27 :tag (map string (* addConnCall))} addConnCalls)) ; in-flight addConnIfNeeded calls
+
+
+^{:go/end 32} (go/method GetClientConn [^{:tag (* clientConnPool)} p ^{:tag (* ClientRequest)} req ^string addr] :results [(* ClientConn) error]
+  (.getClientConn p req addr dialOnMiss))
+
+
+(go/const
+  ^{:line 35} [^{:val true} dialOnMiss true]
+  ^{:line 36} [^{:val false} noDialOnMiss false])
+
+
+^{:go/end 85} (go/method getClientConn [^{:tag (* clientConnPool)} p ^{:tag (* ClientRequest)} req ^string addr ^bool dialOnMiss] :results [(* ClientConn) error]
+  ;; TODO(dneil): Dial a new connection when t.DisableKeepAlives is set?
+  (when (and (isConnectionCloseRequest req) dialOnMiss)
+    ;; It gets its own connection.
+    (traceGetConn req addr)
+    (let [^:const ^{:val true} singleUse true
+        (values cc err) (.dialClientConn (.-t p) (.-Context req) addr singleUse)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return cc nil)))
+
+  (while true
+    (.Lock (.-mu p))
+    (range [_ cc (aget (.-conns p) addr)]
+      (when (.ReserveNewRequest cc)
+        ;; When a connection is presented to us by the net/http package,
+        ;; the GetConn hook has already been called.
+        ;; Don't call it a second time here.
+        (when (not (.-getConnCalled cc))
+          (traceGetConn req addr))
+
+        (set! (.-getConnCalled cc) false)
+        (.Unlock (.-mu p))
+        (return cc nil)))
+
+
+    (when (not dialOnMiss)
+      (.Unlock (.-mu p))
+      (return nil ErrNoCachedConn))
+
+    (traceGetConn req addr)
+    (let [call (.getStartDialLocked p (.-Context req) addr)]
+      (.Unlock (.-mu p))
+      (<! (.-done call))
+      (when (shouldRetryDial call req)
+        (continue))
+
+      (let [(values cc err) (values (.-res call) (.-err call))]
+        (when (!= err nil)
+          (return nil err))
+
+        (when (.ReserveNewRequest cc)
+          (return cc nil))))))
+
+
+
+
+
+(go/type dialCall "dialCall is an in-flight Transport dial call to a host.\n" (struct
+    ^{:line 89 :tag incomparable} _
+    ^{:line 90 :tag (* clientConnPool)} p
+
+
+    ^{:line 93 :tag context/Context :doc "the context associated with the request\nthat created this dialCall\n"} ctx
+    ^{:line 94 :tag (chan (struct))} done ; closed when done
+    ^{:line 95 :tag (* ClientConn)} res ; valid after done is closed
+    ^{:line 96 :tag error} err)) ; valid after done is closed
+
+
+
+^{:go/end 112} (go/method getStartDialLocked "requires p.mu is held.\n" ^{:tag (* dialCall)} [^{:tag (* clientConnPool)} p ^context/Context ctx ^string addr]
+  (when [(values call ok) (aget (.-dialing p) addr)] ok
+    ;; A dial is already in-flight. Don't start another.
+    (return call))
+
+  (let [call (addr (lit dialCall :p p :done (make (chan (struct))) :ctx ctx))]
+    (when (== (.-dialing p) nil)
+      (set! (.-dialing p) (make (map string (* dialCall)))))
+
+    (aset (.-dialing p) addr call)
+    (go (.dial call (.-ctx call) addr))
+    ^{:line 111} call))
+
+
+
+^{:go/end 127} (go/method dial "run in its own goroutine.\n" [^{:tag (* dialCall)} c ^context/Context ctx ^string addr]
+  (let [^:const ^{:val false} singleUse false] ; shared conn
+    (set! (values (.-res c) (.-err c)) (.dialClientConn (.-t (.-p c)) ctx addr singleUse))
+
+    (.Lock (.-mu (.-p c)))
+    (delete (.-dialing (.-p c)) addr)
+    (when (== (.-err c) nil)
+      (.addConnLocked (.-p c) addr (.-res c)))
+
+    (.Unlock (.-mu (.-p c)))
+
+    (close (.-done c))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 164} (go/method addConnIfNeeded "addConnIfNeeded makes a NewClientConn out of c if a connection for key doesn't\nalready exist. It coalesces concurrent calls with the same key.\nThis is used by the http1 Transport code when it creates a new connection. Because\nthe http1 Transport doesn't de-dup TCP dials to outbound hosts (because it doesn't know\nthe protocol), it can get into a situation where it has multiple TLS connections.\nThis code decides which ones live or die.\nThe return value used is whether c was used.\nc is never closed.\n" [^{:tag (* clientConnPool)} p ^string key ^{:tag (* Transport)} t ^net/Conn c] :results [^bool used ^error err]
+  (.Lock (.-mu p))
+  (range [_ cc (aget (.-conns p) key)]
+    (when (.CanTakeNewRequest cc)
+      (.Unlock (.-mu p))
+      (return false nil)))
+
+
+  (let [(values call dup) (aget (.-addConnCalls p) key)]
+    (when (not dup)
+      (when (== (.-addConnCalls p) nil)
+        (set! (.-addConnCalls p) (make (map string (* addConnCall)))))
+
+      (set! call (addr ^{:go/breaks [2 4]} (lit addConnCall
+            :p p
+            :done (make (chan (struct))))))
+
+      (aset (.-addConnCalls p) key call)
+      (go (.run call t key c)))
+
+    (.Unlock (.-mu p))
+
+    (<! (.-done call))
+    (when (!= (.-err call) nil)
+      (return false (.-err call)))
+
+    (return (not dup) nil)))
+
+
+(go/type addConnCall (struct
+    ^{:line 167 :tag incomparable} _
+    ^{:line 168 :tag (* clientConnPool)} p
+    ^{:line 169 :tag (chan (struct))} done ; closed when done
+    ^{:line 170 :tag error} err))
+
+
+^{:go/end 187} (go/method run [^{:tag (* addConnCall)} c ^{:tag (* Transport)} t ^string key ^net/Conn nc]
+  (let [(values cc err) (.newClientConn t nc (.disableKeepAlives t) nil)
+
+      ^{:line 176} p (.-p c)]
+    (.Lock (.-mu p))
+    (if (!= err nil)
+      (set! (.-err c) err)
+      (do
+        (set! (.-getConnCalled cc) true) ; already called by the net/http package
+        (.addConnLocked p key cc)))
+
+    (delete (.-addConnCalls p) key)
+    (.Unlock (.-mu p))
+    (close (.-done c))))
+
+
+
+^{:go/end 202} (go/method addConnLocked "p.mu must be held\n" [^{:tag (* clientConnPool)} p ^string key ^{:tag (* ClientConn)} cc]
+  (when (^{:inst [(slice (* ClientConn)) (* ClientConn)]} slices/Contains (aget (.-conns p) key) cc)
+    (return))
+
+  (when (== (.-conns p) nil)
+    (set! (.-conns p) (make (map string (slice (* ClientConn))))))
+
+  (when (== (.-keys p) nil)
+    (set! (.-keys p) (make (map (* ClientConn) (slice string)))))
+
+  (aset (.-conns p) key (append (aget (.-conns p) key) cc))
+  (aset (.-keys p) cc (append (aget (.-keys p) cc) key)))
+
+
+^{:go/end 220} (go/method MarkDead [^{:tag (* clientConnPool)} p ^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (range [_ key (aget (.-keys p) cc)]
+    (let [(values vv ok) (aget (.-conns p) key)]
+      (when (not ok)
+        (continue))
+
+      (let [newList (filterOutClientConn vv cc)]
+        (if (> (len newList) 0)
+          (aset (.-conns p) key newList)
+
+          (delete (.-conns p) key)))))
+
+
+  (delete (.-keys p) cc))
+
+
+^{:go/end 236} (go/method closeIdleConnections [^{:tag (* clientConnPool)} p]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  ;; TODO: don't close a cc if it was just added to the pool
+  ;; milliseconds ago and has never been used. There's currently
+  ;; a small race window with the HTTP/1 Transport's integration
+  ;; where it can add an idle conn just before using it, and
+  ;; somebody else can concurrently call CloseIdleConns and
+  ;; break some caller's RoundTrip.
+  (range [_ vv (.-conns p)]
+    (range [_ cc vv]
+      (.closeIfIdle cc))))
+
+
+
+
+^{:go/end 251} (go/func filterOutClientConn ^{:tag (slice (* ClientConn))} [^{:tag (slice (* ClientConn))} in ^{:tag (* ClientConn)} exclude]
+  (let [out (subslice in _ 0)]
+    (range [_ v in]
+      (when (!= v exclude)
+        (set! out (append out v))))
+
+
+    ;; If we filtered it out, zero out the last item to prevent
+    ;; the GC from seeing it.
+    (when (!= (len in) (len out))
+      (aset in (- (len in) 1) nil))
+
+    ^{:line 250} out))
+
+
+
+
+
+(go/type noDialClientConnPool "noDialClientConnPool is an implementation of http2.ClientConnPool\nwhich never dials. We let the HTTP/1.1 client dial and use its TLS\nconnection instead.\n" (struct (* clientConnPool)))
+
+^{:go/end 260} (go/method GetClientConn [^noDialClientConnPool p ^{:tag (* ClientRequest)} req ^string addr] :results [(* ClientConn) error]
+  ^{:go/via [clientConnPool]} (.getClientConn p req addr noDialOnMiss))
+
+
+
+
+
+
+^{:go/end 285} (go/func shouldRetryDial "shouldRetryDial reports whether the current request should\nretry dialing after the call finished unsuccessfully, for example\nif the dial was canceled because of a context cancellation or\ndeadline expiry.\n" ^bool [^{:tag (* dialCall)} call ^{:tag (* ClientRequest)} req]
+  (when (== (.-err call) nil)
+    ;; No error, no need to retry
+    (return false))
+
+  (when (== (.-ctx call) (.-Context req))
+    ;; If the call has the same context as the request, the dial
+    ;; should not be retried, since any cancellation will have come
+    ;; from this request.
+    (return false))
+
+  (when (and (not (errors/Is (.-err call) context/Canceled)) (not (errors/Is (.-err call) context/DeadlineExceeded)))
+    ;; If the call error is not because of a context cancellation or a deadline expiry,
+    ;; the dial should not be retried.
+    (return false))
+
+  ;; Only retry if the error is a context cancellation error or deadline expiry
+  ;; and the context associated with the call was canceled or expired.
+  (!= (.Err (.-ctx call)) nil))

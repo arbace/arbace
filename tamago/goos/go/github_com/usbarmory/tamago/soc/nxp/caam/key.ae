@@ -1,0 +1,121 @@
+;; NXP Cryptographic Acceleration and Assurance Module (CAAM) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.caam) (go/file "key.go" :imports [
+
+
+    ^{:line 12} [aes "crypto/aes"]
+    ^{:line 13} [sha256 "crypto/sha256"]
+    ^{:line 14} [errors "errors"]
+
+    ^{:line 16} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+
+
+
+^{:go/end 49} (go/method mkv "mkv requests the CAAM Master Key Verification Blob, the resulting\nunencrypted blob key encryption key (BKEK), derived from the hardware unique\nkey (internal OTPMK, when SNVS is enabled), is written to buf.\n" [^{:tag (* CAAM)} hw ^{:tag (slice byte)} buf] :results [^error err]
+  (when (!= (len buf) sha256/Size)
+    (return (errors/New "invalid input size")))
+
+
+  (let [op (lit Operation)]
+    (.SetDefaults op)
+    (.OpType op OPTYPE_PROT_ENC)
+    (.Protocol op PROTID_BLOB (<< BLOB_FORMAT_MKV PROTINFO_BLOB_FORMAT))
+
+    (let [destinationBufferAddress (dma/Alloc buf 4)]
+      (defer (dma/Free destinationBufferAddress))
+
+      (let [dst (lit SeqOutPtr)]
+        (.SetDefaults dst)
+        ^{:go/via [ExtendedLengthCommand]} (.Pointer dst destinationBufferAddress (len buf))
+
+        (let [jd ^{:go/via [ExtendedLengthCommand Command]} (.Bytes dst)]
+          (set! jd (append jd (spread ^{:go/via [Command]} (.Bytes op))))
+
+          (when [(set! err (.Job hw nil jd))] (!= err nil)
+            (return))
+
+
+          (dma/Read destinationBufferAddress 0 buf)
+
+          (return))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 122} (go/method DeriveKey "DeriveKey derives a hardware unique key in a manner equivalent to NXP\nSymmetric key diversifications guidelines (AN10922 - Rev. 2.2) for AES-256\nkeys.\n\nThe diversifier is used as message for AES-256-CMAC authentication using a\nblob key encryption key (BKEK) derived from the hardware unique key\n(internal OTPMK, when SNVS is enabled, through Master Key Verification\nBlob).\n\n*WARNING*: when SNVS is not enabled a default non-unique test vector is used\nand therefore key derivation is *unsafe*, see snvs.Available().\n\nThe unencrypted BKEK is used through DeriveKeyMemory. An output key buffer\npreviously created with DeriveKeyMemory.Reserve() can be used to avoid\nexternal RAM exposure, when placed in iRAM, as its pointer is directly\npassed to the CAAM without access by the Go runtime.\n" [^{:tag (* CAAM)} hw ^{:tag (slice byte)} diversifier ^{:tag (slice byte)} key] :results [^error err]
+  (when (> (len diversifier) sha256/Size)
+    (return (errors/New "invalid diversifier size")))
+
+
+  (when (!= (len key) sha256/Size)
+    (return (errors/New "invalid key size")))
+
+
+  (let [region (.-DeriveKeyMemory hw)]
+
+    (when (== region nil)
+      (return (errors/New "invalid DeriveKeyMemory")))
+
+
+    ;; Key Diversification (p11, 2.4 AES-256 key, AN10922)
+    ;;
+    ;;   AES-256-CMAC(key, 0x41 || msg || padding) ||
+    ;;   AES-256-CMAC(key, 0x42 || msg || padding)
+
+    ;; padding is added by the CAAM
+    (let [d1 (append (lit (slice byte) 0x41) (spread diversifier))
+        ^{:line 89} d2 (append (lit (slice byte) 0x42) (spread diversifier))
+
+        (values mkvBufferAddress mkv) (.Reserve region sha256/Size 4)]
+      (defer (.Release region mkvBufferAddress))
+
+      (when [(set! err (.mkv hw mkv))] (!= err nil)
+        (return))
+
+
+      (let [d1BufferAddress (.Alloc region d1 aes/BlockSize)]
+        (defer (.Free region d1BufferAddress))
+
+        (let [(values dkaBufferAddress dka) (.Reserve region aes/BlockSize 4)]
+          (defer (.Free region dkaBufferAddress))
+
+          (when [(set! err (.cmac hw d1 mkv dka))] (!= err nil)
+            (return))
+
+
+          (let [d2BufferAddress (.Alloc region d2 aes/BlockSize)]
+            (defer (.Free region d2BufferAddress))
+
+            (let [(values dkbBufferAddress dkb) (.Reserve region aes/BlockSize 4)]
+              (defer (.Free region dkbBufferAddress))
+
+              (when [(set! err (.cmac hw d2 mkv dkb))] (!= err nil)
+                (return))
+
+
+              (copy (subslice key 0 16) dka)
+              (copy (subslice key 16 32) dkb)
+
+              (return))))))))

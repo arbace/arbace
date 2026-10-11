@@ -1,0 +1,1222 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; # Go execution tracer
+;;
+;; The tracer captures a wide range of execution events like goroutine
+;; creation/blocking/unblocking, syscall enter/exit/block, GC-related events,
+;; changes of heap size, processor start/stop, etc and writes them to a buffer
+;; in a compact form. A precise nanosecond-precision timestamp and a stack
+;; trace is captured for most events.
+;;
+;; ## Design
+;;
+;; The basic idea behind the execution tracer is to have per-M buffers that
+;; trace data may be written into. Each M maintains a write flag indicating whether
+;; its trace buffer is currently in use.
+;;
+;; Tracing is initiated by StartTrace, and proceeds in "generations," with each
+;; generation being marked by a call to traceAdvance, to advance to the next
+;; generation. Generations are a global synchronization point for trace data,
+;; and we proceed to a new generation by moving forward trace.gen. Each M reads
+;; trace.gen under its own write flag to determine which generation it is writing
+;; trace data for. To this end, each M has 2 slots for buffers: one slot for the
+;; previous generation, one slot for the current one. It uses tl.gen to select
+;; which buffer slot to write to. Simultaneously, traceAdvance uses the write flag
+;; to determine whether every thread is guaranteed to observe an updated
+;; trace.gen. Once it is sure, it may then flush any buffers that are left over
+;; from the previous generation safely, since it knows the Ms will not mutate
+;; it.
+;;
+;; Flushed buffers are processed by the ReadTrace function, which is called by
+;; the trace reader goroutine. The first goroutine to call ReadTrace is designated
+;; as the trace reader goroutine until tracing completes. (There may only be one at
+;; a time.)
+;;
+;; Once all buffers are flushed, any extra post-processing complete, and flushed
+;; buffers are processed by the trace reader goroutine, the trace emits an
+;; EndOfGeneration event to mark the global synchronization point in the trace.
+;;
+;; All other trace features, including CPU profile samples, stack information,
+;; string tables, etc. all revolve around this generation system, and typically
+;; appear in pairs: one for the previous generation, and one for the current one.
+;; Like the per-M buffers, which of the two is written to is selected using trace.gen,
+;; and anything managed this way must similarly be mutated only in traceAdvance or
+;; under the M's write flag.
+;;
+;; Trace events themselves are simple. They consist of a single byte for the event type,
+;; followed by zero or more LEB128-encoded unsigned varints. They are decoded using
+;; a pre-determined table for each trace version: internal/trace/tracev2.specs.
+;;
+;; To avoid relying on timestamps for correctness and validation, each G and P have
+;; sequence counters that are written into trace events to encode a partial order.
+;; The sequence counters reset on each generation. Ms do not need sequence counters
+;; because they are the source of truth for execution: trace events, and even whole
+;; buffers, are guaranteed to appear in order in the trace data stream, simply because
+;; that's the order the thread emitted them in.
+;;
+;; See traceruntime.go for the API the tracer exposes to the runtime for emitting events.
+;;
+;; In each generation, we ensure that we enumerate all goroutines, such that each
+;; generation's data is fully self-contained. This makes features like the flight
+;; recorder easy to implement. To this end, we guarantee that every live goroutine is
+;; listed at least once by emitting a status event for the goroutine, indicating its
+;; starting state. These status events are emitted based on context, generally based
+;; on the event that's about to be emitted.
+;;
+;; The traceEventWriter type encapsulates these details, and is the backbone of
+;; the API exposed in traceruntime.go, though there are deviations where necessary.
+;;
+;; This is the overall design, but as always, there are many details. Beyond this,
+;; look to the invariants and select corner cases below and the code itself for the
+;; source of truth.
+;;
+;; See https://go.dev/issue/60773 for a link to a more complete design with rationale,
+;; though parts of it are out-of-date.
+;;
+;; ## Invariants
+;;
+;; 1. An m that has a trace buffer MUST be on either the allm or sched.freem lists.
+;;
+;; Otherwise, traceAdvance might miss an M with a buffer that needs to be flushed.
+;;
+;; 2. Trace buffers MUST only be mutated in traceAdvance or under a traceAcquire/traceRelease.
+;;
+;; Otherwise, traceAdvance may race with Ms writing trace data when trying to flush buffers.
+;;
+;; 3. traceAdvance MUST NOT return until all of the current generation's buffers are flushed.
+;;
+;; Otherwise, callers cannot rely on all the data they need being available (for example, for
+;; the flight recorder).
+;;
+;; 4. P and goroutine state transition events MUST be emitted by an M that owns its ability
+;;    to transition.
+;;
+;; What this means is that the M must either be the owner of the P, the owner of the goroutine,
+;; or owner of a non-running goroutine's _Gscan bit. There are a lot of bad things that can
+;; happen if this invariant isn't maintained, mostly around generating inconsistencies in the
+;; trace due to racy emission of events.
+;;
+;; 5. Acquisition of a P (pidleget or takeP/gcstopP) MUST NOT be performed under a traceAcquire/traceRelease pair.
+;;
+;; Notably, it's important that traceAcquire/traceRelease not cover a state in which the
+;; goroutine or P is not yet owned. For example, if traceAcquire is held across both wirep and
+;; pidleget, then we could end up emitting an event in the wrong generation. Suppose T1
+;; traceAcquires in generation 1, a generation transition happens, T2 emits a ProcStop and
+;; executes pidleput in generation 2, and finally T1 calls pidleget and emits ProcStart.
+;; The ProcStart must follow the ProcStop in the trace to make any sense, but ProcStop was
+;; emitted in a latter generation.
+;;
+;; 6. Goroutine state transitions, with the exception of transitions into _Grunning, MUST be
+;;    performed under the traceAcquire/traceRelease pair where the event is emitted.
+;;
+;; Otherwise, traceAdvance may observe a goroutine state that is inconsistent with the
+;; events being emitted. traceAdvance inspects all goroutines' states in order to emit
+;; a status event for any goroutine that did not have an event emitted for it already.
+;; If the generation then advances in between that observation and the event being emitted,
+;; then the trace will contain a status that doesn't line up with the event. For example,
+;; if the event is emitted after the state transition _Gwaiting -> _Grunnable, then
+;; traceAdvance may observe the goroutine in _Grunnable, emit a status event, advance the
+;; generation, and the following generation contains a GoUnblock event. The trace parser
+;; will get confused because it sees that goroutine in _Grunnable in the previous generation
+;; trying to be transitioned from _Gwaiting into _Grunnable in the following one. Something
+;; similar happens if the trace event is emitted before the state transition, so that does
+;; not help either.
+;;
+;; Transitions to _Grunning do not have the same problem because traceAdvance is unable to
+;; observe running goroutines directly. It must stop them, or wait for them to emit an event.
+;; Note that it cannot even stop them with asynchronous preemption in any "bad" window between
+;; the state transition to _Grunning and the event emission because async preemption cannot
+;; stop goroutines in the runtime.
+;;
+;; 7. Goroutine state transitions into _Grunning MUST emit an event for the transition after
+;;    the state transition.
+;;
+;; This follows from invariants (4), (5), and the explanation of (6).
+;; The relevant part of the previous invariant is that in order for the tracer to be unable to
+;; stop a goroutine, it must be in _Grunning and in the runtime. So to close any windows between
+;; event emission and the state transition, the event emission must happen *after* the transition
+;; to _Grunning.
+;;
+;; ## Select corner cases
+;;
+;; ### CGO calls / system calls
+;;
+;; CGO calls and system calls are mostly straightforward, except for P stealing. For historical
+;; reasons, this introduces a new trace-level P state called ProcSyscall which used to model
+;; _Psyscall (now _Psyscall_unused). This state is used to indicate in the trace that a P
+;; is eligible for stealing as part of the parser's ordering logic.
+;;
+;; Another quirk of this corner case is the ProcSyscallAbandoned trace-level P state, which
+;; is used only in status events to indicate a relaxation of verification requirements. It
+;; means that if the execution trace parser can't find the corresponding thread that the P
+;; was stolen from in the state it expects it to be, to accept the trace anyway. This is also
+;; historical. When _Psyscall still existed, one would steal and then ProcSteal, and there
+;; was no ordering between the ProcSteal and the subsequent GoSyscallEndBlocked. One clearly
+;; happened before the other, but since P stealing was a single atomic, there was no way
+;; to enforce the order. The GoSyscallEndBlocked thread could move on and end up in any
+;; state, and the GoSyscallEndBlocked could be in a completely different generation to the
+;; ProcSteal. Today this is no longer possible as the ProcSteal is always ordered before
+;; the GoSyscallEndBlocked event in the runtime.
+;;
+;; Both ProcSyscall and ProcSyscallAbandoned are likely no longer be necessary.
+;;
+;; ### CGO callbacks
+;;
+;; When a C thread calls into Go, the execution tracer models that as the creation of a new
+;; goroutine. When the thread exits back into C, that is modeled as the destruction of that
+;; goroutine. These are the GoCreateSyscall and GoDestroySyscall events, which represent the
+;; creation and destruction of a goroutine with its starting and ending states being _Gsyscall.
+;;
+;; This model is simple to reason about but contradicts the runtime implementation, which
+;; doesn't do this directly for performance reasons. The runtime implementation instead caches
+;; a G on the M created for the C thread. On Linux this M is then cached in the thread's TLS,
+;; and on other systems, the M is put on a global list on exit from Go. We need to do some
+;; extra work to make sure that this is modeled correctly in the tracer. For example,
+;; a C thread exiting Go may leave a P hanging off of its M (whether that M is kept in TLS
+;; or placed back on a list). In order to correctly model goroutine creation and destruction,
+;; we must behave as if the P was at some point stolen by the runtime, if the C thread
+;; reenters Go with the same M (and thus, same P) once more.
+
+(in-ns 'go.runtime) (go/file "trace.go" :imports [
+
+
+    ^{:line 185} [atomic "internal/runtime/atomic"]
+    ^{:line 186} [tracev2 "internal/trace/tracev2"]
+    ^{:line 187} [unsafe "unsafe"]])
+
+
+;; Trace state.
+
+
+(go/var ^{:tag (struct ^{:tag mutex :doc "trace.lock must only be acquired on the system stack where\nstack splits cannot happen while it is held.\n"} lock ^{:tag (* traceBuf) :doc "Trace buffer management.\n\nFirst we check the empty list for any free buffers. If not, buffers\nare allocated directly from the OS. Once they're filled up and/or\nflushed, they end up on the full queue for trace.gen%2.\n\nThe trace reader takes buffers off the full list one-by-one and\nplaces them into reading until they're finished being read from.\nThen they're placed onto the empty list.\n\nProtected by trace.lock.\n"} reading ^{:tag (* traceBuf)} empty ^{:tag (array 2 traceBufQueue)} full ^atomic/Bool workAvailable ^{:tag atomic/Uintptr :doc "State for the trace reader goroutine.\n\nProtected by trace.lock.\n"} readerGen ^atomic/Uintptr flushedGen ^bool headerWritten ^bool endOfGenerationWritten ^{:tag (array 2 uint32) :doc "doneSema is used to synchronize the reader and traceAdvance. Specifically,\nit notifies traceAdvance that the reader is done with a generation.\nBoth semaphores are 0 by default (so, acquires block). traceAdvance\nattempts to acquire for gen%2 after flushing the last buffers for gen.\nMeanwhile the reader releases the sema for gen%2 when it has finished\nprocessing gen.\n"} doneSema ^{:tag (array 2 traceStackTable) :doc "Trace data tables for deduplicating data going into the trace.\nThere are 2 of each: one for gen%2, one for 1-gen%2.\n"} stackTab ^{:tag (array 2 traceStringTable)} stringTab ^{:tag (array 2 traceTypeTable)} typeTab ^{:tag (array 2 (* profBuf)) :doc "cpuLogRead accepts CPU profile samples from the signal handler where\nthey're generated. There are two profBufs here: one for gen%2, one for\n1-gen%2. These profBufs use a three-word header to hold the IDs of the P, G,\nand M (respectively) that were active at the time of the sample. Because\nprofBuf uses a record with all zeros in its header to indicate overflow,\nwe make sure to make the P field always non-zero: The ID of a real P will\nstart at bit 1, and bit 0 will be set. Samples that arrive while no P is\nrunning (such as near syscalls) will set the first header field to 0b10.\nThis careful handling of the first header field allows us to store ID of\nthe active G directly in the second field, even though that will be 0\nwhen sampling g0.\n\nInitialization and teardown of these fields is protected by traceAdvanceSema.\n"} cpuLogRead ^atomic/Uint32 signalLock ^{:tag (array 2 (atomic/Pointer profBuf))} cpuLogWrite ^{:tag (* wakeableSleep)} cpuSleep ^{:tag (chan :recv (struct))} cpuLogDone ^{:tag (array 2 (* traceBuf))} cpuBuf ^{:tag (atomic/Pointer g)} reader ^{:tag (array 2 (array (len gcMarkWorkerModeStrings) traceArg)) :doc "Fast mappings from enumerations to string IDs that are prepopulated\nin the trace.\n"} markWorkerLabels ^{:tag (array 2 (array (len traceGoStopReasonStrings) traceArg))} goStopReasons ^{:tag (array 2 (array (len traceBlockReasonStrings) traceArg))} goBlockReasons ^{:tag bool :doc "enabled indicates whether tracing is enabled, but it is only an optimization,\nNOT the source of truth on whether tracing is enabled. Tracing is only truly\nenabled if gen != 0. This is used as an optimistic fast path check.\n\nTransitioning this value from true -> false is easy (once gen is 0)\nbecause it's OK for enabled to have a stale \"true\" value. traceAcquire will\nalways double-check gen.\n\nTransitioning this value from false -> true is harder. We need to make sure\nthis is observable as true strictly before gen != 0. To maintain this invariant\nwe only make this transition with the world stopped and use the store to gen\nas a publication barrier.\n"} enabled ^{:tag bool :doc "enabledWithAllocFree is set if debug.traceallocfree is != 0 when tracing begins.\nIt follows the same synchronization protocol as enabled.\n"} enabledWithAllocFree ^{:tag atomic/Uintptr :doc "Trace generation counter.\n"} gen ^uintptr lastNonZeroGen ^{:tag atomic/Bool :doc "shutdown is set when we are waiting for trace reader to finish after setting gen to 0\n\nWrites protected by trace.lock.\n"} shutdown ^{:tag atomic/Int32 :doc "Number of goroutines in syscall exiting slow path.\n"} exitingSyscall ^{:tag uint64 :doc "seqGC is the sequence counter for GC begin/end.\n\nMutated only during stop-the-world.\n"} seqGC ^{:tag uint64 :doc "minPageHeapAddr is the minimum address of the page heap when tracing started.\n"} minPageHeapAddr ^{:tag bool :doc "debugMalloc is the value of debug.malloc before tracing began.\n"} debugMalloc) :doc "trace is global tracing context.\n"} trace)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;; buffer currently handed off to user
+;; stack of empty buffers
+
+
+
+
+
+
+;; the generation the reader is currently reading for
+;; the last completed generation
+;; whether ReadTrace has emitted trace header
+;; whether readTrace has emitted the end of the generation signal
+
+
+
+
+
+
+
+
+
+
+
+;; maps stack traces to unique ids
+;; maps strings to unique ids
+;; maps type pointers to unique ids
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;; protects use of the following member, only usable in signal handlers
+;; copy of cpuLogRead for use in signal handlers, set without signalLock
+
+
+
+
+;; goroutine that called ReadTrace, or nil
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;; last non-zero value of gen
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;; Trace public API.
+
+(go/var
+  ^{:line 309} [^uint32 traceAdvanceSema 1]
+  ^{:line 310} [^uint32 traceShutdownSema 1])
+
+
+
+
+
+
+
+^{:go/end 453} (go/func StartTrace "StartTrace enables tracing for the current process.\nWhile tracing, the data will be buffered and available via [ReadTrace].\nStartTrace returns an error if tracing is already enabled.\nMost clients should use the [runtime/trace] package or the [testing] package's\n-test.trace flag instead of calling StartTrace directly.\n" ^error []
+  (when (or (traceEnabled) (traceShuttingDown))
+    (return (conv errorString "tracing is already enabled")))
+
+  ;; Block until cleanup of the last trace is done.
+  (semacquire (addr traceShutdownSema))
+  (semrelease (addr traceShutdownSema))
+
+  ;; Hold traceAdvanceSema across trace start, since we'll want it on
+  ;; the other side of tracing being enabled globally.
+  (semacquire (addr traceAdvanceSema))
+
+  ;; Initialize CPU profile -> trace ingestion.
+  (traceInitReadCPU)
+
+  ;; Compute the first generation for this StartTrace.
+  ;;
+  ;; Note: we start from the last non-zero generation rather than 1 so we
+  ;; can avoid resetting all the arrays indexed by gen%2 or gen%3. There's
+  ;; more than one of each per m, p, and goroutine.
+  (let [firstGen (traceNextGen (.-lastNonZeroGen trace))]
+
+    ;; Reset GC sequencer.
+    (set! (.-seqGC trace) 1)
+
+    ;; Reset trace reader state.
+    (set! (.-headerWritten trace) false)
+    (.Store (.-readerGen trace) firstGen)
+    (.Store (.-flushedGen trace) 0)
+
+    ;; Register some basic strings in the string tables.
+    (traceRegisterLabelsAndReasons firstGen)
+
+    ;; N.B. This may block for quite a while to get a frequency estimate. Do it
+    ;; here to minimize the time that the world is stopped.
+    (let [frequency (traceClockUnitsPerSecond)
+
+        ;; Stop the world.
+        ;;
+        ;; What we need to successfully begin tracing is to make sure that the next time
+        ;; *any goroutine* hits a traceAcquire, it sees that the trace is enabled.
+        ;;
+        ;; Stopping the world gets us most of the way there, since it makes sure that goroutines
+        ;; stop executing. There is however one exception: goroutines without Ps concurrently
+        ;; exiting a syscall. We handle this by making sure that, after we update trace.gen,
+        ;; there isn't a single goroutine calling traceAcquire on the syscall slow path by checking
+        ;; trace.exitingSyscall. See the comment on the check below for more details.
+        ;;
+        ;; Note also that stopping the world is necessary to make sure sweep-related events are
+        ;; coherent. Since the world is stopped and sweeps are non-preemptible, we can never start
+        ;; the world and see an unpaired sweep 'end' event. Other parts of the tracer rely on this.
+        ^{:line 369} stw (stopTheWorld stwStartTrace)]
+
+      ;; Prevent sysmon from running any code that could generate events.
+      (lock (addr (.-sysmonlock sched)))
+
+      ;; Grab the minimum page heap address. All Ps are stopped, so it's safe to read this since
+      ;; nothing can allocate heap memory.
+      (set! (.-minPageHeapAddr trace) (conv uint64 (.addr (.-base (aget (.-ranges (.-inUse (.-pages mheap_))) 0)))))
+
+      ;; Reset mSyscallID on all Ps while we have them stationary and the trace is disabled.
+      (range [_ pp allp]
+        (set! (.-mSyscallID (.-trace pp)) -1))
+
+
+      ;; Start tracing.
+      ;;
+      ;; Set trace.enabled. This is *very* subtle. We need to maintain the invariant that if
+      ;; trace.gen != 0, then trace.enabled is always observed as true. Simultaneously, for
+      ;; performance, we need trace.enabled to be read without any synchronization.
+      ;;
+      ;; We ensure this is safe by stopping the world, which acts a global barrier on almost
+      ;; every M, and explicitly synchronize with any other Ms that could be running concurrently
+      ;; with us. Today, there are only two such cases:
+      ;; - sysmon, which we synchronized with by acquiring sysmonlock.
+      ;; - goroutines exiting syscalls, which we synchronize with via trace.exitingSyscall.
+      ;;
+      ;; After trace.gen is updated, other Ms may start creating trace buffers and emitting
+      ;; data into them.
+      (set! (.-enabled trace) true)
+      (when (!= (.Load (.-traceallocfree debug)) 0)
+        ;; Enable memory events since the GODEBUG is set.
+        (set! (.-debugMalloc trace) (.-malloc debug))
+        (set! (.-enabledWithAllocFree trace) true)
+        (set! (.-malloc debug) true))
+
+      (.Store (.-gen trace) firstGen)
+
+      ;; Wait for exitingSyscall to drain.
+      ;;
+      ;; It may not monotonically decrease to zero, but in the limit it will always become
+      ;; zero because the world is stopped and there are no available Ps for syscall-exited
+      ;; goroutines to run on.
+      ;;
+      ;; Because we set gen before checking this, and because exitingSyscall is always incremented
+      ;; *before* traceAcquire (which checks gen), we can be certain that when exitingSyscall is zero
+      ;; that any goroutine that goes to exit a syscall from then on *must* observe the new gen as
+      ;; well as trace.enabled being set to true.
+      ;;
+      ;; The critical section on each goroutine here is going to be quite short, so the likelihood
+      ;; that we observe a zero value is high.
+      (while (!= (.Load (.-exitingSyscall trace)) 0)
+        (osyield))
+
+
+      ;; Record some initial pieces of information.
+      ;;
+      ;; N.B. This will also emit a status event for this goroutine.
+      ^{:go/breaks [14]} (let [tl (traceAcquire)]
+        (traceSyncBatch firstGen frequency) ; Get this as early in the trace as possible. See comment in traceAdvance.
+        (.Gomaxprocs tl gomaxprocs) ; Get this as early in the trace as possible. See comment in traceAdvance.
+        (.STWStart tl stwStartTrace) ; We didn't trace this above, so trace it now.
+
+        ;; Record the fact that a GC is active, if applicable.
+        (when (or (== gcphase _GCmark) (== gcphase _GCmarktermination))
+          (.GCActive tl))
+
+
+        ;; Dump a snapshot of memory, if enabled.
+        (when (.-enabledWithAllocFree trace)
+          (traceSnapshotMemory firstGen))
+
+
+        ;; Record the heap goal so we have it at the very beginning of the trace.
+        (.HeapGoal tl)
+        (traceRelease tl)
+
+        (unlock (addr (.-sysmonlock sched)))
+        (startTheWorld stw)
+
+        (traceStartReadCPU)
+        (.start traceAdvancer)
+
+        (semrelease (addr traceAdvanceSema))
+        nil))))
+
+
+
+
+^{:go/end 459} (go/func StopTrace "StopTrace stops tracing, if it was previously enabled.\nStopTrace only returns after all the reads for the trace have completed.\n" []
+  (traceAdvance true))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 854} (go/func ^{:go/linkname "traceAdvance"} traceAdvance "traceAdvance moves tracing to the next generation, and cleans up the current generation,\nensuring that it's flushed out before returning. If stopTrace is true, it disables tracing\naltogether instead of advancing to the next generation.\n\ntraceAdvanceSema must not be held.\n\ntraceAdvance is called by runtime/trace and golang.org/x/exp/trace using linkname.\n" [^bool stopTrace]
+  (semacquire (addr traceAdvanceSema))
+
+  ;; Get the gen that we're advancing from. In this function we don't really care much
+  ;; about the generation we're advancing _into_ since we'll do all the cleanup in this
+  ;; generation for the next advancement.
+  (let [gen (.Load (.-gen trace))]
+    (when (== gen 0)
+      ;; We may end up here traceAdvance is called concurrently with StopTrace.
+      (semrelease (addr traceAdvanceSema))
+      (return))
+
+
+    ;; Collect all the untraced Gs.
+    (let-type [untracedG (struct
+          ^{:line 485 :tag (* g)} gp
+          ^{:line 486 :tag uint64} goid
+          ^{:line 487 :tag int64} mid
+          ^{:line 488 :tag uint64} stackID
+          ^{:line 489 :tag uint32} status
+          ^{:line 490 :tag waitReason} waitreason
+          ^{:line 491 :tag bool} inMarkAssist)]
+
+      (let [^{:tag (slice untracedG)} untracedGs (zero (slice untracedG))]
+        (forEachGRace ^{:go/end 540} (fn [^{:tag (* g)} gp]
+            ;; Make absolutely sure all Gs are ready for the next
+            ;; generation. We need to do this even for dead Gs because
+            ;; they may come alive with a new identity, and its status
+            ;; traced bookkeeping might end up being stale.
+            ;; We may miss totally new goroutines, but they'll always
+            ;; have clean bookkeeping.
+            ^{:go/via [traceSchedResourceState]} (.readyNextGen (.-trace gp) gen)
+            ;; If the status was traced, nothing else to do.
+            (when ^{:go/via [traceSchedResourceState]} (.statusWasTraced (.-trace gp) gen)
+              (return))
+
+            ;; Scribble down information about this goroutine.
+            (let [ug (lit untracedG :gp gp :mid -1)]
+              (systemstack ^{:go/end 536} (fn []
+                  (let [me (.-curg (.-m (getg)))]
+                    ;; We don't have to handle this G status transition because we
+                    ;; already eliminated ourselves from consideration above.
+                    (casGToWaitingForSuspendG me _Grunning waitReasonTraceGoroutineStatus)
+                    ;; We need to suspend and take ownership of the G to safely read its
+                    ;; goid. Note that we can't actually emit the event at this point
+                    ;; because we might stop the G in a window where it's unsafe to write
+                    ;; events based on the G's status. We need the global trace buffer flush
+                    ;; coming up to make sure we're not racing with the G.
+                    ;;
+                    ;; It should be very unlikely that we try to preempt a running G here.
+                    ;; The only situation that we might is that we're racing with a G
+                    ;; that's running for the first time in this generation. Therefore,
+                    ;; this should be relatively fast.
+                    (let [s (suspendG gp)]
+                      (when (not (.-dead s))
+                        (set! (.-goid ug) (.-goid (.-g s)))
+                        (when (!= (.-m (.-g s)) nil)
+                          (set! (.-mid ug) (conv int64 (.-procid (.-m (.-g s))))))
+
+                        (set! (.-status ug) (bit-and-not (readgstatus (.-g s)) _Gscan))
+                        (set! (.-waitreason ug) (.-waitreason (.-g s)))
+                        (set! (.-inMarkAssist ug) (.-inMarkAssist (.-g s)))
+                        (set! (.-stackID ug) (traceStack 0 gp (addr (aget (.-stackTab trace) (% gen 2))))))
+
+                      (resumeG s)
+                      (casgstatus me _Gwaiting _Grunning)))))
+
+              (when (!= (.-goid ug) 0)
+                (set! untracedGs (append untracedGs ug))))))
+
+
+
+        (when (not stopTrace)
+          ;; Re-register runtime goroutine labels and stop/block reasons.
+          (traceRegisterLabelsAndReasons (traceNextGen gen)))
+
+
+        ;; N.B. This may block for quite a while to get a frequency estimate. Do it
+        ;; here to minimize the time that we prevent the world from stopping.
+        (let [frequency (traceClockUnitsPerSecond)]
+
+          ;; Prevent the world from stopping.
+          ;;
+          ;; This is necessary to ensure the consistency of the STW events. If we're feeling
+          ;; adventurous we could lift this restriction and add a STWActive event, but the
+          ;; cost of maintaining this consistency is low.
+          ;;
+          ;; This is also a good time to preempt all the Ps and ensure they had a status traced.
+          (semacquire (addr worldsema))
+
+          ;; Go over each P and emit a status event for it if necessary.
+          ;;
+          ;; TODO(mknyszek): forEachP is very heavyweight. We could do better by integrating
+          ;; the statusWasTraced check into it, to avoid preempting unnecessarily.
+          (forEachP waitReasonTraceProcStatus ^{:go/end 570} (fn [^{:tag (* p)} pp]
+              (let [tl (traceAcquire)]
+                (when (not ^{:go/via [traceSchedResourceState]} (.statusWasTraced (.-trace pp) (.-gen tl)))
+                  (.end (.writeProcStatusForP (.writer tl) pp false)))
+
+                (traceRelease tl))))
+
+
+          ;; While we're still holding worldsema (preventing a STW and thus a
+          ;; change in the number of Ps), reset the status on dead Ps.
+          ;; They just appear as idle.
+          ;;
+          ;; TODO(mknyszek): Consider explicitly emitting ProcCreate and ProcDestroy
+          ;; events to indicate whether a P exists, rather than just making its
+          ;; existence implicit.
+          (range [_ pp (subslice allp (len allp) (cap allp))]
+            ^{:go/via [traceSchedResourceState]} (.readyNextGen (.-trace pp) gen))
+
+
+          ;; Prevent preemption to make sure we're not interrupted.
+          ;;
+          ;; We want to get through the rest as soon as possible.
+          (let [mp (acquirem)]
+
+            ;; Advance the generation or stop the trace.
+            (set! (.-lastNonZeroGen trace) gen)
+            (if stopTrace
+              (systemstack ^{:go/end 604} (fn []
+                  ;; Ordering is important here. Set shutdown first, then disable tracing,
+                  ;; so that conditions like (traceEnabled() || traceShuttingDown()) have
+                  ;; no opportunity to be false. Hold the trace lock so this update appears
+                  ;; atomic to the trace reader.
+                  (lock (addr (.-lock trace)))
+                  (.Store (.-shutdown trace) true)
+                  (.Store (.-gen trace) 0)
+                  (unlock (addr (.-lock trace)))
+
+                  ;; Clear trace.enabled. It is totally OK for this value to be stale,
+                  ;; because traceAcquire will always double-check gen.
+                  (set! (.-enabled trace) false)))
+
+
+              (.Store (.-gen trace) (traceNextGen gen)))
+
+
+            ;; Emit a sync batch which contains a ClockSnapshot. Also emit a ProcsChange
+            ;; event so we have one on record for each generation. Let's emit it as soon
+            ;; as possible so that downstream tools can rely on the value being there
+            ;; fairly soon in a generation.
+            ;;
+            ;; It's important that we do this before allowing stop-the-worlds again,
+            ;; because the procs count could change.
+            (when (not stopTrace)
+              (let [tl (traceAcquire)]
+                (traceSyncBatch (.-gen tl) frequency)
+                (.Gomaxprocs tl gomaxprocs)
+                (traceRelease tl)))
+
+
+            ;; Emit a GCActive event in the new generation if necessary.
+            ;;
+            ;; It's important that we do this before allowing stop-the-worlds again,
+            ;; because that could emit global GC-related events.
+            (when (and (not stopTrace) ^:go/paren (or (== gcphase _GCmark) (== gcphase _GCmarktermination)))
+              (let [tl (traceAcquire)]
+                (.GCActive tl)
+                (traceRelease tl)))
+
+
+            ;; Preemption is OK again after this. If the world stops or whatever it's fine.
+            ;; We're just cleaning up the last generation after this point.
+            ;;
+            ;; We also don't care if the GC starts again after this for the same reasons.
+            (releasem mp)
+            (semrelease (addr worldsema))
+
+            ;; Snapshot allm and freem.
+            ;;
+            ;; Snapshotting after the generation counter update is sufficient.
+            ;; Because an m must be on either allm or sched.freem if it has an active trace
+            ;; buffer, new threads added to allm after this point must necessarily observe
+            ;; the new generation number (sched.lock acts as a barrier).
+            ;;
+            ;; Threads that exit before this point and are on neither list explicitly
+            ;; flush their own buffers in traceThreadDestroy.
+            ;;
+            ;; Snapshotting freem is necessary because Ms can continue to emit events
+            ;; while they're still on that list. Removal from sched.freem is serialized with
+            ;; this snapshot, so either we'll capture an m on sched.freem and race with
+            ;; the removal to flush its buffers (resolved by traceThreadDestroy acquiring
+            ;; the thread's write flag, which one of us must win, so at least its old gen buffer
+            ;; will be flushed in time for the new generation) or it will have flushed its
+            ;; buffers before we snapshotted it to begin with.
+            (lock (addr (.-lock sched)))
+            (let [mToFlush allm]
+              (for [mp mToFlush] (!= mp nil) (set! mp (.-alllink mp))
+                (set! (.-link (.-trace mp)) (.-alllink mp)))
+
+              (for [mp (.-freem sched)] (!= mp nil) (set! mp (.-freelink mp))
+                (set! (.-link (.-trace mp)) mToFlush)
+                (set! mToFlush mp))
+
+              (unlock (addr (.-lock sched)))
+
+              ;; Iterate over our snapshot, flushing every buffer until we're done.
+              ;;
+              ;; Because trace writers read the generation while the write flag is
+              ;; held, we can be certain that when there are no writers there are
+              ;; also no stale generation values left. Therefore, it's safe to flush
+              ;; any buffers that remain in that generation's slot.
+              (let [^:const ^{:val false} debugDeadlock false]
+                (systemstack ^{:go/end 725} (fn []
+                    ;; Track iterations for some rudimentary deadlock detection.
+                    (let [i 0
+                        ^{:line 678} detectedDeadlock false]
+
+                      (while (!= mToFlush nil)
+                        (let [prev (addr mToFlush)]
+                          (for [mp @prev] (!= mp nil) _
+                            (when (.Load (.-writing (.-trace mp)))
+                              ;; The M is writing. Come back to it later.
+                              (set! prev (addr (.-link (.-trace mp))))
+                              (set! mp (.-link (.-trace mp)))
+                              (continue))
+
+                            ;; Flush the trace buffer.
+                            ;;
+                            ;; trace.lock needed for traceBufFlush, but also to synchronize
+                            ;; with traceThreadDestroy, which flushes both buffers unconditionally.
+                            (lock (addr (.-lock trace)))
+                            (range [exp buf (aget (.-buf (.-trace mp)) (% gen 2))]
+                              (when (!= buf nil)
+                                (traceBufFlush buf gen)
+                                (aset (aget (.-buf (.-trace mp)) (% gen 2)) exp nil)))
+
+
+                            (unlock (addr (.-lock trace)))
+
+                            ;; Remove the m from the flush list.
+                            (set! @prev (.-link (.-trace mp)))
+                            (set! (.-link (.-trace mp)) nil)
+                            (set! mp @prev))
+
+                          ;; Yield only if we're going to be going around the loop again.
+                          (when (!= mToFlush nil)
+                            (osyield))
+
+
+                          (when debugDeadlock
+                            ;; Try to detect a deadlock. We probably shouldn't loop here
+                            ;; this many times.
+                            (when (and (> i 100000) (not detectedDeadlock))
+                              (set! detectedDeadlock true)
+                              (println "runtime: failing to flush")
+                              (for [mp mToFlush] (!= mp nil) (set! mp (.-link (.-trace mp)))
+                                (print "runtime: m=" (.-id mp) "\n")))
+
+
+                            (inc! i)))))))
+
+
+
+
+                ;; At this point, the old generation is fully flushed minus stack and string
+                ;; tables, CPU samples, and goroutines that haven't run at all during the last
+                ;; generation.
+
+                ;; Check to see if any Gs still haven't had events written out for them.
+                (let [statusWriter (unsafeTraceWriter gen nil)]
+                  (range [_ ug untracedGs]
+                    (when ^{:go/via [traceSchedResourceState]} (.statusWasTraced (.-trace (.-gp ug)) gen)
+                      ;; It was traced, we don't need to do anything.
+                      (continue))
+
+                    ;; It still wasn't traced. Because we ensured all Ms stopped writing trace
+                    ;; events to the last generation, that must mean the G never had its status
+                    ;; traced in gen between when we recorded it and now. If that's true, the goid
+                    ;; and status we recorded then is exactly what we want right now.
+                    (let [status (goStatusToTraceGoStatus (.-status ug) (.-waitreason ug))]
+                      (set! statusWriter (.writeGoStatus statusWriter (.-goid ug) (.-mid ug) status (.-inMarkAssist ug) (.-stackID ug)))))
+
+                  (.end (.flush statusWriter))
+
+                  ;; Read everything out of the last gen's CPU profile buffer.
+                  (traceReadCPU gen)
+
+                  ;; Flush CPU samples, stacks, and strings for the last generation. This is safe,
+                  ;; because we're now certain no M is writing to the last generation.
+                  ;;
+                  ;; Ordering is important here. traceCPUFlush may generate new stacks and dumping
+                  ;; stacks may generate new strings.
+                  (traceCPUFlush gen)
+                  (.dump (aget (.-stackTab trace) (% gen 2)) gen)
+                  (.dump (aget (.-typeTab trace) (% gen 2)) gen)
+                  (.reset (aget (.-stringTab trace) (% gen 2)) gen)
+
+                  ;; That's it. This generation is done producing buffers.
+                  (systemstack ^{:go/end 765} (fn []
+                      (lock (addr (.-lock trace)))
+                      (.Store (.-flushedGen trace) gen)
+                      (unlock (addr (.-lock trace)))))
+
+
+                  (when stopTrace
+                    ;; Acquire the shutdown sema to begin the shutdown process.
+                    (semacquire (addr traceShutdownSema))
+
+                    ;; Finish off CPU profile reading.
+                    (traceStopReadCPU)
+
+                    ;; Reset debug.malloc if necessary. Note that this is set in a racy
+                    ;; way; that's OK. Some mallocs may still enter into the debug.malloc
+                    ;; block, but they won't generate events because tracing is disabled.
+                    ;; That is, it's OK if mallocs read a stale debug.malloc or
+                    ;; trace.enabledWithAllocFree value.
+                    (when (.-enabledWithAllocFree trace)
+                      (set! (.-enabledWithAllocFree trace) false)
+                      (set! (.-malloc debug) (.-debugMalloc trace))))
+
+
+
+                  ;; Block until the trace reader has finished processing the last generation.
+                  (semacquire (addr (aget (.-doneSema trace) (% gen 2))))
+                  (when raceenabled
+                    (raceacquire (conv unsafe/Pointer (addr (aget (.-doneSema trace) (% gen 2))))))
+
+
+                  ;; Double-check that things look as we expect after advancing and perform some
+                  ;; final cleanup if the trace has fully stopped.
+                  (systemstack ^{:go/end 816} (fn []
+                      (lock (addr (.-lock trace)))
+                      (when (not (.empty (aget (.-full trace) (% gen 2))))
+                        (throw "trace: non-empty full trace buffer for done generation"))
+
+                      (when stopTrace
+                        (when (not (.empty (aget (.-full trace) (- 1 (% gen 2)))))
+                          (throw "trace: non-empty full trace buffer for next generation"))
+
+                        (when (or (!= (.-reading trace) nil) (!= (.Load (.-reader trace)) nil))
+                          (throw "trace: reading after shutdown"))
+
+                        ;; Free all the empty buffers.
+                        (while (!= (.-empty trace) nil)
+                          (let [buf (.-empty trace)]
+                            (set! (.-empty trace) ^{:go/via [traceBufHeader]} (.-link buf))
+                            (sysFree (conv unsafe/Pointer buf) (unsafe/Sizeof @buf) (addr (.-other_sys memstats)))))
+
+                        ;; Clear trace.shutdown and other flags.
+                        (set! (.-headerWritten trace) false)
+                        (.Store (.-shutdown trace) false))
+
+                      (unlock (addr (.-lock trace)))))
+
+
+                  (when stopTrace
+                    ;; Clear the sweep state on every P for the next time tracing is enabled.
+                    ;;
+                    ;; It may be stale in the next trace because we may have ended tracing in
+                    ;; the middle of a sweep on a P.
+                    ;;
+                    ;; It's fine not to call forEachP here because tracing is disabled and we
+                    ;; know at this point that nothing is calling into the tracer, but we do
+                    ;; need to look at dead Ps too just because GOMAXPROCS could have been called
+                    ;; at any point since we stopped tracing, and we have to ensure there's no
+                    ;; bad state on dead Ps too. Prevent a STW and a concurrent GOMAXPROCS that
+                    ;; might mutate allp by making ourselves briefly non-preemptible.
+                    (let [mp (acquirem)]
+                      (range [_ pp (subslice allp _ (cap allp))]
+                        (set! (.-inSweep (.-trace pp)) false)
+                        (set! (.-maySweep (.-trace pp)) false)
+                        (set! (.-swept (.-trace pp)) 0)
+                        (set! (.-reclaimed (.-trace pp)) 0))
+
+                      (releasem mp)))
+
+
+                  ;; Release the advance semaphore. If stopTrace is true we're still holding onto
+                  ;; traceShutdownSema.
+                  ;;
+                  ;; Do a direct handoff. Don't let one caller of traceAdvance starve
+                  ;; other calls to traceAdvance.
+                  (semrelease1 (addr traceAdvanceSema) true 0)
+
+                  (when stopTrace
+                    ;; Stop the traceAdvancer. We can't be holding traceAdvanceSema here because
+                    ;; we'll deadlock (we're blocked on the advancer goroutine exiting, but it
+                    ;; may be currently trying to acquire traceAdvanceSema).
+                    (.stop traceAdvancer)
+                    (semrelease (addr traceShutdownSema))))))))))))
+
+
+
+^{:go/end 864} (go/func traceNextGen ^uintptr [^uintptr gen]
+  (when (== gen (bit-not (conv uintptr 0)))
+    ;; gen is used both %2 and %3 and we want both patterns to continue when we loop around.
+    ;; ^uint32(0) and ^uint64(0) are both odd and multiples of 3. Therefore the next generation
+    ;; we want is even and one more than a multiple of 3. The smallest such number is 4.
+    (return 4))
+
+  (+ gen 1))
+
+
+
+
+
+^{:go/end 879} (go/func traceRegisterLabelsAndReasons "traceRegisterLabelsAndReasons re-registers mark worker labels and\ngoroutine stop/block reasons in the string table for the provided\ngeneration. Note: the provided generation must not have started yet.\n" [^uintptr gen]
+  (range [i label (subslice gcMarkWorkerModeStrings)]
+    (aset (aget (.-markWorkerLabels trace) (% gen 2)) i (conv traceArg (.put (aget (.-stringTab trace) (% gen 2)) gen label))))
+
+  (range [i str (subslice traceBlockReasonStrings)]
+    (aset (aget (.-goBlockReasons trace) (% gen 2)) i (conv traceArg (.put (aget (.-stringTab trace) (% gen 2)) gen str))))
+
+  (range [i str (subslice traceGoStopReasonStrings)]
+    (aset (aget (.-goStopReasons trace) (% gen 2)) i (conv traceArg (.put (aget (.-stringTab trace) (% gen 2)) gen str)))))
+
+
+
+
+
+
+
+
+^{:go/end 916} (go/func ReadTrace "ReadTrace returns the next chunk of binary tracing data, blocking until data\nis available. If tracing is turned off and all the data accumulated while it\nwas on has been returned, ReadTrace returns nil. The caller must copy the\nreturned data before calling ReadTrace again.\nReadTrace must be called from one goroutine at a time.\n" [] :results [^{:tag (slice byte)} buf]
+  (let [
+      ^{:line 888 :tag bool :go/label :top} park (zero bool)]
+    (systemstack ^{:go/end 891} (fn []
+        (set! (values buf park) (readTrace0))))
+
+    (when park
+      ^{:go/breaks [2]} (gopark ^{:go/breaks [[4 911]] :go/end 912} (fn ^bool [^{:tag (* g)} gp ^unsafe/Pointer _]
+          (when (not (.CompareAndSwapNoWB (.-reader trace) nil gp))
+            ;; We're racing with another reader.
+            ;; Wake up and handle this case.
+            (return false))
+
+
+          (if [g2 (traceReader)] (== gp g2)
+            ;; New data arrived between unlocking
+            ;; and the CAS and we won the wake-up
+            ;; race, so wake up directly.
+            (return false)
+            (when (!= g2 nil)
+              (printlock)
+              (println "runtime: got trace reader" g2 (.-goid g2))
+              (throw "unexpected trace reader")))
+
+
+          true)
+        nil waitReasonTraceReaderBlocked traceBlockSystemGoroutine 2)
+      (goto :top))
+
+    ^{:line 915} buf))
+
+
+
+
+
+
+^{:go/end 1051} (go/func ^:go/systemstack readTrace0 "readTrace0 is ReadTrace's continuation on g0. This must run on the\nsystem stack because it acquires trace.lock.\n" [] :results [^{:tag (slice byte)} buf ^bool park]
+  (when raceenabled
+    ;; g0 doesn't have a race context. Borrow the user G's.
+    (when (!= (.-racectx (getg)) 0)
+      (throw "expected racectx == 0"))
+
+    (set! (.-racectx (getg)) (.-racectx (.-curg (.-m (getg)))))
+    ;; (This defer should get open-coded, which is safe on
+    ;; the system stack.)
+    (defer (^{:go/end 931} (fn [] (set! (.-racectx (getg)) 0)))))
+
+
+  ;; This function must not allocate while holding trace.lock:
+  ;; allocation can call heap allocate, which will try to emit a trace
+  ;; event while holding heap lock.
+  (lock (addr (.-lock trace)))
+
+  (when (!= (.Load (.-reader trace)) nil)
+    ;; More than one goroutine reads trace. This is bad.
+    ;; But we rather do not crash the program because of tracing,
+    ;; because tracing can be enabled at runtime on prod servers.
+    (unlock (addr (.-lock trace)))
+    (println "runtime: ReadTrace called from multiple goroutines simultaneously")
+    (return nil false))
+
+  ;; Recycle the old buffer.
+  (when [buf (.-reading trace)] (!= buf nil)
+    (set! ^{:go/via [traceBufHeader]} (.-link buf) (.-empty trace))
+    (set! (.-empty trace) buf)
+    (set! (.-reading trace) nil))
+
+  ;; Write trace header.
+  (when (not (.-headerWritten trace))
+    (set! (.-headerWritten trace) true)
+    (unlock (addr (.-lock trace)))
+    (return (conv (slice byte) "go 1.26 trace\u0000\u0000\u0000") false))
+
+
+  ;; Read the next buffer.
+
+  (when (== (.Load (.-readerGen trace)) 0)
+    (.Store (.-readerGen trace) 1))
+
+  (let [^uintptr gen (zero uintptr)]
+    (while true
+      (assertLockHeld (addr (.-lock trace)))
+      (set! gen (.Load (.-readerGen trace)))
+
+      ;; Check to see if we need to block for more data in this generation
+      ;; or if we need to move our generation forward.
+      (when (not (.empty (aget (.-full trace) (% gen 2))))
+        (break))
+
+      ;; Most of the time readerGen is one generation ahead of flushedGen, as the
+      ;; current generation is being read from. Then, once the last buffer is flushed
+      ;; into readerGen, flushedGen will rise to meet it. At this point, the tracer
+      ;; is waiting on the reader to finish flushing the last generation so that it
+      ;; can continue to advance.
+      (when (== (.Load (.-flushedGen trace)) gen)
+        ;; Write out the internal in-band end-of-generation signal.
+        (when (not (.-endOfGenerationWritten trace))
+          (set! (.-endOfGenerationWritten trace) true)
+          (unlock (addr (.-lock trace)))
+          (return (lit (slice byte) (conv byte tracev2/EvEndOfGeneration)) false))
+
+
+        ;; Reset the flag.
+        (set! (.-endOfGenerationWritten trace) false)
+
+        ;; Handle shutdown.
+        (when (.Load (.-shutdown trace))
+          (unlock (addr (.-lock trace)))
+
+          ;; Wake up anyone waiting for us to be done with this generation.
+          ;;
+          ;; Do this after reading trace.shutdown, because the thread we're
+          ;; waking up is going to clear trace.shutdown.
+          (when raceenabled
+            ;; Model synchronization on trace.doneSema, which te race
+            ;; detector does not see. This is required to avoid false
+            ;; race reports on writer passed to trace.Start.
+            (racerelease (conv unsafe/Pointer (addr (aget (.-doneSema trace) (% gen 2))))))
+
+          (semrelease (addr (aget (.-doneSema trace) (% gen 2))))
+
+          ;; We're shutting down, and the last generation is fully
+          ;; read. We're done.
+          (return nil false))
+
+        ;; Handle advancing to the next generation.
+
+        ;; The previous gen has had all of its buffers flushed, and
+        ;; there's nothing else for us to read. Advance the generation
+        ;; we're reading from and try again.
+        (.Store (.-readerGen trace) (.Load (.-gen trace)))
+        (unlock (addr (.-lock trace)))
+
+        ;; Wake up anyone waiting for us to be done with this generation.
+        ;;
+        ;; Do this after reading gen to make sure we can't have the trace
+        ;; advance until we've read it.
+        (when raceenabled
+          ;; See comment above in the shutdown case.
+          (racerelease (conv unsafe/Pointer (addr (aget (.-doneSema trace) (% gen 2))))))
+
+        (semrelease (addr (aget (.-doneSema trace) (% gen 2))))
+
+        ;; Reacquire the lock and go back to the top of the loop.
+        (lock (addr (.-lock trace)))
+        (continue))
+
+      ;; Wait for new data.
+      ;;
+      ;; We don't simply use a note because the scheduler
+      ;; executes this goroutine directly when it wakes up
+      ;; (also a note would consume an M).
+      ;;
+      ;; Before we drop the lock, clear the workAvailable flag. Work can
+      ;; only be queued with trace.lock held, so this is at least true until
+      ;; we drop the lock.
+      (.Store (.-workAvailable trace) false)
+      (unlock (addr (.-lock trace)))
+      (return nil true))
+
+    ;; Pull a buffer.
+    (let [tbuf (.pop (aget (.-full trace) (% gen 2)))]
+      (set! (.-reading trace) tbuf)
+      (unlock (addr (.-lock trace)))
+      (return (subslice (.-arr tbuf) _ ^{:go/via [traceBufHeader]} (.-pos tbuf)) false))))
+
+
+
+
+
+
+
+
+^{:go/end 1065} (go/func ^:go/systemstack traceReader "traceReader returns the trace reader that should be woken up, if any.\nCallers should first check (traceEnabled() || traceShuttingDown()).\n\nThis must run on the system stack because it acquires trace.lock.\n" ^{:tag (* g)} []
+  (let [gp (traceReaderAvailable)]
+    (when (or (== gp nil) (not (.CompareAndSwapNoWB (.-reader trace) gp nil)))
+      (return nil))
+
+    ^{:line 1064} gp))
+
+
+
+
+
+^{:go/breaks [[5 1086]] :go/end 1087} (go/func traceReaderAvailable "traceReaderAvailable returns the trace reader if it is not currently\nscheduled and should be. Callers should first check that\n(traceEnabled() || traceShuttingDown()) is true.\n" ^{:tag (* g)} []
+  ;; There are two conditions under which we definitely want to schedule
+  ;; the reader:
+  ;; - The reader is lagging behind in finishing off the last generation.
+  ;;   In this case, trace buffers could even be empty, but the trace
+  ;;   advancer will be waiting on the reader, so we have to make sure
+  ;;   to schedule the reader ASAP.
+  ;; - The reader has pending work to process for it's reader generation
+  ;;   (assuming readerGen is not lagging behind). Note that we also want
+  ;;   to be careful *not* to schedule the reader if there's no work to do.
+  ;;
+  ;; We also want to be careful not to schedule the reader if there's no
+  ;; reason to.
+  (when (or (== (.Load (.-flushedGen trace)) (.Load (.-readerGen trace))) (.Load (.-workAvailable trace)))
+    (return (.Load (.-reader trace))))
+
+  nil)
+
+
+
+(go/var ^{:tag traceAdvancerState :doc "Trace advancer goroutine.\n"} traceAdvancer)
+
+(go/type traceAdvancerState (struct
+    ^{:line 1093 :tag (* wakeableSleep)} timer
+    ^{:line 1094 :tag (chan (struct))} done))
+
+
+
+^{:go/end 1112} (go/method start "start starts a new traceAdvancer.\n" [^{:tag (* traceAdvancerState)} s]
+  ;; Start a goroutine to periodically advance the trace generation.
+  (set! (.-done s) (make (chan (struct))))
+  (set! (.-timer s) (newWakeableSleep))
+  (go (^{:go/end 1111} (fn []
+        (while (traceEnabled)
+          ;; Set a timer to wake us up
+          (.sleep (.-timer s) (conv int64 (.-traceadvanceperiod debug)))
+
+          ;; Try to advance the trace.
+          (traceAdvance false))
+
+        (>! (.-done s) (lit (struct)))))))
+
+
+
+
+^{:go/end 1120} (go/method stop "stop stops a traceAdvancer and blocks until it exits.\n" [^{:tag (* traceAdvancerState)} s]
+  (.wake (.-timer s))
+  (<! (.-done s))
+  (close (.-done s))
+  (.close (.-timer s)))
+
+
+
+
+(go/const ^{:val 1.0E9 :doc "traceAdvancePeriod is the approximate period between\nnew generations.\n"} defaultTraceAdvancePeriod 1.0E9) ; 1 second.
+
+
+
+
+
+
+(go/type wakeableSleep "wakeableSleep manages a wakeable goroutine sleep.\n\nUsers of this type must call init before first use and\nclose to free up resources. Once close is called, init\nmust be called before another use.\n" (struct
+    ^{:line 1132 :tag (* timer)} timer
+
+
+    ^{:line 1135 :tag mutex :doc "lock protects access to wakeup, but not send/recv on it.\n"} lock
+    ^{:line 1136 :tag (chan (struct))} wakeup))
+
+
+
+^{:go/end 1150} (go/func newWakeableSleep "newWakeableSleep initializes a new wakeableSleep and returns it.\n" ^{:tag (* wakeableSleep)} []
+  (let [s (new wakeableSleep)]
+    (lockInit (addr (.-lock s)) lockRankWakeableSleep)
+    (set! (.-wakeup s) (make (chan (struct)) 1))
+    (set! (.-timer s) (new timer))
+    (let [f ^{:go/end 1147} (fn [^any s ^uintptr _ ^int64 _]
+          (.wake (assert (* wakeableSleep) s)))]
+
+      (.init (.-timer s) f s)
+      ^{:line 1149} s)))
+
+
+
+
+
+
+
+^{:go/end 1170} (go/method sleep "sleep sleeps for the provided duration in nanoseconds or until\nanother goroutine calls wake.\n\nMust not be called by more than one goroutine at a time and\nmust not be called concurrently with close.\n" [^{:tag (* wakeableSleep)} s ^int64 ns]
+  (.reset (.-timer s) (+ (nanotime) ns) 0)
+  (lock (addr (.-lock s)))
+  (when raceenabled
+    (raceacquire (conv unsafe/Pointer (addr (.-lock s)))))
+
+  (let [wakeup (.-wakeup s)]
+    (when raceenabled
+      (racerelease (conv unsafe/Pointer (addr (.-lock s)))))
+
+    (unlock (addr (.-lock s)))
+    (<! wakeup)
+    (.stop (.-timer s))))
+
+
+
+
+
+^{:go/end 1197} (go/method wake "wake awakens any goroutine sleeping on the timer.\n\nSafe for concurrent use with all other methods.\n" [^{:tag (* wakeableSleep)} s]
+  ;; Grab the wakeup channel, which may be nil if we're
+  ;; racing with close.
+  (lock (addr (.-lock s)))
+  (when raceenabled
+    (raceacquire (conv unsafe/Pointer (addr (.-lock s)))))
+
+  (when (!= (.-wakeup s) nil)
+    ;; Non-blocking send.
+    ;;
+    ;; Others may also write to this channel and we don't
+    ;; want to block on the receiver waking up. This also
+    ;; effectively batches together wakeup notifications.
+    (select
+      (case (>! (.-wakeup s) (lit (struct))))
+      (default)))
+
+
+  (when raceenabled
+    (racerelease (conv unsafe/Pointer (addr (.-lock s)))))
+
+  (unlock (addr (.-lock s))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1223} (go/method close "close wakes any goroutine sleeping on the timer and prevents\nfurther sleeping on it.\n\nOnce close is called, the wakeableSleep must no longer be used.\n\nIt must only be called once no goroutine is sleeping on the\ntimer *and* nothing else will call wake concurrently.\n" [^{:tag (* wakeableSleep)} s]
+  ;; Set wakeup to nil so that a late timer ends up being a no-op.
+  (lock (addr (.-lock s)))
+  (when raceenabled
+    (raceacquire (conv unsafe/Pointer (addr (.-lock s)))))
+
+  (let [wakeup (.-wakeup s)]
+    (set! (.-wakeup s) nil)
+
+    ;; Close the channel.
+    (close wakeup)
+
+    (when raceenabled
+      (racerelease (conv unsafe/Pointer (addr (.-lock s)))))
+
+    (unlock (addr (.-lock s)))
+    (return)))

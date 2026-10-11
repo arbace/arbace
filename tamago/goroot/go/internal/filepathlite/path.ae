@@ -1,0 +1,273 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package filepathlite implements a subset of path/filepath,
+;; only using packages which may be imported by "os".
+;;
+;; Tests for these functions are in path/filepath.
+(in-ns 'go.internal.filepathlite) (go/file "path.go" :doc "Package filepathlite implements a subset of path/filepath,\nonly using packages which may be imported by \"os\".\n\nTests for these functions are in path/filepath.\n" :imports [
+
+
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [stringslite "internal/stringslite"]
+    ^{:line 14} [fs "io/fs"]
+    ^{:line 15} [slices "slices"]])
+
+
+(go/var errInvalidPath (errors/New "invalid path"))
+
+
+
+
+
+(go/type lazybuf "A lazybuf is a lazily constructed path buffer.\nIt supports append, reading previously appended bytes,\nand retrieving the final string. It does not allocate a buffer\nto hold the output until that output diverges from s.\n" (struct
+    ^{:line 25 :tag string} path
+    ^{:line 26 :tag (slice byte)} buf
+    ^{:line 27 :tag int} w
+    ^{:line 28 :tag string} volAndPath
+    ^{:line 29 :tag int} volLen))
+
+
+^{:go/end 37} (go/method index ^byte [^{:tag (* lazybuf)} b ^int i]
+  (when (!= (.-buf b) nil)
+    (return (aget (.-buf b) i)))
+
+  (aget (.-path b) i))
+
+
+^{:go/end 50} (go/method append [^{:tag (* lazybuf)} b ^byte c]
+  (when (== (.-buf b) nil)
+    (when (and (< (.-w b) (len (.-path b))) (== (aget (.-path b) (.-w b)) c))
+      (inc! (.-w b))
+      (return))
+
+    (set! (.-buf b) (make (slice byte) (len (.-path b))))
+    (copy (.-buf b) (subslice (.-path b) _ (.-w b))))
+
+  (aset (.-buf b) (.-w b) c)
+  (inc! (.-w b)))
+
+
+^{:go/end 55} (go/method prepend [^{:tag (* lazybuf)} b & ^{:tag (slice byte)} prefix]
+  (set! (.-buf b) (^{:inst [(slice byte) byte]} slices/Insert (.-buf b) 0 (spread prefix)))
+  (set! (.-w b) + (len prefix)))
+
+
+^{:go/end 62} (go/method string ^string [^{:tag (* lazybuf)} b]
+  (when (== (.-buf b) nil)
+    (return (subslice (.-volAndPath b) _ (+ (.-volLen b) (.-w b)))))
+
+  (+ (subslice (.-volAndPath b) _ (.-volLen b)) (conv string (subslice (.-buf b) _ (.-w b)))))
+
+
+
+^{:go/end 138} (go/func Clean "Clean is filepath.Clean.\n" ^string [^string path]
+  (let [originalPath path
+      ^{:line 67} volLen (volumeNameLen path)]
+    (set! path (subslice path volLen))
+    (when (== path "")
+      (when (and (> volLen 1) (IsPathSeparator (aget originalPath 0)) (IsPathSeparator (aget originalPath 1)))
+        ;; should be UNC
+        (return (FromSlash originalPath)))
+
+      (return (+ originalPath ".")))
+
+    (let [rooted (IsPathSeparator (aget path 0))
+
+        ;; Invariants:
+        ;;	reading from path; r is index of next byte to process.
+        ;;	writing to buf; w is index of next byte to write.
+        ;;	dotdot is index in buf where .. must stop, either because
+        ;;		it is the leading slash or it is a leading ../../.. prefix.
+        ^{:line 83} n (len path)
+        ^{:line 84} out (lit lazybuf :path path :volAndPath originalPath :volLen volLen)
+        (values r dotdot) (values 0 0)]
+      (when rooted
+        (.append out Separator)
+        (set! (values r dotdot) (values 1 1)))
+
+
+      (while (< r n)
+        (switch
+          (case [(IsPathSeparator (aget path r))]
+            ;; empty path element
+            (inc! r))
+          (case [(and (== (aget path r) \.) ^:go/paren (or (== (+ r 1) n) (IsPathSeparator (aget path (+ r 1)))))]
+            ;; . element
+            (inc! r))
+          (case [(and (== (aget path r) \.) (== (aget path (+ r 1)) \.) ^:go/paren (or (== (+ r 2) n) (IsPathSeparator (aget path (+ r 2)))))]
+            ;; .. element: remove to last separator
+            (set! r + 2)
+            (switch
+              (case [(> (.-w out) dotdot)]
+                ;; can backtrack
+                (dec! (.-w out))
+                (while (and (> (.-w out) dotdot) (not (IsPathSeparator (.index out (.-w out)))))
+                  (dec! (.-w out))))
+
+              (case [(not rooted)]
+                ;; cannot backtrack, but not rooted, so append .. element.
+                (when (> (.-w out) 0)
+                  (.append out Separator))
+
+                (.append out \.)
+                (.append out \.)
+                (set! dotdot (.-w out)))))
+
+          (default
+            ;; real path element.
+            ;; add slash if needed
+            (when (or (and rooted (!= (.-w out) 1)) (and (not rooted) (!= (.-w out) 0)))
+              (.append out Separator))
+
+            ;; copy element
+            (for [] (and (< r n) (not (IsPathSeparator (aget path r)))) (inc! r)
+              (.append out (aget path r))))))
+
+
+
+
+      ;; Turn empty string into "."
+      (when (== (.-w out) 0)
+        (.append out \.))
+
+
+      (postClean (addr out)) ; avoid creating absolute paths on Windows
+      (FromSlash (.string out)))))
+
+
+
+^{:go/end 143} (go/func IsLocal "IsLocal is filepath.IsLocal.\n" ^bool [^string path]
+  (isLocal path))
+
+
+^{:go/end 165} (go/func unixIsLocal ^bool [^string path]
+  (when (or (IsAbs path) (== path ""))
+    (return false))
+
+  ^{:go/breaks [[5 164]]} (let [hasDots false]
+    (for [p path] (!= p "") _
+      (let [^string part (zero string)]
+        (set! (values part p _) (stringslite/Cut p "/"))
+        (when (or (== part ".") (== part ".."))
+          (set! hasDots true)
+          (break))))
+
+
+    (when hasDots
+      (set! path (Clean path)))
+
+    (when (or (== path "..") (stringslite/HasPrefix path "../"))
+      (return false))
+
+    true))
+
+
+
+^{:go/end 173} (go/func Localize "Localize is filepath.Localize.\n" [^string path] :results [string error]
+  (when (not (fs/ValidPath path))
+    (return "" errInvalidPath))
+
+  (localize path))
+
+
+
+^{:go/end 181} (go/func ToSlash "ToSlash is filepath.ToSlash.\n" ^string [^string path]
+  (when (== Separator \/)
+    (return path))
+
+  (replaceStringByte path Separator \/))
+
+
+
+^{:go/end 189} (go/func FromSlash "FromSlash is filepath.FromSlash.\n" ^string [^string path]
+  (when (== Separator \/)
+    (return path))
+
+  (replaceStringByte path \/ Separator))
+
+
+^{:go/end 202} (go/func replaceStringByte ^string [^string s ^byte old ^byte new]
+  (when (== (stringslite/IndexByte s old) -1)
+    (return s))
+
+  (let [n (conv (slice byte) s)]
+    (range [i n]
+      (when (== (aget n i) old)
+        (aset n i new)))
+
+
+    (conv string n)))
+
+
+
+^{:go/end 212} (go/func Split "Split is filepath.Split.\n" [^string path] :results [^string dir ^string file]
+  (let [vol (VolumeName path)
+      ^{:line 207} i (- (len path) 1)]
+    (while (and (>= i (len vol)) (not (IsPathSeparator (aget path i))))
+      (dec! i))
+
+    (return (subslice path _ (+ i 1)) (subslice path (+ i 1)))))
+
+
+
+^{:go/breaks [[5 221]] :go/end 222} (go/func Ext "Ext is filepath.Ext.\n" ^string [^string path]
+  (for [i (- (len path) 1)] (and (>= i 0) (not (IsPathSeparator (aget path i)))) (dec! i)
+    (when (== (aget path i) \.)
+      (return (subslice path i))))
+
+
+  "")
+
+
+
+^{:go/end 248} (go/func Base "Base is filepath.Base.\n" ^string [^string path]
+  (when (== path "")
+    (return "."))
+
+  ;; Strip trailing slashes.
+  (while (and (> (len path) 0) (IsPathSeparator (aget path (- (len path) 1))))
+    (set! path (subslice path 0 (- (len path) 1))))
+
+  ;; Throw away volume name
+  (set! path (subslice path (len (VolumeName path))))
+  ;; Find the last element
+  (let [i (- (len path) 1)]
+    (while (and (>= i 0) (not (IsPathSeparator (aget path i))))
+      (dec! i))
+
+    (when (>= i 0)
+      (set! path (subslice path (+ i 1))))
+
+    ;; If empty now, it had only slashes.
+    (when (== path "")
+      (return (conv string Separator)))
+
+    ^{:line 247} path))
+
+
+
+^{:go/end 263} (go/func Dir "Dir is filepath.Dir.\n" ^string [^string path]
+  (let [vol (VolumeName path)
+      ^{:line 253} i (- (len path) 1)]
+    (while (and (>= i (len vol)) (not (IsPathSeparator (aget path i))))
+      (dec! i))
+
+    (let [dir (Clean (subslice path (len vol) (+ i 1)))]
+      (when (and (== dir ".") (> (len vol) 2))
+        ;; must be UNC
+        (return vol))
+
+      (+ vol dir))))
+
+
+
+^{:go/end 268} (go/func VolumeName "VolumeName is filepath.VolumeName.\n" ^string [^string path]
+  (FromSlash (subslice path _ (volumeNameLen path))))
+
+
+
+
+^{:go/end 274} (go/func VolumeNameLen "VolumeNameLen returns the length of the leading volume name on Windows.\nIt returns 0 elsewhere.\n" ^int [^string path]
+  (volumeNameLen path))

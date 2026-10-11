@@ -1,0 +1,108 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Fixed-size object allocator. Returned memory is not zeroed.
+;;
+;; See malloc.go for overview.
+
+(in-ns 'go.runtime) (go/file "mfixalloc.go" :imports [
+
+
+    ^{:line 12} [sys "internal/runtime/sys"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type fixalloc "fixalloc is a simple free-list allocator for fixed size objects.\nMalloc uses a FixAlloc wrapped around sysAlloc to manage its\nmcache and mspan objects.\n\nMemory returned by fixalloc.alloc is zeroed by default, but the\ncaller may take responsibility for zeroing allocations by setting\nthe zero flag to false. This is only safe if the memory never\ncontains heap pointers.\n\nThe caller is responsible for locking around FixAlloc calls.\nCallers can keep state in the object but the first word is\nsmashed by freeing and reallocating.\n\nConsider marking fixalloc'd types not in heap by embedding\ninternal/runtime/sys.NotInHeap.\n" (struct
+    ^{:line 32 :tag uintptr} size
+    ^{:line 33 :tag (func [^unsafe/Pointer arg ^unsafe/Pointer p])} first ; called first time p is returned
+    ^{:line 34 :tag unsafe/Pointer} arg
+    ^{:line 35 :tag (* mlink)} list
+    ^{:line 36 :tag uintptr} chunk ; use uintptr instead of unsafe.Pointer to avoid write barriers
+    ^{:line 37 :tag uint32} nchunk ; bytes remaining in current chunk
+    ^{:line 38 :tag uint32} nalloc ; size of new chunks in bytes
+    ^{:line 39 :tag uintptr} inuse ; in-use bytes now
+    ^{:line 40 :tag (* sysMemStat)} stat
+    ^{:line 41 :tag bool} zero)) ; zero allocations
+
+
+
+
+
+
+
+(go/type mlink "A generic linked list of blocks.  (Typically the block is bigger than sizeof(MLink).)\nSince assignments to mlink.next will result in a write barrier being performed\nthis cannot be used by some of the internal GC structures. For example when\nthe sweeper is placing an unmarked object on the free list it does not want the\nwrite barrier to be called since that could result in the object being reachable.\n" (struct
+    ^{:line 50 :tag sys/NotInHeap} _
+    ^{:line 51 :tag (* mlink)} next))
+
+
+
+
+^{:go/end 72} (go/method init "Initialize f to allocate objects of the given size,\nusing the allocator to obtain chunks of memory.\n" [^{:tag (* fixalloc)} f ^uintptr size ^{:tag (func [^unsafe/Pointer arg ^unsafe/Pointer p])} first ^unsafe/Pointer arg ^{:tag (* sysMemStat)} stat]
+  (when (> size _FixAllocChunk)
+    (throw "runtime: fixalloc size too large"))
+
+  (set! size (max size (unsafe/Sizeof (lit mlink))))
+
+  (set! (.-size f) size)
+  (set! (.-first f) first)
+  (set! (.-arg f) arg)
+  (set! (.-list f) nil)
+  (set! (.-chunk f) 0)
+  (set! (.-nchunk f) 0)
+  (set! (.-nalloc f) (conv uint32 (* (/ _FixAllocChunk size) size))) ; Round _FixAllocChunk down to an exact multiple of size to eliminate tail waste
+  (set! (.-inuse f) 0)
+  (set! (.-stat f) stat)
+  (set! (.-zero f) true))
+
+
+^{:go/end 102} (go/method alloc ^unsafe/Pointer [^{:tag (* fixalloc)} f]
+  (when (== (.-size f) 0)
+    (print "runtime: use of FixAlloc_Alloc before FixAlloc_Init\n")
+    (throw "runtime: internal error"))
+
+
+  (when (!= (.-list f) nil)
+    (let [v (conv unsafe/Pointer (.-list f))]
+      (set! (.-list f) (.-next (.-list f)))
+      (set! (.-inuse f) + (.-size f))
+      (when (.-zero f)
+        (memclrNoHeapPointers v (.-size f)))
+
+      (return v)))
+
+  (when (< (conv uintptr (.-nchunk f)) (.-size f))
+    (set! (.-chunk f) (conv uintptr (persistentalloc (conv uintptr (.-nalloc f)) 0 (.-stat f))))
+    (set! (.-nchunk f) (.-nalloc f)))
+
+
+  (let [v (conv unsafe/Pointer (.-chunk f))]
+    (when (!= (.-first f) nil)
+      ((.-first f) (.-arg f) v))
+
+    (set! (.-chunk f) (+ (.-chunk f) (.-size f)))
+    (set! (.-nchunk f) - (conv uint32 (.-size f)))
+    (set! (.-inuse f) + (.-size f))
+    ^{:line 101} v))
+
+
+^{:go/end 109} (go/method free [^{:tag (* fixalloc)} f ^unsafe/Pointer p]
+  (set! (.-inuse f) - (.-size f))
+  (let [v (conv (* mlink) p)]
+    (set! (.-next v) (.-list f))
+    (set! (.-list f) v)))

@@ -1,0 +1,139 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package quotedprintable implements quoted-printable encoding as specified by
+;; RFC 2045.
+(in-ns 'go.mime.quotedprintable) (go/file "reader.go" :doc "Package quotedprintable implements quoted-printable encoding as specified by\nRFC 2045.\n" :imports [
+
+
+    ^{:line 10} [bufio "bufio"]
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [io "io"]])
+
+
+
+(go/type Reader "Reader is a quoted-printable decoder.\n" (struct
+    ^{:line 18 :tag (* bufio/Reader)} br
+    ^{:line 19 :tag error} rerr ; last read error
+    ^{:line 20 :tag (slice byte)} line)) ; to be consumed before more of br
+
+
+
+^{:go/end 28} (go/func NewReader "NewReader returns a quoted-printable reader, decoding from r.\n" ^{:tag (* Reader)} [^io/Reader r]
+  (addr ^{:go/breaks [2]} (lit Reader
+      :br (bufio/NewReader r))))
+
+
+
+^{:go/end 41} (go/func fromHex [^byte b] :results [byte error]
+  (switch
+    (case [(and (>= b \0) (<= b \9))]
+      (return (- b \0) nil))
+    (case [(and (>= b \A) (<= b \F))]
+      (return (+ (- b \A) 10) nil))
+    ;; Accept badly encoded bytes.
+    (case [(and (>= b \a) (<= b \f))]
+      (return (+ (- b \a) 10) nil)))
+
+  (return 0 (fmt/Errorf "quotedprintable: invalid hex byte 0x%02x" b)))
+
+
+^{:go/end 55} (go/func readHexByte [^{:tag (slice byte)} v] :results [^byte b ^error err]
+  (when (< (len v) 2)
+    (return 0 io/ErrUnexpectedEOF))
+
+  (let [(values ^byte hb ^byte lb) (zero byte)]
+    (when [(set! (values hb err) (fromHex (aget v 0)))] (!= err nil)
+      (return 0 err))
+
+    (when [(set! (values lb err) (fromHex (aget v 1)))] (!= err nil)
+      (return 0 err))
+
+    (return (bit-or (<< hb 4) lb) nil)))
+
+
+^{:go/breaks [[4 62]] :go/end 63} (go/func isQPDiscardWhitespace ^bool [^rune r]
+  (switch r
+    (case [\newline \return \space \tab]
+      (return true)))
+
+  false)
+
+
+(go/var
+  ^{:line 66} [crlf (conv (slice byte) "\r\n")]
+  ^{:line 67} [lf (conv (slice byte) "\n")]
+  ^{:line 68} [softSuffix (conv (slice byte) "=")]
+  ^{:line 69} [lwspChar " \t"])
+
+
+
+^{:go/end 140} (go/method Read "Read reads and decodes quoted-printable data from the underlying reader.\n" [^{:tag (* Reader)} r ^{:tag (slice byte)} p] :results [^int n ^error err]
+  ;; Deviations from RFC 2045:
+  ;; 1. in addition to "=\r\n", "=\n" is also treated as soft line break.
+  ;; 2. it will pass through a '\r' or '\n' not preceded by '=', consistent
+  ;;    with other broken QP encoders & decoders.
+  ;; 3. it accepts soft line-break (=) at end of message (issue 15486); i.e.
+  ;;    the final byte read from the underlying reader is allowed to be '=',
+  ;;    and it will be silently ignored.
+  ;; 4. it takes = as literal = if not followed by two hex digits
+  ;;    but not at end of line (issue 13219).
+  (while (> (len p) 0)
+    (when (== (len (.-line r)) 0)
+      (when (!= (.-rerr r) nil)
+        (return n (.-rerr r)))
+
+      (set! (values (.-line r) (.-rerr r)) (.ReadSlice (.-br r) \newline))
+
+      ;; Does the line end in CRLF instead of just LF?
+      (let [hasLF (bytes/HasSuffix (.-line r) lf)
+          ^{:line 92} hasCR (bytes/HasSuffix (.-line r) crlf)
+          ^{:line 93} wholeLine (.-line r)]
+        (set! (.-line r) (bytes/TrimRightFunc wholeLine isQPDiscardWhitespace))
+        (cond (bytes/HasSuffix (.-line r) softSuffix)
+          (let [rightStripped (bytes/TrimLeft (subslice wholeLine (len (.-line r))) lwspChar)]
+            (set! (.-line r) (subslice (.-line r) _ (- (len (.-line r)) 1)))
+            (when (and (not (bytes/HasPrefix rightStripped lf)) (not (bytes/HasPrefix rightStripped crlf))
+                (not (and (== (len rightStripped) 0) (> (len (.-line r)) 0) (== (.-rerr r) io/EOF))))
+              (set! (.-rerr r) (fmt/Errorf "quotedprintable: invalid bytes after =: %q" rightStripped))))
+
+          ^{:line 102} hasLF
+          (if hasCR
+            (set! (.-line r) (append (.-line r) \return \newline))
+
+            (set! (.-line r) (append (.-line r) \newline))))
+
+
+        (continue)))
+
+    (let [b (aget (.-line r) 0)]
+
+      (switch
+        (case [(== b \=)]
+          (set! (values b err) (readHexByte (subslice (.-line r) 1)))
+          (when (!= err nil)
+            (when (and (>= (len (.-line r)) 2) (!= (aget (.-line r) 1) \return) (!= (aget (.-line r) 1) \newline))
+              ;; Take the = as a literal =.
+              (set! b \=)
+              (break))
+
+            (return n err))
+
+          (set! (.-line r) (subslice (.-line r) 2))) ; 2 of the 3; other 1 is done below
+        (case [(or (== b \tab) (== b \return) (== b \newline))]
+          (break))
+        (case [(>= b 0x80)]
+          ;; As an extension to RFC 2045, we accept
+          ;; values >= 0x80 without complaint. Issue 22597.
+          (break))
+        (case [(or (< b \space) (> b \~))]
+          (return n (fmt/Errorf "quotedprintable: invalid unescaped byte 0x%02x in body" b))))
+
+      (aset p 0 b)
+      (set! p (subslice p 1))
+      (set! (.-line r) (subslice (.-line r) 1))
+      (inc! n)))
+
+  (return n nil))

@@ -1,0 +1,288 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.text.unicode.norm) (go/file "forminfo.go" :imports [
+
+    ^{:line 7} [binary "encoding/binary"]])
+
+;; This file contains Form-specific logic and wrappers for data in tables.go.
+
+;; Rune info is stored in a separate trie per composing form. A composing form
+;; and its corresponding decomposing form share the same trie.  Each trie maps
+;; a rune to a uint16. The values take two forms.  For v >= 0x8000:
+;;   bits
+;;   15:    1 (inverse of NFD_QC bit of qcInfo)
+;;   12..7: qcInfo (see below). isYesD is always true (no decomposition).
+;;    6..0: ccc (compressed CCC value).
+;; For v < 0x8000, the respective rune has a decomposition and v is an index
+;; into a byte array of UTF-8 decomposition sequences and additional info and
+;; has the form:
+;;    <header> <decomp_byte>* [<tccc> [<lccc>]]
+;; The header contains the number of bytes in the decomposition (excluding this
+;; length byte), with 33 mapped to 31 to fit in 5 bits.
+;; (If any 31- or 32-byte decompositions come along, we could switch to using
+;; use a general lookup table as long as there are at most 32 distinct lengths.)
+;; The three most significant bits of this length byte correspond
+;; to bit 5, 4, and 3 of qcInfo (see below).  The byte sequence itself starts at v+1.
+;; The byte sequence is followed by a trailing and leading CCC if the values
+;; for these are not zero.  The value of v determines which ccc are appended
+;; to the sequences.  For v < firstCCC, there are none, for v >= firstCCC,
+;; the sequence is followed by a trailing ccc, and for v >= firstLeadingCC
+;; there is an additional leading ccc. The value of tccc itself is the
+;; trailing CCC shifted left 2 bits. The two least-significant bits of tccc
+;; are the number of trailing non-starters.
+
+(go/const
+  ^{:line 37} [^{:val 63} qcInfoMask 0x3F] ; to clear all but the relevant bits in a qcInfo
+  ^{:line 38} [^{:val 31} headerLenMask 0x1F] ; extract the length value from the header byte (31 => 33)
+  ^{:line 39} [^{:val 224} headerFlagsMask 0xE0]) ; extract the qcInfo bits from the header byte
+
+
+
+(go/type Properties "Properties provides access to normalization properties of a rune.\n" (struct
+    ^{:line 44 :tag uint8} pos ; start position in reorderBuffer; used in composition.go
+    ^{:line 45 :tag uint8} size ; length of UTF-8 encoding of this rune
+    ^{:line 46 :tag uint8} ccc ; leading canonical combining class (ccc if not decomposition)
+    ^{:line 47 :tag uint8} tccc ; trailing canonical combining class (ccc if not decomposition)
+    ^{:line 48 :tag uint8} nLead ; number of leading non-starters.
+    ^{:line 49 :tag qcInfo} flags ; quick check flags
+    ^{:line 50 :tag uint16} index))
+
+
+
+(go/type lookupFunc "functions dispatchable per form\n" (func [^input b ^int i] [Properties]))
+
+
+(go/type formInfo "formInfo holds Form-specific functions and tables.\n" (struct
+    ^{:line 58 :tag Form} form
+    ^{:line 59 :tag bool} composing ^bool compatibility ; form type
+    ^{:line 60 :tag lookupFunc} info
+    ^{:line 61 :tag iterFunc} nextMain))
+
+
+(go/var formTable (lit (slice (* formInfo)) ^{:go/breaks [2 4 6 8 10]} (lit _
+      :form NFC
+      :composing true
+      :compatibility false
+      :info lookupInfoNFC
+      :nextMain nextComposed)
+    ^{:go/breaks [2 4 6 8 10]} (lit _
+      :form NFD
+      :composing false
+      :compatibility false
+      :info lookupInfoNFC
+      :nextMain nextDecomposed)
+    ^{:go/breaks [2 4 6 8 10]} (lit _
+      :form NFKC
+      :composing true
+      :compatibility true
+      :info lookupInfoNFKC
+      :nextMain nextComposed)
+    ^{:go/breaks [2 4 6 8 10]} (lit _
+      :form NFKD
+      :composing false
+      :compatibility true
+      :info lookupInfoNFKC
+      :nextMain nextDecomposed)))
+
+
+;; We do not distinguish between boundaries for NFC, NFD, etc. to avoid
+;; unexpected behavior for the user.  For example, in NFD, there is a boundary
+;; after 'a'.  However, 'a' might combine with modifiers, so from the application's
+;; perspective it is not a good boundary. We will therefore always use the
+;; boundaries for the combining variants.
+
+
+
+^{:go/breaks [[5 105]] :go/end 106} (go/method BoundaryBefore "BoundaryBefore returns true if this rune starts a new segment and\ncannot combine with any rune on the left.\n" ^bool [^Properties p]
+  (when (and (== (.-ccc p) 0) (not (.combinesBackward p)))
+    (return true))
+
+  ;; We assume that the CCC of the first character in a decomposition
+  ;; is always non-zero if different from info.ccc and that we can return
+  ;; false at this point. This is verified by maketables.
+  false)
+
+
+
+
+^{:go/end 113} (go/method BoundaryAfter "BoundaryAfter returns true if runes cannot combine with or otherwise\ninteract with this or previous runes.\n" ^bool [^Properties p]
+  ;; TODO: loosen these conditions.
+  (.isInert p))
+
+
+
+
+
+
+
+
+
+
+
+(go/type qcInfo "We pack quick check data in 6 bits:\n\n\t5:    Combines forward  (0 == false, 1 == true)\n\t4..3: NFC_QC Yes(00), No (10), or Maybe (11)\n\t2:    NFD_QC Yes (0) or No (1). No also means there is a decomposition.\n\t1..0: Number of trailing non-starters.\n\nWhen all 6 bits are zero, the character is inert, meaning it is never\ninfluenced by normalization.\n" uint8)
+
+^{:go/end 126} (go/method isYesC ^bool [^Properties p] (== (bit-and (.-flags p) 0x10) 0))
+^{:go/end 127} (go/method isYesD ^bool [^Properties p] (== (bit-and (.-flags p) 0x4) 0))
+
+^{:go/end 129} (go/method combinesForward ^bool [^Properties p] (!= (bit-and (.-flags p) 0x20) 0))
+^{:go/end 130} (go/method combinesBackward ^bool [^Properties p] (!= (bit-and (.-flags p) 0x8) 0)) ; == isMaybe
+^{:go/end 131} (go/method hasDecomposition ^bool [^Properties p] (!= (bit-and (.-flags p) 0x4) 0)) ; == isNoD
+
+^{:go/end 135} (go/method isInert ^bool [^Properties p]
+  (and (== (bit-and (.-flags p) qcInfoMask) 0) (== (.-ccc p) 0)))
+
+
+^{:go/end 139} (go/method multiSegment ^bool [^Properties p]
+  (and (>= (.-index p) firstMulti) (< (.-index p) endMulti)))
+
+
+^{:go/end 143} (go/method nLeadingNonStarters ^uint8 [^Properties p]
+  (.-nLead p))
+
+
+^{:go/end 147} (go/method nTrailingNonStarters ^uint8 [^Properties p]
+  (conv uint8 (bit-and (.-flags p) 0x03)))
+
+
+
+
+^{:go/end 163} (go/method Decomposition "Decomposition returns the decomposition for the underlying rune\nor nil if there is none.\n" ^{:tag (slice byte)} [^Properties p]
+  ;; TODO: create the decomposition for Hangul?
+  (when (== (.-index p) 0)
+    (return nil))
+
+  (let [i (.-index p)
+      ^{:line 157} n (bit-and (aget decomps i) headerLenMask)]
+    (when (== n 31)
+      (set! n 33))
+
+    (inc! i)
+    (subslice decomps i (+ i (conv uint16 n)))))
+
+
+
+^{:go/end 168} (go/method Size "Size returns the length of UTF-8 encoding of the rune.\n" ^int [^Properties p]
+  (conv int (.-size p)))
+
+
+
+^{:go/end 176} (go/method CCC "CCC returns the canonical combining class of the underlying rune.\n" ^uint8 [^Properties p]
+  (when (>= (.-index p) firstCCCZeroExcept)
+    (return 0))
+
+  (aget ccc (.-ccc p)))
+
+
+
+
+^{:go/end 182} (go/method LeadCCC "LeadCCC returns the CCC of the first rune in the decomposition.\nIf there is no decomposition, LeadCCC equals CCC.\n" ^uint8 [^Properties p]
+  (aget ccc (.-ccc p)))
+
+
+
+
+^{:go/end 188} (go/method TrailCCC "TrailCCC returns the CCC of the last rune in the decomposition.\nIf there is no decomposition, TrailCCC equals CCC.\n" ^uint8 [^Properties p]
+  (aget ccc (.-tccc p)))
+
+
+^{:go/end 199} (go/func buildRecompMap []
+  (set! recompMap (make (map uint32 rune) (/ (len recompMapPacked) 8)))
+  (let [^{:tag (array 8 byte)} buf (zero (array 8 byte))]
+    (for [i 0] (< i (len recompMapPacked)) (set! i + 8)
+      (copy (subslice buf) (subslice recompMapPacked i (+ i 8)))
+      (let [key (.Uint32 binary/BigEndian (subslice buf _ 4))
+          ^{:line 196} val (.Uint32 binary/BigEndian (subslice buf 4))]
+        (aset recompMap key (conv rune val))))))
+
+
+
+;; Recomposition
+;; We use 32-bit keys instead of 64-bit for the two codepoint keys.
+;; This clips off the bits of three entries, but we know this will not
+;; result in a collision. In the unlikely event that changes to
+;; UnicodeData.txt introduce collisions, the compiler will catch it.
+;; Note that the recomposition map for NFC and NFKC are identical.
+
+
+
+
+
+^{:go/end 218} (go/func combine "combine returns the combined rune or 0 if it doesn't exist.\n\nThe caller is responsible for calling\nrecompMapOnce.Do(buildRecompMap) sometime before this is called.\n" ^rune [^rune a ^rune b]
+  (let [key (+ (<< (conv uint32 (conv uint16 a)) 16) (conv uint32 (conv uint16 b)))]
+    (when (== recompMap nil)
+      (panic "caller error")) ; see func comment
+
+    (aget recompMap key)))
+
+
+^{:go/end 223} (go/func lookupInfoNFC ^Properties [^input b ^int i]
+  (let [(values v sz) (.charinfoNFC b i)]
+    (compInfo v sz)))
+
+
+^{:go/end 228} (go/func lookupInfoNFKC ^Properties [^input b ^int i]
+  (let [(values v sz) (.charinfoNFKC b i)]
+    (compInfo v sz)))
+
+
+
+^{:go/end 236} (go/method Properties "Properties returns properties for the first rune in s.\n" ^Properties [^Form f ^{:tag (slice byte)} s]
+  (when (or (== f NFC) (== f NFD))
+    (return (compInfo (.lookup nfcData s))))
+
+  (compInfo (.lookup nfkcData s)))
+
+
+
+^{:go/end 244} (go/method PropertiesString "PropertiesString returns properties for the first rune in s.\n" ^Properties [^Form f ^string s]
+  (when (or (== f NFC) (== f NFD))
+    (return (compInfo (.lookupString nfcData s))))
+
+  (compInfo (.lookupString nfkcData s)))
+
+
+
+
+
+^{:go/end 289} (go/func compInfo "compInfo converts the information contained in v and sz\nto a Properties.  See the comment at the top of the file\nfor more information on the format.\n" ^Properties [^uint16 v ^int sz]
+  (cond (== v 0)
+    (return (lit Properties :size (conv uint8 sz)))
+    (>= v 0x8000)
+    (let [p ^{:go/breaks [2 4 6 8]} (lit Properties
+          :size (conv uint8 sz)
+          :ccc (conv uint8 v)
+          :tccc (conv uint8 v)
+          :flags (conv qcInfo (>> v 8)))]
+
+      (when (or (> (.-ccc p) 0) (.combinesBackward p))
+        (set! (.-nLead p) (conv uint8 (bit-and (.-flags p) 0x3))))
+
+      (return p)))
+
+  ;; has decomposition
+  (let [h (aget decomps v)
+      ^{:line 266} f (bit-or (>> (conv qcInfo (bit-and h headerFlagsMask)) 2) 0x4)
+      ^{:line 267} p (lit Properties :size (conv uint8 sz) :flags f :index v)]
+    (when (>= v firstCCC)
+      (let [n (conv uint16 (bit-and h headerLenMask))]
+        (when (== n 31)
+          (set! n 33))
+
+        (set! v + (+ n 1))
+        (let [c (aget decomps v)]
+          (set! (.-tccc p) (>> c 2))
+          (set! (.-flags p) bit-or (conv qcInfo (bit-and c 0x3)))
+          (when (>= v firstLeadingCCC)
+            (set! (.-nLead p) (bit-and c 0x3))
+            (when (>= v firstStarterWithNLead)
+              ;; We were tricked. Remove the decomposition.
+              (set! (.-flags p) bit-and 0x03)
+              (set! (.-index p) 0)
+              (return p))
+
+            (set! (.-ccc p) (aget decomps (+ v 1)))))))
+
+
+    ^{:line 288} p))

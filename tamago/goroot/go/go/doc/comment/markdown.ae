@@ -1,0 +1,187 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.doc.comment) (go/file "markdown.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [strings "strings"]])
+
+
+
+(go/type mdPrinter "An mdPrinter holds the state needed for printing a Doc as Markdown.\n" (struct
+    (* Printer)
+    ^{:line 16 :tag string} headingPrefix
+    ^{:line 17 :tag bytes/Buffer} raw))
+
+
+
+
+^{:go/end 36} (go/method Markdown "Markdown returns a Markdown formatting of the Doc.\nSee the [Printer] documentation for ways to customize the Markdown output.\n" ^{:tag (slice byte)} [^{:tag (* Printer)} p ^{:tag (* Doc)} d]
+  (let [mp (addr ^{:go/breaks [2 4]} (lit mdPrinter
+          :Printer p
+          :headingPrefix (+ (strings/Repeat "#" (.headingLevel p)) " ")))
+
+
+      ^{:line 28 :tag bytes/Buffer} out (zero bytes/Buffer)]
+    (range [i x (.-Content d)]
+      (when (> i 0)
+        (.WriteByte out \newline))
+
+      (.block mp (addr out) x))
+
+    (.Bytes out)))
+
+
+
+^{:go/end 93} (go/method block "block prints the block x to out.\n" [^{:tag (* mdPrinter)} p ^{:tag (* bytes/Buffer)} out ^Block x]
+  (type-switch [x x]
+    (default
+      (fmt/Fprintf out "?%T" x))
+
+    (case [(* Paragraph)]
+      (.text p out (.-Text x))
+      (.WriteString out "\n"))
+
+    (case [(* Heading)]
+      (.WriteString out (.-headingPrefix p))
+      (.text p out (.-Text x))
+      (when [id ^{:go/via [Printer]} (.headingID p x)] (!= id "")
+        (.WriteString out " {#")
+        (.WriteString out id)
+        (.WriteString out "}"))
+
+      (.WriteString out "\n"))
+
+    (case [(* Code)]
+      (let [md (.-Text x)]
+        (while (!= md "")
+          (let [^string line (zero string)]
+            (set! (values line md _) (strings/Cut md "\n"))
+            (when (!= line "")
+              (.WriteString out "\t")
+              (.WriteString out line))
+
+            (.WriteString out "\n")))))
+
+
+    (case [(* List)]
+      (let [loose (.BlankBetween x)]
+        (range [i item (.-Items x)]
+          (when (and (> i 0) loose)
+            (.WriteString out "\n"))
+
+          (if [n (.-Number item)] (!= n "") (do
+              (.WriteString out " ")
+              (.WriteString out n)
+              (.WriteString out ". "))
+
+            (.WriteString out "  - ")) ; SP SP - SP
+
+          (range [i blk (.-Content item)]
+            (let [^:const ^{:val "    "} fourSpace "    "]
+              (when (> i 0)
+                (.WriteString out (+ "\n" fourSpace)))
+
+              (.text p out (.-Text (assert (* Paragraph) blk)))
+              (.WriteString out "\n"))))))))
+
+
+
+
+
+
+^{:go/end 120} (go/method text "text prints the text sequence x to out.\n" [^{:tag (* mdPrinter)} p ^{:tag (* bytes/Buffer)} out ^{:tag (slice Text)} x]
+  (.Reset (.-raw p))
+  (.rawText p (addr (.-raw p)) x)
+  (let [line (bytes/TrimSpace (.Bytes (.-raw p)))]
+    (when (== (len line) 0)
+      (return))
+
+    (switch (aget line 0)
+      (case [\+ \- \* \#]
+        ;; Escape what would be the start of an unordered list or heading.
+        (.WriteByte out \\))
+      (case [\0 \1 \2 \3 \4 \5 \6 \7 \8 \9]
+        (let [i 1]
+          (while (and (< i (len line)) (<= \0 (aget line i)) (<= (aget line i) \9))
+            (inc! i))
+
+          (when (and (< i (len line)) ^:go/paren (or (== (aget line i) \.) (== (aget line i) \))))
+            ;; Escape what would be the start of an ordered list.
+            (.Write out (subslice line _ i))
+            (.WriteByte out \\)
+            (set! line (subslice line i))))))
+
+
+    (.Write out line)))
+
+
+
+
+
+^{:go/end 155} (go/method rawText "rawText prints the text sequence x to out,\nwithout worrying about escaping characters\nthat have special meaning at the start of a Markdown line.\n" [^{:tag (* mdPrinter)} p ^{:tag (* bytes/Buffer)} out ^{:tag (slice Text)} x]
+  (range [_ t x]
+    (type-switch [t t]
+      (case [Plain]
+        (.escape p out (conv string t)))
+      (case [Italic]
+        (.WriteString out "*")
+        (.escape p out (conv string t))
+        (.WriteString out "*"))
+      (case [(* Link)]
+        (.WriteString out "[")
+        (.rawText p out (.-Text t))
+        (.WriteString out "](")
+        (.WriteString out (.-URL t))
+        (.WriteString out ")"))
+      (case [(* DocLink)]
+        (let [url ^{:go/via [Printer]} (.docLinkURL p t)]
+          (when (!= url "")
+            (.WriteString out "["))
+
+          (.rawText p out (.-Text t))
+          (when (!= url "")
+            (.WriteString out "](")
+            (set! url (strings/ReplaceAll url "(" "%28"))
+            (set! url (strings/ReplaceAll url ")" "%29"))
+            (.WriteString out url)
+            (.WriteString out ")")))))))
+
+
+
+
+
+
+
+
+^{:go/end 188} (go/method escape "escape prints s to out as plain text,\nescaping special characters to avoid being misinterpreted\nas Markdown markup sequences.\n" [^{:tag (* mdPrinter)} p ^{:tag (* bytes/Buffer)} out ^string s]
+  (let [start 0]
+    (for [i 0] (< i (len s)) (inc! i)
+      (switch (aget s i)
+        (case [\newline]
+          ;; Turn all \n into spaces, for a few reasons:
+          ;;   - Avoid introducing paragraph breaks accidentally.
+          ;;   - Avoid the need to reindent after the newline.
+          ;;   - Avoid problems with Markdown renderers treating
+          ;;     every mid-paragraph newline as a <br>.
+          (.WriteString out (subslice s start i))
+          (.WriteByte out \space)
+          (set! start (+ i 1))
+          (continue))
+        (case [\` \_ \* \[ \< \\]
+          ;; Not all of these need to be escaped all the time,
+          ;; but is valid and easy to do so.
+          ;; We assume the Markdown is being passed to a
+          ;; Markdown renderer, not edited by a person,
+          ;; so it's fine to have escapes that are not strictly
+          ;; necessary in some cases.
+          (.WriteString out (subslice s start i))
+          (.WriteByte out \\)
+          (.WriteByte out (aget s i))
+          (set! start (+ i 1)))))
+
+
+    (.WriteString out (subslice s start))))

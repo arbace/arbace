@@ -1,0 +1,335 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.zstd) (go/file "literals.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]])
+
+
+
+
+
+^{:go/end 28} (go/method readLiterals "readLiterals reads and decompresses the literals from data at off.\nThe literals are appended to outbuf, which is returned.\nAlso returns the new input offset. RFC 3.1.1.3.1.\n" [^{:tag (* Reader)} r ^block data ^int off ^{:tag (slice byte)} outbuf] :results [int (slice byte) error]
+  (when (>= off (len data))
+    (return 0 nil (.makeEOFError r off)))
+
+
+  ;; Literals section header. RFC 3.1.1.3.1.1.
+  (let [hdr (aget data off)]
+    (inc! off)
+
+    (if (or (== (bit-and hdr 3) 0) (== (bit-and hdr 3) 1))
+      (return (.readRawRLELiterals r data off hdr outbuf))
+
+      (return (.readHuffLiterals r data off hdr outbuf)))))
+
+
+
+
+
+^{:go/end 80} (go/method readRawRLELiterals "readRawRLELiterals reads and decompresses a Raw_Literals_Block or\na RLE_Literals_Block. RFC 3.1.1.3.1.1.\n" [^{:tag (* Reader)} r ^block data ^int off ^byte hdr ^{:tag (slice byte)} outbuf] :results [int (slice byte) error]
+  (let [raw (== (bit-and hdr 3) 0)
+
+      ^{:line 35 :tag int} regeneratedSize (zero int)]
+    (switch (bit-and (>> hdr 2) 3)
+      (case [0 2]
+        (set! regeneratedSize (conv int (>> hdr 3))))
+      (case [1]
+        (when (>= off (len data))
+          (return 0 nil (.makeEOFError r off)))
+
+        (set! regeneratedSize (+ (conv int (>> hdr 4)) (<< (conv int (aget data off)) 4)))
+        (inc! off))
+      (case [3]
+        (when (>= (+ off 1) (len data))
+          (return 0 nil (.makeEOFError r off)))
+
+        (set! regeneratedSize (+ (conv int (>> hdr 4)) (<< (conv int (aget data off)) 4) (<< (conv int (aget data (+ off 1))) 12)))
+        (set! off + 2)))
+
+
+    ;; We are going to use the entire literal block in the output.
+    ;; The maximum size of one decompressed block is 128K,
+    ;; so we can't have more literals than that.
+    (when (> regeneratedSize (<< 128 10))
+      (return 0 nil (.makeError r off "literal size too large")))
+
+
+    (if raw (do
+        ;; RFC 3.1.1.3.1.2.
+        (when (> (+ off regeneratedSize) (len data))
+          (return 0 nil (.makeError r off "raw literal size too large")))
+
+        (set! outbuf (append outbuf (spread (subslice data off (+ off regeneratedSize)))))
+        (set! off + regeneratedSize))
+      (do
+        ;; RFC 3.1.1.3.1.3.
+        (when (>= off (len data))
+          (return 0 nil (.makeError r off "RLE literal missing")))
+
+        (let [rle (aget data off)]
+          (inc! off)
+          (for [i 0] (< i regeneratedSize) (inc! i)
+            (set! outbuf (append outbuf rle))))))
+
+
+
+    (return off outbuf nil)))
+
+
+
+
+^{:go/end 176} (go/method readHuffLiterals "readHuffLiterals reads and decompresses a Compressed_Literals_Block or\na Treeless_Literals_Block. RFC 3.1.1.3.1.4.\n" [^{:tag (* Reader)} r ^block data ^int off ^byte hdr ^{:tag (slice byte)} outbuf] :results [int (slice byte) error]
+  (let [
+      ^{:line 86 :tag int} regeneratedSize (zero int)
+      ^{:line 87 :tag int} compressedSize (zero int)
+      ^{:line 88 :tag int} streams (zero int)]
+
+    (switch (bit-and (>> hdr 2) 3)
+      (case [0 1]
+        (when (>= (+ off 1) (len data))
+          (return 0 nil (.makeEOFError r off)))
+
+        (set! regeneratedSize (bit-or (>> (conv int hdr) 4) (<< (bit-and (conv int (aget data off)) 0x3f) 4)))
+        (set! compressedSize (bit-or (>> (conv int (aget data off)) 6) (<< (conv int (aget data (+ off 1))) 2)))
+        (set! off + 2)
+        (if (== (bit-and (>> hdr 2) 3) 0)
+          (set! streams 1)
+
+          (set! streams 4)))
+
+      (case [2]
+        (when (>= (+ off 2) (len data))
+          (return 0 nil (.makeEOFError r off)))
+
+        (set! regeneratedSize (bit-or (>> (conv int hdr) 4) (<< (conv int (aget data off)) 4) (<< (bit-and (conv int (aget data (+ off 1))) 3) 12)))
+        (set! compressedSize (bit-or (>> (conv int (aget data (+ off 1))) 2) (<< (conv int (aget data (+ off 2))) 6)))
+        (set! off + 3)
+        (set! streams 4))
+      (case [3]
+        (when (>= (+ off 3) (len data))
+          (return 0 nil (.makeEOFError r off)))
+
+        (set! regeneratedSize (bit-or (>> (conv int hdr) 4) (<< (conv int (aget data off)) 4) (<< (bit-and (conv int (aget data (+ off 1))) 0x3f) 12)))
+        (set! compressedSize (bit-or (>> (conv int (aget data (+ off 1))) 6) (<< (conv int (aget data (+ off 2))) 2) (<< (conv int (aget data (+ off 3))) 10)))
+        (set! off + 4)
+        (set! streams 4)))
+
+
+    ;; We are going to use the entire literal block in the output.
+    ;; The maximum size of one decompressed block is 128K,
+    ;; so we can't have more literals than that.
+    (when (> regeneratedSize (<< 128 10))
+      (return 0 nil (.makeError r off "literal size too large")))
+
+
+    (let [roff (+ off compressedSize)]
+      (when (or (> roff (len data)) (< roff 0))
+        (return 0 nil (.makeEOFError r off)))
+
+
+      (let [totalStreamsSize compressedSize]
+        (if (== (bit-and hdr 3) 2) (do
+            ;; Compressed_Literals_Block.
+            ;; Read new huffman tree.
+
+            (when (< (len (.-huffmanTable r)) (<< 1 maxHuffmanBits))
+              (set! (.-huffmanTable r) (make (slice uint16) (<< 1 maxHuffmanBits))))
+
+
+            (let [(values huffmanTableBits hoff err) (.readHuff r data off (.-huffmanTable r))]
+              (when (!= err nil)
+                (return 0 nil err))
+
+              (set! (.-huffmanTableBits r) huffmanTableBits)
+
+              (when (< totalStreamsSize (- hoff off))
+                (return 0 nil (.makeError r off "Huffman table too big")))
+
+              (set! totalStreamsSize - (- hoff off))
+              (set! off hoff)))
+          (do
+            ;; Treeless_Literals_Block
+            ;; Reuse previous Huffman tree.
+            (when (== (.-huffmanTableBits r) 0)
+              (return 0 nil (.makeError r off "missing literals Huffman tree")))))
+
+
+
+        ;; Decompress compressedSize bytes of data at off using the
+        ;; Huffman tree.
+
+        (let [^error err (zero error)]
+          (if (== streams 1)
+            (set! (values outbuf err) (.readLiteralsOneStream r data off totalStreamsSize regeneratedSize outbuf))
+
+            (set! (values outbuf err) (.readLiteralsFourStreams r data off totalStreamsSize regeneratedSize outbuf)))
+
+
+          (when (!= err nil)
+            (return 0 nil err))
+
+
+          (return roff outbuf nil))))))
+
+
+
+^{:go/end 204} (go/method readLiteralsOneStream "readLiteralsOneStream reads a single stream of compressed literals.\n" [^{:tag (* Reader)} r ^block data ^int off ^int compressedSize ^int regeneratedSize ^{:tag (slice byte)} outbuf] :results [(slice byte) error]
+  ;; We let the reverse bit reader read earlier bytes,
+  ;; because the Huffman table ignores bits that it doesn't need.
+  (let [(values rbr err) (.makeReverseBitReader r data (- (+ off compressedSize) 1) (- off 2))]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [huffTable (.-huffmanTable r)
+        ^{:line 188} huffBits (conv uint32 (.-huffmanTableBits r))
+        ^{:line 189} huffMask (- (<< (conv uint32 1) huffBits) 1)]
+
+      (for [i 0] (< i regeneratedSize) (inc! i)
+        (when (not (.fetch rbr (conv uint8 huffBits)))
+          (return nil (.makeError rbr "literals Huffman stream out of bits")))
+
+
+        (let [^uint16 t (zero uint16)
+            ^{:line 197} idx (bit-and (>> (.-bits rbr) (- (.-cnt rbr) huffBits)) huffMask)]
+          (set! t (aget huffTable idx))
+          (set! outbuf (append outbuf (conv byte (>> t 8))))
+          (set! (.-cnt rbr) - (conv uint32 (bit-and t 0xff)))))
+
+
+      (return outbuf nil))))
+
+
+
+
+^{:go/end 336} (go/method readLiteralsFourStreams "readLiteralsFourStreams reads four interleaved streams of\ncompressed literals.\n" [^{:tag (* Reader)} r ^block data ^int off ^int totalStreamsSize ^int regeneratedSize ^{:tag (slice byte)} outbuf] :results [(slice byte) error]
+  ;; Read the jump table to find out where the streams are.
+  ;; RFC 3.1.1.3.1.6.
+  (when (>= (+ off 5) (len data))
+    (return nil (.makeEOFError r off)))
+
+  (when (< totalStreamsSize 6)
+    (return nil (.makeError r off "total streams size too small for jump table")))
+
+  ;; RFC 3.1.1.3.1.6.
+  ;; "The decompressed size of each stream is equal to (Regenerated_Size+3)/4,
+  ;; except for the last stream, which may be up to 3 bytes smaller,
+  ;; to reach a total decompressed size as specified in Regenerated_Size."
+  (let [regeneratedStreamSize (/ (+ regeneratedSize 3) 4)]
+    (when (< regeneratedSize (* regeneratedStreamSize 3))
+      (return nil (.makeError r off "regenerated size too small to decode streams")))
+
+
+    (let [streamSize1 (.Uint16 binary/LittleEndian (subslice data off))
+        ^{:line 227} streamSize2 (.Uint16 binary/LittleEndian (subslice data (+ off 2)))
+        ^{:line 228} streamSize3 (.Uint16 binary/LittleEndian (subslice data (+ off 4)))]
+      (set! off + 6)
+
+      (let [tot (+ (conv uint64 streamSize1) (conv uint64 streamSize2) (conv uint64 streamSize3))]
+        (when (> tot (- (conv uint64 totalStreamsSize) 6))
+          (return nil (.makeEOFError r off)))
+
+        (let [streamSize4 (- (conv uint32 totalStreamsSize) 6 (conv uint32 tot))]
+
+          (dec! off)
+          (let [off1 (+ off (conv int streamSize1))
+              ^{:line 239} start1 (+ off 1)
+
+              ^{:line 241} off2 (+ off1 (conv int streamSize2))
+              ^{:line 242} start2 (+ off1 1)
+
+              ^{:line 244} off3 (+ off2 (conv int streamSize3))
+              ^{:line 245} start3 (+ off2 1)
+
+              ^{:line 247} off4 (+ off3 (conv int streamSize4))
+              ^{:line 248} start4 (+ off3 1)
+
+              ;; We let the reverse bit readers read earlier bytes,
+              ;; because the Huffman tables ignore bits that they don't need.
+
+              (values rbr1 err) (.makeReverseBitReader r data off1 (- start1 2))]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (let [(values rbr2 ^:assign err) (.makeReverseBitReader r data off2 (- start2 2))]
+              (when (!= err nil)
+                (return nil err))
+
+
+              (let [(values rbr3 ^:assign err) (.makeReverseBitReader r data off3 (- start3 2))]
+                (when (!= err nil)
+                  (return nil err))
+
+
+                (let [(values rbr4 ^:assign err) (.makeReverseBitReader r data off4 (- start4 2))]
+                  (when (!= err nil)
+                    (return nil err))
+
+
+                  (let [out1 (len outbuf)
+                      ^{:line 274} out2 (+ out1 regeneratedStreamSize)
+                      ^{:line 275} out3 (+ out2 regeneratedStreamSize)
+                      ^{:line 276} out4 (+ out3 regeneratedStreamSize)
+
+                      ^{:line 278} regeneratedStreamSize4 (- regeneratedSize (* regeneratedStreamSize 3))]
+
+                    (set! outbuf (append outbuf (spread (make (slice byte) regeneratedSize))))
+
+                    (let [huffTable (.-huffmanTable r)
+                        ^{:line 283} huffBits (conv uint32 (.-huffmanTableBits r))
+                        ^{:line 284} huffMask (- (<< (conv uint32 1) huffBits) 1)]
+
+                      (for [i 0] (< i regeneratedStreamSize) (inc! i)
+                        (let [use4 (< i regeneratedStreamSize4)
+
+                            ^{:line 289} fetchHuff ^{:go/end 295} (fn [^{:tag (* reverseBitReader)} rbr] :results [uint16 error]
+                              (when (not (.fetch rbr (conv uint8 huffBits)))
+                                (return 0 (.makeError rbr "literals Huffman stream out of bits")))
+
+                              (let [idx (bit-and (>> (.-bits rbr) (- (.-cnt rbr) huffBits)) huffMask)]
+                                (return (aget huffTable idx) nil)))
+
+
+                            (values t1 err) (fetchHuff (addr rbr1))]
+                          (when (!= err nil)
+                            (return nil err))
+
+
+                          (let [(values t2 ^:assign err) (fetchHuff (addr rbr2))]
+                            (when (!= err nil)
+                              (return nil err))
+
+
+                            (let [(values t3 ^:assign err) (fetchHuff (addr rbr3))]
+                              (when (!= err nil)
+                                (return nil err))
+
+
+                              (when use4
+                                (let [(values t4 err) (fetchHuff (addr rbr4))]
+                                  (when (!= err nil)
+                                    (return nil err))
+
+                                  (aset outbuf out4 (conv byte (>> t4 8)))
+                                  (inc! out4)
+                                  (set! (.-cnt rbr4) - (conv uint32 (bit-and t4 0xff)))))
+
+
+                              (aset outbuf out1 (conv byte (>> t1 8)))
+                              (inc! out1)
+                              (set! (.-cnt rbr1) - (conv uint32 (bit-and t1 0xff)))
+
+                              (aset outbuf out2 (conv byte (>> t2 8)))
+                              (inc! out2)
+                              (set! (.-cnt rbr2) - (conv uint32 (bit-and t2 0xff)))
+
+                              (aset outbuf out3 (conv byte (>> t3 8)))
+                              (inc! out3)
+                              (set! (.-cnt rbr3) - (conv uint32 (bit-and t3 0xff)))))))
+
+
+                      (return outbuf nil))))))))))))

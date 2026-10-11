@@ -1,0 +1,409 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.token) (go/file "tree.go" :imports [
+
+    ;; tree is a self-balancing AVL tree; see
+    ;; Lewis & Denenberg, Data Structures and Their Algorithms.
+    ;;
+    ;; An AVL tree is a binary tree in which the difference between the
+    ;; heights of a node's two subtrees--the node's "balance factor"--is
+    ;; at most one. It is more strictly balanced than a red/black tree,
+    ;; and thus favors lookups at the expense of updates, which is the
+    ;; appropriate trade-off for FileSet.
+    ;;
+    ;; Insertion at a node may cause its ancestors' balance factors to
+    ;; temporarily reach ±2, requiring rebalancing of each such ancestor
+    ;; by a rotation.
+    ;;
+    ;; Each key is the pos-end range of a single File.
+    ;; All Files in the tree must have disjoint ranges.
+    ;;
+    ;; The implementation is simplified from Russ Cox's github.com/rsc/omap.
+
+
+    ^{:line 26} [fmt "fmt"]
+    ^{:line 27} [iter "iter"]])
+
+
+
+
+
+
+
+(go/type tree "A tree is a tree-based ordered map:\neach value is a *File, keyed by its Pos range.\nAll map entries cover disjoint ranges.\n\nThe zero value of tree is an empty map ready to use.\n" (struct
+    ^{:line 36 :tag (* node)} root))
+
+
+(go/type node (struct
+
+    ^{:line 41 :tag (* node) :doc "We use the notation (parent left right) in many comments.\n"} parent
+    ^{:line 42 :tag (* node)} left
+    ^{:line 43 :tag (* node)} right
+    ^{:line 44 :tag (* File)} file
+    ^{:line 45 :tag key} key ; = file.key(), but improves locality (25% faster)
+    ^{:line 46 :tag int32} balance ; at most ±2
+    ^{:line 47 :tag int32} height))
+
+
+
+(go/type key "A key represents the Pos range of a File.\n" (struct ^int start ^int end))
+
+^{:go/end 55} (go/method key ^key [^{:tag (* File)} f]
+  (lit key (.-base f) (+ (.-base f) (.-size f))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 73]] :go/end 74} (go/func compareKey "compareKey reports whether x is before y (-1),\nafter y (+1), or overlapping y (0).\nThis is a total order so long as all\nfiles in the tree have disjoint ranges.\n\nAll files are separated by at least one unit.\nThis allows us to use strict < comparisons.\nUse key{p, p} to search for a zero-width position\neven at the start or end of a file.\n" ^int [^key x ^key y]
+  (switch
+    (case [(< (.-end x) (.-start y))]
+      (return -1))
+    (case [(< (.-end y) (.-start x))]
+      (return (+ 1))))
+
+  0)
+
+
+
+
+^{:go/end 91} (go/method check "check asserts that each node's height, subtree, and parent link is\ncorrect.\n" [^{:tag (* node)} n ^{:tag (* node)} parent]
+  (let [^:const ^{:val false} debugging false]
+    (when debugging
+      (when (== n nil)
+        (return))
+
+      (when (!= (.-parent n) parent)
+        (panic "bad parent"))
+
+      (.check (.-left n) n)
+      (.check (.-right n) n)
+      (.checkBalance n))))
+
+
+
+^{:go/end 106} (go/method checkBalance [^{:tag (* node)} n]
+  (let [(values lheight rheight) (values (.safeHeight (.-left n)) (.safeHeight (.-right n)))
+      ^{:line 95} balance (- rheight lheight)]
+    (when (!= balance (.-balance n))
+      (panic "bad node.balance"))
+
+    (when (not (and (<= -2 balance) (<= balance (+ 2))))
+      (panic (fmt/Sprintf "node.balance out of range: %d" balance)))
+
+    (let [h (+ 1 (max lheight rheight))]
+      (when (!= h (.-height n))
+        (panic "bad node.height")))))
+
+
+
+
+
+
+
+^{:go/end 125} (go/method locate "locate returns a pointer to the variable that holds the node\nidentified by k, along with its parent, if any. If the key is not\npresent, it returns a pointer to the node where the key should be\ninserted by a subsequent call to [tree.set].\n" [^{:tag (* tree)} t ^key k] :results [^{:tag (* (* node))} pos ^{:tag (* node)} parent]
+  (let [(values ^:assign pos x) (values (addr (.-root t)) (.-root t))]
+    (while (!= x nil)
+      (let [sign (compareKey k (.-key x))]
+        (cond (< sign 0)
+          (set! (values pos x parent) (values (addr (.-left x)) (.-left x) x))
+          (> sign 0)
+          (set! (values pos x parent) (values (addr (.-right x)) (.-right x) x)) :else
+
+          (break))))
+
+
+    (return pos parent)))
+
+
+
+
+
+
+^{:go/end 152} (go/method all "all returns an iterator over the tree t.\nIf t is modified during the iteration,\nsome files may not be visited.\nNo file will be visited multiple times.\n" ^{:tag (iter/Seq (* File))} [^{:tag (* tree)} t]
+  ^{:go/end 151} (fn [^{:tag (func [(* File)] [bool])} yield]
+    (when (== t nil)
+      (return))
+
+    (let [x (.-root t)]
+      (when (!= x nil)
+        (while (!= (.-left x) nil)
+          (set! x (.-left x))))
+
+
+      (while (and (!= x nil) (yield (.-file x)))
+        (if (>= (.-height x) 0)
+          ;; still in tree
+          (set! x (.next x))
+
+          ;; deleted
+          (set! x (.nextAfter t (.locate t (.-key x)))))))))
+
+
+
+
+
+
+
+^{:go/end 167} (go/method nextAfter "nextAfter returns the node in the key sequence following\n(pos, parent), a result pair from [tree.locate].\n" ^{:tag (* node)} [^{:tag (* tree)} t ^{:tag (* (* node))} pos ^{:tag (* node)} parent]
+  (switch
+    (case [(!= @pos nil)]
+      (return (.next @pos)))
+    (case [(== parent nil)]
+      (return nil))
+    (case [(== pos (addr (.-left parent)))]
+      (return parent))
+    (default
+      (return (.next parent)))))
+
+
+
+^{:go/end 181} (go/method next ^{:tag (* node)} [^{:tag (* node)} x]
+  (when (== (.-right x) nil)
+    (while (and (!= (.-parent x) nil) (== (.-right (.-parent x)) x))
+      (set! x (.-parent x)))
+
+    (return (.-parent x)))
+
+  (set! x (.-right x))
+  (while (!= (.-left x) nil)
+    (set! x (.-left x)))
+
+  ^{:line 180} x)
+
+
+^{:go/end 188} (go/method setRoot [^{:tag (* tree)} t ^{:tag (* node)} x]
+  (set! (.-root t) x)
+  (when (!= x nil)
+    (set! (.-parent x) nil)))
+
+
+
+^{:go/end 195} (go/method setLeft [^{:tag (* node)} x ^{:tag (* node)} y]
+  (set! (.-left x) y)
+  (when (!= y nil)
+    (set! (.-parent y) x)))
+
+
+
+^{:go/end 202} (go/method setRight [^{:tag (* node)} x ^{:tag (* node)} y]
+  (set! (.-right x) y)
+  (when (!= y nil)
+    (set! (.-parent y) x)))
+
+
+
+^{:go/end 209} (go/method safeHeight ^int32 [^{:tag (* node)} n]
+  (when (== n nil)
+    (return -1))
+
+  (.-height n))
+
+
+^{:go/end 215} (go/method update [^{:tag (* node)} n]
+  (let [(values lheight rheight) (values (.safeHeight (.-left n)) (.safeHeight (.-right n)))]
+    (set! (.-height n) (+ (max lheight rheight) 1))
+    (set! (.-balance n) (- rheight lheight))))
+
+
+^{:go/end 231} (go/method replaceChild [^{:tag (* tree)} t ^{:tag (* node)} parent ^{:tag (* node)} old ^{:tag (* node)} new]
+  (switch
+    (case [(== parent nil)]
+      (when (!= (.-root t) old)
+        (panic "corrupt tree"))
+
+      (.setRoot t new))
+    (case [(== (.-left parent) old)]
+      (.setLeft parent new))
+    (case [(== (.-right parent) old)]
+      (.setRight parent new))
+    (default
+      (panic "corrupt tree"))))
+
+
+
+
+
+
+
+
+
+^{:go/end 264} (go/method rebalanceUp "rebalanceUp visits each excessively unbalanced ancestor\nof x, restoring balance by rotating it.\n\nx is a node that has just been mutated, and so the height and\nbalance of x and its ancestors may be stale, but the children of x\nmust be in a valid state.\n" [^{:tag (* tree)} t ^{:tag (* node)} x]
+  (while (!= x nil)
+    (let [h (.-height x)]
+      (.update x)
+      (switch (.-balance x)
+        (case [-2]
+          (when (== (.-balance (.-left x)) 1)
+            (.rotateLeft t (.-left x)))
+
+          (set! x (.rotateRight t x)))
+
+        (case [(+ 2)]
+          (when (== (.-balance (.-right x)) -1)
+            (.rotateRight t (.-right x)))
+
+          (set! x (.rotateLeft t x))))
+
+      (when (== (.-height x) h)
+        ;; x's height has not changed, so the height
+        ;; and balance of its ancestors have not changed;
+        ;; no further rebalancing is required.
+        (return))
+
+      (set! x (.-parent x)))))
+
+
+
+
+
+^{:go/end 284} (go/method rotateRight "rotateRight rotates the subtree rooted at node y.\nturning (y (x a b) c) into (x a (y b c)).\n" ^{:tag (* node)} [^{:tag (* tree)} t ^{:tag (* node)} y]
+  ;; p -> (y (x a b) c)
+  (let [p (.-parent y)
+      ^{:line 271} x (.-left y)
+      ^{:line 272} b (.-right x)]
+
+    (.checkBalance x)
+    (.checkBalance y)
+
+    (.setRight x y)
+    (.setLeft y b)
+    (.replaceChild t p y x)
+
+    (.update y)
+    (.update x)
+    ^{:line 283} x))
+
+
+
+
+^{:go/end 304} (go/method rotateLeft "rotateLeft rotates the subtree rooted at node x.\nturning (x a (y b c)) into (y (x a b) c).\n" ^{:tag (* node)} [^{:tag (* tree)} t ^{:tag (* node)} x]
+  ;; p -> (x a (y b c))
+  (let [p (.-parent x)
+      ^{:line 291} y (.-right x)
+      ^{:line 292} b (.-left y)]
+
+    (.checkBalance x)
+    (.checkBalance y)
+
+    (.setLeft y x)
+    (.setRight x b)
+    (.replaceChild t p x y)
+
+    (.update x)
+    (.update y)
+    ^{:line 303} y))
+
+
+
+
+^{:go/end 319} (go/method add "add inserts file into the tree, if not present.\nIt panics if file overlaps with another.\n" [^{:tag (* tree)} t ^{:tag (* File)} file]
+  (let [(values pos parent) (.locate t (.key file))]
+    (when (== @pos nil)
+      (.set t file pos parent) ; missing; insert
+      (return))
+
+    (when [prev (.-file @pos)] (!= prev file)
+      (panic (fmt/Sprintf "file %s (%d-%d) overlaps with file %s (%d-%d)"
+          (.Name prev) (.Base prev) (.End prev)
+          (.Name file) (.Base file) (.End file))))))
+
+
+
+
+
+^{:go/end 337} (go/method set "set updates the existing node at (pos, parent) if present, or\ninserts a new node if not, so that it refers to file.\n" [^{:tag (* tree)} t ^{:tag (* File)} file ^{:tag (* (* node))} pos ^{:tag (* node)} parent]
+  (when [x @pos] (!= x nil)
+    ;; This code path isn't currently needed
+    ;; because FileSet never updates an existing entry.
+    ;; Remove this assertion if things change.
+    (when true ; defeat vet's unreachable pass
+      (panic "unreachable according to current FileSet requirements"))
+
+    (set! (.-file x) file)
+    (return))
+
+  (let [x (addr (lit node :file file :key (.key file) :parent parent :height -1))]
+    (set! @pos x)
+    (.rebalanceUp t x)))
+
+
+
+^{:go/end 375} (go/method delete "delete deletes the node at pos.\n" [^{:tag (* tree)} t ^{:tag (* (* node))} pos]
+  (.check (.-root t) nil)
+
+  (let [x @pos]
+    (switch
+      (case [(== x nil)]
+        ;; This code path isn't currently needed because FileSet
+        ;; only calls delete after a positive locate.
+        ;; Remove this assertion if things change.
+        (when true ; defeat vet's unreachable pass
+          (panic "unreachable according to current FileSet requirements"))
+
+        (return))
+
+      (case [(== (.-left x) nil)]
+        (when [(set! @pos (.-right x))] (!= @pos nil)
+          (set! (.-parent @pos) (.-parent x)))
+
+        (.rebalanceUp t (.-parent x)))
+
+      (case [(== (.-right x) nil)]
+        (set! @pos (.-left x))
+        (set! (.-parent (.-left x)) (.-parent x))
+        (.rebalanceUp t (.-parent x)))
+
+      (default
+        (.deleteSwap t pos)))
+
+
+    (set! (.-balance x) -100)
+    (set! (.-parent x) nil)
+    (set! (.-left x) nil)
+    (set! (.-right x) nil)
+    (set! (.-height x) -1)
+    (.check (.-root t) nil)))
+
+
+
+
+^{:go/end 395} (go/method deleteSwap "deleteSwap deletes a node that has two children by replacing\nit by its in-order successor, then triggers a rebalance.\n" [^{:tag (* tree)} t ^{:tag (* (* node))} pos]
+  (let [x @pos
+      ^{:line 381} z (.deleteMin t (addr (.-right x)))]
+
+    (set! @pos z)
+    (let [unbalanced (.-parent z)] ; lowest potentially unbalanced node
+      (when (== unbalanced x)
+        (set! unbalanced z)) ; (x a (z nil b)) -> (z a b)
+
+      (set! (.-parent z) (.-parent x))
+      (set! (.-height z) (.-height x))
+      (set! (.-balance z) (.-balance x))
+      (.setLeft z (.-left x))
+      (.setRight z (.-right x))
+
+      (.rebalanceUp t unbalanced))))
+
+
+
+
+
+^{:go/end 410} (go/method deleteMin "deleteMin updates the subtree rooted at *zpos to delete its minimum\n(leftmost) element, which may be *zpos itself. It returns the\ndeleted node.\n" [^{:tag (* tree)} t ^{:tag (* (* node))} zpos] :results [^{:tag (* node)} z]
+  (while (!= (.-left @zpos) nil)
+    (set! zpos (addr (.-left @zpos))))
+
+  (set! z @zpos)
+  (set! @zpos (.-right z))
+  (when (!= @zpos nil)
+    (set! (.-parent @zpos) (.-parent z)))
+
+  ^{:line 409} z)

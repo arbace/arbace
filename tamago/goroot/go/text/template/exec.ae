@@ -1,0 +1,1133 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.text.template) (go/file "exec.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [fmtsort "internal/fmtsort"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [reflect "reflect"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [strings "strings"]
+    ^{:line 15} [parse "text/template/parse"]])
+
+
+
+
+
+
+(go/var ^{:doc "maxExecDepth specifies the maximum stack depth of templates within\ntemplates. This limit is only practically reached by accidentally\nrecursive template invocations. This limit allows us to return\nan error instead of triggering a stack overflow.\n"} maxExecDepth (initMaxExecDepth))
+
+^{:go/breaks [[4 28]] :go/end 29} (go/func initMaxExecDepth ^int []
+  (when (== runtime/GOARCH "wasm")
+    (return 1000))
+
+  100000)
+
+
+
+
+
+(go/type state "state represents the state of an execution. It's not part of the\ntemplate so that multiple executions of the same template\ncan execute in parallel.\n" (struct
+    ^{:line 35 :tag (* Template)} tmpl
+    ^{:line 36 :tag io/Writer} wr
+    ^{:line 37 :tag parse/Node} node ; current node, for errors
+    ^{:line 38 :tag (slice variable)} vars ; push-down stack of variable values.
+    ^{:line 39 :tag int} depth)) ; the height of the stack of executing templates.
+
+
+
+(go/type variable "variable holds the dynamic value of a variable such as $, $x etc.\n" (struct
+    ^{:line 44 :tag string} name
+    ^{:line 45 :tag reflect/Value} value))
+
+
+
+^{:go/end 51} (go/method push "push pushes a new variable on the stack.\n" [^{:tag (* state)} s ^string name ^reflect/Value value]
+  (set! (.-vars s) (append (.-vars s) (lit variable name value))))
+
+
+
+^{:go/end 56} (go/method mark "mark returns the length of the variable stack.\n" ^int [^{:tag (* state)} s]
+  (len (.-vars s)))
+
+
+
+^{:go/end 61} (go/method pop "pop pops the variable stack up to the mark.\n" [^{:tag (* state)} s ^int mark]
+  (set! (.-vars s) (subslice (.-vars s) 0 mark)))
+
+
+
+
+^{:go/end 73} (go/method setVar "setVar overwrites the last declared variable with the given name.\nUsed by variable assignments.\n" [^{:tag (* state)} s ^string name ^reflect/Value value]
+  (for [i (- (.mark s) 1)] (>= i 0) (dec! i)
+    (when (== (.-name (aget (.-vars s) i)) name)
+      (set! (.-value (aget (.-vars s) i)) value)
+      (return)))
+
+
+  (.errorf s "undefined variable: %s" name))
+
+
+
+^{:go/end 78} (go/method setTopVar "setTopVar overwrites the top-nth variable on the stack. Used by range iterations.\n" [^{:tag (* state)} s ^int n ^reflect/Value value]
+  (set! (.-value (aget (.-vars s) (- (len (.-vars s)) n))) value))
+
+
+
+^{:go/end 89} (go/method varValue "varValue returns the value of the named variable.\n" ^reflect/Value [^{:tag (* state)} s ^string name]
+  (for [i (- (.mark s) 1)] (>= i 0) (dec! i)
+    (when (== (.-name (aget (.-vars s) i)) name)
+      (return (.-value (aget (.-vars s) i)))))
+
+
+  (.errorf s "undefined variable: %s" name)
+  ^{:line 88} zero)
+
+
+(go/var ^reflect/Value zero)
+
+(go/type missingValType (struct))
+
+(go/var missingVal (reflect/ValueOf (lit missingValType)))
+
+(go/var missingValReflectType ((inst reflect/TypeFor missingValType)))
+
+^{:go/end 101} (go/func isMissing ^bool [^reflect/Value v]
+  (and (.IsValid v) (== (.Type v) missingValReflectType)))
+
+
+
+^{:go/end 106} (go/method at "at marks the state to be on node n, for error reporting.\n" [^{:tag (* state)} s ^parse/Node node]
+  (set! (.-node s) node))
+
+
+
+
+^{:go/end 112} (go/func doublePercent "doublePercent returns the string with %'s replaced by %%, if necessary,\nso it can be used safely inside a Printf format string.\n" ^string [^string str]
+  (strings/ReplaceAll str "%" "%%"))
+
+
+;; TODO: It would be nice if ExecError was more broken down, but
+;; the way ErrorContext embeds the template name makes the
+;; processing too clumsy.
+
+
+
+
+(go/type ExecError "ExecError is the custom error type returned when Execute has an\nerror evaluating its template. (If a write error occurs, the actual\nerror is returned; it will not be of type ExecError.)\n" (struct
+    ^{:line 122 :tag string} Name ; Name of template.
+    ^{:line 123 :tag error} Err)) ; Pre-formatted error.
+
+
+^{:go/end 128} (go/method Error ^string [^ExecError e]
+  (.Error (.-Err e)))
+
+
+^{:go/end 132} (go/method Unwrap ^error [^ExecError e]
+  (.-Err e))
+
+
+
+^{:go/end 147} (go/method errorf "errorf records an ExecError and terminates processing.\n" [^{:tag (* state)} s ^string format & ^{:tag (slice any)} args]
+  (let [name (doublePercent (.Name (.-tmpl s)))]
+    (if (== (.-node s) nil)
+      (set! format (fmt/Sprintf "template: %s: %s" name format))
+
+      (let [(values location context) ^{:go/via [Tree]} (.ErrorContext (.-tmpl s) (.-node s))]
+        (set! format (fmt/Sprintf "template: %s: executing %q at <%s>: %s" location name (doublePercent context) format))))
+
+    (panic ^{:go/breaks [2 4]} (lit ExecError
+        :Name (.Name (.-tmpl s))
+        :Err (fmt/Errorf format (spread args))))))
+
+
+
+
+
+
+
+(go/type writeError "writeError is the wrapper type used internally when Execute has an\nerror writing to its output. We strip the wrapper in errRecover.\nNote that this is not an implementation of error, so it cannot escape\nfrom the package as an error value.\n" (struct
+    ^{:line 154 :tag error} Err)) ; Original error.
+
+
+^{:go/end 161} (go/method writeError [^{:tag (* state)} s ^error err]
+  (panic ^{:go/breaks [2]} (lit writeError
+      :Err err)))
+
+
+
+
+
+^{:go/end 179} (go/func errRecover "errRecover is the handler that turns panics into returns from the top\nlevel of Parse.\n" [^{:tag (* error)} errp]
+  (let [e (recover)]
+    (when (!= e nil)
+      (type-switch [err e]
+        (case [runtime/Error]
+          (panic e))
+        (case [writeError]
+          (set! @errp (.-Err err))) ; Strip the wrapper.
+        (case [ExecError]
+          (set! @errp err)) ; Keep the wrapper.
+        (default
+          (panic e))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 194} (go/method ExecuteTemplate "ExecuteTemplate applies the template associated with t that has the given name\nto the specified data object and writes the output to wr.\nIf an error occurs executing the template or writing its output,\nexecution stops, but partial results may already have been written to\nthe output writer.\nA template may be executed safely in parallel, although if parallel\nexecutions share a Writer the output may be interleaved.\n" ^error [^{:tag (* Template)} t ^io/Writer wr ^string name ^any data]
+  (let [tmpl (.Lookup t name)]
+    (when (== tmpl nil)
+      (return (fmt/Errorf "template: no template %q associated with template %q" name (.-name t))))
+
+    (.Execute tmpl wr data)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 208} (go/method Execute "Execute applies a parsed template to the specified data object,\nand writes the output to wr.\nIf an error occurs executing the template or writing its output,\nexecution stops, but partial results may already have been written to\nthe output writer.\nA template may be executed safely in parallel, although if parallel\nexecutions share a Writer the output may be interleaved.\n\nIf data is a [reflect.Value], the template applies to the concrete\nvalue that the reflect.Value holds, as in [fmt.Print].\n" ^error [^{:tag (* Template)} t ^io/Writer wr ^any data]
+  (.execute t wr data))
+
+
+^{:go/end 226} (go/method execute [^{:tag (* Template)} t ^io/Writer wr ^any data] :results [^error err]
+  (defer (errRecover (addr err)))
+  (let [(values value ok) (assert reflect/Value data)]
+    (when (not ok)
+      (set! value (reflect/ValueOf data)))
+
+    (let [state (addr ^{:go/breaks [2 4 6]} (lit state
+            :tmpl t
+            :wr wr
+            :vars (lit (slice variable) (lit _ "$" value))))]
+
+      (when (or (== (.-Tree t) nil) (== ^{:go/via [Tree]} (.-Root t) nil))
+        (.errorf state "%q is an incomplete or empty template" (.Name t)))
+
+      (.walk state value ^{:go/via [Tree]} (.-Root t))
+      (return))))
+
+
+
+
+
+
+^{:go/end 251} (go/method DefinedTemplates "DefinedTemplates returns a string listing the defined templates,\nprefixed by the string \"; defined templates are: \". If there are none,\nit returns the empty string. For generating an error message here\nand in [html/template].\n" ^string [^{:tag (* Template)} t]
+  (when (== (.-common t) nil)
+    (return ""))
+
+  (let [^strings/Builder b (zero strings/Builder)]
+    (.RLock ^{:go/via [common]} (.-muTmpl t))
+    (defer (.RUnlock ^{:go/via [common]} (.-muTmpl t)))
+    (range [name tmpl ^{:go/via [common]} (.-tmpl t)]
+      (when (or (== (.-Tree tmpl) nil) (== ^{:go/via [Tree]} (.-Root tmpl) nil))
+        (continue))
+
+      (if (== (.Len b) 0)
+        (.WriteString b "; defined templates are: ")
+
+        (.WriteString b ", "))
+
+      (fmt/Fprintf (addr b) "%q" name))
+
+    (.String b)))
+
+
+
+(go/var "Sentinel errors for use with panic to signal early exits from range loops.\n"
+  ^{:line 255} [walkBreak (errors/New "break")]
+  ^{:line 256} [walkContinue (errors/New "continue")])
+
+
+
+
+^{:go/end 295} (go/method walk "Walk functions step through the major pieces of the template structure,\ngenerating output as they go.\n" [^{:tag (* state)} s ^reflect/Value dot ^parse/Node node]
+  (.at s node)
+  (type-switch [node node]
+    (case [(* parse/ActionNode)]
+      ;; Do not pop variables so they persist until next end.
+      ;; Also, if the action declares variables, don't print the result.
+      (let [val (.evalPipeline s dot (.-Pipe node))]
+        (when (== (len (.-Decl (.-Pipe node))) 0)
+          (.printValue s node val))))
+
+    (case [(* parse/BreakNode)]
+      (panic walkBreak))
+    (case [(* parse/CommentNode)])
+    (case [(* parse/ContinueNode)]
+      (panic walkContinue))
+    (case [(* parse/IfNode)]
+      (.walkIfOrWith s parse/NodeIf dot ^{:go/via [BranchNode]} (.-Pipe node) ^{:go/via [BranchNode]} (.-List node) ^{:go/via [BranchNode]} (.-ElseList node)))
+    (case [(* parse/ListNode)]
+      (range [_ node (.-Nodes node)]
+        (.walk s dot node)))
+
+    (case [(* parse/RangeNode)]
+      (.walkRange s dot node))
+    (case [(* parse/TemplateNode)]
+      (.walkTemplate s dot node))
+    (case [(* parse/TextNode)]
+      (when [(values _ err) (.Write (.-wr s) (.-Text node))] (!= err nil)
+        (.writeError s err)))
+
+    (case [(* parse/WithNode)]
+      (.walkIfOrWith s parse/NodeWith dot ^{:go/via [BranchNode]} (.-Pipe node) ^{:go/via [BranchNode]} (.-List node) ^{:go/via [BranchNode]} (.-ElseList node)))
+    (default
+      (.errorf s "unknown node: %s" node))))
+
+
+
+
+
+^{:go/end 315} (go/method walkIfOrWith "walkIfOrWith walks an 'if' or 'with' node. The two control structures\nare identical in behavior except that 'with' sets dot.\n" [^{:tag (* state)} s ^parse/NodeType typ ^reflect/Value dot ^{:tag (* parse/PipeNode)} pipe ^{:tag (* parse/ListNode)} list ^{:tag (* parse/ListNode)} elseList]
+  (defer (.pop s (.mark s)))
+  (let [val (.evalPipeline s dot pipe)
+      (values truth ok) (isTrue (indirectInterface val))]
+    (when (not ok)
+      (.errorf s "if/with can't use %v" val))
+
+    (cond truth
+      (if (== typ parse/NodeWith)
+        (.walk s val list)
+
+        (.walk s dot list))
+
+      (!= elseList nil)
+      (.walk s dot elseList))))
+
+
+
+
+
+
+^{:go/end 322} (go/func IsTrue "IsTrue reports whether the value is 'true', in the sense of not the zero of its type,\nand whether the value has a meaningful truth value. This is the definition of\ntruth used by if and other such actions.\n" [^any val] :results [^bool truth ^bool ok]
+  (isTrue (reflect/ValueOf val)))
+
+
+^{:go/end 350} (go/func isTrue [^reflect/Value val] :results [^bool truth ^bool ok]
+  (when (not (.IsValid val))
+    ;; Something like var x interface{}, never set. It's a form of nil.
+    (return false true))
+
+  (switch (.Kind val)
+    (case [reflect/Array reflect/Map reflect/Slice reflect/String]
+      (set! truth (> (.Len val) 0)))
+    (case [reflect/Bool]
+      (set! truth (.Bool val)))
+    (case [reflect/Complex64 reflect/Complex128]
+      (set! truth (!= (.Complex val) 0)))
+    (case [reflect/Chan reflect/Func reflect/Pointer reflect/UnsafePointer reflect/Interface]
+      (set! truth (not (.IsNil val))))
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (set! truth (!= (.Int val) 0)))
+    (case [reflect/Float32 reflect/Float64]
+      (set! truth (!= (.Float val) 0)))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (set! truth (!= (.Uint val) 0)))
+    (case [reflect/Struct]
+      (set! truth true)) ; Struct values are always true.
+    (default
+      (return)))
+
+  (return truth true))
+
+
+^{:go/end 496} (go/method walkRange [^{:tag (* state)} s ^reflect/Value dot ^{:tag (* parse/RangeNode)} r]
+  (.at s r)
+  (defer (^{:go/end 358} (fn []
+        (when [r (recover)] (and (!= r nil) (!= r walkBreak))
+          (panic r)))))
+
+
+  (defer (.pop s (.mark s)))
+  (let [(values val _) (indirect (.evalPipeline s dot ^{:go/via [BranchNode]} (.-Pipe r)))
+      ;; mark top of stack before any variables in the body are pushed.
+      ^{:line 362} mark (.mark s)
+      ^{:line 363} oneIteration ^{:go/end 396} (fn [^reflect/Value index ^reflect/Value elem]
+        (when (> (len (.-Decl ^{:go/via [BranchNode]} (.-Pipe r))) 0)
+          (if (.-IsAssign ^{:go/via [BranchNode]} (.-Pipe r))
+            ;; With two variables, index comes first.
+            ;; With one, we use the element.
+            (if (> (len (.-Decl ^{:go/via [BranchNode]} (.-Pipe r))) 1)
+              (.setVar s (aget (.-Ident (aget (.-Decl ^{:go/via [BranchNode]} (.-Pipe r)) 0)) 0) index)
+
+              (.setVar s (aget (.-Ident (aget (.-Decl ^{:go/via [BranchNode]} (.-Pipe r)) 0)) 0) elem))
+
+
+            ;; Set top var (lexically the second if there
+            ;; are two) to the element.
+            (.setTopVar s 1 elem)))
+
+
+        (when (> (len (.-Decl ^{:go/via [BranchNode]} (.-Pipe r))) 1)
+          (if (.-IsAssign ^{:go/via [BranchNode]} (.-Pipe r))
+            (.setVar s (aget (.-Ident (aget (.-Decl ^{:go/via [BranchNode]} (.-Pipe r)) 1)) 0) elem)
+
+            ;; Set next var (lexically the first if there
+            ;; are two) to the index.
+            (.setTopVar s 2 index)))
+
+
+        (defer (.pop s mark))
+        (defer (^{:go/end 394} (fn []
+              ;; Consume panic(walkContinue)
+              (when [r (recover)] (and (!= r nil) (!= r walkContinue))
+                (panic r)))))
+
+
+        (.walk s elem ^{:go/via [BranchNode]} (.-List r)))]
+
+    (switch (.Kind val)
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64
+          ^{:line 399} reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+        (when (> (len (.-Decl ^{:go/via [BranchNode]} (.-Pipe r))) 1)
+          (.errorf s "can't use %v to iterate over more than one variable" val)
+          (break))
+
+        (let [run false]
+          (range [v (.Seq val)]
+            (set! run true)
+            ;; Pass element as second value, as we do for channels.
+            (oneIteration (lit reflect/Value) v))
+
+          (when (not run)
+            (break))
+
+          (return)))
+      (case [reflect/Array reflect/Slice]
+        (when (== (.Len val) 0)
+          (break))
+
+        (for [i 0] (< i (.Len val)) (inc! i)
+          (oneIteration (reflect/ValueOf i) (.Index val i)))
+
+        (return))
+      (case [reflect/Map]
+        (when (== (.Len val) 0)
+          (break))
+
+        (let [om (fmtsort/Sort val)]
+          (range [_ m om]
+            (oneIteration (.-Key m) (.-Value m)))
+
+          (return)))
+      (case [reflect/Chan]
+        (when (.IsNil val)
+          (break))
+
+        (when (== (.ChanDir (.Type val)) reflect/SendDir)
+          (.errorf s "range over send-only channel %v" val)
+          (break))
+
+        (let [i 0]
+          (for [] _ (inc! i)
+            (let [(values elem ok) (.Recv val)]
+              (when (not ok)
+                (break))
+
+              (oneIteration (reflect/ValueOf i) elem)))
+
+          (when (== i 0)
+            (break))
+
+          (return)))
+      (case [reflect/Invalid]
+        (break)) ; An invalid value is likely a nil map, etc. and acts like an empty map.
+      (case [reflect/Func]
+        (when (.CanSeq (.Type val))
+          (when (> (len (.-Decl ^{:go/via [BranchNode]} (.-Pipe r))) 1)
+            (.errorf s "can't use %v iterate over more than one variable" val)
+            (break))
+
+          (let [run false]
+            (range [v (.Seq val)]
+              (set! run true)
+              ;; Pass element as second value,
+              ;; as we do for channels.
+              (oneIteration (lit reflect/Value) v))
+
+            (when (not run)
+              (break))
+
+            (return)))
+
+        (when (.CanSeq2 (.Type val))
+          (let [run false]
+            (range [i v (.Seq2 val)]
+              (set! run true)
+              (if (> (len (.-Decl ^{:go/via [BranchNode]} (.-Pipe r))) 1)
+                (oneIteration i v)
+
+                ;; If there is only one range variable,
+                ;; oneIteration will use the
+                ;; second value.
+                (oneIteration (lit reflect/Value) i)))
+
+
+            (when (not run)
+              (break))
+
+            (return)))
+
+        (fallthrough))
+      (default
+        (.errorf s "range can't iterate over %v" val)))
+
+    (when (!= ^{:go/via [BranchNode]} (.-ElseList r) nil)
+      (.walk s dot ^{:go/via [BranchNode]} (.-ElseList r)))))
+
+
+
+^{:go/end 515} (go/method walkTemplate [^{:tag (* state)} s ^reflect/Value dot ^{:tag (* parse/TemplateNode)} t]
+  (.at s t)
+  (let [tmpl (.Lookup (.-tmpl s) (.-Name t))]
+    (when (== tmpl nil)
+      (.errorf s "template %q not defined" (.-Name t)))
+
+    (when (== (.-depth s) maxExecDepth)
+      (.errorf s "exceeded maximum template depth (%v)" maxExecDepth))
+
+    ;; Variables declared by the pipeline persist.
+    (set! dot (.evalPipeline s dot (.-Pipe t)))
+    (let [newState @s]
+      (inc! (.-depth newState))
+      (set! (.-tmpl newState) tmpl)
+      ;; No dynamic scoping: template invocations inherit no variables.
+      (set! (.-vars newState) (lit (slice variable) (lit _ "$" dot)))
+      (.walk newState dot ^{:go/via [Tree]} (.-Root tmpl)))))
+
+
+;; Eval functions evaluate pipelines, commands, and their elements and extract
+;; values from the data structure by examining fields, calling methods, and so on.
+;; The printing of those values happens only through walk functions.
+
+
+
+
+
+^{:go/end 546} (go/method evalPipeline "evalPipeline returns the value acquired by evaluating a pipeline. If the\npipeline has a variable declaration, the variable will be pushed on the\nstack. Callers should therefore pop the stack after they are finished\nexecuting commands depending on the pipeline value.\n" [^{:tag (* state)} s ^reflect/Value dot ^{:tag (* parse/PipeNode)} pipe] :results [^reflect/Value value]
+  (when (== pipe nil)
+    (return))
+
+  (.at s pipe)
+  (set! value missingVal)
+  (range [_ cmd (.-Cmds pipe)]
+    (set! value (.evalCommand s dot cmd value)) ; previous value is this one's final arg.
+    ;; If the object has type interface{}, dig down one level to the thing inside.
+    (when (and (== (.Kind value) reflect/Interface) (== (.NumMethod (.Type value)) 0))
+      (set! value (.Elem value))))
+
+
+  (range [_ variable (.-Decl pipe)]
+    (if (.-IsAssign pipe)
+      (.setVar s (aget (.-Ident variable) 0) value)
+
+      (.push s (aget (.-Ident variable) 0) value)))
+
+
+  ^{:line 545} value)
+
+
+^{:go/end 552} (go/method notAFunction [^{:tag (* state)} s ^{:tag (slice parse/Node)} args ^reflect/Value final]
+  (when (or (> (len args) 1) (not (isMissing final)))
+    (.errorf s "can't give argument to non-function %s" (aget args 0))))
+
+
+
+^{:go/end 587} (go/method evalCommand ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^{:tag (* parse/CommandNode)} cmd ^reflect/Value final]
+  (let [firstWord (aget (.-Args cmd) 0)]
+    (type-switch [n firstWord]
+      (case [(* parse/FieldNode)]
+        (return (.evalFieldNode s dot n (.-Args cmd) final)))
+      (case [(* parse/ChainNode)]
+        (return (.evalChainNode s dot n (.-Args cmd) final)))
+      (case [(* parse/IdentifierNode)]
+        ;; Must be a function.
+        (return (.evalFunction s dot n cmd (.-Args cmd) final)))
+      (case [(* parse/PipeNode)]
+        ;; Parenthesized pipeline. The arguments are all inside the pipeline; final must be absent.
+        (.notAFunction s (.-Args cmd) final)
+        (return (.evalPipeline s dot n)))
+      (case [(* parse/VariableNode)]
+        (return (.evalVariableNode s dot n (.-Args cmd) final))))
+
+    (.at s firstWord)
+    (.notAFunction s (.-Args cmd) final)
+    (type-switch [word firstWord]
+      (case [(* parse/BoolNode)]
+        (return (reflect/ValueOf (.-True word))))
+      (case [(* parse/DotNode)]
+        (return dot))
+      (case [(* parse/NilNode)]
+        (.errorf s "nil is not a command"))
+      (case [(* parse/NumberNode)]
+        (return (.idealConstant s word)))
+      (case [(* parse/StringNode)]
+        (return (reflect/ValueOf (.-Text word)))))
+
+    (.errorf s "can't evaluate command %q" firstWord)
+    (panic "not reached")))
+
+
+
+
+
+
+^{:go/end 618} (go/method idealConstant "idealConstant is called to return the value of a number in a context where\nwe don't know the type. In that case, the syntax of the number tells us\nits type, and we use Go rules to resolve. Note there is no such thing as\na uint ideal constant in this situation - the value must be of int type.\n" ^reflect/Value [^{:tag (* state)} s ^{:tag (* parse/NumberNode)} constant]
+  ;; These are ideal constants but we don't know the type
+  ;; and we have no context.  (If it was a method argument,
+  ;; we'd know what we need.) The syntax guides us to some extent.
+  (.at s constant)
+  (switch
+    (case [(.-IsComplex constant)]
+      (return (reflect/ValueOf (.-Complex128 constant)))) ; incontrovertible.
+
+    (case [(and (.-IsFloat constant)
+          (not (isHexInt (.-Text constant))) (not (isRuneInt (.-Text constant)))
+          (strings/ContainsAny (.-Text constant) ".eEpP"))]
+      (return (reflect/ValueOf (.-Float64 constant))))
+
+    (case [(.-IsInt constant)]
+      (let [n (conv int (.-Int64 constant))]
+        (when (!= (conv int64 n) (.-Int64 constant))
+          (.errorf s "%s overflows int" (.-Text constant)))
+
+        (return (reflect/ValueOf n))))
+
+    (case [(.-IsUint constant)]
+      (.errorf s "%s overflows int" (.-Text constant))))
+
+  ^{:line 617} zero)
+
+
+^{:go/end 622} (go/func isRuneInt ^bool [^string s]
+  (and (> (len s) 0) (== (aget s 0) \')))
+
+
+^{:go/end 626} (go/func isHexInt ^bool [^string s]
+  (and (> (len s) 2) (== (aget s 0) \0) ^:go/paren (or (== (aget s 1) \x) (== (aget s 1) \X)) (not (strings/ContainsAny s "pP"))))
+
+
+^{:go/end 631} (go/method evalFieldNode ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^{:tag (* parse/FieldNode)} field ^{:tag (slice parse/Node)} args ^reflect/Value final]
+  (.at s field)
+  (.evalFieldChain s dot dot field (.-Ident field) args final))
+
+
+^{:go/end 644} (go/method evalChainNode ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^{:tag (* parse/ChainNode)} chain ^{:tag (slice parse/Node)} args ^reflect/Value final]
+  (.at s chain)
+  (when (== (len (.-Field chain)) 0)
+    (.errorf s "internal error: no fields in evalChainNode"))
+
+  (when (== (.Type (.-Node chain)) parse/NodeNil)
+    (.errorf s "indirection through explicit nil in %s" chain))
+
+  ;; (pipe).Field1.Field2 has pipe as .Node, fields as .Field. Eval the pipeline, then the fields.
+  (let [pipe (.evalArg s dot nil (.-Node chain))]
+    (.evalFieldChain s dot pipe chain (.-Field chain) args final)))
+
+
+^{:go/end 655} (go/method evalVariableNode ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^{:tag (* parse/VariableNode)} variable ^{:tag (slice parse/Node)} args ^reflect/Value final]
+  ;; $x.Field has $x as the first ident, Field as the second. Eval the var, then the fields.
+  (.at s variable)
+  (let [value (.varValue s (aget (.-Ident variable) 0))]
+    (when (== (len (.-Ident variable)) 1)
+      (.notAFunction s args final)
+      (return value))
+
+    (.evalFieldChain s dot value variable (subslice (.-Ident variable) 1) args final)))
+
+
+
+
+
+^{:go/end 667} (go/method evalFieldChain "evalFieldChain evaluates .X.Y.Z possibly followed by arguments.\ndot is the environment in which to evaluate arguments, while\nreceiver is the value being walked along the chain.\n" ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^reflect/Value receiver ^parse/Node node ^{:tag (slice string)} ident ^{:tag (slice parse/Node)} args ^reflect/Value final]
+  (let [n (len ident)]
+    (for [i 0] (< i (- n 1)) (inc! i)
+      (set! receiver (.evalField s dot (aget ident i) node nil missingVal receiver)))
+
+    ;; Now if it's a method, it gets the arguments.
+    (.evalField s dot (aget ident (- n 1)) node args final receiver)))
+
+
+^{:go/end 677} (go/method evalFunction ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^{:tag (* parse/IdentifierNode)} node ^parse/Node cmd ^{:tag (slice parse/Node)} args ^reflect/Value final]
+  (.at s node)
+  (let [name (.-Ident node)
+      (values function isBuiltin ok) (findFunction name (.-tmpl s))]
+    (when (not ok)
+      (.errorf s "%q is not a defined function" name))
+
+    (.evalCall s dot function isBuiltin cmd name args final)))
+
+
+
+
+
+^{:go/end 761} (go/method evalField "evalField evaluates an expression like (.Field) or (.Field arg1 arg2).\nThe 'final' argument represents the return value from the preceding\nvalue of the pipeline, if any.\n" ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^string fieldName ^parse/Node node ^{:tag (slice parse/Node)} args ^reflect/Value final ^reflect/Value receiver]
+  (when (not (.IsValid receiver))
+    (when (== (.-missingKey ^{:go/via [common]} (.-option (.-tmpl s))) mapError) ; Treat invalid value as missing map key.
+      (.errorf s "nil data; no entry for key %q" fieldName))
+
+    (return zero))
+
+  (let [typ (.Type receiver)
+      (values ^:assign receiver isNil) (indirect receiver)]
+    (when (and (== (.Kind receiver) reflect/Interface) isNil)
+      ;; Calling a method on a nil interface can't work. The
+      ;; MethodByName method call below would panic.
+      (.errorf s "nil pointer evaluating %s.%s" typ fieldName)
+      (return zero))
+
+
+    ;; Unless it's an interface, need to get to a value of type *T to guarantee
+    ;; we see all methods of T and *T.
+    (let [ptr receiver]
+      (when (and (!= (.Kind ptr) reflect/Interface) (!= (.Kind ptr) reflect/Pointer) (.CanAddr ptr))
+        (set! ptr (.Addr ptr)))
+
+      (when [method (.MethodByName ptr fieldName)] (.IsValid method)
+        (return (.evalCall s dot method false node fieldName args final)))
+
+      (let [hasArgs (or (> (len args) 1) (not (isMissing final)))]
+        ;; It's not a method; must be a field of a struct or an element of a map.
+        (switch (.Kind receiver)
+          (case [reflect/Struct]
+            (let [(values tField ok) (.FieldByName (.Type receiver) fieldName)]
+              (when ok
+                (let [(values field err) (.FieldByIndexErr receiver (.-Index tField))]
+                  (when (not (.IsExported tField))
+                    (.errorf s "%s is an unexported field of struct type %s" fieldName typ))
+
+                  (when (!= err nil)
+                    (.errorf s "%v" err))
+
+                  ;; If it's a function, we must call it.
+                  (when hasArgs
+                    (.errorf s "%s has arguments but cannot be invoked as function" fieldName))
+
+                  (return field)))))
+
+          (case [reflect/Map]
+            ;; If it's a map, attempt to use the field name as a key.
+            (let [nameVal (reflect/ValueOf fieldName)]
+              (when (.AssignableTo (.Type nameVal) (.Key (.Type receiver)))
+                (when hasArgs
+                  (.errorf s "%s is not a method but has arguments" fieldName))
+
+                (let [result (.MapIndex receiver nameVal)]
+                  (when (not (.IsValid result))
+                    (switch (.-missingKey ^{:go/via [common]} (.-option (.-tmpl s)))
+                      (case [mapInvalid])
+                      ;; Just use the invalid value.
+                      (case [mapZeroValue]
+                        (set! result (reflect/Zero (.Elem (.Type receiver)))))
+                      (case [mapError]
+                        (.errorf s "map has no entry for key %q" fieldName))))
+
+
+                  (return result)))))
+
+          (case [reflect/Pointer]
+            (let [etyp (.Elem (.Type receiver))]
+              (when (== (.Kind etyp) reflect/Struct)
+                (when [(values _ ok) (.FieldByName etyp fieldName)] (not ok)
+                  ;; If there's no such field, say "can't evaluate"
+                  ;; instead of "nil pointer evaluating".
+                  (break)))
+
+
+              (when isNil
+                (.errorf s "nil pointer evaluating %s.%s" typ fieldName)))))
+
+
+        (.errorf s "can't evaluate field %s in type %s" fieldName typ)
+        (panic "not reached")))))
+
+
+(go/var
+  ^{:line 764} [errorType ((inst reflect/TypeFor error))]
+  ^{:line 765} [fmtStringerType ((inst reflect/TypeFor fmt/Stringer))]
+  ^{:line 766} [reflectValueType ((inst reflect/TypeFor reflect/Value))])
+
+
+
+
+
+^{:go/end 878} (go/method evalCall "evalCall executes a function or method call. If it's a method, fun already has the receiver bound, so\nit looks just like a function call. The arg list, if non-nil, includes (in the manner of the shell), arg[0]\nas the function itself.\n" ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^reflect/Value fun ^bool isBuiltin ^parse/Node node ^string name ^{:tag (slice parse/Node)} args ^reflect/Value final]
+  (when (!= args nil)
+    (set! args (subslice args 1))) ; Zeroth arg is function name/node; not passed to function.
+
+  (let [typ (.Type fun)
+      ^{:line 777} numIn (len args)]
+    (when (not (isMissing final))
+      (inc! numIn))
+
+    (let [numFixed (len args)]
+      (cond (.IsVariadic typ) (do
+          (set! numFixed (- (.NumIn typ) 1)) ; last arg is the variadic one.
+          (when (< numIn numFixed)
+            (.errorf s "wrong number of args for %s: want at least %d got %d" name (- (.NumIn typ) 1) (len args))))
+
+        (!= numIn (.NumIn typ))
+        (.errorf s "wrong number of args for %s: want %d got %d" name (.NumIn typ) numIn))
+
+      (when [err (goodFunc name typ)] (!= err nil)
+        (.errorf s "%v" err))
+
+
+      (let [unwrap ^{:go/end 799} (fn ^reflect/Value [^reflect/Value v]
+            (when (== (.Type v) reflectValueType)
+              (set! v (assert reflect/Value (.Interface v))))
+
+            ^{:line 798} v)]
+
+
+        ;; Special case for builtin and/or, which short-circuit.
+        (when (and isBuiltin ^:go/paren (or (== name "and") (== name "or")))
+          (let [argType (.In typ 0)
+              ^{:line 804 :tag reflect/Value} v (zero reflect/Value)]
+            (range [_ arg args]
+              (set! v (assert reflect/Value (.Interface (.evalArg s dot argType arg))))
+              (when (== (truth v) (== name "or"))
+                ;; This value was already unwrapped
+                ;; by the .Interface().(reflect.Value).
+                (return v)))
+
+
+            (when (not (.Equal final missingVal))
+              ;; The last argument to and/or is coming from
+              ;; the pipeline. We didn't short circuit on an earlier
+              ;; argument, so we are going to return this one.
+              ;; We don't have to evaluate final, but we do
+              ;; have to check its type. Then, since we are
+              ;; going to return it, we have to unwrap it.
+              (set! v (unwrap (.validateType s final argType))))
+
+            (return v)))
+
+
+        ;; Build the arg list.
+        (let [argv (make (slice reflect/Value) numIn)
+            ;; Args must be evaluated. Fixed args first.
+            ^{:line 828} i 0]
+          (for [] (and (< i numFixed) (< i (len args))) (inc! i)
+            (aset argv i (.evalArg s dot (.In typ i) (aget args i))))
+
+          ;; Now the ... args.
+          (when (.IsVariadic typ)
+            (let [argType (.Elem (.In typ (- (.NumIn typ) 1)))] ; Argument is a slice.
+              (for [] (< i (len args)) (inc! i)
+                (aset argv i (.evalArg s dot argType (aget args i))))))
+
+
+          ;; Add final value if necessary.
+          (when (not (isMissing final))
+            (let [t (.In typ (- (.NumIn typ) 1))]
+              (when (.IsVariadic typ)
+                (if (< (- numIn 1) numFixed)
+                  ;; The added final argument corresponds to a fixed parameter of the function.
+                  ;; Validate against the type of the actual parameter.
+                  (set! t (.In typ (- numIn 1)))
+
+                  ;; The added final argument corresponds to the variadic part.
+                  ;; Validate against the type of the elements of the variadic slice.
+                  (set! t (.Elem t))))
+
+
+              (aset argv i (.validateType s final t))))
+
+
+          ;; Special case for the "call" builtin.
+          ;; Insert the name of the callee function as the first argument.
+          (when (and isBuiltin (== name "call"))
+            (let [^string calleeName (zero string)]
+              (if (== (len args) 0)
+                ;; final must be present or we would have errored out above.
+                (set! calleeName (.String final))
+
+                (set! calleeName (.String (aget args 0))))
+
+              (set! argv (append (lit (slice reflect/Value) (reflect/ValueOf calleeName)) (spread argv)))
+              (set! fun (reflect/ValueOf call))))
+
+
+          (let [(values v err) (safeCall fun argv)]
+            ;; If we have an error that is not nil, stop execution and return that
+            ;; error to the caller.
+            (when (!= err nil)
+              (.at s node)
+              (.errorf s "error calling %s: %w" name err))
+
+            (unwrap v)))))))
+
+
+
+^{:go/breaks [[5 888]] :go/end 889} (go/func canBeNil "canBeNil reports whether an untyped nil can be assigned to the type. See reflect.Zero.\n" ^bool [^reflect/Type typ]
+  (switch (.Kind typ)
+    (case [reflect/Chan reflect/Func reflect/Interface reflect/Map reflect/Pointer reflect/Slice]
+      (return true))
+    (case [reflect/Struct]
+      (return (== typ reflectValueType))))
+
+  false)
+
+
+
+^{:go/end 932} (go/method validateType "validateType guarantees that the value is valid and assignable to the type.\n" ^reflect/Value [^{:tag (* state)} s ^reflect/Value value ^reflect/Type typ]
+  (when (not (.IsValid value))
+    (when (== typ nil)
+      ;; An untyped nil interface{}. Accept as a proper nil value.
+      (return (reflect/ValueOf nil)))
+
+    (when (canBeNil typ)
+      ;; Like above, but use the zero value of the non-nil type.
+      (return (reflect/Zero typ)))
+
+    (.errorf s "invalid value; expected %s" typ))
+
+  (when (and (== typ reflectValueType) (!= (.Type value) typ))
+    (return (reflect/ValueOf value)))
+
+  (when (and (!= typ nil) (not (.AssignableTo (.Type value) typ)))
+    (when (and (== (.Kind value) reflect/Interface) (not (.IsNil value)))
+      (set! value (.Elem value))
+      (when (.AssignableTo (.Type value) typ)
+        (return value)))
+
+    ;; fallthrough
+
+    ;; Does one dereference or indirection work? We could do more, as we
+    ;; do with method receivers, but that gets messy and method receivers
+    ;; are much more constrained, so it makes more sense there than here.
+    ;; Besides, one is almost always all you need.
+    (switch
+      (case [(and (== (.Kind value) reflect/Pointer) (.AssignableTo (.Elem (.Type value)) typ))]
+        (set! value (.Elem value))
+        (when (not (.IsValid value))
+          (.errorf s "dereference of nil pointer of type %s" typ)))
+
+      (case [(and (.AssignableTo (reflect/PointerTo (.Type value)) typ) (.CanAddr value))]
+        (set! value (.Addr value)))
+      (default
+        (.errorf s "wrong type for value; expected %s; got %s" typ (.Type value)))))
+
+
+  ^{:line 931} value)
+
+
+^{:go/end 979} (go/method evalArg ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^reflect/Type typ ^parse/Node n]
+  (.at s n)
+  (type-switch [arg n]
+    (case [(* parse/DotNode)]
+      (return (.validateType s dot typ)))
+    (case [(* parse/NilNode)]
+      (when (canBeNil typ)
+        (return (reflect/Zero typ)))
+
+      (.errorf s "cannot assign nil to %s" typ))
+    (case [(* parse/FieldNode)]
+      (return (.validateType s (.evalFieldNode s dot arg (lit (slice parse/Node) n) missingVal) typ)))
+    (case [(* parse/VariableNode)]
+      (return (.validateType s (.evalVariableNode s dot arg nil missingVal) typ)))
+    (case [(* parse/PipeNode)]
+      (return (.validateType s (.evalPipeline s dot arg) typ)))
+    (case [(* parse/IdentifierNode)]
+      (return (.validateType s (.evalFunction s dot arg arg nil missingVal) typ)))
+    (case [(* parse/ChainNode)]
+      (return (.validateType s (.evalChainNode s dot arg nil missingVal) typ))))
+
+  (switch (.Kind typ)
+    (case [reflect/Bool]
+      (return (.evalBool s typ n)))
+    (case [reflect/Complex64 reflect/Complex128]
+      (return (.evalComplex s typ n)))
+    (case [reflect/Float32 reflect/Float64]
+      (return (.evalFloat s typ n)))
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (return (.evalInteger s typ n)))
+    (case [reflect/Interface]
+      (when (== (.NumMethod typ) 0)
+        (return (.evalEmptyInterface s dot n))))
+
+    (case [reflect/Struct]
+      (when (== typ reflectValueType)
+        (return (reflect/ValueOf (.evalEmptyInterface s dot n)))))
+
+    (case [reflect/String]
+      (return (.evalString s typ n)))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (return (.evalUnsignedInteger s typ n))))
+
+  (.errorf s "can't handle %s for arg of type %s" n typ)
+  (panic "not reached"))
+
+
+^{:go/end 990} (go/method evalBool ^reflect/Value [^{:tag (* state)} s ^reflect/Type typ ^parse/Node n]
+  (.at s n)
+  (when [(values n ok) (assert (* parse/BoolNode) n)] ok
+    (let [value (.Elem (reflect/New typ))]
+      (.SetBool value (.-True n))
+      (return value)))
+
+  (.errorf s "expected bool; found %s" n)
+  (panic "not reached"))
+
+
+^{:go/end 1001} (go/method evalString ^reflect/Value [^{:tag (* state)} s ^reflect/Type typ ^parse/Node n]
+  (.at s n)
+  (when [(values n ok) (assert (* parse/StringNode) n)] ok
+    (let [value (.Elem (reflect/New typ))]
+      (.SetString value (.-Text n))
+      (return value)))
+
+  (.errorf s "expected string; found %s" n)
+  (panic "not reached"))
+
+
+^{:go/end 1012} (go/method evalInteger ^reflect/Value [^{:tag (* state)} s ^reflect/Type typ ^parse/Node n]
+  (.at s n)
+  (when [(values n ok) (assert (* parse/NumberNode) n)] (and ok (.-IsInt n))
+    (let [value (.Elem (reflect/New typ))]
+      (.SetInt value (.-Int64 n))
+      (return value)))
+
+  (.errorf s "expected integer; found %s" n)
+  (panic "not reached"))
+
+
+^{:go/end 1023} (go/method evalUnsignedInteger ^reflect/Value [^{:tag (* state)} s ^reflect/Type typ ^parse/Node n]
+  (.at s n)
+  (when [(values n ok) (assert (* parse/NumberNode) n)] (and ok (.-IsUint n))
+    (let [value (.Elem (reflect/New typ))]
+      (.SetUint value (.-Uint64 n))
+      (return value)))
+
+  (.errorf s "expected unsigned integer; found %s" n)
+  (panic "not reached"))
+
+
+^{:go/end 1034} (go/method evalFloat ^reflect/Value [^{:tag (* state)} s ^reflect/Type typ ^parse/Node n]
+  (.at s n)
+  (when [(values n ok) (assert (* parse/NumberNode) n)] (and ok (.-IsFloat n))
+    (let [value (.Elem (reflect/New typ))]
+      (.SetFloat value (.-Float64 n))
+      (return value)))
+
+  (.errorf s "expected float; found %s" n)
+  (panic "not reached"))
+
+
+^{:go/end 1044} (go/method evalComplex ^reflect/Value [^{:tag (* state)} s ^reflect/Type typ ^parse/Node n]
+  (when [(values n ok) (assert (* parse/NumberNode) n)] (and ok (.-IsComplex n))
+    (let [value (.Elem (reflect/New typ))]
+      (.SetComplex value (.-Complex128 n))
+      (return value)))
+
+  (.errorf s "expected complex; found %s" n)
+  (panic "not reached"))
+
+
+^{:go/end 1071} (go/method evalEmptyInterface ^reflect/Value [^{:tag (* state)} s ^reflect/Value dot ^parse/Node n]
+  (.at s n)
+  (type-switch [n n]
+    (case [(* parse/BoolNode)]
+      (return (reflect/ValueOf (.-True n))))
+    (case [(* parse/DotNode)]
+      (return dot))
+    (case [(* parse/FieldNode)]
+      (return (.evalFieldNode s dot n nil missingVal)))
+    (case [(* parse/IdentifierNode)]
+      (return (.evalFunction s dot n n nil missingVal)))
+    (case [(* parse/NilNode)]
+      ;; NilNode is handled in evalArg, the only place that calls here.
+      (.errorf s "evalEmptyInterface: nil (can't happen)"))
+    (case [(* parse/NumberNode)]
+      (return (.idealConstant s n)))
+    (case [(* parse/StringNode)]
+      (return (reflect/ValueOf (.-Text n))))
+    (case [(* parse/VariableNode)]
+      (return (.evalVariableNode s dot n nil missingVal)))
+    (case [(* parse/PipeNode)]
+      (return (.evalPipeline s dot n))))
+
+  (.errorf s "can't handle assignment of %s to empty interface argument" n)
+  (panic "not reached"))
+
+
+
+
+
+^{:go/end 1083} (go/func indirect "indirect returns the item at the end of indirection, and a bool to indicate\nif it's nil. If the returned bool is true, the returned value's kind will be\neither a pointer or interface.\n" [^reflect/Value v] :results [^reflect/Value rv ^bool isNil]
+  (for [] (or (== (.Kind v) reflect/Pointer) (== (.Kind v) reflect/Interface)) (set! v (.Elem v))
+    (when (.IsNil v)
+      (return v true)))
+
+
+  (return v false))
+
+
+
+
+
+
+^{:go/end 1097} (go/func indirectInterface "indirectInterface returns the concrete value in an interface value,\nor else the zero reflect.Value.\nThat is, if v represents the interface value x, the result is the same as reflect.ValueOf(x):\nthe fact that x was an interface value is forgotten.\n" ^reflect/Value [^reflect/Value v]
+  (when (!= (.Kind v) reflect/Interface)
+    (return v))
+
+  (when (.IsNil v)
+    (return (lit reflect/Value)))
+
+  (.Elem v))
+
+
+
+
+^{:go/end 1111} (go/method printValue "printValue writes the textual representation of the value to the output of\nthe template.\n" [^{:tag (* state)} s ^parse/Node n ^reflect/Value v]
+  (.at s n)
+  (let [(values iface ok) (printableValue v)]
+    (when (not ok)
+      (.errorf s "can't print %s of type %s" n (.Type v)))
+
+    (let [(values _ err) (fmt/Fprint (.-wr s) iface)]
+      (when (!= err nil)
+        (.writeError s err)))))
+
+
+
+
+
+^{:go/end 1134} (go/func printableValue "printableValue returns the, possibly indirected, interface value inside v that\nis best for a call to formatted printer.\n" [^reflect/Value v] :results [any bool]
+  (when (== (.Kind v) reflect/Pointer)
+    (set! (values v _) (indirect v))) ; fmt.Fprint handles nil.
+
+  (when (not (.IsValid v))
+    (return "<no value>" true))
+
+
+  (when (and (not (.Implements (.Type v) errorType)) (not (.Implements (.Type v) fmtStringerType)))
+    (if (and (.CanAddr v) ^:go/paren (or (.Implements (reflect/PointerTo (.Type v)) errorType) (.Implements (reflect/PointerTo (.Type v)) fmtStringerType)))
+      (set! v (.Addr v))
+
+      (switch (.Kind v)
+        (case [reflect/Chan reflect/Func]
+          (return nil false)))))
+
+
+
+  (return (.Interface v) true))

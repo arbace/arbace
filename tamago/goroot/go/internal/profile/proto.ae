@@ -1,0 +1,372 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file is a simple protocol buffer encoder and decoder.
+;;
+;; A protocol message must implement the message interface:
+;;   decoder() []decoder
+;;   encode(*buffer)
+;;
+;; The decode method returns a slice indexed by field number that gives the
+;; function to decode that field.
+;; The encode method encodes its receiver into the given buffer.
+;;
+;; The two methods are simple enough to be implemented by hand rather than
+;; by using a protocol compiler.
+;;
+;; See profile.go for examples of messages implementing this interface.
+;;
+;; There is no support for groups, message sets, or "has" bits.
+
+(in-ns 'go.internal.profile) (go/file "proto.go" :imports [
+
+
+    ^{:line 25} [errors "errors"]
+    ^{:line 26} [fmt "fmt"]
+    ^{:line 27} [slices "slices"]])
+
+
+(go/type buffer (struct
+    ^{:line 31 :tag int} field
+    ^{:line 32 :tag int} typ
+    ^{:line 33 :tag uint64} u64
+    ^{:line 34 :tag (slice byte)} data
+    ^{:line 35 :tag (array 16 byte)} tmp))
+
+
+(go/type decoder (func [(* buffer) message] [error]))
+
+(go/type message (interface
+    (decoder ^{:tag (slice decoder)} [])
+    (encode [(* buffer)])))
+
+
+^{:go/end 49} (go/func marshal ^{:tag (slice byte)} [^message m]
+  (let [^buffer b (zero buffer)]
+    (.encode m (addr b))
+    (.-data b)))
+
+
+^{:go/end 57} (go/func encodeVarint [^{:tag (* buffer)} b ^uint64 x]
+  (while (>= x 128)
+    (set! (.-data b) (append (.-data b) (bit-or (conv byte x) 0x80)))
+    (set! x >> 7))
+
+  (set! (.-data b) (append (.-data b) (conv byte x))))
+
+
+^{:go/end 62} (go/func encodeLength [^{:tag (* buffer)} b ^int tag ^int len]
+  (encodeVarint b (bit-or (<< (conv uint64 tag) 3) 2))
+  (encodeVarint b (conv uint64 len)))
+
+
+^{:go/end 68} (go/func encodeUint64 [^{:tag (* buffer)} b ^int tag ^uint64 x]
+  ;; append varint to b.data
+  (encodeVarint b (bit-or (<< (conv uint64 tag) 3) 0))
+  (encodeVarint b x))
+
+
+^{:go/end 88} (go/func encodeUint64s [^{:tag (* buffer)} b ^int tag ^{:tag (slice uint64)} x]
+  (when (> (len x) 2)
+    ;; Use packed encoding
+    (let [n1 (len (.-data b))]
+      (range [_ u x]
+        (encodeVarint b u))
+
+      (let [n2 (len (.-data b))]
+        (encodeLength b tag (- n2 n1))
+        (let [n3 (len (.-data b))]
+          (copy (subslice (.-tmp b)) (subslice (.-data b) n2 n3))
+          (copy (subslice (.-data b) (+ n1 (- n3 n2))) (subslice (.-data b) n1 n2))
+          (copy (subslice (.-data b) n1) (subslice (.-tmp b) _ (- n3 n2)))
+          (return)))))
+
+  (range [_ u x]
+    (encodeUint64 b tag u)))
+
+
+
+^{:go/end 95} (go/func encodeUint64Opt [^{:tag (* buffer)} b ^int tag ^uint64 x]
+  (when (== x 0)
+    (return))
+
+  (encodeUint64 b tag x))
+
+
+^{:go/end 100} (go/func encodeInt64 [^{:tag (* buffer)} b ^int tag ^int64 x]
+  (let [u (conv uint64 x)]
+    (encodeUint64 b tag u)))
+
+
+^{:go/end 107} (go/func encodeInt64Opt [^{:tag (* buffer)} b ^int tag ^int64 x]
+  (when (== x 0)
+    (return))
+
+  (encodeInt64 b tag x))
+
+
+^{:go/end 127} (go/func encodeInt64s [^{:tag (* buffer)} b ^int tag ^{:tag (slice int64)} x]
+  (when (> (len x) 2)
+    ;; Use packed encoding
+    (let [n1 (len (.-data b))]
+      (range [_ u x]
+        (encodeVarint b (conv uint64 u)))
+
+      (let [n2 (len (.-data b))]
+        (encodeLength b tag (- n2 n1))
+        (let [n3 (len (.-data b))]
+          (copy (subslice (.-tmp b)) (subslice (.-data b) n2 n3))
+          (copy (subslice (.-data b) (+ n1 (- n3 n2))) (subslice (.-data b) n1 n2))
+          (copy (subslice (.-data b) n1) (subslice (.-tmp b) _ (- n3 n2)))
+          (return)))))
+
+  (range [_ u x]
+    (encodeInt64 b tag u)))
+
+
+
+^{:go/end 132} (go/func encodeString [^{:tag (* buffer)} b ^int tag ^string x]
+  (encodeLength b tag (len x))
+  (set! (.-data b) (append (.-data b) (spread x))))
+
+
+^{:go/end 138} (go/func encodeStrings [^{:tag (* buffer)} b ^int tag ^{:tag (slice string)} x]
+  (range [_ s x]
+    (encodeString b tag s)))
+
+
+
+^{:go/end 146} (go/func encodeBool [^{:tag (* buffer)} b ^int tag ^bool x]
+  (if x
+    (encodeUint64 b tag 1)
+
+    (encodeUint64 b tag 0)))
+
+
+
+^{:go/end 153} (go/func encodeBoolOpt [^{:tag (* buffer)} b ^int tag ^bool x]
+  (when (not x)
+    (return))
+
+  (encodeBool b tag x))
+
+
+^{:go/end 164} (go/func encodeMessage [^{:tag (* buffer)} b ^int tag ^message m]
+  (let [n1 (len (.-data b))]
+    (.encode m b)
+    (let [n2 (len (.-data b))]
+      (encodeLength b tag (- n2 n1))
+      (let [n3 (len (.-data b))]
+        (copy (subslice (.-tmp b)) (subslice (.-data b) n2 n3))
+        (copy (subslice (.-data b) (+ n1 (- n3 n2))) (subslice (.-data b) n1 n2))
+        (copy (subslice (.-data b) n1) (subslice (.-tmp b) _ (- n3 n2)))))))
+
+
+^{:go/end 169} (go/func unmarshal [^{:tag (slice byte)} data ^message m] :results [^error err]
+  (let [b (lit buffer :data data :typ 2)]
+    (decodeMessage (addr b) m)))
+
+
+^{:go/end 173} (go/func le64 ^uint64 [^{:tag (slice byte)} p]
+  (bit-or (conv uint64 (aget p 0)) (<< (conv uint64 (aget p 1)) 8) (<< (conv uint64 (aget p 2)) 16) (<< (conv uint64 (aget p 3)) 24) (<< (conv uint64 (aget p 4)) 32) (<< (conv uint64 (aget p 5)) 40) (<< (conv uint64 (aget p 6)) 48) (<< (conv uint64 (aget p 7)) 56)))
+
+
+^{:go/end 177} (go/func le32 ^uint32 [^{:tag (slice byte)} p]
+  (bit-or (conv uint32 (aget p 0)) (<< (conv uint32 (aget p 1)) 8) (<< (conv uint32 (aget p 2)) 16) (<< (conv uint32 (aget p 3)) 24)))
+
+
+^{:go/end 187} (go/func peekNumVarints [^{:tag (slice byte)} data] :results [^int numVarints]
+  (for [] (> (len data) 0) (inc! numVarints)
+    (let [^error err (zero error)]
+      (when [(set! (values _ data err) (decodeVarint data))] (!= err nil)
+        (break))))
+
+
+  ^{:line 186} numVarints)
+
+
+^{:go/end 201} (go/func decodeVarint [^{:tag (slice byte)} data] :results [uint64 (slice byte) error]
+  (let [^int i (zero int)
+      ^{:line 191 :tag uint64} u (zero uint64)]
+    (for [(set! i 0)] _ (inc! i)
+      (when (or (>= i 10) (>= i (len data)))
+        (return 0 nil (errors/New "bad varint")))
+
+      (set! u bit-or (<< (conv uint64 (bit-and (aget data i) 0x7F)) (conv uint (* 7 i))))
+      (when (== (bit-and (aget data i) 0x80) 0)
+        (return u (subslice data (+ i 1)) nil)))))
+
+
+
+
+^{:go/end 246} (go/func decodeField [^{:tag (* buffer)} b ^{:tag (slice byte)} data] :results [(slice byte) error]
+  (let [(values x ^:assign data err) (decodeVarint data)]
+    (when (!= err nil)
+      (return nil err))
+
+    (set! (.-field b) (conv int (>> x 3)))
+    (set! (.-typ b) (conv int (bit-and x 7)))
+    (set! (.-data b) nil)
+    (set! (.-u64 b) 0)
+    (switch (.-typ b)
+      (case [0]
+        (set! (values (.-u64 b) data err) (decodeVarint data))
+        (when (!= err nil)
+          (return nil err)))
+
+      (case [1]
+        (when (< (len data) 8)
+          (return nil (errors/New "not enough data")))
+
+        (set! (.-u64 b) (le64 (subslice data _ 8)))
+        (set! data (subslice data 8)))
+      (case [2]
+        (let [^uint64 n (zero uint64)]
+          (set! (values n data err) (decodeVarint data))
+          (when (!= err nil)
+            (return nil err))
+
+          (when (> n (conv uint64 (len data)))
+            (return nil (errors/New "too much data")))
+
+          (set! (.-data b) (subslice data _ n))
+          (set! data (subslice data n))))
+      (case [5]
+        (when (< (len data) 4)
+          (return nil (errors/New "not enough data")))
+
+        (set! (.-u64 b) (conv uint64 (le32 (subslice data _ 4))))
+        (set! data (subslice data 4)))
+      (default
+        (return nil (fmt/Errorf "unknown wire type: %d" (.-typ b)))))
+
+
+    (return data nil)))
+
+
+^{:go/breaks [[4 252]] :go/end 253} (go/func checkType ^error [^{:tag (* buffer)} b ^int typ]
+  (when (!= (.-typ b) typ)
+    (return (errors/New "type mismatch")))
+
+  nil)
+
+
+^{:go/end 276} (go/func decodeMessage ^error [^{:tag (* buffer)} b ^message m]
+  (when [err (checkType b 2)] (!= err nil)
+    (return err))
+
+  ^{:go/breaks [[3 275]]} (let [dec (.decoder m)
+      ^{:line 260} data (.-data b)]
+    (while (> (len data) 0)
+      ;; pull varint field# + type
+      (let [^error err (zero error)]
+        (set! (values data err) (decodeField b data))
+        (when (!= err nil)
+          (return err))
+
+        (when (or (>= (.-field b) (len dec)) (== (aget dec (.-field b)) nil))
+          (continue))
+
+        (when [err ((aget dec (.-field b)) b m)] (!= err nil)
+          (return err))))
+
+
+    nil))
+
+
+^{:go/breaks [5] :go/end 284} (go/func decodeInt64 ^error [^{:tag (* buffer)} b ^{:tag (* int64)} x]
+  (when [err (checkType b 0)] (!= err nil)
+    (return err))
+
+  (set! @x (conv int64 (.-u64 b)))
+  nil)
+
+
+^{:go/end 310} (go/func decodeInt64s ^error [^{:tag (* buffer)} b ^{:tag (* (slice int64))} x]
+  (when (== (.-typ b) 2)
+    ;; Packed encoding
+    (let [dataLen (peekNumVarints (.-data b))]
+      (set! @x (^{:inst [(slice int64) int64]} slices/Grow @x dataLen))
+
+      (let [data (.-data b)]
+        (while (> (len data) 0)
+          (let [^uint64 u (zero uint64)
+              ^{:line 295 :tag error} err (zero error)]
+
+            (when [(set! (values u data err) (decodeVarint data))] (!= err nil)
+              (return err))
+
+            (set! @x (append @x (conv int64 u)))))
+
+        (return nil))))
+
+  ^{:go/breaks [4]} (let [^int64 i (zero int64)]
+    (when [err (decodeInt64 b (addr i))] (!= err nil)
+      (return err))
+
+    (set! @x (append @x i))
+    nil))
+
+
+^{:go/breaks [5] :go/end 318} (go/func decodeUint64 ^error [^{:tag (* buffer)} b ^{:tag (* uint64)} x]
+  (when [err (checkType b 0)] (!= err nil)
+    (return err))
+
+  (set! @x (.-u64 b))
+  nil)
+
+
+^{:go/end 344} (go/func decodeUint64s ^error [^{:tag (* buffer)} b ^{:tag (* (slice uint64))} x]
+  (when (== (.-typ b) 2)
+    ;; Packed encoding
+    (let [dataLen (peekNumVarints (.-data b))]
+      (set! @x (^{:inst [(slice uint64) uint64]} slices/Grow @x dataLen))
+
+      (let [data (.-data b)]
+        (while (> (len data) 0)
+          (let [^uint64 u (zero uint64)
+              ^{:line 329 :tag error} err (zero error)]
+
+            (when [(set! (values u data err) (decodeVarint data))] (!= err nil)
+              (return err))
+
+            (set! @x (append @x u))))
+
+        (return nil))))
+
+  ^{:go/breaks [4]} (let [^uint64 u (zero uint64)]
+    (when [err (decodeUint64 b (addr u))] (!= err nil)
+      (return err))
+
+    (set! @x (append @x u))
+    nil))
+
+
+^{:go/breaks [5] :go/end 352} (go/func decodeString ^error [^{:tag (* buffer)} b ^{:tag (* string)} x]
+  (when [err (checkType b 2)] (!= err nil)
+    (return err))
+
+  (set! @x (conv string (.-data b)))
+  nil)
+
+
+^{:go/end 361} (go/func decodeStrings ^error [^{:tag (* buffer)} b ^{:tag (* (slice string))} x]
+  ^{:go/breaks [4]} (let [^string s (zero string)]
+    (when [err (decodeString b (addr s))] (!= err nil)
+      (return err))
+
+    (set! @x (append @x s))
+    nil))
+
+
+^{:go/breaks [[5 372]] :go/end 373} (go/func decodeBool ^error [^{:tag (* buffer)} b ^{:tag (* bool)} x]
+  (when [err (checkType b 0)] (!= err nil)
+    (return err))
+
+  (if (== (conv int64 (.-u64 b)) 0)
+    (set! @x false)
+
+    (set! @x true))
+
+  nil)

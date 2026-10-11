@@ -1,0 +1,117 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.database.sql) (go/file "closemu.go" :imports [
+
+
+    ^{:line 8} [sync "sync"]
+    ^{:line 9} [atomic "sync/atomic"]])
+
+
+
+
+
+(go/type closingMutex "A closingMutex is an RWMutex for synchronizing close.\nUnlike a sync.RWMutex, RLock takes priority over Lock.\nReads can starve out close, but reads are safely reentrant.\n" (struct
+
+
+
+
+
+    ^{:line 21 :tag atomic/Int64 :doc "state is 2*readers+writerWaiting.\n  0 is unlocked\n  1 is unlocked and a writer needs to wake\n  >0 is read-locked\n  <0 is write-locked\n"} state
+    ^{:line 22 :tag sync/Mutex} mu
+    ^{:line 23 :tag (* sync/Cond)} read
+    ^{:line 24 :tag (* sync/Cond)} write))
+
+
+^{:go/end 42} (go/method RLock [^{:tag (* closingMutex)} m]
+  (when (.TryRLock m)
+    (return))
+
+
+  ;; Wait for writer.
+  (.Lock (.-mu m))
+  (defer (.Unlock (.-mu m)))
+  (while true
+    (when (.TryRLock m)
+      (return))
+
+    (.init m)
+    (.Wait (.-read m))))
+
+
+
+^{:go/end 61} (go/method RUnlock [^{:tag (* closingMutex)} m]
+  (while true
+    (let [x (.Load (.-state m))]
+      (when (< x 2)
+        (panic "runlock of un-rlocked mutex"))
+
+      (when (.CompareAndSwap (.-state m) x (- x 2))
+        (when (== (- x 2) 1)
+          ;; We were the last reader, and a writer is waiting.
+          ;; The lock makes sure the writer sees the broadcast.
+          (.Lock (.-mu m))
+          (defer (.Unlock (.-mu m)))
+          (.Broadcast (.-write m)))
+
+        (return)))))
+
+
+
+
+^{:go/end 81} (go/method Lock [^{:tag (* closingMutex)} m]
+  (.Lock (.-mu m))
+  (defer (.Unlock (.-mu m)))
+  (while true
+    (let [x (.Load (.-state m))]
+      (when (or (== x 0) (== x 1))
+        (when (.CompareAndSwap (.-state m) x -1)
+          (return))
+
+        (continue))
+
+      ;; Set writer waiting bit and sleep.
+      (when (and (== (bit-and x 1) 0) (not (.CompareAndSwap (.-state m) x (bit-or x 1))))
+        (continue))
+
+      (.init m)
+      (.Wait (.-write m)))))
+
+
+
+^{:go/end 93} (go/method Unlock [^{:tag (* closingMutex)} m]
+  (.Lock (.-mu m))
+  (defer (.Unlock (.-mu m)))
+  (when (not (.CompareAndSwap (.-state m) -1 0))
+    (panic "unlock of unlocked mutex"))
+
+  (when (!= (.-read m) nil)
+    (.Broadcast (.-read m))
+    (.Broadcast (.-write m))))
+
+
+
+^{:go/end 110} (go/method TryRLock ^bool [^{:tag (* closingMutex)} m]
+  (while true
+    (let [x (.Load (.-state m))]
+      ;; Fail if the mutex is write locked (x < 0)
+      ;; or unlocked with a writer waiting (x == 1).
+      ;;
+      ;; If the mutex is read-locked (x > 1), try to add a reader
+      ;; even if this starves out a waiting writer.
+      (when (or (< x 0) (== x 1))
+        (return false))
+
+      (when (.CompareAndSwap (.-state m) x (+ x 2))
+        (return true)))))
+
+
+
+
+^{:go/end 119} (go/method init [^{:tag (* closingMutex)} m]
+  ;; Lazily create the read/write Conds.
+  ;; In the common, uncontended case, we'll never need them.
+  (when (== (.-read m) nil)
+    (set! (.-read m) (sync/NewCond (addr (.-mu m))))
+    (set! (.-write m) (sync/NewCond (addr (.-mu m))))))

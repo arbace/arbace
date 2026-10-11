@@ -1,0 +1,115 @@
+;; NXP Temperature Monitor (TEMPMON) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package bee implements a driver for the NXP Temperature Monitor (TEMPMON)
+;; adopting the following reference specifications:
+;;   - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11
+;;
+;; This package is only meant to be used with `GOOS=tamago` as supported by the
+;; TamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.tempmon) (go/file "tempmon.go" :doc "Package bee implements a driver for the NXP Temperature Monitor (TEMPMON)\nadopting the following reference specifications:\n  - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11\n\nThis package is only meant to be used with `GOOS=tamago` as supported by the\nTamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 18} [sync "sync"]
+
+    ^{:line 20} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 21} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "TEMPMON registers\n"
+  ^{:line 26} [^{:val 0} TEMPMON_TEMPSENSE0 0x00]
+  ^{:line 27} [^{:val 4} TEMPMON_TEMPSENSE0_SET 0x04]
+  ^{:line 28} [^{:val 8} TEMPMON_TEMPSENSE0_CLR 0x08]
+
+  ^{:line 30} [^{:val 8} TEMPSENSE0_TEMP_CNT 8]
+  ^{:line 31} [^{:val 2} TEMPSENSE0_FINISHED 2]
+  ^{:line 32} [^{:val 1} TEMPSENSE0_MEASURE_TEMP 1]
+  ^{:line 33} [^{:val 0} TEMPSENSE0_POWER_DOWN 0]
+
+  ^{:line 35} [^{:val 16} TEMPMON_TEMPSENSE1 0x10]
+  ^{:line 36} [^{:val 20} TEMPMON_TEMPSENSE1_SET 0x14]
+  ^{:line 37} [^{:val 24} TEMPMON_TEMPSENSE1_CLR 0x18]
+
+  ^{:line 39} [^{:val 0} TEMPSENSE1_MEASURE_FREQ 0])
+
+
+
+(go/type TEMPMON "TEMPMON represents the Temperature Monitor instance.\n" (struct
+    ^{:line 44} sync/Mutex
+
+
+    ^{:line 47 :tag uint32 :doc "Base register\n"} Base
+
+
+    ^{:line 50 :tag uint32 :doc "control registers\n"} sense0
+    ^{:line 51 :tag uint32} sense0_set
+    ^{:line 52 :tag uint32} sense0_clr
+    ^{:line 53 :tag uint32} sense1
+    ^{:line 54 :tag uint32} sense1_clr
+
+
+    ^{:line 57 :tag uint32 :doc "calibration points\n"} hotTemp
+    ^{:line 58 :tag uint32} hotCount
+    ^{:line 59 :tag uint32} roomCount))
+
+
+
+
+^{:go/end 82} (go/method Init "Init initializes the Temperature Monitor instance, the calibration data is\nfused individually for each part and is required for correct measurements.\n" [^{:tag (* TEMPMON)} hw ^uint32 calibrationData]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (== (.-Base hw) 0)
+    (panic "invalid TEMPMON instance"))
+
+
+  (set! (.-sense0 hw) (+ (.-Base hw) TEMPMON_TEMPSENSE0))
+  (set! (.-sense0_set hw) (+ (.-Base hw) TEMPMON_TEMPSENSE0_SET))
+  (set! (.-sense0_clr hw) (+ (.-Base hw) TEMPMON_TEMPSENSE0_CLR))
+
+  (set! (.-sense1 hw) (+ (.-Base hw) TEMPMON_TEMPSENSE1))
+  (set! (.-sense1_clr hw) (+ (.-Base hw) TEMPMON_TEMPSENSE1_CLR))
+
+  (set! (.-hotTemp hw) (bits/GetN (addr calibrationData) 0 0xff))
+  (set! (.-hotCount hw) (bits/GetN (addr calibrationData) 8 0xfff))
+  (set! (.-roomCount hw) (bits/GetN (addr calibrationData) 20 0xfff)))
+
+
+
+^{:go/end 105} (go/method Read "Read performs a single on-die temperature measurement.\n" ^float32 [^{:tag (* TEMPMON)} hw]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (== (.-sense0 hw) 0)
+    (return 0))
+
+
+  ;; enable sensor only during single measurement
+  (reg/Set (.-sense0_clr hw) TEMPSENSE0_POWER_DOWN)
+  (defer (reg/Set (.-sense0_set hw) TEMPSENSE0_POWER_DOWN))
+
+  ;; start and wait for a single measurement
+  (reg/SetN (.-sense1_clr hw) TEMPSENSE1_MEASURE_FREQ 0xffff 0xffff)
+  (reg/Set (.-sense0_set hw) TEMPSENSE0_MEASURE_TEMP)
+  (reg/Wait (.-sense0 hw) TEMPSENSE0_FINISHED 1 1)
+
+  (let [cnt (reg/GetN (.-sense0 hw) TEMPSENSE0_TEMP_CNT 0xfff)]
+
+    (temp cnt (.-hotTemp hw) (.-hotCount hw) (.-roomCount hw))))
+
+
+
+^{:go/end 116} (go/func temp "p3531, 52.2 Software Usage Guidelines, IMX6ULLRM\n" ^float32 [^uint32 cnt ^uint32 hotTemp ^uint32 hotCount ^uint32 roomCount]
+  (let [nm (conv float32 cnt)
+      ^{:line 110} t1 (conv float32 25.0)
+      ^{:line 111} t2 (conv float32 hotTemp)
+      ^{:line 112} n1 (conv float32 roomCount)
+      ^{:line 113} n2 (conv float32 hotCount)]
+
+    (- t2 (* (- nm n2) (/ (- t2 t1) (- n1 n2))))))

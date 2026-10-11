@@ -1,0 +1,577 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.strings) (go/file "replace.go" :imports [
+
+
+    ^{:line 8} [io "io"]
+    ^{:line 9} [sync "sync"]])
+
+
+
+
+(go/type Replacer "Replacer replaces a list of strings with replacements.\nIt is safe for concurrent use by multiple goroutines.\n" (struct
+    ^{:line 15 :tag sync/Once} once ; guards buildOnce method
+    ^{:line 16 :tag replacer} r
+    ^{:line 17 :tag (slice string)} oldnew))
+
+
+
+(go/type replacer "replacer is the interface that a replacement algorithm needs to implement.\n" (interface
+    (Replace ^string [^string s])
+    (WriteString [^io/Writer w ^string s] :results [^int n ^error err])))
+
+
+
+
+
+
+
+
+^{:go/end 37} (go/func NewReplacer "NewReplacer returns a new [Replacer] from a list of old, new string\npairs. Replacements are performed in the order they appear in the\ntarget string, without overlapping matches. The old string\ncomparisons are done in argument order.\n\nNewReplacer panics if given an odd number of arguments.\n" ^{:tag (* Replacer)} [& ^{:tag (slice string)} oldnew]
+  (when (== (% (len oldnew) 2) 1)
+    (panic "strings.NewReplacer: odd argument count"))
+
+  (addr (lit Replacer :oldnew (append (conv (slice string) nil) (spread oldnew)))))
+
+
+^{:go/end 42} (go/method buildOnce [^{:tag (* Replacer)} r]
+  (set! (.-r r) (.build r))
+  (set! (.-oldnew r) nil))
+
+
+^{:go/end 92} (go/method build ^replacer [^{:tag (* Replacer)} b]
+  (let [oldnew (.-oldnew b)]
+    (when (and (== (len oldnew) 2) (> (len (aget oldnew 0)) 1))
+      (return (makeSingleStringReplacer (aget oldnew 0) (aget oldnew 1))))
+
+
+    (let [allNewBytes true]
+      (for [i 0] (< i (len oldnew)) (set! i + 2)
+        (when (!= (len (aget oldnew i)) 1)
+          (return (makeGenericReplacer oldnew)))
+
+        (when (!= (len (aget oldnew (+ i 1))) 1)
+          (set! allNewBytes false)))
+
+
+
+      (when allNewBytes
+        (let [r (lit byteReplacer)]
+          (range [i r]
+            (aset r i (conv byte i)))
+
+          ;; The first occurrence of old->new map takes precedence
+          ;; over the others with the same old string.
+          (for [i (- (len oldnew) 2)] (>= i 0) (set! i - 2)
+            (let [o (aget (aget oldnew i) 0)
+                ^{:line 69} n (aget (aget oldnew (+ i 1)) 0)]
+              (aset r o n)))
+
+          (return (addr r))))
+
+
+      (let [r (lit byteStringReplacer :toReplace (make (slice string) 0 (/ (len oldnew) 2)))]
+        ;; The first occurrence of old->new map takes precedence
+        ;; over the others with the same old string.
+        (for [i (- (len oldnew) 2)] (>= i 0) (set! i - 2)
+          (let [o (aget (aget oldnew i) 0)
+              ^{:line 80} n (aget oldnew (+ i 1))]
+            ;; To avoid counting repetitions multiple times.
+            (when (== (aget (.-replacements r) o) nil)
+              ;; We need to use string([]byte{o}) instead of string(o),
+              ;; to avoid utf8 encoding of o.
+              ;; E. g. byte(150) produces string of length 2.
+              (set! (.-toReplace r) (append (.-toReplace r) (conv string (lit (slice byte) o)))))
+
+            (aset (.-replacements r) o (conv (slice byte) n))))
+
+
+        (addr r)))))
+
+
+
+^{:go/end 98} (go/method Replace "Replace returns a copy of s with all replacements performed.\n" ^string [^{:tag (* Replacer)} r ^string s]
+  (.Do (.-once r) (.-buildOnce r))
+  (.Replace (.-r r) s))
+
+
+
+^{:go/end 104} (go/method WriteString "WriteString writes s to w with all replacements performed.\n" [^{:tag (* Replacer)} r ^io/Writer w ^string s] :results [^int n ^error err]
+  (.Do (.-once r) (.-buildOnce r))
+  (.WriteString (.-r r) w s))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type trieNode "trieNode is a node in a lookup trie for prioritized key/value pairs. Keys\nand values may be empty. For example, the trie containing keys \"ax\", \"ay\",\n\"bcbc\", \"x\" and \"xy\" could have eight nodes:\n\n\tn0  -\n\tn1  a-\n\tn2  .x+\n\tn3  .y+\n\tn4  b-\n\tn5  .cbc+\n\tn6  x+\n\tn7  .y+\n\nn0 is the root node, and its children are n1, n4 and n6; n1's children are\nn2 and n3; n4's child is n5; n6's child is n7. Nodes n0, n1 and n4 (marked\nwith a trailing \"-\") are partial keys, and nodes n2, n3, n5, n6 and n7\n(marked with a trailing \"+\") are complete keys.\n" (struct
+
+
+    ^{:line 126 :tag string :doc "value is the value of the trie node's key/value pair. It is empty if\nthis node is not a complete key.\n"} value
+
+
+
+
+
+    ^{:line 132 :tag int :doc "priority is the priority (higher is more important) of the trie node's\nkey/value pair; keys are not necessarily matched shortest- or longest-\nfirst. Priority is positive if this node is a complete key, and zero\notherwise. In the example above, positive/zero priorities are marked\nwith a trailing \"+\" or \"-\".\n"} priority
+
+    ;; A trie node may have zero, one or more child nodes:
+    ;;  * if the remaining fields are zero, there are no children.
+    ;;  * if prefix and next are non-zero, there is one child in next.
+    ;;  * if table is non-zero, it defines all the children.
+    ;;
+    ;; Prefixes are preferred over tables when there is one child, but the
+    ;; root node always uses a table for lookup efficiency.
+
+
+
+
+    ^{:line 145 :tag string :doc "prefix is the difference in keys between this trie node and the next.\nIn the example above, node n4 has prefix \"cbc\" and n4's next node is n5.\nNode n5 has no children and so has zero prefix, next and table fields.\n"} prefix
+    ^{:line 146 :tag (* trieNode)} next
+
+
+
+
+
+
+
+
+    ^{:line 155 :tag (slice (* trieNode)) :doc "table is a lookup table indexed by the next byte in the key, after\nremapping that byte through genericReplacer.mapping to create a dense\nindex. In the example above, the keys only use 'a', 'b', 'c', 'x' and\n'y', which remap to 0, 1, 2, 3 and 4. All other bytes remap to 5, and\ngenericReplacer.tableSize will be 5. Node n0's table will be\n[]*trieNode{ 0:n1, 1:n4, 3:n6 }, where the 0, 1 and 3 are the remapped\n'a', 'b' and 'x'.\n"} table))
+
+
+^{:go/end 219} (go/method add [^{:tag (* trieNode)} t ^string key ^string val ^int priority ^{:tag (* genericReplacer)} r]
+  (when (== key "")
+    (when (== (.-priority t) 0)
+      (set! (.-value t) val)
+      (set! (.-priority t) priority))
+
+    (return))
+
+
+  (cond (!= (.-prefix t) "")
+    ;; Need to split the prefix among multiple nodes.
+    (let [^int n (zero int)] ; length of the longest common prefix
+      (for [] (and (< n (len (.-prefix t))) (< n (len key))) (inc! n)
+        (when (!= (aget (.-prefix t) n) (aget key n))
+          (break)))
+
+
+      (cond (== n (len (.-prefix t)))
+        (.add (.-next t) (subslice key n) val priority r)
+        (== n 0)
+        ;; First byte differs, start a new lookup table here. Looking up
+        ;; what is currently t.prefix[0] will lead to prefixNode, and
+        ;; looking up key[0] will lead to keyNode.
+        (let [^{:tag (* trieNode)} prefixNode (zero (* trieNode))]
+          (if (== (len (.-prefix t)) 1)
+            (set! prefixNode (.-next t))
+
+            (set! prefixNode (addr ^{:go/breaks [2 4]} (lit trieNode
+                  :prefix (subslice (.-prefix t) 1)
+                  :next (.-next t)))))
+
+
+          (let [keyNode (new trieNode)]
+            (set! (.-table t) (make (slice (* trieNode)) (.-tableSize r)))
+            (aset (.-table t) (aget (.-mapping r) (aget (.-prefix t) 0)) prefixNode)
+            (aset (.-table t) (aget (.-mapping r) (aget key 0)) keyNode)
+            (set! (.-prefix t) "")
+            (set! (.-next t) nil)
+            (.add keyNode (subslice key 1) val priority r))) :else
+
+        ;; Insert new node after the common section of the prefix.
+        (let [next (addr ^{:go/breaks [2 4]} (lit trieNode
+                :prefix (subslice (.-prefix t) n)
+                :next (.-next t)))]
+
+          (set! (.-prefix t) (subslice (.-prefix t) _ n))
+          (set! (.-next t) next)
+          (.add next (subslice key n) val priority r))))
+
+    (!= (.-table t) nil)
+    ;; Insert into existing table.
+    (let [m (aget (.-mapping r) (aget key 0))]
+      (when (== (aget (.-table t) m) nil)
+        (aset (.-table t) m (new trieNode)))
+
+      (.add (aget (.-table t) m) (subslice key 1) val priority r)) :else
+    (do
+      (set! (.-prefix t) key)
+      (set! (.-next t) (new trieNode))
+      (.add (.-next t) "" val priority r))))
+
+
+
+^{:go/end 255} (go/method lookup [^{:tag (* genericReplacer)} r ^string s ^bool ignoreRoot] :results [^string val ^int keylen ^bool found]
+  ;; Iterate down the trie to the end, and grab the value and keylen with
+  ;; the highest priority.
+  (let [bestPriority 0
+      ^{:line 225} node (addr (.-root r))
+      ^{:line 226} n 0]
+    (while (!= node nil)
+      (when (and (> (.-priority node) bestPriority) (not (and ignoreRoot (== node (addr (.-root r))))))
+        (set! bestPriority (.-priority node))
+        (set! val (.-value node))
+        (set! keylen n)
+        (set! found true))
+
+
+      (when (== s "")
+        (break))
+
+      (cond (!= (.-table node) nil)
+        (let [index (aget (.-mapping r) (aget s 0))]
+          (when (== (conv int index) (.-tableSize r))
+            (break))
+
+          (set! node (aget (.-table node) index))
+          (set! s (subslice s 1))
+          (inc! n))
+        (and (!= (.-prefix node) "") (HasPrefix s (.-prefix node))) (do
+          (set! n + (len (.-prefix node)))
+          (set! s (subslice s (len (.-prefix node))))
+          (set! node (.-next node))) :else
+
+        (break)))
+
+
+    (return)))
+
+
+
+
+(go/type genericReplacer "genericReplacer is the fully generic algorithm.\nIt's used as a fallback when nothing faster can be used.\n" (struct
+    ^{:line 260 :tag trieNode} root
+
+
+    ^{:line 263 :tag int :doc "tableSize is the size of a trie node's lookup table. It is the number\nof unique key bytes.\n"} tableSize
+
+    ^{:line 265 :tag (array 256 byte) :doc "mapping maps from key bytes to a dense index for trieNode.table.\n"} mapping))
+
+
+^{:go/end 298} (go/func makeGenericReplacer ^{:tag (* genericReplacer)} [^{:tag (slice string)} oldnew]
+  (let [r (new genericReplacer)]
+    ;; Find each byte used, then assign them each an index.
+    (for [i 0] (< i (len oldnew)) (set! i + 2)
+      (let [key (aget oldnew i)]
+        (for [j 0] (< j (len key)) (inc! j)
+          (aset (.-mapping r) (aget key j) 1))))
+
+
+
+    (range [_ b (.-mapping r)]
+      (set! (.-tableSize r) + (conv int b)))
+
+
+    (let [^byte index (zero byte)]
+      (range [i b (.-mapping r)]
+        (if (== b 0)
+          (aset (.-mapping r) i (conv byte (.-tableSize r)))
+          (do
+            (aset (.-mapping r) i index)
+            (inc! index))))
+
+
+      ;; Ensure root node uses a lookup table (for performance).
+      (set! (.-table (.-root r)) (make (slice (* trieNode)) (.-tableSize r)))
+
+      (for [i 0] (< i (len oldnew)) (set! i + 2)
+        (.add (.-root r) (aget oldnew i) (aget oldnew (+ i 1)) (- (len oldnew) i) r))
+
+      ^{:line 297} r)))
+
+
+(go/type appendSliceWriter (slice byte))
+
+
+^{:go/end 306} (go/method Write "Write writes to the buffer to satisfy [io.Writer].\n" [^{:tag (* appendSliceWriter)} w ^{:tag (slice byte)} p] :results [int error]
+  (set! @w (append @w (spread p)))
+  (return (len p) nil))
+
+
+
+^{:go/end 312} (go/method WriteString "WriteString writes to the buffer without string->[]byte->string allocations.\n" [^{:tag (* appendSliceWriter)} w ^string s] :results [int error]
+  (set! @w (append @w (spread s)))
+  (return (len s) nil))
+
+
+(go/type stringWriter (struct
+    ^{:line 315 :tag io/Writer} w))
+
+
+^{:go/end 320} (go/method WriteString [^stringWriter w ^string s] :results [int error]
+  (.Write (.-w w) (conv (slice byte) s)))
+
+
+^{:go/end 328} (go/func getStringWriter ^io/StringWriter [^io/Writer w]
+  (let [(values sw ok) (assert io/StringWriter w)]
+    (when (not ok)
+      (set! sw (lit stringWriter w)))
+
+    ^{:line 327} sw))
+
+
+^{:go/end 334} (go/method Replace ^string [^{:tag (* genericReplacer)} r ^string s]
+  (let [buf (make appendSliceWriter 0 (len s))]
+    (.WriteString r (addr buf) s)
+    (conv string buf)))
+
+
+^{:go/end 375} (go/method WriteString [^{:tag (* genericReplacer)} r ^io/Writer w ^string s] :results [^int n ^error err]
+  (let [sw (getStringWriter w)
+      (values ^int last ^int wn) (zero int)
+      ^{:line 339 :tag bool} prevMatchEmpty (zero bool)]
+    (for [i 0] (<= i (len s)) _
+      ;; Fast path: s[i] is not a prefix of any pattern.
+      (when (and (!= i (len s)) (== (.-priority (.-root r)) 0))
+        (let [index (conv int (aget (.-mapping r) (aget s i)))]
+          (when (or (== index (.-tableSize r)) (== (aget (.-table (.-root r)) index) nil))
+            (inc! i)
+            (continue))))
+
+
+
+      ;; Ignore the empty match iff the previous loop found the empty match.
+      (let [(values val keylen match) (.lookup r (subslice s i) prevMatchEmpty)]
+        (set! prevMatchEmpty (and match (== keylen 0)))
+        (when match
+          (set! (values wn err) (.WriteString sw (subslice s last i)))
+          (set! n + wn)
+          (when (!= err nil)
+            (return))
+
+          (set! (values wn err) (.WriteString sw val))
+          (set! n + wn)
+          (when (!= err nil)
+            (return))
+
+          (set! i + keylen)
+          (set! last i)
+          (continue))
+
+        (inc! i)))
+
+    (when (!= last (len s))
+      (set! (values wn err) (.WriteString sw (subslice s last)))
+      (set! n + wn))
+
+    (return)))
+
+
+
+
+(go/type singleStringReplacer "singleStringReplacer is the implementation that's used when there is only\none string to replace (and that string has more than one byte).\n" (struct
+    ^{:line 380 :tag (* stringFinder)} finder
+
+    ^{:line 382 :tag string :doc "value is the new string that replaces that pattern when it's found.\n"} value))
+
+
+^{:go/end 387} (go/func makeSingleStringReplacer ^{:tag (* singleStringReplacer)} [^string pattern ^string value]
+  (addr (lit singleStringReplacer :finder (makeStringFinder pattern) :value value)))
+
+
+^{:go/end 408} (go/method Replace ^string [^{:tag (* singleStringReplacer)} r ^string s]
+  (let [^Builder buf (zero Builder)
+      (values i matched) (values 0 false)]
+    (while true
+      (let [match (.next (.-finder r) (subslice s i))]
+        (when (== match -1)
+          (break))
+
+        (set! matched true)
+        (.Grow buf (+ match (len (.-value r))))
+        (.WriteString buf (subslice s i (+ i match)))
+        (.WriteString buf (.-value r))
+        (set! i + (+ match (len (.-pattern (.-finder r)))))))
+
+    (when (not matched)
+      (return s))
+
+    (.WriteString buf (subslice s i))
+    (.String buf)))
+
+
+^{:go/end 433} (go/method WriteString [^{:tag (* singleStringReplacer)} r ^io/Writer w ^string s] :results [^int n ^error err]
+  (let [sw (getStringWriter w)
+      (values ^int i ^int wn) (zero int)]
+    (while true
+      (let [match (.next (.-finder r) (subslice s i))]
+        (when (== match -1)
+          (break))
+
+        (set! (values wn err) (.WriteString sw (subslice s i (+ i match))))
+        (set! n + wn)
+        (when (!= err nil)
+          (return))
+
+        (set! (values wn err) (.WriteString sw (.-value r)))
+        (set! n + wn)
+        (when (!= err nil)
+          (return))
+
+        (set! i + (+ match (len (.-pattern (.-finder r)))))))
+
+    (set! (values wn err) (.WriteString sw (subslice s i)))
+    (set! n + wn)
+    (return)))
+
+
+
+
+
+(go/type byteReplacer "byteReplacer is the implementation that's used when all the \"old\"\nand \"new\" values are single ASCII bytes.\nThe array contains replacement bytes indexed by old byte.\n" (array 256 byte))
+
+^{:go/end 455} (go/method Replace ^string [^{:tag (* byteReplacer)} r ^string s]
+  (let [^{:tag (slice byte)} buf (zero (slice byte))] ; lazily allocated
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [b (aget s i)]
+        (when (!= (aget r b) b)
+          (when (== buf nil)
+            (set! buf (conv (slice byte) s)))
+
+          (aset buf i (aget r b)))))
+
+
+    (when (== buf nil)
+      (return s))
+
+    (conv string buf)))
+
+
+^{:go/end 487} (go/method WriteString [^{:tag (* byteReplacer)} r ^io/Writer w ^string s] :results [^int n ^error err]
+  (let [sw (getStringWriter w)
+      ^{:line 459} last 0]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [b (aget s i)]
+        (when (== (aget r b) b)
+          (continue))
+
+        (when (!= last i)
+          (let [(values wn err) (.WriteString sw (subslice s last i))]
+            (set! n + wn)
+            (when (!= err nil)
+              (return n err))))
+
+
+        (set! last (+ i 1))
+        (let [(values nw err) (.Write w (subslice r b (+ (conv int b) 1)))]
+          (set! n + nw)
+          (when (!= err nil)
+            (return n err)))))
+
+
+    (when (!= last (len s))
+      (let [(values nw err) (.WriteString sw (subslice s last))]
+        (set! n + nw)
+        (when (!= err nil)
+          (return n err))))
+
+
+    (return n nil)))
+
+
+
+
+(go/type byteStringReplacer "byteStringReplacer is the implementation that's used when all the\n\"old\" values are single ASCII bytes but the \"new\" values vary in size.\n" (struct
+
+
+    ^{:line 494 :tag (array 256 (slice byte)) :doc "replacements contains replacement byte slices indexed by old byte.\nA nil []byte means that the old byte should not be replaced.\n"} replacements
+
+
+
+    ^{:line 498 :tag (slice string) :doc "toReplace keeps a list of bytes to replace. Depending on length of toReplace\nand length of target string it may be faster to use Count, or a plain loop.\nWe store single byte as a string, because Count takes a string.\n"} toReplace))
+
+
+
+
+
+
+
+
+
+(go/const ^{:val 8 :doc "countCutOff controls the ratio of a string length to a number of replacements\nat which (*byteStringReplacer).Replace switches algorithms.\nFor strings with higher ration of length to replacements than that value,\nwe call Count, for each replacement from toReplace.\nFor strings, with a lower ratio we use simple loop, because of Count overhead.\ncountCutOff is an empirically determined overhead multiplier.\nTODO(tocarip) revisit once we have register-based abi/mid-stack inlining.\n"} countCutOff 8)
+
+^{:go/end 548} (go/method Replace ^string [^{:tag (* byteStringReplacer)} r ^string s]
+  (let [newSize (len s)
+      ^{:line 512} anyChanges false]
+    ;; Is it faster to use Count?
+    (if (<= (* (len (.-toReplace r)) countCutOff) (len s))
+      (range [_ x (.-toReplace r)]
+        (when [c (Count s x)] (!= c 0)
+          ;; The -1 is because we are replacing 1 byte with len(replacements[b]) bytes.
+          (set! newSize + (* c (- (len (aget (.-replacements r) (aget x 0))) 1)))
+          (set! anyChanges true)))
+
+
+
+
+      (for [i 0] (< i (len s)) (inc! i)
+        (let [b (aget s i)]
+          (when (!= (aget (.-replacements r) b) nil)
+            ;; See above for explanation of -1
+            (set! newSize + (- (len (aget (.-replacements r) b)) 1))
+            (set! anyChanges true)))))
+
+
+
+    (when (not anyChanges)
+      (return s))
+
+    (let [buf (make (slice byte) newSize)
+        ^{:line 537} j 0]
+      (for [i 0] (< i (len s)) (inc! i)
+        (let [b (aget s i)]
+          (if (!= (aget (.-replacements r) b) nil)
+            (set! j + (copy (subslice buf j) (aget (.-replacements r) b)))
+            (do
+              (aset buf j b)
+              (inc! j)))))
+
+
+      (conv string buf))))
+
+
+^{:go/end 578} (go/method WriteString [^{:tag (* byteStringReplacer)} r ^io/Writer w ^string s] :results [^int n ^error err]
+  (let [sw (getStringWriter w)
+      ^{:line 552} last 0]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [b (aget s i)]
+        (when (== (aget (.-replacements r) b) nil)
+          (continue))
+
+        (when (!= last i)
+          (let [(values nw err) (.WriteString sw (subslice s last i))]
+            (set! n + nw)
+            (when (!= err nil)
+              (return n err))))
+
+
+        (set! last (+ i 1))
+        (let [(values nw err) (.Write w (aget (.-replacements r) b))]
+          (set! n + nw)
+          (when (!= err nil)
+            (return n err)))))
+
+
+    (when (!= last (len s))
+      (let [^int nw (zero int)]
+        (set! (values nw err) (.WriteString sw (subslice s last)))
+        (set! n + nw)))
+
+    (return)))

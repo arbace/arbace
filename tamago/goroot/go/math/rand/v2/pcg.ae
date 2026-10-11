@@ -1,0 +1,105 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.math.rand.v2) (go/file "pcg.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [byteorder "internal/byteorder"]
+    ^{:line 10} [bits "math/bits"]])
+
+
+;; https://numpy.org/devdocs/reference/random/upgrading-pcg64.html
+;; https://github.com/imneme/pcg-cpp/commit/871d0494ee9c9a7b7c43f753e3d8ca47c26f8005
+
+
+
+(go/type PCG "A PCG is a PCG generator with 128 bits of internal state.\nA zero PCG is equivalent to NewPCG(0, 0).\n" (struct
+    ^{:line 19 :tag uint64} hi
+    ^{:line 20 :tag uint64} lo))
+
+
+
+^{:go/end 26} (go/func NewPCG "NewPCG returns a new PCG seeded with the given values.\n" ^{:tag (* PCG)} [^uint64 seed1 ^uint64 seed2]
+  (addr (lit PCG seed1 seed2)))
+
+
+
+^{:go/end 32} (go/method Seed "Seed resets the PCG to behave the same way as NewPCG(seed1, seed2).\n" [^{:tag (* PCG)} p ^uint64 seed1 ^uint64 seed2]
+  (set! (.-hi p) seed1)
+  (set! (.-lo p) seed2))
+
+
+
+^{:go/end 40} (go/method AppendBinary "AppendBinary implements the [encoding.BinaryAppender] interface.\n" [^{:tag (* PCG)} p ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (set! b (append b (spread "pcg:")))
+  (set! b (byteorder/BEAppendUint64 b (.-hi p)))
+  (set! b (byteorder/BEAppendUint64 b (.-lo p)))
+  (return b nil))
+
+
+
+^{:go/end 45} (go/method MarshalBinary "MarshalBinary implements the [encoding.BinaryMarshaler] interface.\n" [^{:tag (* PCG)} p] :results [(slice byte) error]
+  (.AppendBinary p (make (slice byte) 0 20)))
+
+
+(go/var errUnmarshalPCG (errors/New "invalid PCG encoding"))
+
+
+^{:go/breaks [7] :go/end 57} (go/method UnmarshalBinary "UnmarshalBinary implements the [encoding.BinaryUnmarshaler] interface.\n" ^error [^{:tag (* PCG)} p ^{:tag (slice byte)} data]
+  (when (or (!= (len data) 20) (!= (conv string (subslice data _ 4)) "pcg:"))
+    (return errUnmarshalPCG))
+
+  (set! (.-hi p) (byteorder/BEUint64 (subslice data 4)))
+  (set! (.-lo p) (byteorder/BEUint64 (subslice data (+ 4 8))))
+  nil)
+
+
+^{:go/end 83} (go/method next [^{:tag (* PCG)} p] :results [^uint64 hi ^uint64 lo]
+  ;; https://github.com/imneme/pcg-cpp/blob/428802d1a5/include/pcg_random.hpp#L161
+  ;;
+  ;; Numpy's PCG multiplies by the 64-bit value cheapMul
+  ;; instead of the 128-bit value used here and in the official PCG code.
+  ;; This does not seem worthwhile, at least for Go: not having any high
+  ;; bits in the multiplier reduces the effect of low bits on the highest bits,
+  ;; and it only saves 1 multiply out of 3.
+  ;; (On 32-bit systems, it saves 1 out of 6, since Mul64 is doing 4.)
+  (let [
+      ^:const ^{:line 69 :val 2549297995355413924} mulHi 2549297995355413924
+      ^:const ^:go/grouped ^{:line 70 :val 4865540595714422341} mulLo 4865540595714422341
+      ^:const ^:go/grouped ^{:line 71 :val 6364136223846793005} incHi 6364136223846793005
+      ^:const ^:go/grouped ^{:line 72 :val 1442695040888963407} incLo 1442695040888963407]
+
+
+    ;; state = state * mul + inc
+    (set! (values hi lo) (bits/Mul64 (.-lo p) mulLo))
+    (set! hi + (+ (* (.-hi p) mulLo) (* (.-lo p) mulHi)))
+    (let [(values ^:assign lo c) (bits/Add64 lo incLo 0)]
+      (set! (values hi _) (bits/Add64 hi incHi c))
+      (set! (.-lo p) lo)
+      (set! (.-hi p) hi)
+      (return hi lo))))
+
+
+
+^{:go/end 106} (go/method Uint64 "Uint64 return a uniformly-distributed random uint64 value.\n" ^uint64 [^{:tag (* PCG)} p]
+  (let [(values hi lo) (.next p)
+
+      ;; XSL-RR would be
+      ;;	hi, lo := p.next()
+      ;;	return bits.RotateLeft64(lo^hi, -int(hi>>58))
+      ;; but Numpy uses DXSM and O'Neill suggests doing the same.
+      ;; See https://github.com/golang/go/issues/21835#issuecomment-739065688
+      ;; and following comments.
+
+      ;; DXSM "double xorshift multiply"
+      ;; https://github.com/imneme/pcg-cpp/blob/428802d1a5/include/pcg_random.hpp#L1015
+
+      ;; https://github.com/imneme/pcg-cpp/blob/428802d1a5/include/pcg_random.hpp#L176
+      ^:const ^{:line 100 :val 15750249268501108917N} cheapMul 0xda942042e4dd58b5]
+    (set! hi bit-xor (>> hi 32))
+    (set! hi * cheapMul)
+    (set! hi bit-xor (>> hi 48))
+    (set! hi * (bit-or lo 1))
+    ^{:line 105} hi))

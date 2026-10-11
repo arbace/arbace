@@ -1,0 +1,152 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.debug.macho) (go/file "fat.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [saferio "internal/saferio"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [os "os"]])
+
+
+
+(go/type FatFile "A FatFile is a Mach-O universal binary that contains at least one architecture.\n" (struct
+    ^{:line 17 :tag uint32} Magic
+    ^{:line 18 :tag (slice FatArch)} Arches
+    ^{:line 19 :tag io/Closer} closer))
+
+
+
+(go/type FatArchHeader "A FatArchHeader represents a fat header for a specific image architecture.\n" (struct
+    ^{:line 24 :tag Cpu} Cpu
+    ^{:line 25 :tag uint32} SubCpu
+    ^{:line 26 :tag uint32} Offset
+    ^{:line 27 :tag uint32} Size
+    ^{:line 28 :tag uint32} Align))
+
+
+(go/const ^{:val 20} fatArchHeaderSize (* 5 4))
+
+
+(go/type FatArch "A FatArch is a Mach-O File inside a FatFile.\n" (struct
+    ^{:line 35} FatArchHeader
+    (* File)))
+
+
+
+
+(go/var ^{:doc "ErrNotFat is returned from [NewFatFile] or [OpenFat] when the file is not a\nuniversal binary but may be a thin binary, based on its magic number.\n"} ErrNotFat (addr (lit FormatError 0 "not a fat Mach-O file" nil)))
+
+
+
+
+^{:go/end 128} (go/func NewFatFile "NewFatFile creates a new [FatFile] for accessing all the Mach-O images in a\nuniversal binary. The Mach-O binary is expected to start at position 0 in\nthe ReaderAt.\n" [^io/ReaderAt r] :results [(* FatFile) error]
+  (let [^FatFile ff (zero FatFile)
+      ^{:line 48} sr (io/NewSectionReader r 0 (- (<< 1 63) 1))
+
+      ;; Read the fat_header struct, which is always in big endian.
+      ;; Start with the magic number.
+      ^{:line 52} err (binary/Read sr binary/BigEndian (addr (.-Magic ff)))]
+    (cond (!= err nil)
+      (return nil (addr (lit FormatError 0 "error reading magic number" nil)))
+      (!= (.-Magic ff) MagicFat)
+      ;; See if this is a Mach-O file via its magic number. The magic
+      ;; must be converted to little endian first though.
+      (let [^{:tag (array 4 byte)} buf (zero (array 4 byte))]
+        (.PutUint32 binary/BigEndian (subslice buf) (.-Magic ff))
+        (let [leMagic (.Uint32 binary/LittleEndian (subslice buf))]
+          (if (or (== leMagic Magic32) (== leMagic Magic64))
+            (return nil ErrNotFat)
+
+            (return nil (addr (lit FormatError 0 "invalid magic number" nil)))))))
+
+
+    (let [offset (conv int64 4)
+
+        ;; Read the number of FatArchHeaders that come after the fat_header.
+        ^{:line 70 :tag uint32} narch (zero uint32)]
+      (set! err (binary/Read sr binary/BigEndian (addr narch)))
+      (when (!= err nil)
+        (return nil (addr (lit FormatError offset "invalid fat_header" nil))))
+
+      (set! offset + 4)
+
+      (when (< narch 1)
+        (return nil (addr (lit FormatError offset "file contains no images" nil))))
+
+
+      ;; Combine the Cpu and SubCpu (both uint32) into a uint64 to make sure
+      ;; there are not duplicate architectures.
+      (let [seenArches (make (map uint64 bool))
+          ;; Make sure that all images are for the same MH_ type.
+          ^{:line 85 :tag Type} machoType (zero Type)
+
+          ;; Following the fat_header comes narch fat_arch structs that index
+          ;; Mach-O images further in the file.
+          ^{:line 89} c ((inst saferio/SliceCap FatArch) (conv uint64 narch))]
+        (when (< c 0)
+          (return nil (addr (lit FormatError offset "too many images" nil))))
+
+        (set! (.-Arches ff) (make (slice FatArch) 0 c))
+        (for [i (conv uint32 0)] (< i narch) (inc! i)
+          (let [^FatArch fa (zero FatArch)]
+            (set! err (binary/Read sr binary/BigEndian (addr (.-FatArchHeader fa))))
+            (when (!= err nil)
+              (return nil (addr (lit FormatError offset "invalid fat_arch header" nil))))
+
+            (set! offset + fatArchHeaderSize)
+
+            (let [fr (io/NewSectionReader r (conv int64 ^{:go/via [FatArchHeader]} (.-Offset fa)) (conv int64 ^{:go/via [FatArchHeader]} (.-Size fa)))]
+              (set! (values (.-File fa) err) (NewFile fr))
+              (when (!= err nil)
+                (return nil err))
+
+
+              ;; Make sure the architecture for this image is not duplicate.
+              (let [seenArch (bit-or (<< (conv uint64 ^{:go/via [FatArchHeader]} (.-Cpu fa)) 32) (conv uint64 ^{:go/via [FatArchHeader]} (.-SubCpu fa)))]
+                (when [(values o k) (aget seenArches seenArch)] (or o k)
+                  (return nil (addr (lit FormatError offset (fmt/Sprintf "duplicate architecture cpu=%v, subcpu=%#x" ^{:go/via [FatArchHeader]} (.-Cpu fa) ^{:go/via [FatArchHeader]} (.-SubCpu fa)) nil))))
+
+                (aset seenArches seenArch true)
+
+                ;; Make sure the Mach-O type matches that of the first image.
+                (if (== i 0)
+                  (set! machoType ^{:go/via [File FileHeader]} (.-Type fa))
+                  (do
+                    (when (!= ^{:go/via [File FileHeader]} (.-Type fa) machoType)
+                      (return nil (addr (lit FormatError offset (fmt/Sprintf "Mach-O type for architecture #%d (type=%#x) does not match first (type=%#x)" i ^{:go/via [File FileHeader]} (.-Type fa) machoType) nil))))))
+
+
+
+                (set! (.-Arches ff) (append (.-Arches ff) fa))))))
+
+
+        (return (addr ff) nil)))))
+
+
+
+
+^{:go/end 144} (go/func OpenFat "OpenFat opens the named file using [os.Open] and prepares it for use as a Mach-O\nuniversal binary.\n" [^string name] :results [(* FatFile) error]
+  (let [(values f err) (os/Open name)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values ff ^:assign err) (NewFatFile f)]
+      (when (!= err nil)
+        (.Close f)
+        (return nil err))
+
+      (set! (.-closer ff) f)
+      (return ff nil))))
+
+
+^{:go/end 153} (go/method Close ^error [^{:tag (* FatFile)} ff]
+  (let [^error err (zero error)]
+    (when (!= (.-closer ff) nil)
+      (set! err (.Close (.-closer ff)))
+      (set! (.-closer ff) nil))
+
+    ^{:line 152} err))

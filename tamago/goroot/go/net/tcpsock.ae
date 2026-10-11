@@ -1,0 +1,477 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "tcpsock.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [strconv "internal/strconv"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [netip "net/netip"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [syscall "syscall"]
+    ^{:line 14} [time "time"]])
+
+
+;; BUG(mikio): On JS, the File method of TCPConn and
+;; TCPListener is not implemented.
+
+
+(go/type TCPAddr "TCPAddr represents the address of a TCP end point.\n" (struct
+    ^{:line 22 :tag IP} IP
+    ^{:line 23 :tag int} Port
+    ^{:line 24 :tag string} Zone)) ; IPv6 scoped addressing zone
+
+
+
+
+
+
+
+^{:go/end 39} (go/method AddrPort "AddrPort returns the [TCPAddr] a as a [netip.AddrPort].\n\nIf a.Port does not fit in a uint16, it's silently truncated.\n\nIf a is nil, a zero value is returned.\n" ^netip/AddrPort [^{:tag (* TCPAddr)} a]
+  (when (== a nil)
+    (return (lit netip/AddrPort)))
+
+  (let [(values na _) (netip/AddrFromSlice (.-IP a))]
+    (set! na (.WithZone na (.-Zone a)))
+    (netip/AddrPortFrom na (conv uint16 (.-Port a)))))
+
+
+
+^{:go/end 42} (go/method Network "Network returns the address's network name, \"tcp\".\n" ^string [^{:tag (* TCPAddr)} a] "tcp")
+
+^{:go/end 53} (go/method String ^string [^{:tag (* TCPAddr)} a]
+  (when (== a nil)
+    (return "<nil>"))
+
+  (let [ip (ipEmptyString (.-IP a))]
+    (when (!= (.-Zone a) "")
+      (return (JoinHostPort (+ ip "%" (.-Zone a)) (strconv/Itoa (.-Port a)))))
+
+    (JoinHostPort ip (strconv/Itoa (.-Port a)))))
+
+
+^{:go/end 60} (go/method isWildcard ^bool [^{:tag (* TCPAddr)} a]
+  (when (or (== a nil) (== (.-IP a) nil))
+    (return true))
+
+  (.IsUnspecified (.-IP a)))
+
+
+^{:go/end 67} (go/method opAddr ^Addr [^{:tag (* TCPAddr)} a]
+  (when (== a nil)
+    (return nil))
+
+  ^{:line 66} a)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 97} (go/func ResolveTCPAddr "ResolveTCPAddr returns an address of TCP end point.\n\nThe network must be a TCP network name.\n\nIf the host in the address parameter is not a literal IP address or\nthe port is not a literal port number, ResolveTCPAddr resolves the\naddress to an address of TCP end point.\nOtherwise, it parses the address as a pair of literal IP address\nand port number.\nThe address parameter can use a host name, but this is not\nrecommended, because it will return at most one of the host name's\nIP addresses.\n\nSee func [Dial] for a description of the network and address\nparameters.\n" [^string network ^string address] :results [(* TCPAddr) error]
+  (switch network
+    (case ["tcp" "tcp4" "tcp6"])
+    (case [""] ; a hint wildcard for Go 1.0 undocumented behavior
+      (set! network "tcp"))
+    (default
+      (return nil (conv UnknownNetworkError network))))
+
+  (let [(values addrs err) (.internetAddrList DefaultResolver (context/Background) network address)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (assert (* TCPAddr) (.forResolve addrs network address)) nil)))
+
+
+
+
+
+^{:go/end 108} (go/func TCPAddrFromAddrPort "TCPAddrFromAddrPort returns addr as a [TCPAddr]. If addr.IsValid() is false,\nthen the returned TCPAddr will contain a nil IP field, indicating an\naddress family-agnostic unspecified address.\n" ^{:tag (* TCPAddr)} [^netip/AddrPort addr]
+  (addr ^{:go/breaks [2 4 6]} (lit TCPAddr
+      :IP (.AsSlice (.Addr addr))
+      :Zone (.Zone (.Addr addr))
+      :Port (conv int (.Port addr)))))
+
+
+
+
+
+(go/type TCPConn "TCPConn is an implementation of the [Conn] interface for TCP network\nconnections.\n" (struct
+    ^{:line 113} conn))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type KeepAliveConfig "KeepAliveConfig contains TCP keep-alive options.\n\nIf the Idle, Interval, or Count fields are zero, a default value is chosen.\nIf a field is negative, the corresponding socket-level option will be left unchanged.\n\nNote that prior to Windows 10 version 1709, neither setting Idle and Interval\nseparately nor changing Count (which is usually 10) is supported.\nTherefore, it's recommended to set both Idle and Interval to non-negative values\nin conjunction with a -1 for Count on those old Windows if you intend to customize\nthe TCP keep-alive settings.\nBy contrast, if only one of Idle and Interval is set to a non-negative value,\nthe other will be set to the system default value, and ultimately,\nset both Idle and Interval to negative values if you want to leave them unchanged.\n\nNote that Solaris and its derivatives do not support setting Interval to a non-negative value\nand Count to a negative value, or vice-versa.\n" (struct
+
+    ^{:line 134 :tag bool :doc "If Enable is true, keep-alive probes are enabled.\n"} Enable
+
+
+
+
+    ^{:line 139 :tag time/Duration :doc "Idle is the time that the connection must be idle before\nthe first keep-alive probe is sent.\nIf zero, a default value of 15 seconds is used.\n"} Idle
+
+
+
+    ^{:line 143 :tag time/Duration :doc "Interval is the time between keep-alive probes.\nIf zero, a default value of 15 seconds is used.\n"} Interval
+
+
+
+
+    ^{:line 148 :tag int :doc "Count is the maximum number of keep-alive probes that\ncan go unanswered before dropping a connection.\nIf zero, a default value of 9 is used.\n"} Count))
+
+
+
+
+^{:go/end 158} (go/method SyscallConn "SyscallConn returns a raw network connection.\nThis implements the [syscall.Conn] interface.\n" [^{:tag (* TCPConn)} c] :results [syscall/RawConn error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return nil syscall/EINVAL))
+
+  (return (newRawConn ^{:go/via [conn]} (.-fd c)) nil))
+
+
+
+^{:go/end 170} (go/method ReadFrom "ReadFrom implements the [io.ReaderFrom] ReadFrom method.\n" [^{:tag (* TCPConn)} c ^io/Reader r] :results [int64 error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 syscall/EINVAL))
+
+  (let [(values n err) (.readFrom c r)]
+    (when (and (!= err nil) (!= err io/EOF))
+      (set! err (addr (lit OpError :Op "readfrom" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+    (return n err)))
+
+
+
+^{:go/end 182} (go/method WriteTo "WriteTo implements the io.WriterTo WriteTo method.\n" [^{:tag (* TCPConn)} c ^io/Writer w] :results [int64 error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 syscall/EINVAL))
+
+  (let [(values n err) (.writeTo c w)]
+    (when (and (!= err nil) (!= err io/EOF))
+      (set! err (addr (lit OpError :Op "writeto" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+    (return n err)))
+
+
+
+
+^{:go/breaks [[6 193]] :go/end 194} (go/method CloseRead "CloseRead shuts down the reading side of the TCP connection.\nMost callers should just use Close.\n" ^error [^{:tag (* TCPConn)} c]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return syscall/EINVAL))
+
+  (when [err (.closeRead ^{:go/via [conn]} (.-fd c))] (!= err nil)
+    (return (addr (lit OpError :Op "close" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+  nil)
+
+
+
+
+^{:go/breaks [[6 205]] :go/end 206} (go/method CloseWrite "CloseWrite shuts down the writing side of the TCP connection.\nMost callers should just use Close.\n" ^error [^{:tag (* TCPConn)} c]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return syscall/EINVAL))
+
+  (when [err (.closeWrite ^{:go/via [conn]} (.-fd c))] (!= err nil)
+    (return (addr (lit OpError :Op "close" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 229]] :go/end 230} (go/method SetLinger "SetLinger sets the behavior of Close on a connection which still\nhas data waiting to be sent or to be acknowledged.\n\nIf sec < 0 (the default), the operating system finishes sending the\ndata in the background.\n\nIf sec == 0, the operating system discards any unsent or\nunacknowledged data.\n\nIf sec > 0, the data is sent in the background as with sec < 0.\nOn some operating systems including Linux, this may cause Close to block\nuntil all data has been sent or discarded.\nOn some operating systems after sec seconds have elapsed any remaining\nunsent data may be discarded.\n" ^error [^{:tag (* TCPConn)} c ^int sec]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return syscall/EINVAL))
+
+  (when [err (setLinger ^{:go/via [conn]} (.-fd c) sec)] (!= err nil)
+    (return (addr (lit OpError :Op "set" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+  nil)
+
+
+
+
+^{:go/breaks [[6 241]] :go/end 242} (go/method SetKeepAlive "SetKeepAlive sets whether the operating system should send\nkeep-alive messages on the connection.\n" ^error [^{:tag (* TCPConn)} c ^bool keepalive]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return syscall/EINVAL))
+
+  (when [err (setKeepAlive ^{:go/via [conn]} (.-fd c) keepalive)] (!= err nil)
+    (return (addr (lit OpError :Op "set" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+  nil)
+
+
+
+
+
+
+
+^{:go/breaks [[6 256]] :go/end 257} (go/method SetKeepAlivePeriod "SetKeepAlivePeriod sets the duration the connection needs to\nremain idle before TCP starts sending keepalive probes.\n\nNote that calling this method on Windows prior to Windows 10 version 1709\nwill reset the KeepAliveInterval to the default system value, which is normally 1 second.\n" ^error [^{:tag (* TCPConn)} c ^time/Duration d]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return syscall/EINVAL))
+
+  (when [err (setKeepAliveIdle ^{:go/via [conn]} (.-fd c) d)] (!= err nil)
+    (return (addr (lit OpError :Op "set" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+  nil)
+
+
+
+
+
+
+^{:go/breaks [[6 270]] :go/end 271} (go/method SetNoDelay "SetNoDelay controls whether the operating system should delay\npacket transmission in hopes of sending fewer packets (Nagle's\nalgorithm).  The default is true (no delay), meaning that data is\nsent as soon as possible after a Write.\n" ^error [^{:tag (* TCPConn)} c ^bool noDelay]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return syscall/EINVAL))
+
+  (when [err (setNoDelay ^{:go/via [conn]} (.-fd c) noDelay)] (!= err nil)
+    (return (addr (lit OpError :Op "set" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 287} (go/method MultipathTCP "MultipathTCP reports whether the ongoing connection is using MPTCP.\n\nIf Multipath TCP is not supported by the host, by the other peer or\nintentionally / accidentally filtered out by a device in between, a\nfallback to TCP will be done. This method does its best to check if\nMPTCP is still being used or not.\n\nOn Linux, more conditions are verified on kernels >= v5.16, improving\nthe results.\n" [^{:tag (* TCPConn)} c] :results [bool error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return false syscall/EINVAL))
+
+  (return (isUsingMultipathTCP ^{:go/via [conn]} (.-fd c)) nil))
+
+
+^{:go/end 308} (go/func newTCPConn ^{:tag (* TCPConn)} [^{:tag (* netFD)} fd ^time/Duration keepAliveIdle ^KeepAliveConfig keepAliveCfg ^{:tag (func [(* netFD)])} preKeepAliveHook ^{:tag (func [KeepAliveConfig])} keepAliveHook]
+  (setNoDelay fd true)
+  (when (and (not (.-Enable keepAliveCfg)) (>= keepAliveIdle 0))
+    (set! keepAliveCfg ^{:go/breaks [2 4]} (lit KeepAliveConfig
+        :Enable true
+        :Idle keepAliveIdle)))
+
+
+  (let [c (addr (lit TCPConn (lit conn fd)))]
+    (when (.-Enable keepAliveCfg)
+      (when (!= preKeepAliveHook nil)
+        (preKeepAliveHook fd))
+
+      (.SetKeepAliveConfig c keepAliveCfg)
+      (when (!= keepAliveHook nil)
+        (keepAliveHook keepAliveCfg)))
+
+
+    ^{:line 307} c))
+
+
+
+
+
+
+
+
+
+^{:go/end 319} (go/func DialTCP "DialTCP acts like [Dial] for TCP networks.\n\nThe network must be a TCP network name; see func Dial for details.\n\nIf laddr is nil, a local address is automatically chosen.\nIf the IP field of raddr is nil or an unspecified IP address, the\nlocal system is assumed.\n" [^string network ^{:tag (* TCPAddr)} laddr ^{:tag (* TCPAddr)} raddr] :results [(* TCPConn) error]
+  (dialTCP (context/Background) nil network laddr raddr))
+
+
+^{:go/end 347} (go/func dialTCP [^context/Context ctx ^{:tag (* Dialer)} dialer ^string network ^{:tag (* TCPAddr)} laddr ^{:tag (* TCPAddr)} raddr] :results [(* TCPConn) error]
+  (switch network
+    (case ["tcp" "tcp4" "tcp6"])
+    (default
+      (return nil (addr (lit OpError :Op "dial" :Net network :Source (.opAddr laddr) :Addr (.opAddr raddr) :Err (conv UnknownNetworkError network))))))
+
+  (when (== raddr nil)
+    (return nil (addr (lit OpError :Op "dial" :Net network :Source (.opAddr laddr) :Addr nil :Err errMissingAddress))))
+
+  (let [sd (addr (lit sysDialer :network network :address (.String raddr)))
+
+      ^{:line 332 :tag (* TCPConn)} c (zero (* TCPConn))
+      ^{:line 333 :tag error} err (zero error)]
+
+    (when (!= dialer nil)
+      (set! (.-Dialer sd) @dialer))
+
+    (if ^{:go/via [Dialer]} (.MultipathTCP sd)
+      (set! (values c err) (.dialMPTCP sd ctx laddr raddr))
+
+      (set! (values c err) (.dialTCP sd ctx laddr raddr)))
+
+    (when (!= err nil)
+      (return nil (addr (lit OpError :Op "dial" :Net network :Source (.opAddr laddr) :Addr (.opAddr raddr) :Err err))))
+
+    (return c nil)))
+
+
+
+
+(go/type TCPListener "TCPListener is a TCP network listener. Clients should typically\nuse variables of type [Listener] instead of assuming TCP.\n" (struct
+    ^{:line 352 :tag (* netFD)} fd
+    ^{:line 353 :tag ListenConfig} lc))
+
+
+
+
+
+
+
+^{:go/end 366} (go/method SyscallConn "SyscallConn returns a raw network connection.\nThis implements the [syscall.Conn] interface.\n\nThe returned RawConn only supports calling Control. Read and\nWrite return an error.\n" [^{:tag (* TCPListener)} l] :results [syscall/RawConn error]
+  (when (not (.ok l))
+    (return nil syscall/EINVAL))
+
+  (return (newRawListener (.-fd l)) nil))
+
+
+
+
+^{:go/end 379} (go/method AcceptTCP "AcceptTCP accepts the next incoming call and returns the new\nconnection.\n" [^{:tag (* TCPListener)} l] :results [(* TCPConn) error]
+  (when (not (.ok l))
+    (return nil syscall/EINVAL))
+
+  (let [(values c err) (.accept l)]
+    (when (!= err nil)
+      (return nil (addr (lit OpError :Op "accept" :Net (.-net (.-fd l)) :Source nil :Addr (.-laddr (.-fd l)) :Err err))))
+
+    (return c nil)))
+
+
+
+
+^{:go/end 392} (go/method Accept "Accept implements the Accept method in the [Listener] interface; it\nwaits for the next call and returns a generic [Conn].\n" [^{:tag (* TCPListener)} l] :results [Conn error]
+  (when (not (.ok l))
+    (return nil syscall/EINVAL))
+
+  (let [(values c err) (.accept l)]
+    (when (!= err nil)
+      (return nil (addr (lit OpError :Op "accept" :Net (.-net (.-fd l)) :Source nil :Addr (.-laddr (.-fd l)) :Err err))))
+
+    (return c nil)))
+
+
+
+
+^{:go/breaks [[6 403]] :go/end 404} (go/method Close "Close stops listening on the TCP address.\nAlready Accepted connections are not closed.\n" ^error [^{:tag (* TCPListener)} l]
+  (when (not (.ok l))
+    (return syscall/EINVAL))
+
+  (when [err (.close l)] (!= err nil)
+    (return (addr (lit OpError :Op "close" :Net (.-net (.-fd l)) :Source nil :Addr (.-laddr (.-fd l)) :Err err))))
+
+  nil)
+
+
+
+
+
+^{:go/end 409} (go/method Addr "Addr returns the listener's network address, a [*TCPAddr].\nThe Addr returned is shared by all invocations of Addr, so\ndo not modify it.\n" ^Addr [^{:tag (* TCPListener)} l] (.-laddr (.-fd l)))
+
+
+
+^{:go/end 418} (go/method SetDeadline "SetDeadline sets the deadline associated with the listener.\nA zero time value disables the deadline.\n" ^error [^{:tag (* TCPListener)} l ^time/Time t]
+  (when (not (.ok l))
+    (return syscall/EINVAL))
+
+  (.SetDeadline (.-fd l) t))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 439} (go/method File "File returns a copy of the underlying [os.File].\nIt is the caller's responsibility to close f when finished.\nClosing l does not affect f, and closing f does not affect l.\n\nThe returned os.File's file descriptor is different from the\nconnection's. Attempting to change properties of the original\nusing this duplicate may or may not have the desired effect.\n\nOn Windows, the returned os.File's file descriptor is not\nusable on other processes.\n" [^{:tag (* TCPListener)} l] :results [^{:tag (* os/File)} f ^error err]
+  (when (not (.ok l))
+    (return nil syscall/EINVAL))
+
+  (set! (values f err) (.file l))
+  (when (!= err nil)
+    (return nil (addr (lit OpError :Op "file" :Net (.-net (.-fd l)) :Source nil :Addr (.-laddr (.-fd l)) :Err err))))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 473} (go/func ListenTCP "ListenTCP acts like [Listen] for TCP networks.\n\nThe network must be a TCP network name; see func Dial for details.\n\nIf the IP field of laddr is nil or an unspecified IP address,\nListenTCP listens on all available unicast and anycast IP addresses\nof the local system.\nIf the Port field of laddr is 0, a port number is automatically\nchosen.\n" [^string network ^{:tag (* TCPAddr)} laddr] :results [(* TCPListener) error]
+  (switch network
+    (case ["tcp" "tcp4" "tcp6"])
+    (default
+      (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr (.opAddr laddr) :Err (conv UnknownNetworkError network))))))
+
+  (when (== laddr nil)
+    (set! laddr (addr (lit TCPAddr))))
+
+  (let [sl (addr (lit sysListener :network network :address (.String laddr)))
+
+      ^{:line 461 :tag (* TCPListener)} ln (zero (* TCPListener))
+      ^{:line 462 :tag error} err (zero error)]
+
+    (if ^{:go/via [ListenConfig]} (.MultipathTCP sl)
+      (set! (values ln err) (.listenMPTCP sl (context/Background) laddr))
+
+      (set! (values ln err) (.listenTCP sl (context/Background) laddr)))
+
+    (when (!= err nil)
+      (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr (.opAddr laddr) :Err err))))
+
+    (return ln nil)))
+
+
+
+^{:go/end 478} (go/func roundDurationUp "roundDurationUp rounds d to the next multiple of to.\n" ^time/Duration [^time/Duration d ^time/Duration to]
+  (/ (- (+ d to) 1) to))

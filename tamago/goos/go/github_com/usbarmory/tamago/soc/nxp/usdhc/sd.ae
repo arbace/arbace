@@ -1,0 +1,447 @@
+;; NXP Ultra Secured Digital Host Controller (uSDHC) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; IP: https://www.mobiveil.com/esdhc/
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.usdhc) (go/file "sd.go" :imports [
+
+
+    ^{:line 14} [binary "encoding/binary"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [time "time"]
+
+    ^{:line 19} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 20} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "SD registers\n"
+
+  ^{:line 26} [^{:val 8 :doc "p101, 4.3.13 Send Interface Condition Command (CMD8), SD-PL-7.10\n"} CMD8_ARG_VHS 8]
+  ^{:line 27} [^{:val 0} CMD8_ARG_CHECK_PATTERN 0]
+
+  ^{:line 29} [^{:val 1} VHS_HIGH 2r0001]
+  ^{:line 30} [^{:val 2} VHS_LOW 2r0010]
+  ^{:line 31} [^{:val 170} CHECK_PATTERN 2r10101010]
+
+
+
+  ^{:line 35} [^{:val 31 :doc "p59, 4.2.3.1 Initialization Command (ACMD41), SD-PL-7.10\np198, 5.1 OCR register, SD-PL-7.10\n"} SD_OCR_BUSY 31]
+  ^{:line 36} [^{:val 30} SD_OCR_HCS 30]
+  ^{:line 37} [^{:val 29} SD_OCR_UHSII 29]
+  ^{:line 38} [^{:val 28} SD_OCR_XPC 28]
+  ^{:line 39} [^{:val 24} SD_OCR_S18R 24]
+  ^{:line 40} [^{:val 23} SD_OCR_VDD_HV_MAX 23]
+  ^{:line 41} [^{:val 15} SD_OCR_VDD_HV_MIN 15]
+  ^{:line 42} [^{:val 7} SD_OCR_VDD_LV 7]
+
+
+  ^{:line 45} [^{:val 31 :doc "p120, Table 4-32 : Switch Function Commands (class 10), SD-PL-7.10\n"} SD_SWITCH_MODE 31]
+
+  ^{:line 47} [^{:val 4 :doc "p92, Table 4-11 : Available Functions of CMD6, SD-PL-7.10\n"} SD_SWITCH_POWER_LIMIT_GROUP 4]
+  ^{:line 48} [^{:val 1} SD_SWITCH_ACCESS_MODE_GROUP 1]
+
+  ^{:line 50} [^{:val 64 :doc "p95, 4.3.10.4 Switch Function Status, SD-PL-7.10\n"} SD_SWITCH_STATUS_LENGTH 64]
+
+
+  ^{:line 53} [^{:val 0 :doc "p89, 4.3.10 Switch Function Command, SD-PL-7.10\n"} MODE_CHECK 0]
+  ^{:line 54} [^{:val 1} MODE_SWITCH 1]
+  ^{:line 55} [^{:val 1} ACCESS_MODE_HS 0x1]
+  ^{:line 56} [^{:val 2} ACCESS_MODE_SDR50 0x2]
+  ^{:line 57} [^{:val 3} ACCESS_MODE_SDR104 0x3]
+  ^{:line 58} [^{:val 3} POWER_LIMIT_288W 0x3]
+
+
+  ^{:line 61} [^{:val 118 :doc "p201 5.3.1 CSD_STRUCTURE, SD-PL-7.10\n"} SD_CSD_STRUCTURE (+ 126 CSD_RSP_OFF)]
+
+
+  ^{:line 64} [^{:val 39 :doc "p202 5.3.2 CSD Register (CSD Version 1.0), SD-PL-7.10\n"} SD_CSD_C_SIZE_MULT_1 (+ 47 CSD_RSP_OFF)]
+  ^{:line 65} [^{:val 54} SD_CSD_C_SIZE_1 (+ 62 CSD_RSP_OFF)]
+  ^{:line 66} [^{:val 72} SD_CSD_READ_BL_LEN_1 (+ 80 CSD_RSP_OFF)]
+
+
+  ^{:line 69} [^{:val 40 :doc "p209 5.3.3 CSD Register (CSD Version 2.0), SD-PL-7.10\n"} SD_CSD_C_SIZE_2 (+ 48 CSD_RSP_OFF)]
+  ^{:line 70} [^{:val 72} SD_CSD_READ_BL_LEN_2 (+ 80 CSD_RSP_OFF)]
+
+
+  ^{:line 73} [^{:val 40 :doc "p212 5.3.4 CSD Register (CSD Version 3.0), SD-PL-7.10\n"} SD_CSD_C_SIZE_3 (+ 48 CSD_RSP_OFF)]
+  ^{:line 74} [^{:val 72} SD_CSD_READ_BL_LEN_3 (+ 80 CSD_RSP_OFF)]
+
+
+  ^{:line 77} [^{:val 25 :doc "p23, 2. System Features, SD-PL-7.10\n"} HS_MBPS 25]
+  ^{:line 78} [^{:val 50} SDR50_MBPS 50]
+  ^{:line 79} [^{:val 75} SDR104_MBPS 75] ; instead of 104 due to NXP ERR010450
+
+
+  ^{:line 82} [^{:val 1 :doc "PLL2 PFD2 clock divided by 2\n"} ROOTCLK_UHS_SDR50 1]
+  ;; Root clock frequency: 396 MHz / (1 + 1) = 198 MHz
+
+
+  ^{:line 86} [^{:val 2 :doc "PLL2 PFD2 clock divided by 3\n"} ROOTCLK_UHS_SDR104 2] ; instead of 1 due to NXP ERR010450
+  ;; Root clock frequency: 396 MHz / (1 + 2) = 132 MHz
+
+
+  ^{:line 90} [^{:val 1 :doc "Root clock divided by 2 (Single Data Rate mode)\n"} SDCLKFS_UHS_SDR50 0x01]
+  ;; SDR50 frequency: 198 / (1 * 2) == 99 MHz
+
+
+  ^{:line 94} [^{:val 0 :doc "Root clock divided by 1 (Single Data Rate mode)\n"} SDCLKFS_UHS_SDR104 0])
+;; SDR104 frequency: 132 / (1 * 1) == 132 MHz
+
+
+
+(go/const "SD constants\n"
+  ^{:line 100} [^{:val 1000000000} SD_DETECT_TIMEOUT (* 1 time/Second)]
+  ^{:line 101} [^{:val 512} SD_DEFAULT_BLOCK_SIZE 512]
+
+
+
+  ^{:line 105} [^{:val 40 :doc "Tuning should complete in max 40 cycles\np42, 4.2.4.5 Tuning Command, SD-PL-7.10\n"} TUNING_MAX_LOOP_COUNT 40]
+
+
+
+  ^{:line 109} [^{:val 2 :doc "The following values are set to make the standard tuning logic\ncomplete in less then 40 cycles.\n"} TUNING_STEP 2]
+  ^{:line 110} [^{:val 20} TUNING_START_TAP 20])
+
+
+^{:go/end 141} (go/method switchSD [^{:tag (* USDHC)} hw ^uint32 mode ^int group ^uint32 val] :results [^{:tag (slice byte)} status ^error err]
+  (let [^uint32 arg (zero uint32)]
+
+    ;; set `no influence` (0xf) for all function groups
+    (set! arg 0x00ffffff)
+    ;; set mode check
+    (bits/SetN (addr arg) SD_SWITCH_MODE 1 mode)
+    ;; set function group
+    (bits/SetN (addr arg) (* (- group 1) 4) 0xf val)
+
+    (set! status (make (slice byte) SD_SWITCH_STATUS_LENGTH))
+
+    ;; CMD6 - SWITCH - switch mode of operation
+    (when [(set! err (.transfer hw 6 READ (conv uint64 arg) 1 SD_SWITCH_STATUS_LENGTH status))] (!= err nil)
+      (return))
+
+
+    (set! err (.waitState hw CURRENT_STATE_TRAN (* 500 time/Millisecond)))
+
+    (when (!= err nil)
+      (return))
+
+
+    (when (!= (bit-and (>> (.rsp hw 0) STATUS_SWITCH_ERROR) 1) 0)
+      (set! err (errors/New "switch error")))
+
+
+    (return)))
+
+
+^{:go/end 145} (go/method executeTuningSD ^error [^{:tag (* USDHC)} hw]
+  (.executeTuning hw 19 64))
+
+
+
+^{:go/end 246} (go/method voltageValidationSD "p350, 35.4.4 SD voltage validation flow chart, IMX6FG\n" ^bool [^{:tag (* USDHC)} hw]
+  (let [^uint32 arg (zero uint32)
+      ^{:line 150 :tag bool} hv (zero bool)]
+
+    ;; ensure 3.3V signaling
+    (when (!= (.-LowVoltage hw) nil)
+      ((.-LowVoltage hw) false))
+
+
+    ;; CMD8 - SEND_IF_COND - read device data
+    ;; p101, 4.3.13 Send Interface Condition Command (CMD8), SD-PL-7.10
+
+    (bits/SetN (addr arg) CMD8_ARG_VHS 2r1111 VHS_HIGH)
+    (bits/SetN (addr arg) CMD8_ARG_CHECK_PATTERN 0xff CHECK_PATTERN)
+
+    (if (and (== (.cmd hw 8 arg 0 0) nil) (== (.rsp hw 0) arg)) (do
+        ;; HC/LC HV SD 2.x
+        (set! (.-HC (.-card hw)) true)
+        (set! hv true))
+      (do
+        (set! arg (bit-or (<< VHS_LOW CMD8_ARG_VHS) CHECK_PATTERN))
+
+        (if (and (== (.cmd hw 8 arg 0 0) nil) (== (.rsp hw 0) arg))
+          ;; LC SD 1.x
+          (set! (.-HC (.-card hw)) true)
+
+          ;; LC SD 2.x
+          (set! hv true))))
+
+
+
+    ;; ACMD41 - SD_SEND_OP_COND - read capacity information
+    ;; p59, 4.2.3.1 Initialization Command (ACMD41), SD-PL-7.10
+    ;;
+    ;; The ACMD41 full argument is the OCR, despite the standard
+    ;; confusingly naming OCR only bits 23-08 of it (which instead
+    ;; represents part of OCR register voltage window).
+    (set! arg 0)
+
+    (when (.-HC (.-card hw))
+      ;; SDHC or SDXC supported
+      (bits/Set (addr arg) SD_OCR_HCS)
+      ;; Maximum Performance
+      (bits/Set (addr arg) SD_OCR_XPC)
+      ;; Switch to 1.8V (only check acceptance for speed detection)
+      (bits/Set (addr arg) SD_OCR_S18R))
+
+
+    (if hv
+      ;; set HV range
+      (bits/SetN (addr arg) SD_OCR_VDD_HV_MIN 0x1ff 0x1ff)
+
+      (bits/Set (addr arg) SD_OCR_VDD_LV))
+
+
+    (let [start (time/Now)]
+
+      (while (<= (time/Since start) SD_DETECT_TIMEOUT)
+        ;; CMD55 - APP_CMD - next command is application specific
+        (when (!= (.cmd hw 55 0 0 0) nil)
+          (break))
+
+
+        ;; ACMD41 - SD_SEND_OP_COND - send operating conditions
+        (when [err (.cmd hw 41 arg 0 0)] (!= err nil)
+          (break))
+
+
+        (let [rsp (.rsp hw 0)]
+
+          (when (== (bits/GetN (addr rsp) SD_OCR_BUSY 1) 0)
+            (continue))
+
+
+          (when (== (bits/GetN (addr rsp) SD_OCR_HCS 1) 1)
+            (set! (.-HC (.-card hw)) true))
+
+
+          ;; Select the fastest mandatory speed mode, supported by this
+          ;; driver, according to the card type.
+
+          (cond (== (bits/GetN (addr rsp) SD_OCR_S18R 1) 1)
+            ;; UHS-I
+            (set! (.-Rate (.-card hw)) SDR50_MBPS)
+            (== (bits/GetN (addr rsp) SD_OCR_UHSII 1) 1)
+            ;; UHS-II
+            (set! (.-Rate (.-card hw)) SDR50_MBPS) :else
+
+            ;; Non UHS-I
+            (set! (.-Rate (.-card hw)) HS_MBPS))
+
+
+          (set! (.-SD (.-card hw)) true)
+
+          (break)))
+
+
+      (.-SD (.-card hw)))))
+
+
+^{:go/end 287} (go/method detectCapabilitiesSD [^{:tag (* USDHC)} hw] :results [^error err]
+  ;; CMD9 - SEND_CSD - read device data
+  (when [(set! err (.cmd hw 9 (.-rca hw) 0 0))] (!= err nil)
+    (return))
+
+
+  (let [ver (.rspVal hw SD_CSD_STRUCTURE 2r11)]
+
+    (switch ver
+      (case [0]
+        ;; CSD Version 1.0
+        (let [c_size_mult (.rspVal hw SD_CSD_C_SIZE_MULT_1 2r111)
+            ^{:line 260} c_size (.rspVal hw SD_CSD_C_SIZE_1 0xfff)
+            ^{:line 261} read_bl_len (.rspVal hw SD_CSD_READ_BL_LEN_1 0xf)]
+
+          ;; p205, C_SIZE, SD-PL-7.10
+          (set! (.-BlockSize (.-card hw)) ^int (<< 2 (- read_bl_len 1)))
+          (set! (.-Blocks (.-card hw)) (conv int (* (+ c_size 1) ^uint32 (<< 2 (+ c_size_mult 2)))))))
+      (case [1]
+        ;; CSD Version 2.0
+        (let [c_size (.rspVal hw SD_CSD_C_SIZE_2 0x3fffff)
+            ^{:line 269} read_bl_len (.rspVal hw SD_CSD_READ_BL_LEN_2 0xf)]
+
+          ;; p210, C_SIZE, SD-PL-7.10
+          (set! (.-BlockSize (.-card hw)) ^int (<< 2 (- read_bl_len 1)))
+          (set! (.-Blocks (.-card hw)) (* (conv int (+ c_size 1)) 1024))))
+      (case [2]
+        ;; CSD Version 3.0
+        (let [c_size (.rspVal hw SD_CSD_C_SIZE_2 0xfffffff)
+            ^{:line 277} read_bl_len (.rspVal hw SD_CSD_READ_BL_LEN_2 0xf)]
+
+          ;; p213, C_SIZE, SD-PL-7.10
+          (set! (.-BlockSize (.-card hw)) ^int (<< 2 (- read_bl_len 1)))
+          (set! (.-Blocks (.-card hw)) (* (conv int (+ c_size 1)) 1024))))
+      (default
+        (return (fmt/Errorf "unsupported CSD version %d" ver))))
+
+
+    (return)))
+
+
+
+^{:go/end 319} (go/method voltageSwitchSD "p60, 4.2.4 Bus Signal Voltage Switch Sequence, SD-PL-7.10\n" [^{:tag (* USDHC)} hw] :results [^error err]
+  ;; CMD11 - VOLTAGE_SWITCH - switch to 1.8V signaling
+  (when [(set! err (.cmd hw 11 0 0 0))] (!= err nil)
+    (return))
+
+
+  (when (not (reg/WaitFor (* 1 time/Millisecond) (.-pres_state hw) PRES_STATE_DLSL 1 0))
+    (return (fmt/Errorf "voltage switch failed, invalid data line")))
+
+
+  (.setFreq hw -1 -1)
+
+  ;; SoC uSDHC IO power voltage selection signal (might be unused)
+  (reg/Set (.-vend_spec hw) VEND_SPEC_VSELECT)
+
+  ;; board specific low voltage selection/indication function
+  (when (and (!= (.-LowVoltage hw) nil) (not ((.-LowVoltage hw) true)))
+    (return (errors/New "voltage switch failed, not at LV")))
+
+
+  (time/Sleep (* 10 time/Millisecond))
+
+  (.setFreq hw DVS_OP SDCLKFS_OP)
+
+  (when (not (reg/WaitFor (* 1 time/Millisecond) (.-pres_state hw) PRES_STATE_DLSL 1 1))
+    (return (fmt/Errorf "voltage switch failed, invalid data line")))
+
+
+  (return))
+
+
+
+
+^{:go/end 448} (go/method initSD "p351, 35.4.5 SD card initialization flow chart, IMX6FG\np57, 4.2.3 Card Initialization and Identification Process, SD-PL-7.10\n" [^{:tag (* USDHC)} hw] :results [^error err]
+  (let [^uint32 arg (zero uint32)
+      ^{:line 325 :tag uint32} bus_width (zero uint32)
+      ^{:line 326 :tag uint32} mode (zero uint32)
+      ^{:line 327 :tag uint32} root_clk (zero uint32)
+      ^{:line 328 :tag int} clk (zero int)
+      ^{:line 329 :tag bool} tune (zero bool)]
+
+    (cond (== (.-LowVoltage hw) nil)
+      (set! (.-Rate (.-card hw)) HS_MBPS)
+      (>= (.-Rate (.-card hw)) SDR50_MBPS)
+      (when [(set! err (.voltageSwitchSD hw))] (!= err nil)
+        (set! (.-Rate (.-card hw)) HS_MBPS)))
+
+
+
+    ;; CMD2 - ALL_SEND_CID - get unique card identification
+    (when [(set! err (.cmd hw 2 arg 0 0))] (!= err nil)
+      (return))
+
+
+    (for [i 0] (< i (len (.-CID (.-card hw)))) (set! i + 4)
+      (.PutUint32 binary/LittleEndian (subslice (.-CID (.-card hw)) i) (.rsp hw (/ i 4))))
+
+
+    ;; CMD3 - SEND_RELATIVE_ADDR - get relative card address (RCA)
+    (when [(set! err (.cmd hw 3 arg 0 0))] (!= err nil)
+      (return))
+
+
+    (when [state (bit-and (>> (.rsp hw 0) STATUS_CURRENT_STATE) 2r1111)] (!= state CURRENT_STATE_IDENT)
+      (return (fmt/Errorf "card not in ident state (%d)" state)))
+
+
+    (when (== (.-Rate (.-card hw)) HS_MBPS)
+      (.setFreq hw -1 -1)
+      (.setFreq hw DVS_OP SDCLKFS_OP))
+
+
+    ;; set relative card address
+    (set! (.-rca hw) (bit-and (.rsp hw 0) (<< 0xffff RCA_ADDR)))
+
+    (when [(set! err (.detectCapabilitiesSD hw))] (!= err nil)
+      (return))
+
+
+    ;; CMD7 - SELECT/DESELECT CARD - enter transfer state
+    (when [(set! err (.cmd hw 7 (.-rca hw) 0 0))] (!= err nil)
+      (return))
+
+
+    (when [(set! err (.waitState hw CURRENT_STATE_TRAN (* 1 time/Millisecond)))] (!= err nil)
+      (return))
+
+
+    ;; CMD55 - APP_CMD - next command is application specific
+    (when [(set! err (.cmd hw 55 (.-rca hw) 0 0))] (!= err nil)
+      (return))
+
+
+    (when (!= (bit-and (>> (.rsp hw 0) STATUS_APP_CMD) 1) 1)
+      (return (fmt/Errorf "card not expecting application command")))
+
+
+    ;; p118, Table 4-31, SD-PL-7.10
+    (switch (.-width hw)
+      (case [1]
+        (set! bus_width 2r00))
+      (case [4]
+        (set! bus_width 2r10))
+      (default
+        (return (errors/New "unsupported SD bus width"))))
+
+
+    ;; ACMD6 - SET_BUS_WIDTH - define the card data bus width
+    (when [(set! err (.cmd hw 6 (conv uint32 bus_width) 0 0))] (!= err nil)
+      (return))
+
+
+    (when (>= (.-Rate (.-card hw)) SDR50_MBPS)
+      ;; Check support bits 415:400 for SDR104 mode,
+      ;; p96, 4.3.10.4 Switch Function Status, SD-PL-7.10.
+      (when [(values status _) (.switchSD hw MODE_CHECK SD_SWITCH_ACCESS_MODE_GROUP 0xf)] (!= (bit-and (aget status 13) ACCESS_MODE_SDR104) 0)
+        (set! (.-Rate (.-card hw)) SDR104_MBPS)))
+
+
+
+    (switch (.-Rate (.-card hw))
+      (case [HS_MBPS]
+        (set! mode ACCESS_MODE_HS)
+        (set! root_clk ROOTCLK_HS_SDR)
+        (set! clk SDCLKFS_HS_SDR))
+      (case [SDR50_MBPS]
+        (set! mode ACCESS_MODE_SDR50)
+        (set! root_clk ROOTCLK_UHS_SDR50)
+        (set! clk SDCLKFS_UHS_SDR50)
+        (set! tune true))
+      (case [SDR104_MBPS]
+        (set! mode ACCESS_MODE_SDR104)
+        (set! root_clk ROOTCLK_UHS_SDR104)
+        (set! clk SDCLKFS_UHS_SDR104)
+        (set! tune true))
+      (default
+        (return)))
+
+
+    (when [(set! (values _ err) (.switchSD hw MODE_SWITCH SD_SWITCH_POWER_LIMIT_GROUP POWER_LIMIT_288W))] (!= err nil)
+      (return))
+
+
+    (when [(set! (values _ err) (.switchSD hw MODE_SWITCH SD_SWITCH_ACCESS_MODE_GROUP mode))] (!= err nil)
+      (return))
+
+
+    (.setFreq hw -1 -1)
+    ((.-SetClock hw) (.-Index hw) root_clk 0)
+    (.setFreq hw DVS_HS clk)
+
+    (when tune
+      (set! err (.executeTuningSD hw)))
+
+
+    (set! (.-HS (.-card hw)) true)
+
+    (return)))

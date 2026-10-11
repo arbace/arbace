@@ -1,0 +1,226 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.flate) (go/file "level3.go" :imports [])
+
+(go/const
+  ^{:line 8} [^{:val 16} l3TableBits 16] ; Bits used in level 3 table
+  ^{:line 9} [^{:val 65536} l3TableSize (<< 1 l3TableBits)]) ; Size of the level 3 table
+
+
+
+
+
+(go/type fastEncL3 "Level 3 uses a similar algorithm to level 2, with a smaller table,\nbut will check up two candidates for each iteration with more\nentries added to the table.\n" (struct
+    ^{:line 16} fastGen
+    ^{:line 17 :tag (array l3TableSize tableEntryPrev)} table))
+
+
+^{:go/end 228} (go/method encode [^{:tag (* fastEncL3)} e ^{:tag (* tokens)} dst ^{:tag (slice byte)} src]
+  (let [
+      ^:const ^{:line 22 :val 11} inputMargin (- 12 1)
+      ^:const ^:go/grouped ^{:line 23 :val 13} minNonLiteralBlockSize (+ 1 1 inputMargin)
+      ^:const ^:go/grouped ^{:line 24 :val 5} hashBytes 5]
+
+
+    ;; Protect against e.cur wraparound.
+    (while (>= ^{:go/via [fastGen]} (.-cur e) bufferReset)
+      (when (== (len ^{:go/via [fastGen]} (.-hist e)) 0)
+        (clear (subslice (.-table e)))
+        (set! ^{:go/via [fastGen]} (.-cur e) maxMatchOffset)
+        (break))
+
+      ;; Shift down everything in the table that isn't already too far away.
+      (let [minOff (- (+ ^{:go/via [fastGen]} (.-cur e) (conv int32 (len ^{:go/via [fastGen]} (.-hist e)))) maxMatchOffset)]
+        (range [i (subslice (.-table e))]
+          (let [v (aget (.-table e) i)]
+            (if (<= (.-offset (.-cur v)) minOff)
+              (set! (.-offset (.-cur v)) 0)
+
+              (set! (.-offset (.-cur v)) (+ (- (.-offset (.-cur v)) ^{:go/via [fastGen]} (.-cur e)) maxMatchOffset)))
+
+            (if (<= (.-offset (.-prev v)) minOff)
+              (set! (.-offset (.-prev v)) 0)
+
+              (set! (.-offset (.-prev v)) (+ (- (.-offset (.-prev v)) ^{:go/via [fastGen]} (.-cur e)) maxMatchOffset)))
+
+            (aset (.-table e) i v)))
+
+        (set! ^{:go/via [fastGen]} (.-cur e) maxMatchOffset)))
+
+
+    (let [s ^{:go/via [fastGen]} (.addBlock e src)]
+
+      ;; Skip if too small.
+      (when (< (len src) minNonLiteralBlockSize)
+        ;; We do not fill the token table.
+        ;; This will be picked up by caller.
+        (set! (.-n dst) (conv uint16 (len src)))
+        (return))
+
+
+      ;; Override src
+      (set! src ^{:go/via [fastGen]} (.-hist e))
+      (let [nextEmit s
+
+          ;; sLimit is when to stop looking for offset/length copies. The inputMargin
+          ;; lets us use a fast path for emitLiterals in the main loop, while we are
+          ;; looking for copies.
+          ^{:line 70} sLimit (conv int32 (- (len src) inputMargin))
+
+          ;; nextEmit is where in src the next emitLiterals should start from.
+          ^{:line 73} cv (^{:inst [int32]} loadLE64 src s)]
+        (while true
+          (let [^:const ^{:val 7} skipLog 7
+              ^{:line 76} nextS s
+              ^{:line 77 :tag tableEntry} candidate (zero tableEntry)]
+            (while true
+              (let [nextHash (hashLen cv l3TableBits hashBytes)]
+                (set! s nextS)
+                (set! nextS (+ s 1 (>> (- s nextEmit) skipLog)))
+                (when (> nextS sLimit)
+                  (goto :emitRemainder))
+
+                (let [candidates (aget (.-table e) nextHash)
+                    ^{:line 86} now (^{:inst [int32]} loadLE64 src nextS)
+
+                    ;; Safe offset distance until s + 4...
+                    ^{:line 89} minOffset (- (+ ^{:go/via [fastGen]} (.-cur e) s) (- maxMatchOffset 4))]
+                  (aset (.-table e) nextHash (lit tableEntryPrev :prev (.-cur candidates) :cur (lit tableEntry :offset (+ s ^{:go/via [fastGen]} (.-cur e)))))
+
+                  ;; Check both candidates
+                  (set! candidate (.-cur candidates))
+                  (when (< (.-offset candidate) minOffset)
+                    (set! cv now)
+                    ;; Previous will also be invalid, we have nothing.
+                    (continue))
+
+
+                  (if (== (conv uint32 cv) (^{:inst [int32]} loadLE32 src (- (.-offset candidate) ^{:go/via [fastGen]} (.-cur e)))) (do
+                      (when (or (< (.-offset (.-prev candidates)) minOffset) (!= (conv uint32 cv) (^{:inst [int32]} loadLE32 src (- (.-offset (.-prev candidates)) ^{:go/via [fastGen]} (.-cur e)))))
+                        (break))
+
+                      ;; Both match and are valid, pick longest.
+                      (let [offset (- s (- (.-offset candidate) ^{:go/via [fastGen]} (.-cur e)))
+                          ^{:line 106} o2 (- s (- (.-offset (.-prev candidates)) ^{:go/via [fastGen]} (.-cur e)))
+                          (values l1 l2) (values (matchLen (subslice src (+ s 4)) (subslice src (+ (- s offset) 4))) (matchLen (subslice src (+ s 4)) (subslice src (+ (- s o2) 4))))]
+                        (when (> l2 l1)
+                          (set! candidate (.-prev candidates)))
+
+                        (break)))
+                    (do
+                      ;; We only check if value mismatches.
+                      ;; Offset will always be invalid in other cases.
+                      (set! candidate (.-prev candidates))
+                      (when (and (> (.-offset candidate) minOffset) (== (conv uint32 cv) (^{:inst [int32]} loadLE32 src (- (.-offset candidate) ^{:go/via [fastGen]} (.-cur e)))))
+                        (break))))
+
+
+                  (set! cv now))))
+
+
+            (while true
+              ;; Extend the 4-byte match as long as possible.
+              ;;
+              (let [t (- (.-offset candidate) ^{:go/via [fastGen]} (.-cur e))
+                  ^{:line 127} l (+ ^{:go/via [fastGen]} (.matchLenLong e (conv int (+ s 4)) (conv int (+ t 4)) src) 4)]
+
+                ;; Extend backwards
+                (while (and (> t 0) (> s nextEmit) (== (aget src (- t 1)) (aget src (- s 1))))
+                  (dec! s)
+                  (dec! t)
+                  (inc! l))
+
+                ;; Emit literals.
+                (when (< nextEmit s)
+                  (range [_ v (subslice src nextEmit s)]
+                    (aset (.-tokens dst) (.-n dst) (conv token v))
+                    (inc! (aget (.-litHist dst) v))
+                    (inc! (.-n dst))))
+
+
+
+                ;; Emit match.
+                (.AddMatchLong dst l (conv uint32 (- s t baseMatchOffset)))
+                (set! s + l)
+                (set! nextEmit s)
+                (when (>= nextS s)
+                  (set! s (+ nextS 1)))
+
+
+                (when (>= s sLimit)
+                  (set! t + l)
+                  ;; Index first pair after match end.
+                  (when (and (< (conv int (+ t 8)) (len src)) (> t 0))
+                    (set! cv (^{:inst [int32]} loadLE64 src t))
+                    (let [nextHash (hashLen cv l3TableBits hashBytes)]
+                      (aset (.-table e) nextHash ^{:go/breaks [2 4]} (lit tableEntryPrev
+                          :prev (.-cur (aget (.-table e) nextHash))
+                          :cur (lit tableEntry :offset (+ ^{:go/via [fastGen]} (.-cur e) t))))))
+
+
+                  (goto :emitRemainder))
+
+
+                ;; Store every 5th hash in-between.
+                (for [i (+ (- s l) 2)] (< i (- s 5)) (set! i + 6)
+                  (let [nextHash (hashLen (^{:inst [int32]} loadLE64 src i) l3TableBits hashBytes)]
+                    (aset (.-table e) nextHash ^{:go/breaks [2 4]} (lit tableEntryPrev
+                        :prev (.-cur (aget (.-table e) nextHash))
+                        :cur (lit tableEntry :offset (+ ^{:go/via [fastGen]} (.-cur e) i))))))
+
+                ;; We could immediately start working at s now, but to improve
+                ;; compression we first update the hash table at s-2 to s.
+                (let [x (^{:inst [int32]} loadLE64 src (- s 2))
+                    ^{:line 176} prevHash (hashLen x l3TableBits hashBytes)]
+
+                  (aset (.-table e) prevHash ^{:go/breaks [2 4]} (lit tableEntryPrev
+                      :prev (.-cur (aget (.-table e) prevHash))
+                      :cur (lit tableEntry :offset (- (+ ^{:go/via [fastGen]} (.-cur e) s) 2))))
+
+                  (set! x >> 8)
+                  (set! prevHash (hashLen x l3TableBits hashBytes))
+
+                  (aset (.-table e) prevHash ^{:go/breaks [2 4]} (lit tableEntryPrev
+                      :prev (.-cur (aget (.-table e) prevHash))
+                      :cur (lit tableEntry :offset (- (+ ^{:go/via [fastGen]} (.-cur e) s) 1))))
+
+                  (set! x >> 8)
+                  (let [currHash (hashLen x l3TableBits hashBytes)
+                      ^{:line 191} candidates (aget (.-table e) currHash)]
+                    (set! cv x)
+                    (aset (.-table e) currHash ^{:go/breaks [2 4]} (lit tableEntryPrev
+                        :prev (.-cur candidates)
+                        :cur (lit tableEntry :offset (+ s ^{:go/via [fastGen]} (.-cur e)))))
+
+
+                    ;; Check both candidates
+                    (set! candidate (.-cur candidates))
+                    (let [minOffset (- (+ ^{:go/via [fastGen]} (.-cur e) s) (- maxMatchOffset 4))]
+
+                      (when (> (.-offset candidate) minOffset)
+                        (when (== (conv uint32 cv) (^{:inst [int32]} loadLE32 src (- (.-offset candidate) ^{:go/via [fastGen]} (.-cur e))))
+                          ;; Found a match...
+                          (continue))
+
+                        (set! candidate (.-prev candidates))
+                        (when (and (> (.-offset candidate) minOffset) (== (conv uint32 cv) (^{:inst [int32]} loadLE32 src (- (.-offset candidate) ^{:go/via [fastGen]} (.-cur e)))))
+                          ;; Match at prev...
+                          (continue)))
+
+
+                      (set! cv (>> x 8))
+                      (inc! s)
+                      (break))))))))
+
+
+
+        (label :emitRemainder
+          (when (< (conv int nextEmit) (len src))
+            ;; If nothing was added, don't encode literals.
+            (when (== (.-n dst) 0)
+              (return))
+
+
+            (emitLiterals dst (subslice src nextEmit))))))))

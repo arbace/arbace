@@ -1,0 +1,305 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package ascii85 implements the ascii85 data encoding
+;; as used in the btoa tool and Adobe's PostScript and PDF document formats.
+(in-ns 'go.encoding.ascii85) (go/file "ascii85.go" :doc "Package ascii85 implements the ascii85 data encoding\nas used in the btoa tool and Adobe's PostScript and PDF document formats.\n" :imports [
+
+
+    ^{:line 10} [io "io"]
+    ^{:line 11} [strconv "strconv"]])
+
+
+;; /*
+;; * Encoder
+;; */
+
+
+
+
+
+
+
+
+
+
+^{:go/end 83} (go/func Encode "Encode encodes src into at most [MaxEncodedLen](len(src))\nbytes of dst, returning the actual number of bytes written.\n\nThe encoding handles 4-byte chunks, using a special encoding\nfor the last fragment, so Encode is not appropriate for use on\nindividual blocks of a large data stream. Use [NewEncoder] instead.\n\nOften, ascii85-encoded data is wrapped in <~ and ~> symbols.\nEncode does not add these.\n" ^int [^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (when (== (len src) 0)
+    (return 0))
+
+
+  (let [n 0]
+    (while (> (len src) 0)
+      (aset dst 0 0)
+      (aset dst 1 0)
+      (aset dst 2 0)
+      (aset dst 3 0)
+      (aset dst 4 0)
+
+      ;; Unpack 4 bytes into uint32 to repack into base 85 5-byte.
+      (let [^uint32 v (zero uint32)]
+        (switch (len src)
+          (default
+            (set! v bit-or (conv uint32 (aget src 3)))
+            (fallthrough))
+          (case [3]
+            (set! v bit-or (<< (conv uint32 (aget src 2)) 8))
+            (fallthrough))
+          (case [2]
+            (set! v bit-or (<< (conv uint32 (aget src 1)) 16))
+            (fallthrough))
+          (case [1]
+            (set! v bit-or (<< (conv uint32 (aget src 0)) 24))))
+
+
+        ;; Special case: zero (!!!!!) shortens to z.
+        (when (and (== v 0) (>= (len src) 4))
+          (aset dst 0 \z)
+          (set! dst (subslice dst 1))
+          (set! src (subslice src 4))
+          (inc! n)
+          (continue))
+
+
+        ;; Otherwise, 5 base 85 digits starting at !.
+        (for [i 4] (>= i 0) (dec! i)
+          (aset dst i (+ \! (conv byte (% v 85))))
+          (set! v / 85))
+
+
+        ;; If src was short, discard the low destination bytes.
+        (let [m 5]
+          (if (< (len src) 4) (do
+              (set! m - (- 4 (len src)))
+              (set! src nil))
+
+            (set! src (subslice src 4)))
+
+          (set! dst (subslice dst m))
+          (set! n + m))))
+
+    ^{:line 82} n))
+
+
+
+^{:go/end 86} (go/func MaxEncodedLen "MaxEncodedLen returns the maximum length of an encoding of n source bytes.\n" ^int [^int n] (* (/ (+ n 3) 4) 5))
+
+
+
+
+
+
+^{:go/end 93} (go/func NewEncoder "NewEncoder returns a new ascii85 stream encoder. Data written to\nthe returned writer will be encoded and then written to w.\nAscii85 encodings operate in 32-bit blocks; when finished\nwriting, the caller must Close the returned encoder to flush any\ntrailing partial block.\n" ^io/WriteCloser [^io/Writer w] (addr (lit encoder :w w)))
+
+(go/type encoder (struct
+    ^{:line 96 :tag error} err
+    ^{:line 97 :tag io/Writer} w
+    ^{:line 98 :tag (array 4 byte)} buf ; buffered data waiting to be encoded
+    ^{:line 99 :tag int} nbuf ; number of bytes in buf
+    ^{:line 100 :tag (array 1024 byte)} out)) ; output buffer
+
+
+^{:go/end 149} (go/method Write [^{:tag (* encoder)} e ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (!= (.-err e) nil)
+    (return 0 (.-err e)))
+
+
+  ;; Leading fringe.
+  (when (> (.-nbuf e) 0)
+    (let [^int i (zero int)]
+      (for [(set! i 0)] (and (< i (len p)) (< (.-nbuf e) 4)) (inc! i)
+        (aset (.-buf e) (.-nbuf e) (aget p i))
+        (inc! (.-nbuf e)))
+
+      (set! n + i)
+      (set! p (subslice p i))
+      (when (< (.-nbuf e) 4)
+        (return))
+
+      (let [nout (Encode (subslice (.-out e) 0) (subslice (.-buf e) 0))]
+        (when [(set! (values _ (.-err e)) (.Write (.-w e) (subslice (.-out e) 0 nout)))] (!= (.-err e) nil)
+          (return n (.-err e)))
+
+        (set! (.-nbuf e) 0))))
+
+
+  ;; Large interior chunks.
+  (while (>= (len p) 4)
+    (let [nn (* (/ (len (.-out e)) 5) 4)]
+      (when (> nn (len p))
+        (set! nn (len p)))
+
+      (set! nn - (% nn 4))
+      (when (> nn 0)
+        (let [nout (Encode (subslice (.-out e) 0) (subslice p 0 nn))]
+          (when [(set! (values _ (.-err e)) (.Write (.-w e) (subslice (.-out e) 0 nout)))] (!= (.-err e) nil)
+            (return n (.-err e)))))
+
+
+      (set! n + nn)
+      (set! p (subslice p nn))))
+
+
+  ;; Trailing fringe.
+  (copy (subslice (.-buf e)) p)
+  (set! (.-nbuf e) (len p))
+  (set! n + (len p))
+  (return))
+
+
+
+
+^{:go/end 161} (go/method Close "Close flushes any pending output from the encoder.\nIt is an error to call Write after calling Close.\n" ^error [^{:tag (* encoder)} e]
+  ;; If there's anything left in the buffer, flush it out
+  (when (and (== (.-err e) nil) (> (.-nbuf e) 0))
+    (let [nout (Encode (subslice (.-out e) 0) (subslice (.-buf e) 0 (.-nbuf e)))]
+      (set! (.-nbuf e) 0)
+      (set! (values _ (.-err e)) (.Write (.-w e) (subslice (.-out e) 0 nout)))))
+
+  (.-err e))
+
+
+;; /*
+;; * Decoder
+;; */
+
+(go/type CorruptInputError int64)
+
+^{:go/end 171} (go/method Error ^string [^CorruptInputError e]
+  (+ "illegal ascii85 data at input byte " (strconv/FormatInt (conv int64 e) 10)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 240} (go/func Decode "Decode decodes src into dst, returning both the number\nof bytes written to dst and the number consumed from src.\nIf src contains invalid ascii85 data, Decode will return the\nnumber of bytes successfully written and a [CorruptInputError].\nDecode ignores space and control characters in src.\nOften, ascii85-encoded data is wrapped in <~ and ~> symbols.\nDecode expects these to have been stripped by the caller.\n\nIf flush is true, Decode assumes that src represents the\nend of the input stream and processes it completely rather\nthan wait for the completion of another 32-bit block.\n\n[NewDecoder] wraps an [io.Reader] interface around Decode.\n" [^{:tag (slice byte)} dst ^{:tag (slice byte)} src ^bool flush] :results [^int ndst ^int nsrc ^error err]
+  (let [^uint32 v (zero uint32)
+      ^{:line 188 :tag int} nb (zero int)]
+    (range [i b src]
+      (when (< (- (len dst) ndst) 4)
+        (return))
+
+      (switch
+        (case [(<= b \space)]
+          (continue))
+        (case [(and (== b \z) (== nb 0))]
+          (set! nb 5)
+          (set! v 0))
+        (case [(and (<= \! b) (<= b \u))]
+          (set! v (+ (* v 85) (conv uint32 (- b \!))))
+          (inc! nb))
+        (default
+          (return 0 0 (conv CorruptInputError i))))
+
+      (when (== nb 5)
+        (set! nsrc (+ i 1))
+        (aset dst ndst (conv byte (>> v 24)))
+        (aset dst (+ ndst 1) (conv byte (>> v 16)))
+        (aset dst (+ ndst 2) (conv byte (>> v 8)))
+        (aset dst (+ ndst 3) (conv byte v))
+        (set! ndst + 4)
+        (set! nb 0)
+        (set! v 0)))
+
+
+    (when flush
+      (set! nsrc (len src))
+      (when (> nb 0)
+        ;; The number of output bytes in the last fragment
+        ;; is the number of leftover input bytes - 1:
+        ;; the extra byte provides enough bits to cover
+        ;; the inefficiency of the encoding for the block.
+        (when (== nb 1)
+          (return 0 0 (conv CorruptInputError (len src))))
+
+        (for [i nb] (< i 5) (inc! i)
+          ;; The short encoding truncated the output value.
+          ;; We have to assume the worst case values (digit 84)
+          ;; in order to ensure that the top bits are correct.
+          (set! v (+ (* v 85) 84)))
+
+        (for [i 0] (< i (- nb 1)) (inc! i)
+          (aset dst ndst (conv byte (>> v 24)))
+          (set! v << 8)
+          (inc! ndst))))
+
+
+
+    (return)))
+
+
+
+^{:go/end 243} (go/func NewDecoder "NewDecoder constructs a new ascii85 stream decoder.\n" ^io/Reader [^io/Reader r] (addr (lit decoder :r r)))
+
+(go/type decoder (struct
+    ^{:line 246 :tag error} err
+    ^{:line 247 :tag error} readErr
+    ^{:line 248 :tag io/Reader} r
+    ^{:line 249 :tag (array 1024 byte)} buf ; leftover input
+    ^{:line 250 :tag int} nbuf
+    ^{:line 251 :tag (slice byte)} out ; leftover decoded output
+    ^{:line 252 :tag (array 1024 byte)} outbuf))
+
+
+^{:go/end 307} (go/method Read [^{:tag (* decoder)} d ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (== (len p) 0)
+    (return 0 nil))
+
+  (when (!= (.-err d) nil)
+    (return 0 (.-err d)))
+
+
+  (while true
+    ;; Copy leftover output from last decode.
+    (when (> (len (.-out d)) 0)
+      (set! n (copy p (.-out d)))
+      (set! (.-out d) (subslice (.-out d) n))
+      (return))
+
+
+    ;; Decode leftover input from last read.
+    (let [(values ^int nn ^int nsrc ^int ndst) (zero int)]
+      (when (> (.-nbuf d) 0)
+        (set! (values ndst nsrc (.-err d)) (Decode (subslice (.-outbuf d) 0) (subslice (.-buf d) 0 (.-nbuf d)) (!= (.-readErr d) nil)))
+        (when (> ndst 0)
+          (set! (.-out d) (subslice (.-outbuf d) 0 ndst))
+          (set! (.-nbuf d) (copy (subslice (.-buf d) 0) (subslice (.-buf d) nsrc (.-nbuf d))))
+          (continue)) ; copy out and return
+
+        (when (and (== ndst 0) (== (.-err d) nil))
+          ;; Special case: input buffer is mostly filled with non-data bytes.
+          ;; Filter out such bytes to make room for more input.
+          (let [off 0]
+            (for [i 0] (< i (.-nbuf d)) (inc! i)
+              (when (> (aget (.-buf d) i) \space)
+                (aset (.-buf d) off (aget (.-buf d) i))
+                (inc! off)))
+
+
+            (set! (.-nbuf d) off))))
+
+
+
+      ;; Out of input, out of decoded output. Check errors.
+      (when (!= (.-err d) nil)
+        (return 0 (.-err d)))
+
+      (when (!= (.-readErr d) nil)
+        (set! (.-err d) (.-readErr d))
+        (return 0 (.-err d)))
+
+
+      ;; Read more data.
+      (set! (values nn (.-readErr d)) (.Read (.-r d) (subslice (.-buf d) (.-nbuf d))))
+      (set! (.-nbuf d) + nn))))

@@ -1,0 +1,1803 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Garbage collector: marking and scanning
+
+(in-ns 'go.runtime) (go/file "mgcmark.go" :imports [
+
+
+    ^{:line 10} [abi "internal/abi"]
+    ^{:line 11} [goarch "internal/goarch"]
+    ^{:line 12} [goexperiment "internal/goexperiment"]
+    ^{:line 13} [atomic "internal/runtime/atomic"]
+    ^{:line 14} [sys "internal/runtime/sys"]
+    ^{:line 15} [unsafe "unsafe"]])
+
+
+(go/const
+  ^{:line 19} [^{:val 0} fixedRootFinalizers iota]
+  ^{:line 20} [^{:val 1} fixedRootFreeGStacks]
+  ^{:line 21} [^{:val 2} fixedRootCleanups]
+  ^{:line 22} [^{:val 3} fixedRootCount]
+
+
+
+  ^{:line 26} [^{:val 262144 :doc "rootBlockBytes is the number of bytes to scan per data or\nBSS root.\n"} rootBlockBytes (<< 256 10)]
+
+
+
+
+
+
+
+
+  ^{:line 35} [^{:val 131072 :doc "maxObletBytes is the maximum bytes of an object to scan at\nonce. Larger objects will be split up into \"oblets\" of at\nmost this size. Since we can scan 1–2 MB/ms, 128 KB bounds\nscan preemption at ~100 µs.\n\nThis must be > _MaxSmallSize so that the object base is the\nspan base.\n"} maxObletBytes (<< 128 10)]
+
+
+
+
+
+
+
+  ^{:line 43} [^{:val 100000 :doc "drainCheckThreshold specifies how many units of work to do\nbetween self-preemption checks in gcDrain. Assuming a scan\nrate of 1 MB/ms, this is ~100 µs. Lower values have higher\noverhead in the scan loop (the scheduler check may perform\na syscall, so its overhead is nontrivial). Higher values\nmake the system less responsive to incoming work.\n"} drainCheckThreshold 100000]
+
+
+
+
+
+
+
+
+
+  ^{:line 53} [^{:val 512 :doc "pagesPerSpanRoot indicates how many pages to scan from a span root\nat a time. Used by special root marking.\n\nHigher values improve throughput by increasing locality, but\nincrease the minimum latency of a marking operation.\n\nMust be a multiple of the pageInUse bitmap element size and\nmust also evenly divide pagesPerArena.\n"} pagesPerSpanRoot (min 512 pagesPerArena)])
+
+
+
+
+
+
+
+^{:go/end 64} (go/method ^:go/nosplit internalBlocked "internalBlocked returns true if the goroutine is blocked due to an\ninternal (non-leaking) waitReason, e.g. waiting for the netpoller or garbage collector.\nSuch goroutines are never leak detection candidates according to the GC.\n" ^bool [^{:tag (* g)} gp]
+  (let [reason (.-waitreason gp)]
+    (or (< reason waitReasonChanReceiveNilChan) (< waitReasonSyncWaitGroupWait reason))))
+
+
+
+
+
+
+
+
+^{:go/end 103} (go/func allGsSnapshotSortedForGC "allGsSnapshotSortedForGC takes a snapshot of allgs and returns a sorted\narray of Gs. The array is sorted by the G's status, with running Gs\nfirst, followed by blocked Gs. The returned index indicates the cutoff\nbetween runnable and blocked Gs.\n\nThe world must be stopped or allglock must be held.\n" [] :results [(slice (* g)) int]
+  (assertWorldStoppedOrLockHeld (addr allglock))
+
+  ;; Reset the status of leaked goroutines in order to improve
+  ;; the precision of goroutine leak detection.
+  (range [_ gp allgs]
+    (.CompareAndSwap (.-atomicstatus gp) _Gleaked _Gwaiting))
+
+
+  (let [allgsSorted (make (slice (* g)) (len allgs))
+
+      ;; Indices cutting off runnable and blocked Gs.
+      ^:var (values currIndex blockedIndex) (values 0 (- (len allgsSorted) 1))]
+    (range [_ gp allgs]
+      ;; not sure if we need atomic load because we are stopping the world,
+      ;; but do it just to be safe for now
+      (if [status (readgstatus gp)] (or (!= status _Gwaiting) (.internalBlocked gp)) (do
+          (aset allgsSorted currIndex gp)
+          (inc! currIndex))
+        (do
+          (aset allgsSorted blockedIndex gp)
+          (dec! blockedIndex))))
+
+
+
+    ;; Because the world is stopped or allglock is held, allgadd
+    ;; cannot happen concurrently with this. allgs grows
+    ;; monotonically and existing entries never change, so we can
+    ;; simply return a copy of the slice header. For added safety,
+    ;; we trim everything past len because that can still change.
+    (return allgsSorted (+ blockedIndex 1))))
+
+
+
+
+
+
+^{:go/end 175} (go/func gcPrepareMarkRoots "gcPrepareMarkRoots queues root scanning jobs (stacks, globals, and\nsome miscellany) and initializes scanning-related state.\n\nThe world must be stopped.\n" []
+  (assertWorldStopped)
+
+  ;; Compute how many data and BSS root blocks there are.
+  (let [nBlocks ^{:go/end 115} (fn ^int [^uintptr bytes]
+        (conv int (divRoundUp bytes rootBlockBytes)))]
+
+
+    (set! (.-nDataRoots work) 0)
+    (set! (.-nBSSRoots work) 0)
+
+    ;; Scan globals.
+    (range [_ datap (activeModules)]
+      (let [nDataRoots (nBlocks (- (.-edata datap) (.-data datap)))]
+        (when (> nDataRoots (.-nDataRoots work))
+          (set! (.-nDataRoots work) nDataRoots))
+
+
+        (let [nBSSRoots (nBlocks (- (.-ebss datap) (.-bss datap)))]
+          (when (> nBSSRoots (.-nBSSRoots work))
+            (set! (.-nBSSRoots work) nBSSRoots)))))
+
+
+
+    ;; Scan span roots for finalizer specials.
+    ;;
+    ;; We depend on addfinalizer to mark objects that get
+    ;; finalizers after root marking.
+    ;;
+    ;; We're going to scan the whole heap (that was available at the time the
+    ;; mark phase started, i.e. markArenas) for in-use spans which have specials.
+    ;;
+    ;; Break up the work into arenas, and further into chunks.
+    ;;
+    ;; Snapshot heapArenas as markArenas. This snapshot is safe because heapArenas
+    ;; is append-only.
+    (set! (.-markArenas mheap_) (subslice (.-heapArenas mheap_) _ (len (.-heapArenas mheap_)) (len (.-heapArenas mheap_))))
+    (set! (.-nSpanRoots work) (* (len (.-markArenas mheap_)) (/ pagesPerArena pagesPerSpanRoot)))
+
+    ;; Scan stacks.
+    ;;
+    ;; Gs may be created after this point, but it's okay that we
+    ;; ignore them because they begin life without any roots, so
+    ;; there's nothing to scan, and any roots they create during
+    ;; the concurrent phase will be caught by the write barrier.
+    (if (.-enabled (.-goroutineLeak work))
+      ;; goroutine leak finder GC --- only prepare runnable
+      ;; goroutines for marking.
+      (set! (values (.-stackRoots work) (.-nMaybeRunnableStackRoots work)) (allGsSnapshotSortedForGC))
+      (do
+        ;; regular GC --- scan every goroutine
+        (set! (.-stackRoots work) (allGsSnapshot))
+        (set! (.-nMaybeRunnableStackRoots work) (len (.-stackRoots work)))))
+
+
+    (set! (.-nStackRoots work) (len (.-stackRoots work)))
+
+    (.Store (.-markrootNext work) 0)
+    (.Store (.-markrootJobs work) (conv uint32 (+ fixedRootCount (.-nDataRoots work) (.-nBSSRoots work) (.-nSpanRoots work) (.-nMaybeRunnableStackRoots work))))
+
+    ;; Calculate base indexes of each root type
+    (set! (.-baseData work) (conv uint32 fixedRootCount))
+    (set! (.-baseBSS work) (+ (.-baseData work) (conv uint32 (.-nDataRoots work))))
+    (set! (.-baseSpans work) (+ (.-baseBSS work) (conv uint32 (.-nBSSRoots work))))
+    (set! (.-baseStacks work) (+ (.-baseSpans work) (conv uint32 (.-nSpanRoots work))))
+    (set! (.-baseEnd work) (+ (.-baseStacks work) (conv uint32 (.-nStackRoots work))))))
+
+
+
+
+^{:go/end 205} (go/func gcMarkRootCheck "gcMarkRootCheck checks that all roots have been scanned. It is\npurely for debugging.\n" []
+  (when [(values next jobs) (values (.Load (.-markrootNext work)) (.Load (.-markrootJobs work)))] (< next jobs)
+    (print next " of " jobs " markroot jobs done\n")
+    (throw "left over markroot jobs"))
+
+
+  ;; Check that stacks have been scanned.
+  ;;
+  ;; We only check the first nStackRoots Gs that we should have scanned.
+  ;; Since we don't care about newer Gs (see comment in
+  ;; gcPrepareMarkRoots), no locking is required.
+  (let [i 0]
+    (forEachGRace ^{:go/end 204} (fn [^{:tag (* g)} gp]
+        (when (>= i (.-nStackRoots work))
+          (return))
+
+
+        (when (not (.-gcscandone gp))
+          ^{:go/breaks [5 7]} (println "gp" gp "goid" (.-goid gp)
+            "status" (readgstatus gp)
+            "gcscandone" (.-gcscandone gp))
+          (throw "scan missed a g"))
+
+
+        (inc! i)))))
+
+
+
+
+(go/var ^{:doc "oneptrmask for an allocation containing a single pointer.\n"} oneptrmask (lit (array ... uint8) 1))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 322} (go/func ^:go/nowritebarrier markroot "markroot scans the i'th root.\n\nPreemption must be disabled (because this uses a gcWork).\n\nReturns the amount of GC work credit produced by the operation.\nIf flushBgCredit is true, then that credit is also flushed\nto the background credit pool.\n\nnowritebarrier is only advisory here.\n" ^int64 [^{:tag (* gcWork)} gcw ^uint32 i ^bool flushBgCredit]
+  ;; Note: if you add a case here, please also update heapdump.go:dumproots.
+  (let [^int64 workDone (zero int64)
+      ^{:line 224 :tag (* atomic/Int64)} workCounter (zero (* atomic/Int64))]
+    (switch
+      (case [(and (<= (.-baseData work) i) (< i (.-baseBSS work)))]
+        (set! workCounter (addr (.-globalsScanWork gcController)))
+        (range [_ datap (activeModules)]
+          (set! workDone + (markrootBlock (.-data datap) (- (.-edata datap) (.-data datap)) (.-bytedata (.-gcdatamask datap)) gcw (conv int (- i (.-baseData work)))))))
+
+
+      (case [(and (<= (.-baseBSS work) i) (< i (.-baseSpans work)))]
+        (set! workCounter (addr (.-globalsScanWork gcController)))
+        (range [_ datap (activeModules)]
+          (set! workDone + (markrootBlock (.-bss datap) (- (.-ebss datap) (.-bss datap)) (.-bytedata (.-gcbssmask datap)) gcw (conv int (- i (.-baseBSS work)))))))
+
+
+      (case [(== i fixedRootFinalizers)]
+        (for [fb allfin] (!= fb nil) (set! fb (.-alllink fb))
+          (let [cnt (conv uintptr (atomic/Load (addr (.-cnt fb))))]
+            (scanblock (conv uintptr (conv unsafe/Pointer (addr (aget (.-fin fb) 0)))) (* cnt (unsafe/Sizeof (aget (.-fin fb) 0))) (addr (aget finptrmask 0)) gcw nil))))
+
+
+      (case [(== i fixedRootFreeGStacks)]
+        ;; Switch to the system stack so we can call
+        ;; stackfree.
+        (systemstack markrootFreeGStacks))
+
+      (case [(== i fixedRootCleanups)]
+        (for [cb (conv (* cleanupBlock) (.Load (.-all gcCleanups)))] (!= cb nil) (set! cb ^{:go/via [cleanupBlockHeader]} (.-alllink cb))
+          ;; N.B. This only needs to synchronize with cleanup execution, which only resets these blocks.
+          ;; All cleanup queueing happens during sweep.
+          (let [n (conv uintptr (atomic/Load (addr ^{:go/via [cleanupBlockHeader]} (.-n cb))))]
+            (scanblock (conv uintptr (conv unsafe/Pointer (addr (aget (.-cleanups cb) 0)))) (* n (unsafe/Sizeof (lit cleanupFn))) (addr (aget cleanupBlockPtrMask 0)) gcw nil))))
+
+
+      (case [(and (<= (.-baseSpans work) i) (< i (.-baseStacks work)))]
+        ;; mark mspan.specials
+        (markrootSpans gcw (conv int (- i (.-baseSpans work)))))
+
+      (default
+        ;; the rest is scanning goroutine stacks
+        (set! workCounter (addr (.-stackScanWork gcController)))
+        (when (or (< i (.-baseStacks work)) (<= (.-baseEnd work) i))
+          (printlock)
+          (print "runtime: markroot index " i " not in stack roots range [" (.-baseStacks work) ", " (.-baseEnd work) ")\n")
+          (throw "markroot: bad index"))
+
+        (let [gp (aget (.-stackRoots work) (- i (.-baseStacks work)))
+
+            ;; remember when we've first observed the G blocked
+            ;; needed only to output in traceback
+            ^{:line 273} status (readgstatus gp)] ; We are not in a scan state
+          (when (and ^:go/paren (or (== status _Gwaiting) (== status _Gsyscall)) (== (.-waitsince gp) 0))
+            (set! (.-waitsince gp) (.-tstart work)))
+
+
+          ;; scanstack must be done on the system stack in case
+          ;; we're trying to scan our own stack.
+          (systemstack ^{:go/end 313} (fn []
+              ;; If this is a self-scan, put the user G in
+              ;; _Gwaiting to prevent self-deadlock. It may
+              ;; already be in _Gwaiting if this is a mark
+              ;; worker or we're in mark termination.
+              (let [userG (.-curg (.-m (getg)))
+                  ^{:line 286} selfScan (and (== gp userG) (== (readgstatus userG) _Grunning))]
+                (when selfScan
+                  (casGToWaitingForSuspendG userG _Grunning waitReasonGarbageCollectionScan))
+
+
+                ;; TODO: suspendG blocks (and spins) until gp
+                ;; stops, which may take a while for
+                ;; running goroutines. Consider doing this in
+                ;; two phases where the first is non-blocking:
+                ;; we scan the stacks we can and ask running
+                ;; goroutines to scan themselves; and the
+                ;; second blocks.
+                (let [stopped (suspendG gp)]
+                  (when (.-dead stopped)
+                    (set! (.-gcscandone gp) true)
+                    (return))
+
+                  (when (.-gcscandone gp)
+                    (throw "g already scanned"))
+
+                  (set! workDone + (scanstack gp gcw))
+                  (set! (.-gcscandone gp) true)
+                  (resumeG stopped)
+
+                  (when selfScan
+                    (casgstatus userG _Gwaiting _Grunning)))))))))
+
+
+
+    (when (and (!= workCounter nil) (!= workDone 0))
+      (.Add workCounter workDone)
+      (when flushBgCredit
+        (gcFlushBgCredit workDone)))
+
+
+    ^{:line 321} workDone))
+
+
+
+
+
+
+
+
+^{:go/end 353} (go/func ^:go/nowritebarrier markrootBlock "markrootBlock scans the shard'th shard of the block of memory [b0,\nb0+n0), with the given pointer mask.\n\nReturns the amount of work done.\n" ^int64 [^uintptr b0 ^uintptr n0 ^{:tag (* uint8)} ptrmask0 ^{:tag (* gcWork)} gcw ^int shard]
+  (when (!= (% rootBlockBytes (* 8 goarch/PtrSize)) 0)
+    ;; This is necessary to pick byte offsets in ptrmask0.
+    (throw "rootBlockBytes must be a multiple of 8*ptrSize"))
+
+
+  ;; Note that if b0 is toward the end of the address space,
+  ;; then b0 + rootBlockBytes might wrap around.
+  ;; These tests are written to avoid any possible overflow.
+  (let [off (* (conv uintptr shard) rootBlockBytes)]
+    (when (>= off n0)
+      (return 0))
+
+    (let [b (+ b0 off)
+        ^{:line 344} ptrmask (conv (* uint8) (add (conv unsafe/Pointer ptrmask0) (* (conv uintptr shard) (/ rootBlockBytes (* 8 goarch/PtrSize)))))
+        ^{:line 345} n (conv uintptr rootBlockBytes)]
+      (when (> (+ off n) n0)
+        (set! n (- n0 off)))
+
+
+      ;; Scan this shard.
+      (scanblock b n ptrmask gcw nil)
+      (conv int64 n))))
+
+
+
+
+
+
+^{:go/end 388} (go/func markrootFreeGStacks "markrootFreeGStacks frees stacks of dead Gs.\n\nThis does not free stacks of dead Gs cached on Ps, but having a few\ncached stacks around isn't a problem.\n" []
+  ;; Take list of dead Gs with stacks.
+  (lock (addr (.-lock (.-gFree sched))))
+  (let [list (.-stack (.-gFree sched))]
+    (set! (.-stack (.-gFree sched)) (lit gList))
+    (unlock (addr (.-lock (.-gFree sched))))
+    (when (.empty list)
+      (return))
+
+
+    ;; Free stacks.
+    (let [^{:tag (* g)} tail (zero (* g))]
+      (for [gp (.ptr (.-head list))] (!= gp nil) (set! gp (.ptr (.-schedlink gp)))
+        (set! tail gp)
+        (stackfree (.-stack gp))
+        (set! (.-lo (.-stack gp)) 0)
+        (set! (.-hi (.-stack gp)) 0)
+        (when valgrindenabled
+          (valgrindDeregisterStack (.-valgrindStackID gp))
+          (set! (.-valgrindStackID gp) 0)))
+
+
+
+      (let [q (lit gQueue (.-head list) (.guintptr tail) (.-size list))]
+
+        ;; Put Gs back on the free list.
+        (lock (addr (.-lock (.-gFree sched))))
+        (.pushAll (.-noStack (.-gFree sched)) q)
+        (unlock (addr (.-lock (.-gFree sched))))))))
+
+
+
+
+
+^{:go/end 469} (go/func ^:go/nowritebarrier markrootSpans "markrootSpans marks roots for one shard of markArenas.\n" [^{:tag (* gcWork)} gcw ^int shard]
+  ;; Objects with finalizers have two GC-related invariants:
+  ;;
+  ;; 1) Everything reachable from the object must be marked.
+  ;; This ensures that when we pass the object to its finalizer,
+  ;; everything the finalizer can reach will be retained.
+  ;;
+  ;; 2) Finalizer specials (which are not in the garbage
+  ;; collected heap) are roots. In practice, this means the fn
+  ;; field must be scanned.
+  ;;
+  ;; Objects with weak handles have only one invariant related
+  ;; to this function: weak handle specials (which are not in the
+  ;; garbage collected heap) are roots. In practice, this means
+  ;; the handle field must be scanned. Note that the value the
+  ;; handle pointer referenced does *not* need to be scanned. See
+  ;; the definition of specialWeakHandle for details.
+  (let [sg (.-sweepgen mheap_)
+
+      ;; Find the arena and page index into that arena for this shard.
+      ^{:line 413} ai (aget (.-markArenas mheap_) (/ shard (/ pagesPerArena pagesPerSpanRoot)))
+      ^{:line 414} ha (aget (aget (.-arenas mheap_) (.l1 ai)) (.l2 ai))
+      ^{:line 415} arenaPage (conv uint (% (* (conv uintptr shard) pagesPerSpanRoot) pagesPerArena))
+
+      ;; Construct slice of bitmap which we'll iterate over.
+      ^{:line 418} specialsbits (subslice (.-pageSpecials ha) (/ arenaPage 8))]
+    (set! specialsbits (subslice specialsbits _ (/ pagesPerSpanRoot 8)))
+    (range [i specialsbits]
+      ;; Find set bits, which correspond to spans with specials.
+      (let [specials (atomic/Load8 (addr (aget specialsbits i)))]
+        (when (== specials 0)
+          (continue))
+
+        (for [j (conv uint 0)] (< j 8) (inc! j)
+          (when (== (bit-and specials ^uint8 (<< 1 j)) 0)
+            (continue))
+
+          ;; Find the span for this bit.
+          ;;
+          ;; This value is guaranteed to be non-nil because having
+          ;; specials implies that the span is in-use, and since we're
+          ;; currently marking we can be sure that we don't have to worry
+          ;; about the span being freed and re-used.
+          (let [s (aget (.-spans ha) (+ arenaPage (* (conv uint i) 8) j))]
+
+            ;; The state must be mSpanInUse if the specials bit is set, so
+            ;; sanity check that.
+            (when [state (.get (.-state s))] (!= state mSpanInUse)
+              (print "s.state = " state "\n")
+              (throw "non in-use span found with specials bit set"))
+
+            ;; Check that this span was swept (it may be cached or uncached).
+            (when (and (not useCheckmark) (not (or (== (.-sweepgen s) sg) (== (.-sweepgen s) (+ sg 3)))))
+              ;; sweepgen was updated (+2) during non-checkmark GC pass
+              (print "sweep " (.-sweepgen s) " " sg "\n")
+              (throw "gc: unswept span"))
+
+
+            ;; Lock the specials to prevent a special from being
+            ;; removed from the list while we're traversing it.
+            (lock (addr (.-speciallock s)))
+            (for [sp (.-specials s)] (!= sp nil) (set! sp (.-next sp))
+              (switch (.-kind sp)
+                (case [_KindSpecialFinalizer]
+                  (gcScanFinalizer (conv (* specialfinalizer) (conv unsafe/Pointer sp)) s gcw))
+                (case [_KindSpecialWeakHandle]
+                  ;; The special itself is a root.
+                  (let [spw (conv (* specialWeakHandle) (conv unsafe/Pointer sp))]
+                    (scanblock (conv uintptr (conv unsafe/Pointer (addr (.-handle spw)))) goarch/PtrSize (addr (aget oneptrmask 0)) gcw nil)))
+                (case [_KindSpecialCleanup]
+                  (gcScanCleanup (conv (* specialCleanup) (conv unsafe/Pointer sp)) gcw))))
+
+
+            (unlock (addr (.-speciallock s)))))))))
+
+
+
+
+
+^{:go/end 487} (go/func gcScanFinalizer "gcScanFinalizer scans the relevant parts of a finalizer special as a root.\n" [^{:tag (* specialfinalizer)} spf ^{:tag (* mspan)} s ^{:tag (* gcWork)} gcw]
+  ;; Don't mark finalized object, but scan it so we retain everything it points to.
+
+  ;; A finalizer can be set for an inner byte of an object, find object beginning.
+  (let [p (+ (.base s) (* (/ (.-offset (.-special spf)) (.-elemsize s)) (.-elemsize s)))]
+
+    ;; Mark everything that can be reached from
+    ;; the object (but *not* the object itself or
+    ;; we'll never collect it).
+    (when (not (.noscan (.-spanclass s)))
+      (scanObject p gcw))
+
+
+    ;; The special itself is also a root.
+    (scanblock (conv uintptr (conv unsafe/Pointer (addr (.-fn spf)))) goarch/PtrSize (addr (aget oneptrmask 0)) gcw nil)))
+
+
+
+^{:go/end 493} (go/func gcScanCleanup "gcScanCleanup scans the relevant parts of a cleanup special as a root.\n" [^{:tag (* specialCleanup)} spc ^{:tag (* gcWork)} gcw]
+  ;; The special itself is a root.
+  (scanblock (conv uintptr (conv unsafe/Pointer (addr (.-cleanup spc)))) (unsafe/Sizeof (lit cleanupFn)) (addr (aget cleanupFnPtrMask 0)) gcw nil))
+
+
+
+
+
+
+^{:go/end 699} (go/func gcAssistAlloc "gcAssistAlloc performs GC work to make gp's assist debt positive.\ngp must be the calling user goroutine.\n\nThis must be called with preemption enabled.\n" [^{:tag (* g)} gp]
+  ;; Don't assist in non-preemptible contexts. These are
+  ;; generally fragile and won't allow the assist to block.
+  (when (== (getg) (.-g0 (.-m gp)))
+    (return))
+
+  (when [mp (.-m (getg))] (or (> (.-locks mp) 0) (!= (.-preemptoff mp) ""))
+    (return))
+
+
+  (when [gp (getg)] (!= (.-bubble gp) nil)
+    ;; Disassociate the G from its synctest bubble while allocating.
+    ;; This is less elegant than incrementing the group's active count,
+    ;; but avoids any contamination between GC assist and synctest.
+    (let [bubble (.-bubble gp)]
+      (set! (.-bubble gp) nil)
+      (defer (^{:go/end 517} (fn []
+            (set! (.-bubble gp) bubble))))))
+
+
+
+  ;; This extremely verbose boolean indicates whether we've
+  ;; entered mark assist from the perspective of the tracer.
+  ;;
+  ;; In the tracer, this is just before we call gcAssistAlloc1
+  ;; *regardless* of whether tracing is enabled. This is because
+  ;; the tracer allows for tracing to begin (and advance
+  ;; generations) in the middle of a GC mark phase, so we need to
+  ;; record some state so that the tracer can pick it up to ensure
+  ;; a consistent trace result.
+  ;;
+  ;; TODO(mknyszek): Hide the details of inMarkAssist in tracer
+  ;; functions and simplify all the state tracking. This is a lot.
+  (let [enteredMarkAssistForTracing false]
+    (label :retry
+      (when (.limiting gcCPULimiter)
+        ;; If the CPU limiter is enabled, intentionally don't
+        ;; assist to reduce the amount of CPU time spent in the GC.
+        (when enteredMarkAssistForTracing
+          (let [trace (traceAcquire)]
+            (if (.ok trace) (do
+                (.GCMarkAssistDone trace)
+                ;; Set this *after* we trace the end to make sure
+                ;; that we emit an in-progress event if this is
+                ;; the first event for the goroutine in the trace
+                ;; or trace generation. Also, do this between
+                ;; acquire/release because this is part of the
+                ;; goroutine's trace state, and it must be atomic
+                ;; with respect to the tracer.
+                (set! (.-inMarkAssist gp) false)
+                (traceRelease trace))
+
+              ;; This state is tracked even if tracing isn't enabled.
+              ;; It's only used by the new tracer.
+              ;; See the comment on enteredMarkAssistForTracing.
+              (set! (.-inMarkAssist gp) false))))
+
+
+        (return)))
+
+    ;; Compute the amount of scan work we need to do to make the
+    ;; balance positive. When the required amount of work is low,
+    ;; we over-assist to build up credit for future allocations
+    ;; and amortize the cost of assisting.
+    (let [assistWorkPerByte (.Load (.-assistWorkPerByte gcController))
+        ^{:line 564} assistBytesPerWork (.Load (.-assistBytesPerWork gcController))
+        ^{:line 565} debtBytes (- (.-gcAssistBytes gp))
+        ^{:line 566} scanWork (conv int64 (* assistWorkPerByte (conv float64 debtBytes)))]
+      (when (< scanWork gcOverAssistWork)
+        (set! scanWork gcOverAssistWork)
+        (set! debtBytes (conv int64 (* assistBytesPerWork (conv float64 scanWork)))))
+
+
+      ;; Steal as much credit as we can from the background GC's
+      ;; scan credit. This is racy and may drop the background
+      ;; credit below 0 if two mutators steal at the same time. This
+      ;; will just cause steals to fail until credit is accumulated
+      ;; again, so in the long run it doesn't really matter, but we
+      ;; do have to handle the negative credit case.
+      (let [bgScanCredit (.Load (.-bgScanCredit gcController))
+          ^{:line 579} stolen (conv int64 0)]
+        (when (> bgScanCredit 0)
+          (if (< bgScanCredit scanWork) (do
+              (set! stolen bgScanCredit)
+              (set! (.-gcAssistBytes gp) + (+ 1 (conv int64 (* assistBytesPerWork (conv float64 stolen))))))
+            (do
+              (set! stolen scanWork)
+              (set! (.-gcAssistBytes gp) + debtBytes)))
+
+          (.Add (.-bgScanCredit gcController) (- stolen))
+
+          (set! scanWork - stolen)
+
+          (when (== scanWork 0)
+            ;; We were able to steal all of the credit we
+            ;; needed.
+            (when enteredMarkAssistForTracing
+              (let [trace (traceAcquire)]
+                (if (.ok trace) (do
+                    (.GCMarkAssistDone trace)
+                    ;; Set this *after* we trace the end to make sure
+                    ;; that we emit an in-progress event if this is
+                    ;; the first event for the goroutine in the trace
+                    ;; or trace generation. Also, do this between
+                    ;; acquire/release because this is part of the
+                    ;; goroutine's trace state, and it must be atomic
+                    ;; with respect to the tracer.
+                    (set! (.-inMarkAssist gp) false)
+                    (traceRelease trace))
+
+                  ;; This state is tracked even if tracing isn't enabled.
+                  ;; It's only used by the new tracer.
+                  ;; See the comment on enteredMarkAssistForTracing.
+                  (set! (.-inMarkAssist gp) false))))
+
+
+            (return)))
+
+
+        (when (not enteredMarkAssistForTracing)
+          (let [trace (traceAcquire)]
+            (if (.ok trace) (do
+                (.GCMarkAssistStart trace)
+                ;; Set this *after* we trace the start, otherwise we may
+                ;; emit an in-progress event for an assist we're about to start.
+                (set! (.-inMarkAssist gp) true)
+                (traceRelease trace))
+
+              (set! (.-inMarkAssist gp) true))
+
+            ;; In the new tracer, set enter mark assist tracing if we
+            ;; ever pass this point, because we must manage inMarkAssist
+            ;; correctly.
+            ;;
+            ;; See the comment on enteredMarkAssistForTracing.
+            (set! enteredMarkAssistForTracing true)))
+
+
+        ;; Perform assist work
+        (systemstack ^{:go/end 642} (fn []
+            (gcAssistAlloc1 gp scanWork)))
+        ;; The user stack may have moved, so this can't touch
+        ;; anything on it until it returns from systemstack.
+
+
+        (let [completed (!= (.-param gp) nil)]
+          (set! (.-param gp) nil)
+          (when completed
+            (gcMarkDone))
+
+
+          (when (< (.-gcAssistBytes gp) 0)
+            ;; We were unable steal enough credit or perform
+            ;; enough work to pay off the assist debt. We need to
+            ;; do one of these before letting the mutator allocate
+            ;; more to prevent over-allocation.
+            ;;
+            ;; If this is because we were preempted, reschedule
+            ;; and try some more.
+            (when (.-preempt gp)
+              (Gosched)
+              (goto :retry))
+
+
+            ;; Add this G to an assist queue and park. When the GC
+            ;; has more background credit, it will satisfy queued
+            ;; assists before flushing to the global credit pool.
+            ;;
+            ;; Note that this does *not* get woken up when more
+            ;; work is added to the work list. The theory is that
+            ;; there wasn't enough work to do anyway, so we might
+            ;; as well let background marking take care of the
+            ;; work that is available.
+            (when (not (gcParkAssist))
+              (goto :retry)))
+
+
+          ;; At this point either background GC has satisfied
+          ;; this G's assist debt, or the GC cycle is over.
+
+          (when enteredMarkAssistForTracing
+            (let [trace (traceAcquire)]
+              (if (.ok trace) (do
+                  (.GCMarkAssistDone trace)
+                  ;; Set this *after* we trace the end to make sure
+                  ;; that we emit an in-progress event if this is
+                  ;; the first event for the goroutine in the trace
+                  ;; or trace generation. Also, do this between
+                  ;; acquire/release because this is part of the
+                  ;; goroutine's trace state, and it must be atomic
+                  ;; with respect to the tracer.
+                  (set! (.-inMarkAssist gp) false)
+                  (traceRelease trace))
+
+                ;; This state is tracked even if tracing isn't enabled.
+                ;; It's only used by the new tracer.
+                ;; See the comment on enteredMarkAssistForTracing.
+                (set! (.-inMarkAssist gp) false)))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 779} (go/func ^:go/systemstack gcAssistAlloc1 "gcAssistAlloc1 is the part of gcAssistAlloc that runs on the system\nstack. This is a separate function to make it easier to see that\nwe're not capturing anything from the user stack, since the user\nstack may move while we're in this function.\n\ngcAssistAlloc1 indicates whether this assist completed the mark\nphase by setting gp.param to non-nil. This can't be communicated on\nthe stack since it may move.\n" [^{:tag (* g)} gp ^int64 scanWork]
+  ;; Clear the flag indicating that this assist completed the
+  ;; mark phase.
+  (set! (.-param gp) nil)
+
+  (when (== (atomic/Load (addr gcBlackenEnabled)) 0)
+    ;; The gcBlackenEnabled check in malloc races with the
+    ;; store that clears it but an atomic check in every malloc
+    ;; would be a performance hit.
+    ;; Instead we recheck it here on the non-preemptible system
+    ;; stack to determine if we should perform an assist.
+
+    ;; GC is done, so ignore any remaining debt.
+    (set! (.-gcAssistBytes gp) 0)
+    (return))
+
+
+  ;; Track time spent in this assist. Since we're on the
+  ;; system stack, this is non-preemptible, so we can
+  ;; just measure start and end time.
+  ;;
+  ;; Limiter event tracking might be disabled if we end up here
+  ;; while on a mark worker.
+  (let [startTime (nanotime)
+      ^{:line 735} trackLimiterEvent (.start (.-limiterEvent (.ptr (.-p (.-m gp)))) limiterEventMarkAssist startTime)]
+
+    (gcBeginWork)
+
+    ;; gcDrainN requires the caller to be preemptible.
+    (casGToWaitingForSuspendG gp _Grunning waitReasonGCAssistMarking)
+
+    ;; drain own cached work first in the hopes that it
+    ;; will be more cache friendly.
+    (let [gcw (addr (.-gcw (.ptr (.-p (.-m (getg))))))
+        ^{:line 745} workDone (gcDrainN gcw scanWork)]
+
+      (casgstatus gp _Gwaiting _Grunning)
+
+      ;; Record that we did this much scan work.
+      ;;
+      ;; Back out the number of bytes of assist credit that
+      ;; this scan work counts for. The "1+" is a poor man's
+      ;; round-up, to ensure this adds credit even if
+      ;; assistBytesPerWork is very low.
+      (let [assistBytesPerWork (.Load (.-assistBytesPerWork gcController))]
+        (set! (.-gcAssistBytes gp) + (+ 1 (conv int64 (* assistBytesPerWork (conv float64 workDone)))))
+
+        ;; If this is the last worker and we ran out of work,
+        ;; signal a completion point.
+        (when (gcEndWork)
+          ;; This has reached a background completion point. Set
+          ;; gp.param to a non-nil value to indicate this. It
+          ;; doesn't matter what we set it to (it just has to be
+          ;; a valid pointer).
+          (set! (.-param gp) (conv unsafe/Pointer gp)))
+
+        (let [now (nanotime)
+            ^{:line 768} duration (- now startTime)
+            ^{:line 769} pp (.ptr (.-p (.-m gp)))]
+          (set! (.-gcAssistTime pp) + duration)
+          (when trackLimiterEvent
+            (.stop (.-limiterEvent pp) limiterEventMarkAssist now))
+
+          (when (> (.-gcAssistTime pp) gcAssistTimeSlack)
+            (.Add (.-assistTime gcController) (.-gcAssistTime pp))
+            (.update gcCPULimiter now)
+            (set! (.-gcAssistTime pp) 0)))))))
+
+
+
+
+
+
+^{:go/end 789} (go/func gcWakeAllAssists "gcWakeAllAssists wakes all currently blocked assists. This is used\nat the end of a GC cycle. gcBlackenEnabled must be false to prevent\nnew assists from going to sleep after this point.\n" []
+  (lock (addr (.-lock (.-assistQueue work))))
+  (let [list (.popList (.-q (.-assistQueue work)))]
+    (injectglist (addr list))
+    (unlock (addr (.-lock (.-assistQueue work))))))
+
+
+
+
+
+
+^{:go/end 824} (go/func gcParkAssist "gcParkAssist puts the current goroutine on the assist queue and parks.\n\ngcParkAssist reports whether the assist is now satisfied. If it\nreturns false, the caller must retry the assist.\n" ^bool []
+  (lock (addr (.-lock (.-assistQueue work))))
+  ;; If the GC cycle finished while we were getting the lock,
+  ;; exit the assist. The cycle can't finish while we hold the
+  ;; lock.
+  (when (== (atomic/Load (addr gcBlackenEnabled)) 0)
+    (unlock (addr (.-lock (.-assistQueue work))))
+    (return true))
+
+
+  ^{:go/breaks [5]} (let [gp (getg)
+      ^{:line 806} oldList (.-q (.-assistQueue work))]
+    (.pushBack (.-q (.-assistQueue work)) gp)
+
+    ;; Recheck for background credit now that this G is in
+    ;; the queue, but can still back out. This avoids a
+    ;; race in case background marking has flushed more
+    ;; credit since we checked above.
+    (when (> (.Load (.-bgScanCredit gcController)) 0)
+      (set! (.-q (.-assistQueue work)) oldList)
+      (when (!= (.-tail oldList) 0)
+        (.set (.-schedlink (.ptr (.-tail oldList))) nil))
+
+      (unlock (addr (.-lock (.-assistQueue work))))
+      (return false))
+
+    ;; Park.
+    (goparkunlock (addr (.-lock (.-assistQueue work))) waitReasonGCAssistWait traceBlockGCMarkAssist 2)
+    true))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 885} (go/func ^:go/nowritebarrierrec gcFlushBgCredit "gcFlushBgCredit flushes scanWork units of background scan work\ncredit. This first satisfies blocked assists on the\nwork.assistQueue and then flushes any remaining credit to\ngcController.bgScanCredit.\n\nWrite barriers are disallowed because this is used by gcDrain after\nit has ensured that all work is drained and this must preserve that\ncondition.\n" [^int64 scanWork]
+  (when (.empty (.-q (.-assistQueue work)))
+    ;; Fast path; there are no blocked assists. There's a
+    ;; small window here where an assist may add itself to
+    ;; the blocked queue and park. If that happens, we'll
+    ;; just get it on the next flush.
+    (.Add (.-bgScanCredit gcController) scanWork)
+    (return))
+
+
+  (let [assistBytesPerWork (.Load (.-assistBytesPerWork gcController))
+      ^{:line 847} scanBytes (conv int64 (* (conv float64 scanWork) assistBytesPerWork))]
+
+    (lock (addr (.-lock (.-assistQueue work))))
+    (while (and (not (.empty (.-q (.-assistQueue work)))) (> scanBytes 0))
+      (let [gp (.pop (.-q (.-assistQueue work)))]
+        ;; Note that gp.gcAssistBytes is negative because gp
+        ;; is in debt. Think carefully about the signs below.
+        (if (>= (+ scanBytes (.-gcAssistBytes gp)) 0) (do
+            ;; Satisfy this entire assist debt.
+            (set! scanBytes + (.-gcAssistBytes gp))
+            (set! (.-gcAssistBytes gp) 0)
+            ;; It's important that we *not* put gp in
+            ;; runnext. Otherwise, it's possible for user
+            ;; code to exploit the GC worker's high
+            ;; scheduler priority to get itself always run
+            ;; before other goroutines and always in the
+            ;; fresh quantum started by GC.
+            (ready gp 0 false))
+          (do
+            ;; Partially satisfy this assist.
+            (set! (.-gcAssistBytes gp) + scanBytes)
+            (set! scanBytes 0)
+            ;; As a heuristic, we move this assist to the
+            ;; back of the queue so that large assists
+            ;; can't clog up the assist queue and
+            ;; substantially delay small assists.
+            (.pushBack (.-q (.-assistQueue work)) gp)
+            (break)))))
+
+
+
+    (when (> scanBytes 0)
+      ;; Convert from scan bytes back to work.
+      (let [assistWorkPerByte (.Load (.-assistWorkPerByte gcController))]
+        (set! scanWork (conv int64 (* (conv float64 scanBytes) assistWorkPerByte)))
+        (.Add (.-bgScanCredit gcController) scanWork)))
+
+    (unlock (addr (.-lock (.-assistQueue work))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1069} (go/func ^:go/nowritebarrier ^:go/systemstack scanstack "scanstack scans gp's stack, greying all pointers found on the stack.\n\nReturns the amount of scan work performed, but doesn't update\ngcController.stackScanWork or flush any credit. Any background credit produced\nby this function should be flushed by its caller. scanstack itself can't\nsafely flush because it may result in trying to wake up a goroutine that\nwas just scanned, resulting in a self-deadlock.\n\nscanstack will also shrink the stack if it is safe to do so. If it\nis not, it schedules a stack shrink for the next synchronous safe\npoint.\n\nscanstack is marked go:systemstack because it must not be preempted\nwhile using a workbuf.\n" ^int64 [^{:tag (* g)} gp ^{:tag (* gcWork)} gcw]
+  (when (== (bit-and (readgstatus gp) _Gscan) 0)
+    (print "runtime:scanstack: gp=" gp ", goid=" (.-goid gp) ", gp->atomicstatus=" (conv hex (readgstatus gp)) "\n")
+    (throw "scanstack - bad status"))
+
+
+  (switch (bit-and-not (readgstatus gp) _Gscan)
+    (default
+      (print "runtime: gp=" gp ", goid=" (.-goid gp) ", gp->atomicstatus=" (readgstatus gp) "\n")
+      (throw "mark - bad status"))
+    (case [_Gdead _Gdeadextra]
+      (return 0))
+    (case [_Grunning]
+      (print "runtime: gp=" gp ", goid=" (.-goid gp) ", gp->atomicstatus=" (readgstatus gp) "\n")
+      (throw "scanstack: goroutine not stopped"))
+    (case [_Grunnable _Gsyscall _Gwaiting _Gleaked]))
+  ;; ok
+
+
+  (when (== gp (getg))
+    (throw "can't scan our own stack"))
+
+
+  ;; scannedSize is the amount of work we'll be reporting.
+  ;;
+  ;; It is less than the allocated size (which is hi-lo).
+  (let [^uintptr sp (zero uintptr)]
+    (if (!= (.-syscallsp gp) 0)
+      (set! sp (.-syscallsp gp)) ; If in a system call this is the stack pointer (gp.sched.sp can be 0 in this case on Windows).
+
+      (set! sp (.-sp (.-sched gp))))
+
+    (let [scannedSize (- (.-hi (.-stack gp)) sp)
+
+        ;; Keep statistics for initial stack size calculation.
+        ;; Note that this accumulates the scanned size, not the allocated size.
+        ^{:line 940} p (.ptr (.-p (.-m (getg))))]
+      (set! (.-scannedStackSize p) + (conv uint64 scannedSize))
+      (inc! (.-scannedStacks p))
+
+      (if (isShrinkStackSafe gp)
+        ;; Shrink the stack if not much of it is being used.
+        (shrinkstack gp)
+
+        ;; Otherwise, shrink the stack at the next sync safe point.
+        (set! (.-preemptShrink gp) true))
+
+
+      (let [^stackScanState state (zero stackScanState)]
+        (set! (.-stack state) (.-stack gp))
+
+        (when stackTraceDebug
+          (println "stack trace goroutine" (.-goid gp)))
+
+
+        (when (and debugScanConservative (.-asyncSafePoint gp))
+          (print "scanning async preempted goroutine " (.-goid gp) " stack [" (conv hex (.-lo (.-stack gp))) "," (conv hex (.-hi (.-stack gp))) ")\n"))
+
+
+        ;; Scan the saved context register. This is effectively a live
+        ;; register that gets moved back and forth between the
+        ;; register and sched.ctxt without a write barrier.
+        (when (!= (.-ctxt (.-sched gp)) nil)
+          (scanblock (conv uintptr (conv unsafe/Pointer (addr (.-ctxt (.-sched gp))))) goarch/PtrSize (addr (aget oneptrmask 0)) gcw (addr state)))
+
+
+        ;; Scan conservatively the extended register state.
+        (when (.-asyncSafePoint gp)
+          (xRegScan gp gcw (addr state)))
+
+
+        ;; Scan the stack. Accumulate a list of stack objects.
+        (let [^unwinder u (zero unwinder)]
+          (for [(.init u gp 0)] (.valid u) (.next u)
+            (scanframeworker (addr (.-frame u)) (addr state) gcw))
+
+
+          ;; Find additional pointers that point into the stack from the heap.
+          ;; Currently this includes defers and panics. See also function copystack.
+
+          ;; Find and trace other pointers in defer records.
+          (for [d (.-_defer gp)] (!= d nil) (set! d (.-link d))
+            (when (!= (.-fn d) nil)
+              ;; Scan the func value, which could be a stack allocated closure.
+              ;; See issue 30453.
+              (scanblock (conv uintptr (conv unsafe/Pointer (addr (.-fn d)))) goarch/PtrSize (addr (aget oneptrmask 0)) gcw (addr state)))
+
+            (when (!= (.-link d) nil)
+              ;; The link field of a stack-allocated defer record might point
+              ;; to a heap-allocated defer record. Keep that heap record live.
+              (scanblock (conv uintptr (conv unsafe/Pointer (addr (.-link d)))) goarch/PtrSize (addr (aget oneptrmask 0)) gcw (addr state)))
+
+            ;; Retain defers records themselves.
+            ;; Defer records might not be reachable from the G through regular heap
+            ;; tracing because the defer linked list might weave between the stack and the heap.
+            (when (.-heap d)
+              (scanblock (conv uintptr (conv unsafe/Pointer (addr d))) goarch/PtrSize (addr (aget oneptrmask 0)) gcw (addr state))))
+
+
+          (when (!= (.-_panic gp) nil)
+            ;; Panics are always stack allocated.
+            (.putPtr state (conv uintptr (conv unsafe/Pointer (.-_panic gp))) false))
+
+
+          ;; Find and scan all reachable stack objects.
+          ;;
+          ;; The state's pointer queue prioritizes precise pointers over
+          ;; conservative pointers so that we'll prefer scanning stack
+          ;; objects precisely.
+          (.buildIndex state)
+          (while true
+            (let [(values p conservative) (.getPtr state)]
+              (when (== p 0)
+                (break))
+
+              (let [obj (.findObject state p)]
+                (when (== obj nil)
+                  (continue))
+
+                (let [r (.-r obj)]
+                  (when (== r nil)
+                    ;; We've already scanned this object.
+                    (continue))
+
+                  (.setRecord obj nil) ; Don't scan it again.
+                  (when stackTraceDebug
+                    (printlock)
+                    (print "  live stkobj at" (conv hex (+ (.-lo (.-stack state)) (conv uintptr (.-off obj)))) "of size" (.-size obj))
+                    (when conservative
+                      (print " (conservative)"))
+
+                    (println)
+                    (printunlock))
+
+                  (let [(values ptrBytes gcData) (.gcdata r)
+                      ^{:line 1039} b (+ (.-lo (.-stack state)) (conv uintptr (.-off obj)))]
+                    (if conservative
+                      (scanConservative b ptrBytes gcData gcw (addr state))
+
+                      (scanblock b ptrBytes gcData gcw (addr state))))))))
+
+
+
+          ;; Deallocate object buffers.
+          ;; (Pointer buffers were all deallocated in the loop above.)
+          (while (!= (.-head state) nil)
+            (let [x (.-head state)]
+              (set! (.-head state) ^{:go/via [stackObjectBufHdr]} (.-next x))
+              (when stackTraceDebug
+                (for [i 0] (< i ^{:go/via [stackObjectBufHdr workbufhdr]} (.-nobj x)) (inc! i)
+                  (let [obj (addr (aget (.-obj x) i))]
+                    (when (== (.-r obj) nil) ; reachable
+                      (continue))
+
+                    (println "  dead stkobj at" (conv hex (+ (.-lo (.-stack gp)) (conv uintptr (.-off obj)))) "of size" (.-size (.-r obj))))))
+              ;; Note: not necessarily really dead - only reachable-from-ptr dead.
+
+
+              (set! ^{:go/via [stackObjectBufHdr workbufhdr]} (.-nobj x) 0)
+              (putempty (conv (* workbuf) (conv unsafe/Pointer x)))))
+
+          (when (or (!= (.-buf state) nil) (!= (.-cbuf state) nil) (!= (.-freeBuf state) nil))
+            (throw "remaining pointer buffers"))
+
+          (conv int64 scannedSize))))))
+
+
+
+
+
+^{:go/end 1168} (go/func ^:go/nowritebarrier scanframeworker "Scan a stack frame: local variables and function arguments/results.\n" [^{:tag (* stkframe)} frame ^{:tag (* stackScanState)} state ^{:tag (* gcWork)} gcw]
+  (when (and (> _DebugGC 1) (!= (.-continpc frame) 0))
+    (print "scanframe " (funcname (.-fn frame)) "\n"))
+
+
+  (let [isAsyncPreempt (and (.valid (.-fn frame)) (== ^{:go/via [_func]} (.-funcID (.-fn frame)) abi/FuncID_asyncPreempt))
+      ^{:line 1080} isDebugCall (and (.valid (.-fn frame)) (== ^{:go/via [_func]} (.-funcID (.-fn frame)) abi/FuncID_debugCallV2))]
+    (when (or (.-conservative state) isAsyncPreempt isDebugCall)
+      (when debugScanConservative
+        (println "conservatively scanning function" (funcname (.-fn frame)) "at PC" (conv hex (.-continpc frame))))
+
+
+      ;; Conservatively scan the frame. Unlike the precise
+      ;; case, this includes the outgoing argument space
+      ;; since we may have stopped while this function was
+      ;; setting up a call.
+      ;;
+      ;; TODO: We could narrow this down if the compiler
+      ;; produced a single map per function of stack slots
+      ;; and registers that ever contain a pointer.
+      (when (!= (.-varp frame) 0)
+        (let [size (- (.-varp frame) (.-sp frame))]
+          (when (> size 0)
+            (let [isSigPanic (and (.valid (.-fn frame)) (== ^{:go/via [_func]} (.-funcID (.-fn frame)) abi/FuncID_sigpanic))]
+              (when (and usesLR ^:go/paren (or isSigPanic isAsyncPreempt isDebugCall))
+                ;; Also include the small frame injected by
+                ;; (*sigctxt).pushCall. This is the same bump
+                ;; as the SP bump used in (*unwinder).next.
+                ;; We need this to ensure LR is scanned (for when
+                ;; it contains a pointer-y non-PC). See issue 80188.
+                (set! size + (alignUp sys/MinFrameSize sys/StackAlign)))
+
+              (scanConservative (.-sp frame) size nil gcw state)))))
+
+
+
+      ;; Scan arguments to this frame.
+      (when [n (.argBytes frame)] (!= n 0)
+        ;; TODO: We could pass the entry argument map
+        ;; to narrow this down further.
+        (scanConservative (.-argp frame) n nil gcw state))
+
+
+      (if (or isAsyncPreempt isDebugCall)
+        ;; This function's frame contained the
+        ;; registers for the asynchronously stopped
+        ;; parent frame. Scan the parent
+        ;; conservatively.
+        (set! (.-conservative state) true)
+
+        ;; We only wanted to scan those two frames
+        ;; conservatively. Clear the flag for future
+        ;; frames.
+        (set! (.-conservative state) false))
+
+      (return))
+
+
+    (let [(values locals args objs) (.getStackMap frame false)]
+
+      ;; Scan local variables if stack frame has been allocated.
+      (when (> (.-n locals) 0)
+        (let [size (* (conv uintptr (.-n locals)) goarch/PtrSize)]
+          (scanblock (- (.-varp frame) size) size (.-bytedata locals) gcw state)))
+
+
+      ;; Scan arguments.
+      (when (> (.-n args) 0)
+        (scanblock (.-argp frame) (* (conv uintptr (.-n args)) goarch/PtrSize) (.-bytedata args) gcw state))
+
+
+      ;; Add all stack objects to the stack object list.
+      (when (!= (.-varp frame) 0)
+        ;; varp is 0 for defers, where there are no locals.
+        ;; In that case, there can't be a pointer to its args, either.
+        ;; (And all args would be scanned above anyway.)
+        (range [i objs]
+          (let [obj (addr (aget objs i))
+              ^{:line 1152} off (.-off obj)
+              ^{:line 1153} base (.-varp frame)] ; locals base pointer
+            (when (>= off 0)
+              (set! base (.-argp frame))) ; arguments and return values base pointer
+
+            (let [ptr (+ base (conv uintptr off))]
+              (when (< ptr (.-sp frame))
+                ;; object hasn't been allocated in the frame yet.
+                (continue))
+
+              (when stackTraceDebug
+                (println "stkobj at" (conv hex ptr) "of size" (.-size obj)))
+
+              (.addObject state ptr obj))))))))
+
+
+
+
+(go/type gcDrainFlags int)
+
+(go/const
+  ^{:line 1173} [^{:tag gcDrainFlags :val 1} gcDrainUntilPreempt (<< 1 iota)]
+  ^{:line 1174} [^{:val 2} gcDrainFlushBgCredit]
+  ^{:line 1175} [^{:val 4} gcDrainIdle]
+  ^{:line 1176} [^{:val 8} gcDrainFractional])
+
+
+
+
+^{:go/end 1183} (go/func gcDrainMarkWorkerIdle "gcDrainMarkWorkerIdle is a wrapper for gcDrain that exists to better account\nmark time in profiles.\n" [^{:tag (* gcWork)} gcw]
+  (gcDrain gcw (bit-or gcDrainIdle gcDrainUntilPreempt gcDrainFlushBgCredit)))
+
+
+
+
+^{:go/end 1193} (go/func gcDrainMarkWorkerDedicated "gcDrainMarkWorkerDedicated is a wrapper for gcDrain that exists to better account\nmark time in profiles.\n" [^{:tag (* gcWork)} gcw ^bool untilPreempt]
+  (let [flags gcDrainFlushBgCredit]
+    (when untilPreempt
+      (set! flags bit-or gcDrainUntilPreempt))
+
+    (gcDrain gcw flags)))
+
+
+
+
+^{:go/end 1199} (go/func gcDrainMarkWorkerFractional "gcDrainMarkWorkerFractional is a wrapper for gcDrain that exists to better account\nmark time in profiles.\n" [^{:tag (* gcWork)} gcw]
+  (gcDrain gcw (bit-or gcDrainFractional gcDrainUntilPreempt gcDrainFlushBgCredit)))
+
+
+
+
+
+
+^{:go/end 1221} (go/func gcNextMarkRoot "gcNextMarkRoot safely increments work.markrootNext and returns the\nindex of the next root job. The returned boolean is true if the root job\nis valid, and false if there are no more root jobs to be claimed,\ni.e. work.markrootNext >= work.markrootJobs.\n" [] :results [uint32 bool]
+  (when (not (.-enabled (.-goroutineLeak work)))
+    ;; If not running goroutine leak detection, assume regular GC behavior.
+    (let [job (- (.Add (.-markrootNext work) 1) 1)]
+      (return job (< job (.Load (.-markrootJobs work))))))
+
+
+  ;; Otherwise, use a CAS loop to increment markrootNext.
+  (for [(values next jobs) (values (.Load (.-markrootNext work)) (.Load (.-markrootJobs work)))] (< next jobs) (set! next (.Load (.-markrootNext work)))
+    ;; There is still work available at the moment.
+    (when (.CompareAndSwap (.-markrootNext work) next (+ next 1))
+      ;; We manage to snatch a root job. Return the root index.
+      (return next true)))
+
+
+  (return 0 false))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1391} (go/func ^:go/nowritebarrier gcDrain "gcDrain scans roots and objects in work buffers, blackening grey\nobjects until it is unable to get more work. It may return before\nGC is done; it's the caller's responsibility to balance work from\nother Ps.\n\nIf flags&gcDrainUntilPreempt != 0, gcDrain returns when g.preempt\nis set.\n\nIf flags&gcDrainIdle != 0, gcDrain returns when there is other work\nto do.\n\nIf flags&gcDrainFractional != 0, gcDrain self-preempts when\npollFractionalWorkerExit() returns true. This implies\ngcDrainNoBlock.\n\nIf flags&gcDrainFlushBgCredit != 0, gcDrain flushes scan work\ncredit to gcController.bgScanCredit every gcCreditSlack units of\nscan work.\n\ngcDrain will always return if there is a pending STW or forEachP.\n\nDisabling write barriers is necessary to ensure that after we've\nconfirmed that we've drained gcw, that we don't accidentally end\nup flipping that condition by immediately adding work in the form\nof a write barrier buffer flush.\n\nDon't set nowritebarrierrec because it's safe for some callees to\nhave write barriers enabled.\n" [^{:tag (* gcWork)} gcw ^gcDrainFlags flags]
+  (when (not (.-enabled writeBarrier))
+    (throw "gcDrain phase incorrect"))
+
+
+  ;; N.B. We must be running in a non-preemptible context, so it's
+  ;; safe to hold a reference to our P here.
+  (let [gp (.-curg (.-m (getg)))
+      ^{:line 1261} pp (.ptr (.-p (.-m gp)))
+      ^{:line 1262} preemptible (!= (bit-and flags gcDrainUntilPreempt) 0)
+      ^{:line 1263} flushBgCredit (!= (bit-and flags gcDrainFlushBgCredit) 0)
+      ^{:line 1264} idle (!= (bit-and flags gcDrainIdle) 0)
+
+      ^{:line 1266} initScanWork (.-heapScanWork gcw)
+
+      ;; checkWork is the scan work before performing the next
+      ;; self-preempt check.
+      ^{:line 1270} checkWork (conv int64 (- (<< 1 63) 1))
+      ^{:line 1271 :tag (func [] [bool])} check (zero (func [] [bool]))]
+    (when (!= (bit-and flags (bit-or gcDrainIdle gcDrainFractional)) 0)
+      (set! checkWork (+ initScanWork drainCheckThreshold))
+      (cond idle
+        (set! check pollWork)
+        (!= (bit-and flags gcDrainFractional) 0)
+        (set! check pollFractionalWorkerExit)))
+
+
+
+    (when (< (.Load (.-markrootNext work)) (.Load (.-markrootJobs work)))
+      ;; Stop if we're preemptible, if someone wants to STW, or if
+      ;; someone is calling forEachP.
+      (while (not (and (.-preempt gp) ^:go/paren (or preemptible (.Load (.-gcwaiting sched)) (!= (.-runSafePointFn pp) 0))))
+        (let [(values job ok) (gcNextMarkRoot)]
+          (when (not ok)
+            (break))
+
+          (markroot gcw job flushBgCredit)
+          (when (and (!= check nil) (check))
+            (goto :done))
+
+
+          ;; Spin up a new worker if requested.
+          (when (and goexperiment/GreenTeaGC (.-mayNeedWorker gcw))
+            (set! (.-mayNeedWorker gcw) false)
+            (when (== gcphase _GCmark)
+              (.enlistWorker gcController))))))
+
+
+
+
+
+    ;; Drain heap marking jobs.
+    ;;
+    ;; Stop if we're preemptible, if someone wants to STW, or if
+    ;; someone is calling forEachP.
+    ;;
+    ;; TODO(mknyszek): Consider always checking gp.preempt instead
+    ;; of having the preempt flag, and making an exception for certain
+    ;; mark workers in retake. That might be simpler than trying to
+    ;; enumerate all the reasons why we might want to preempt, even
+    ;; if we're supposed to be mostly non-preemptible.
+    (while (not (and (.-preempt gp) ^:go/paren (or preemptible (.Load (.-gcwaiting sched)) (!= (.-runSafePointFn pp) 0))))
+      ;; Try to keep work available on the global queue. We used to
+      ;; check if there were waiting workers, but it's better to
+      ;; just keep work available than to make workers wait. In the
+      ;; worst case, we'll do O(log(_WorkbufSize)) unnecessary
+      ;; balances.
+      (when (== (.-full work) 0)
+        (.balance gcw))
+
+
+      ;; See mgcwork.go for the rationale behind the order in which we check these queues.
+      (let [^uintptr b (zero uintptr)
+          ^{:line 1326 :tag objptr} s (zero objptr)]
+        (when [(set! b (.tryGetObjFast gcw))] (== b 0)
+          (when [(set! s (.tryGetSpanFast gcw))] (== s 0)
+            (when [(set! b (.tryGetObj gcw))] (== b 0)
+              (when [(set! s (.tryGetSpan gcw))] (== s 0)
+                ;; Flush the write barrier
+                ;; buffer; this may create
+                ;; more work.
+                (wbBufFlush)
+                (when [(set! b (.tryGetObj gcw))] (== b 0)
+                  (when [(set! s (.tryGetSpan gcw))] (== s 0)
+                    (set! s (.tryStealSpan gcw))))))))
+
+
+
+
+
+
+        (cond (!= b 0)
+          (scanObject b gcw)
+          (!= s 0)
+          (scanSpan s gcw) :else
+
+          ;; Unable to get work.
+          (break))
+
+
+        ;; Spin up a new worker if requested.
+        (when (and goexperiment/GreenTeaGC (.-mayNeedWorker gcw))
+          (set! (.-mayNeedWorker gcw) false)
+          (when (== gcphase _GCmark)
+            (.enlistWorker gcController)))
+
+
+
+        ;; Flush background scan work credit to the global
+        ;; account if we've accumulated enough locally so
+        ;; mutator assists can draw on it.
+        (when (>= (.-heapScanWork gcw) gcCreditSlack)
+          (.Add (.-heapScanWork gcController) (.-heapScanWork gcw))
+          (when flushBgCredit
+            (gcFlushBgCredit (- (.-heapScanWork gcw) initScanWork))
+            (set! initScanWork 0))
+
+          (set! checkWork - (.-heapScanWork gcw))
+          (set! (.-heapScanWork gcw) 0)
+
+          (when (<= checkWork 0)
+            (set! checkWork + drainCheckThreshold)
+            (when (and (!= check nil) (check))
+              (break))))))
+
+
+
+
+
+    (label :done
+      ;; Flush remaining scan work credit.
+      (when (> (.-heapScanWork gcw) 0)
+        (.Add (.-heapScanWork gcController) (.-heapScanWork gcw))
+        (when flushBgCredit
+          (gcFlushBgCredit (- (.-heapScanWork gcw) initScanWork)))
+
+        (set! (.-heapScanWork gcw) 0)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1482} (go/func ^:go/nowritebarrier ^:go/systemstack gcDrainN "gcDrainN blackens grey objects until it has performed roughly\nscanWork units of scan work or the G is preempted. This is\nbest-effort, so it may perform less work if it fails to get a work\nbuffer. Otherwise, it will perform at least n units of work, but\nmay perform more because scanning is always done in whole object\nincrements. It returns the amount of scan work performed.\n\nThe caller goroutine must be in a preemptible state (e.g.,\n_Gwaiting) to prevent deadlocks during stack scanning. As a\nconsequence, this must be called on the system stack.\n" ^int64 [^{:tag (* gcWork)} gcw ^int64 scanWork]
+  (when (not (.-enabled writeBarrier))
+    (throw "gcDrainN phase incorrect"))
+
+
+  ;; There may already be scan work on the gcw, which we don't
+  ;; want to claim was done by this call.
+  (let [workFlushed (- (.-heapScanWork gcw))
+
+      ;; In addition to backing out because of a preemption, back out
+      ;; if the GC CPU limiter is enabled.
+      ^{:line 1417} gp (.-curg (.-m (getg)))]
+    (while (and (not (.-preempt gp)) (not (.limiting gcCPULimiter)) (< (+ workFlushed (.-heapScanWork gcw)) scanWork))
+      ;; See gcDrain comment.
+      (when (== (.-full work) 0)
+        (.balance gcw))
+
+
+      ;; See mgcwork.go for the rationale behind the order in which we check these queues.
+      (let [^uintptr b (zero uintptr)
+          ^{:line 1426 :tag objptr} s (zero objptr)]
+        (when [(set! b (.tryGetObjFast gcw))] (== b 0)
+          (when [(set! s (.tryGetSpanFast gcw))] (== s 0)
+            (when [(set! b (.tryGetObj gcw))] (== b 0)
+              (when [(set! s (.tryGetSpan gcw))] (== s 0)
+                ;; Flush the write barrier
+                ;; buffer; this may create
+                ;; more work.
+                (wbBufFlush)
+                (when [(set! b (.tryGetObj gcw))] (== b 0)
+                  (when [(set! s (.tryGetSpan gcw))] (== s 0)
+                    ;; Try to do a root job.
+                    (when (< (.Load (.-markrootNext work)) (.Load (.-markrootJobs work)))
+                      (let [(values job ok) (gcNextMarkRoot)]
+                        (when ok
+                          (set! workFlushed + (markroot gcw job false))
+                          (continue))))
+
+
+                    (set! s (.tryStealSpan gcw))))))))
+
+
+
+
+
+
+        (cond (!= b 0)
+          (scanObject b gcw)
+          (!= s 0)
+          (scanSpan s gcw) :else
+
+          ;; Unable to get work.
+          (break))
+
+
+        ;; Flush background scan work credit.
+        (when (>= (.-heapScanWork gcw) gcCreditSlack)
+          (.Add (.-heapScanWork gcController) (.-heapScanWork gcw))
+          (set! workFlushed + (.-heapScanWork gcw))
+          (set! (.-heapScanWork gcw) 0))
+
+
+        ;; Spin up a new worker if requested.
+        (when (and goexperiment/GreenTeaGC (.-mayNeedWorker gcw))
+          (set! (.-mayNeedWorker gcw) false)
+          (when (== gcphase _GCmark)
+            (.enlistWorker gcController)))))
+
+
+
+
+    ;; Unlike gcDrain, there's no need to flush remaining work
+    ;; here because this never flushes to bgScanCredit and
+    ;; gcw.dispose will flush any remaining work to scanWork.
+
+    (+ workFlushed (.-heapScanWork gcw))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1527} (go/func ^:go/nowritebarrier scanblock "scanblock scans b as scanObject would, but using an explicit\npointer bitmap instead of the heap bitmap.\n\nThis is used to scan non-heap roots, so it does not update\ngcw.bytesMarked or gcw.heapScanWork.\n\nIf stk != nil, possible stack pointers are also reported to stk.putPtr.\n" [^uintptr b0 ^uintptr n0 ^{:tag (* uint8)} ptrmask ^{:tag (* gcWork)} gcw ^{:tag (* stackScanState)} stk]
+  ;; Use local copies of original parameters, so that a stack trace
+  ;; due to one of the throws below shows the original block
+  ;; base and extent.
+  (let [b b0
+      ^{:line 1498} n n0]
+
+    (for [i (conv uintptr 0)] (< i n) _
+      ;; Find bits for the next word.
+      (let [bits (conv uint32 @(addb ptrmask (/ i (* goarch/PtrSize 8))))]
+        (when (== bits 0)
+          (set! i + (* goarch/PtrSize 8))
+          (continue))
+
+        (for [j 0] (and (< j 8) (< i n)) (inc! j)
+          (when (!= (bit-and bits 1) 0)
+            ;; Same work as in scanObject; see comments there.
+            (let [p @(conv (* uintptr) (conv unsafe/Pointer (+ b i)))]
+              (when (!= p 0)
+                (if (and (!= stk nil) (>= p (.-lo (.-stack stk))) (< p (.-hi (.-stack stk))))
+                  (.putPtr stk p false)
+                  (do
+                    (when (not (tryDeferToSpanScan p gcw))
+                      (when [(values obj span objIndex) (findObject p b i)] (!= obj 0)
+                        (greyobject obj b i span gcw objIndex))))))))
+
+
+
+
+
+          (set! bits >> 1)
+          (set! i + goarch/PtrSize))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1630} (go/func scanConservative "scanConservative scans block [b, b+n) conservatively, treating any\npointer-like value in the block as a pointer.\n\nIf ptrmask != nil, only words that are marked in ptrmask are\nconsidered as potential pointers.\n\nIf state != nil, it's assumed that [b, b+n) is a block in the stack\nand may contain pointers to stack objects.\n" [^uintptr b ^uintptr n ^{:tag (* uint8)} ptrmask ^{:tag (* gcWork)} gcw ^{:tag (* stackScanState)} state]
+  (when debugScanConservative
+    (printlock)
+    (print "conservatively scanning [" (conv hex b) "," (conv hex (+ b n)) ")\n")
+    (hexdumpWords b n ^{:go/end 1567} (fn [^uintptr p ^hexdumpMarker m]
+        (when (!= ptrmask nil)
+          (let [word (/ (- p b) goarch/PtrSize)
+              ^{:line 1544} bits @(addb ptrmask (/ word 8))]
+            (when (== (bit-and (>> bits (% word 8)) 1) 0)
+              (return))))
+
+
+
+        (let [val @(conv (* uintptr) (conv unsafe/Pointer p))]
+          (when (and (!= state nil) (<= (.-lo (.-stack state)) val) (< val (.-hi (.-stack state))))
+            (.start m)
+            (println "ptr to stack")
+            (return))
+
+
+          (let [span (spanOfHeap val)]
+            (when (== span nil)
+              (return))
+
+            (let [idx (.objIndex span val)]
+              (when (.isFreeOrNewlyAllocated span idx)
+                (return))
+
+              (.start m)
+              (println "ptr to heap"))))))
+
+    (printunlock))
+
+
+  (for [i (conv uintptr 0)] (< i n) (set! i + goarch/PtrSize)
+    (when (!= ptrmask nil)
+      (let [word (/ i goarch/PtrSize)
+          ^{:line 1574} bits @(addb ptrmask (/ word 8))]
+        (when (== bits 0)
+          ;; Skip 8 words (the loop increment will do the 8th)
+          ;;
+          ;; This must be the first time we've
+          ;; seen this word of ptrmask, so i
+          ;; must be 8-word-aligned, but check
+          ;; our reasoning just in case.
+          (when (!= (% i (* goarch/PtrSize 8)) 0)
+            (throw "misaligned mask"))
+
+          (set! i + (- (* goarch/PtrSize 8) goarch/PtrSize))
+          (continue))
+
+        (when (== (bit-and (>> bits (% word 8)) 1) 0)
+          (continue))))
+
+
+
+    (let [val @(conv (* uintptr) (conv unsafe/Pointer (+ b i)))]
+
+      ;; Check if val points into the stack.
+      (when (and (!= state nil) (<= (.-lo (.-stack state)) val) (< val (.-hi (.-stack state))))
+        ;; val may point to a stack object. This
+        ;; object may be dead from last cycle and
+        ;; hence may contain pointers to unallocated
+        ;; objects, but unlike heap objects we can't
+        ;; tell if it's already dead. Hence, if all
+        ;; pointers to this object are from
+        ;; conservative scanning, we have to scan it
+        ;; defensively, too.
+        (.putPtr state val true)
+        (continue))
+
+
+      ;; Check if val points to a heap span.
+      (let [span (spanOfHeap val)]
+        (when (== span nil)
+          (continue))
+
+
+        ;; Check if val points to an allocated object.
+        ;;
+        ;; Ignore objects allocated during the mark phase, they've
+        ;; been allocated black.
+        (let [idx (.objIndex span val)]
+          (when (.isFreeOrNewlyAllocated span idx)
+            (continue))
+
+
+          ;; val points to an allocated object. Mark it.
+          (let [obj (+ (.base span) (* idx (.-elemsize span)))]
+            (when (not (tryDeferToSpanScan obj gcw))
+              (greyobject obj b i span gcw idx))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1644} (go/func ^:go/nowritebarrier shade "Shade the object if it isn't already.\nThe object is not nil and known to be in the heap.\nPreemption must be disabled.\n" [^uintptr b]
+  (let [gcw (addr (.-gcw (.ptr (.-p (.-m (getg))))))]
+    (when (not (tryDeferToSpanScan b gcw))
+      (when [(values obj span objIndex) (findObject b 0 0)] (!= obj 0)
+        (greyobject obj 0 0 span gcw objIndex)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1706} (go/func ^:go/nowritebarrierrec greyobject "obj is the start of an object with mark mbits.\nIf it isn't already marked, mark it and enqueue into gcw.\nbase and off are for debugging only and could be removed.\n\nSee also wbBufFlush1, which partially duplicates this logic.\n" [^uintptr obj ^uintptr base ^uintptr off ^{:tag (* mspan)} span ^{:tag (* gcWork)} gcw ^uintptr objIndex]
+  ;; obj should be start of allocation, and so must be at least pointer-aligned.
+  (when (!= (bit-and obj (- goarch/PtrSize 1)) 0)
+    (throw "greyobject: obj not pointer-aligned"))
+
+  (let [mbits (.markBitsForIndex span objIndex)]
+
+    (if useCheckmark (do
+        (when (setCheckmark obj base off mbits)
+          ;; Already marked.
+          (return))
+
+        (when (> (.-checkfinalizers debug) 1)
+          (print "  mark " (conv hex obj) " found at *(" (conv hex base) "+" (conv hex off) ")\n")))
+
+      (do
+        (when (and (> (.-gccheckmark debug) 0) (.isFree span objIndex))
+          (print "runtime: marking free object " (conv hex obj) " found at *(" (conv hex base) "+" (conv hex off) ")\n")
+          (gcDumpObject "base" base off)
+          (gcDumpObject "obj" obj (bit-not (conv uintptr 0)))
+          (set! (.-traceback (.-m (getg))) 2)
+          (throw "marking free object"))
+
+
+        ;; If marked we have nothing to do.
+        (when (.isMarked mbits)
+          (return))
+
+        (.setMarked mbits)
+
+        ;; Mark span.
+        (let [(values arena pageIdx pageMask) (pageIndexOf (.base span))]
+          (when (== (bit-and (aget (.-pageMarks arena) pageIdx) pageMask) 0)
+            (atomic/Or8 (addr (aget (.-pageMarks arena) pageIdx)) pageMask)))))
+
+
+
+    ;; If this is a noscan object, fast-track it to black
+    ;; instead of greying it.
+    (when (.noscan (.-spanclass span))
+      (set! (.-bytesMarked gcw) + (conv uint64 (.-elemsize span)))
+      (return))
+
+
+    ;; We're adding obj to P's local workbuf, so it's likely
+    ;; this object will be processed soon by the same P.
+    ;; Even if the workbuf gets flushed, there will likely still be
+    ;; some benefit on platforms with inclusive shared caches.
+    (sys/Prefetch obj)
+    ;; Queue the obj for scanning.
+    (when (not (.putObjFast gcw obj))
+      (.putObj gcw obj))))
+
+
+
+
+
+^{:go/end 1753} (go/func gcDumpObject "gcDumpObject dumps the contents of obj for debugging and marks the\nfield at byte offset off in obj.\n" [^string label ^uintptr obj ^uintptr off]
+  (let [s (spanOf obj)]
+    (print label "=" (conv hex obj))
+    (when (== s nil)
+      (print " s=nil\n")
+      (return))
+
+    (print " s.base()=" (conv hex (.base s)) " s.limit=" (conv hex (.-limit s)) " s.spanclass=" (.-spanclass s) " s.elemsize=" (.-elemsize s) " s.state=")
+    (if [state (.get (.-state s))] (and (<= 0 state) (< (conv int state) (len mSpanStateNames)))
+      (print (aget mSpanStateNames state) "\n")
+
+      (print "unknown(" state ")\n"))
+
+
+    (let [skipped false
+        ^{:line 1725} size (.-elemsize s)]
+      (when (and (== (.get (.-state s)) mSpanManual) (== size 0))
+        ;; We're printing something from a stack frame. We
+        ;; don't know how big it is, so just show up to an
+        ;; including off.
+        (set! size (+ off goarch/PtrSize)))
+
+      (for [i (conv uintptr 0)] (< i size) (set! i + goarch/PtrSize)
+        ;; For big objects, just print the beginning (because
+        ;; that usually hints at the object's type) and the
+        ;; fields around off.
+        (when (not (or (< i (* 128 goarch/PtrSize)) (and (< (- off (* 16 goarch/PtrSize)) i) (< i (+ off (* 16 goarch/PtrSize))))))
+          (set! skipped true)
+          (continue))
+
+        (when skipped
+          (print " ...\n")
+          (set! skipped false))
+
+        (print " *(" label "+" i ") = " (conv hex @(conv (* uintptr) (conv unsafe/Pointer (+ obj i)))))
+        (when (== i off)
+          (print " <=="))
+
+        (print "\n"))
+
+      (when skipped
+        (print " ...\n")))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1787} (go/func ^:go/nosplit ^:go/nowritebarrier gcmarknewobject "gcmarknewobject marks a newly allocated object black. obj must\nnot contain any non-nil pointers.\n\nThis is nosplit so it can manipulate a gcWork without preemption.\n" [^{:tag (* mspan)} span ^uintptr obj]
+  (when useCheckmark ; The world should be stopped so this should not happen.
+    (throw "gcmarknewobject called while doing checkmark"))
+
+  (when (== gcphase _GCmarktermination)
+    ;; Check this here instead of on the hot path.
+    (throw "mallocgc called with gcphase == _GCmarktermination"))
+
+
+  ;; Mark object.
+  (let [objIndex (.objIndex span obj)]
+    (.setMarked (.markBitsForIndex span objIndex))
+    (when (and goexperiment/GreenTeaGC (gcUsesSpanInlineMarkBits (.-elemsize span)))
+      ;; No need to scan the new object.
+      (.setMarked (.scannedBitsForIndex span objIndex)))
+
+
+    ;; Mark span.
+    (let [(values arena pageIdx pageMask) (pageIndexOf (.base span))]
+      (when (== (bit-and (aget (.-pageMarks arena) pageIdx) pageMask) 0)
+        (atomic/Or8 (addr (aget (.-pageMarks arena) pageIdx)) pageMask))
+
+
+      (let [gcw (addr (.-gcw (.ptr (.-p (.-m (getg))))))]
+        (set! (.-bytesMarked gcw) + (conv uint64 (.-elemsize span)))))))
+
+
+
+
+
+^{:go/end 1806} (go/func gcMarkTinyAllocs "gcMarkTinyAllocs greys all active tiny alloc blocks.\n\nThe world must be stopped.\n" []
+  (assertWorldStopped)
+
+  (range [_ p allp]
+    (let [c (.-mcache p)]
+      (when (or (== c nil) (== (.-tiny c) 0))
+        (continue))
+
+      (let [gcw (addr (.-gcw p))]
+        (when (not (tryDeferToSpanScan (.-tiny c) gcw))
+          (let [(values _ span objIndex) (findObject (.-tiny c) 0 0)]
+            (greyobject (.-tiny c) 0 0 span gcw objIndex)))))))

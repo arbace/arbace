@@ -1,0 +1,780 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.mldsa) (go/file "field.go" :imports [
+
+
+    ^{:line 8} [constanttime "crypto/internal/constanttime"]
+    ^{:line 9} [sha3 "crypto/internal/fips140/sha3"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [bits "math/bits"]])
+
+
+(go/const
+  ^{:line 15} [^{:val 8380417} q 8380417] ; 2²³ - 2¹³ + 1
+  ^{:line 16} [^{:val 4294967296} R 4294967296] ; 2³²
+  ^{:line 17} [^{:val 2365951} RR 2365951] ; R² mod q, aka R in the Montgomery domain
+  ^{:line 18} [^{:val 4236238847} qNegInv 4236238847] ; -q⁻¹ mod R (q * qNegInv ≡ -1 mod R)
+  ^{:line 19} [^{:val 4193792} one 4193792] ; R mod q, aka 1 in the Montgomery domain
+  ^{:line 20} [^{:val 4186625} minusOne 4186625]) ; (q - 1) * R mod q, aka -1 in the Montgomery domain
+
+
+
+
+(go/type fieldElement "fieldElement is an element n of ℤ_q in the Montgomery domain, represented as\nan integer x in [0, q) such that x ≡ n * R (mod q) where R = 2³².\n" uint32)
+
+(go/var errUnreducedFieldElement (errors/New "mldsa: unreduced field element"))
+
+
+
+^{:go/end 37} (go/func fieldToMontgomery "fieldToMontgomery checks that a value a is < q, and converts it to\nMontgomery form.\n" [^uint32 a] :results [fieldElement error]
+  (when (>= a q)
+    (return 0 errUnreducedFieldElement))
+
+  ;; a * R² * R⁻¹ ≡ a * R (mod q)
+  (return (fieldMontgomeryMul (conv fieldElement a) RR) nil))
+
+
+
+
+^{:go/end 44} (go/func fieldSubToMontgomery "fieldSubToMontgomery converts a difference a - b to Montgomery form.\na and b must be < q. (This bound can probably be relaxed.)\n" ^fieldElement [^uint32 a ^uint32 b]
+  (let [x (+ (- a b) q)]
+    (fieldMontgomeryMul (conv fieldElement x) RR)))
+
+
+
+
+^{:go/end 51} (go/func fieldFromMontgomery "fieldFromMontgomery converts a value a in Montgomery form back to\nstandard representation.\n" ^uint32 [^fieldElement a]
+  ;; (a * R) * 1 * R⁻¹ ≡ a (mod q)
+  (conv uint32 (fieldMontgomeryReduce (conv uint64 a))))
+
+
+
+
+^{:go/end 59} (go/func fieldCenteredMod "fieldCenteredMod returns r mod± q, the value r reduced to the range\n[−(q−1)/2, (q−1)/2].\n" ^int32 [^fieldElement r]
+  (let [x (conv int32 (fieldFromMontgomery r))]
+    ;; x <= q / 2 ? x : x - q
+    (constantTimeSelectLessOrEqual x (/ q 2) x (- x q))))
+
+
+
+
+^{:go/end 68} (go/func fieldInfinityNorm "fieldInfinityNorm returns the infinity norm ||r||∞ of r, or the absolute\nvalue of r centered around 0.\n" ^uint32 [^fieldElement r]
+  (let [x (conv int32 (fieldFromMontgomery r))]
+    ;; x <= q / 2 ? x : |x - q|
+    ;; |x - q| = -(x - q) = q - x because x < q => x - q < 0
+    (conv uint32 (constantTimeSelectLessOrEqual x (/ q 2) x (- q x)))))
+
+
+
+^{:go/end 74} (go/func fieldReduceOnce "fieldReduceOnce reduces a value a < 2q.\n" ^fieldElement [^uint32 a]
+  (let [(values x b) (bits/Sub64 (conv uint64 a) (conv uint64 q) 0)]
+    (conv fieldElement (+ x (* b q)))))
+
+
+
+^{:go/end 80} (go/func fieldAdd "fieldAdd returns a + b mod q.\n" ^fieldElement [^fieldElement a ^fieldElement b]
+  (let [x (conv uint32 (+ a b))]
+    (fieldReduceOnce x)))
+
+
+
+^{:go/end 86} (go/func fieldSub "fieldSub returns a - b mod q.\n" ^fieldElement [^fieldElement a ^fieldElement b]
+  (let [x (conv uint32 (+ (- a b) q))]
+    (fieldReduceOnce x)))
+
+
+
+^{:go/end 92} (go/func fieldMontgomeryMul "fieldMontgomeryMul returns a * b * R⁻¹ mod q.\n" ^fieldElement [^fieldElement a ^fieldElement b]
+  (let [x (* (conv uint64 a) (conv uint64 b))]
+    (fieldMontgomeryReduce x)))
+
+
+
+^{:go/end 99} (go/func fieldMontgomeryReduce "fieldMontgomeryReduce returns x * R⁻¹ mod q for x < q * R.\n" ^fieldElement [^uint64 x]
+  (let [t (* (conv uint32 x) qNegInv)
+      ^{:line 97} u (>> (+ x (* (conv uint64 t) q)) 32)]
+    (fieldReduceOnce (conv uint32 u))))
+
+
+
+
+^{:go/end 106} (go/func fieldMontgomeryMulSub "fieldMontgomeryMulSub returns a * (b - c). This operation is fused to save a\nfieldReduceOnce after the subtraction.\n" ^fieldElement [^fieldElement a ^fieldElement b ^fieldElement c]
+  (let [x (* (conv uint64 a) (conv uint64 (+ (- b c) q)))]
+    (fieldMontgomeryReduce x)))
+
+
+
+
+^{:go/end 114} (go/func fieldMontgomeryAddMul "fieldMontgomeryAddMul returns a * b + c * d. This operation is fused to save\na fieldReduceOnce and a fieldReduce.\n" ^fieldElement [^fieldElement a ^fieldElement b ^fieldElement c ^fieldElement d]
+  (let [x (* (conv uint64 a) (conv uint64 b))]
+    (set! x + (* (conv uint64 c) (conv uint64 d)))
+    (fieldMontgomeryReduce x)))
+
+
+(go/const ^{:val 256} n 256)
+
+
+(go/type ringElement "ringElement is a polynomial, an element of R_q.\n" (array n fieldElement))
+
+
+^{:go/end 127} (go/func polyAdd "polyAdd adds two ringElements or nttElements.\n" :type-params [^{:tag (tilde (array n fieldElement))} T] [^T a ^:go/grouped ^T b] :results [^T s]
+  (range [i s]
+    (aset s i (fieldAdd (aget a i) (aget b i))))
+
+  ^{:line 126} s)
+
+
+
+^{:go/end 135} (go/func polySub "polySub subtracts two ringElements or nttElements.\n" :type-params [^{:tag (tilde (array n fieldElement))} T] [^T a ^:go/grouped ^T b] :results [^T s]
+  (range [i s]
+    (aset s i (fieldSub (aget a i) (aget b i))))
+
+  ^{:line 134} s)
+
+
+
+(go/type nttElement "nttElement is an NTT representation, an element of T_q.\n" (array n fieldElement))
+
+
+
+(go/var ^{:doc "zetas are the values ζ^BitRev₈(k) mod q for each index k, converted to the\nMontgomery domain.\n"} zetas (lit (array 256 fieldElement) 4193792 25847 5771523 7861508 237124 7602457 7504169 466468 1826347 2353451 8021166 6288512 3119733 5495562 3111497 2680103 2725464 1024112 7300517 3585928 7830929 7260833 2619752 6271868 6262231 4520680 6980856 5102745 1757237 8360995 4010497 280005 2706023 95776 3077325 3530437 6718724 4788269 5842901 3915439 4519302 5336701 3574422 5512770 3539968 8079950 2348700 7841118 6681150 6736599 3505694 4558682 3507263 6239768 6779997 3699596 811944 531354 954230 3881043 3900724 5823537 2071892 5582638 4450022 6851714 4702672 5339162 6927966 3475950 2176455 6795196 7122806 1939314 4296819 7380215 5190273 5223087 4747489 126922 3412210 7396998 2147896 2715295 5412772 4686924 7969390 5903370 7709315 7151892 8357436 7072248 7998430 1349076 1852771 6949987 5037034 264944 508951 3097992 44288 7280319 904516 3958618 4656075 8371839 1653064 5130689 2389356 8169440 759969 7063561 189548 4827145 3159746 6529015 5971092 8202977 1315589 1341330 1285669 6795489 7567685 6940675 5361315 4499357 4751448 3839961 2091667 3407706 2316500 3817976 5037939 2244091 5933984 4817955 266997 2434439 7144689 3513181 4860065 4621053 7183191 5187039 900702 1859098 909542 819034 495491 6767243 8337157 7857917 7725090 5257975 2031748 3207046 4823422 7855319 7611795 4784579 342297 286988 5942594 4108315 3437287 5038140 1735879 203044 2842341 2691481 5790267 1265009 4055324 1247620 2486353 1595974 4613401 1250494 2635921 4832145 5386378 1869119 1903435 7329447 7047359 1237275 5062207 6950192 7929317 1312455 3306115 6417775 7100756 1917081 5834105 7005614 1500165 777191 2235880 3406031 7838005 5548557 6709241 6533464 5796124 4656147 594136 4603424 6366809 2432395 2454455 8215696 1957272 3369112 185531 7173032 5196991 162844 1616392 3014001 810149 1652634 4686184 6581310 5341501 3523897 3866901 269760 2213111 7404533 1717735 472078 7953734 1723600 6577327 1910376 6712985 7276084 8119771 4546524 5441381 6144432 7959518 6094090 183443 7403526 1612842 4834730 7826001 3919660 8332111 7018208 3937738 1400424 7534263 1976782))
+
+
+
+
+^{:go/end 213} (go/func ntt "ntt maps a ringElement to its nttElement representation.\n\nIt implements NTT, according to FIPS 203, Algorithm 9.\n" ^nttElement [^ringElement f]
+  (let [^uint8 m (zero uint8)]
+
+    (for [len 128] (>= len 8) (set! len / 2)
+      (for [start 0] (< start 256) (set! start + (* 2 len))
+        (inc! m)
+        (let [zeta (aget zetas m)
+
+            ;; Bounds check elimination hint.
+            (values f flen) (values (subslice f start (+ start len)) (subslice f (+ start len) (+ start len len)))]
+          (for [j 0] (< j len) (set! j + 2)
+            (let [t (fieldMontgomeryMul zeta (aget flen j))]
+              (aset flen j (fieldSub (aget f j) t))
+              (aset f j (fieldAdd (aget f j) t))
+
+              ;; Unroll by 2 for performance.
+              (set! t (fieldMontgomeryMul zeta (aget flen (+ j 1))))
+              (aset flen (+ j 1) (fieldSub (aget f (+ j 1)) t))
+              (aset f (+ j 1) (fieldAdd (aget f (+ j 1)) t)))))))
+
+
+
+
+    ;; Unroll len = 4, 2, and 1.
+    (for [start 0] (< start 256) (set! start + 8)
+      (inc! m)
+      (let [zeta (aget zetas m)
+
+          ^{:line 175} t (fieldMontgomeryMul zeta (aget f (+ start 4)))]
+        (aset f (+ start 4) (fieldSub (aget f start) t))
+        (aset f start (fieldAdd (aget f start) t))
+
+        (set! t (fieldMontgomeryMul zeta (aget f (+ start 5))))
+        (aset f (+ start 5) (fieldSub (aget f (+ start 1)) t))
+        (aset f (+ start 1) (fieldAdd (aget f (+ start 1)) t))
+
+        (set! t (fieldMontgomeryMul zeta (aget f (+ start 6))))
+        (aset f (+ start 6) (fieldSub (aget f (+ start 2)) t))
+        (aset f (+ start 2) (fieldAdd (aget f (+ start 2)) t))
+
+        (set! t (fieldMontgomeryMul zeta (aget f (+ start 7))))
+        (aset f (+ start 7) (fieldSub (aget f (+ start 3)) t))
+        (aset f (+ start 3) (fieldAdd (aget f (+ start 3)) t))))
+
+    (for [start 0] (< start 256) (set! start + 4)
+      (inc! m)
+      (let [zeta (aget zetas m)
+
+          ^{:line 195} t (fieldMontgomeryMul zeta (aget f (+ start 2)))]
+        (aset f (+ start 2) (fieldSub (aget f start) t))
+        (aset f start (fieldAdd (aget f start) t))
+
+        (set! t (fieldMontgomeryMul zeta (aget f (+ start 3))))
+        (aset f (+ start 3) (fieldSub (aget f (+ start 1)) t))
+        (aset f (+ start 1) (fieldAdd (aget f (+ start 1)) t))))
+
+    (for [start 0] (< start 256) (set! start + 2)
+      (inc! m)
+      (let [zeta (aget zetas m)
+
+          ^{:line 207} t (fieldMontgomeryMul zeta (aget f (+ start 1)))]
+        (aset f (+ start 1) (fieldSub (aget f start) t))
+        (aset f start (fieldAdd (aget f start) t))))
+
+
+    (conv nttElement f)))
+
+
+
+
+
+^{:go/end 288} (go/func inverseNTT "inverseNTT maps a nttElement back to the ringElement it represents.\n\nIt implements NTT⁻¹, according to FIPS 203, Algorithm 10.\n" ^ringElement [^nttElement f]
+  (let [^uint8 m 255]
+
+    ;; Unroll len = 1, 2, and 4.
+    (for [start 0] (< start 256) (set! start + 2)
+      (let [zeta (aget zetas m)]
+        (dec! m)
+
+        (let [t (aget f start)]
+          (aset f start (fieldAdd t (aget f (+ start 1))))
+          (aset f (+ start 1) (fieldMontgomeryMulSub zeta (aget f (+ start 1)) t)))))
+
+    (for [start 0] (< start 256) (set! start + 4)
+      (let [zeta (aget zetas m)]
+        (dec! m)
+
+        (let [t (aget f start)]
+          (aset f start (fieldAdd t (aget f (+ start 2))))
+          (aset f (+ start 2) (fieldMontgomeryMulSub zeta (aget f (+ start 2)) t))
+
+          (set! t (aget f (+ start 1)))
+          (aset f (+ start 1) (fieldAdd t (aget f (+ start 3))))
+          (aset f (+ start 3) (fieldMontgomeryMulSub zeta (aget f (+ start 3)) t)))))
+
+    (for [start 0] (< start 256) (set! start + 8)
+      (let [zeta (aget zetas m)]
+        (dec! m)
+
+        (let [t (aget f start)]
+          (aset f start (fieldAdd t (aget f (+ start 4))))
+          (aset f (+ start 4) (fieldMontgomeryMulSub zeta (aget f (+ start 4)) t))
+
+          (set! t (aget f (+ start 1)))
+          (aset f (+ start 1) (fieldAdd t (aget f (+ start 5))))
+          (aset f (+ start 5) (fieldMontgomeryMulSub zeta (aget f (+ start 5)) t))
+
+          (set! t (aget f (+ start 2)))
+          (aset f (+ start 2) (fieldAdd t (aget f (+ start 6))))
+          (aset f (+ start 6) (fieldMontgomeryMulSub zeta (aget f (+ start 6)) t))
+
+          (set! t (aget f (+ start 3)))
+          (aset f (+ start 3) (fieldAdd t (aget f (+ start 7))))
+          (aset f (+ start 7) (fieldMontgomeryMulSub zeta (aget f (+ start 7)) t)))))
+
+
+    (for [len 8] (< len 256) (set! len * 2)
+      (for [start 0] (< start 256) (set! start + (* 2 len))
+        (let [zeta (aget zetas m)]
+          (dec! m)
+
+          ;; Bounds check elimination hint.
+          (let [(values f flen) (values (subslice f start (+ start len)) (subslice f (+ start len) (+ start len len)))]
+            (for [j 0] (< j len) (set! j + 2)
+              (let [t (aget f j)]
+                (aset f j (fieldAdd t (aget flen j)))
+                ;; -z * (t - flen[j]) = z * (flen[j] - t)
+                (aset flen j (fieldMontgomeryMulSub zeta (aget flen j) t))
+
+                ;; Unroll by 2 for performance.
+                (set! t (aget f (+ j 1)))
+                (aset f (+ j 1) (fieldAdd t (aget flen (+ j 1))))
+                (aset flen (+ j 1) (fieldMontgomeryMulSub zeta (aget flen (+ j 1)) t))))))))
+
+
+
+
+    (range [i f]
+      (aset f i (fieldMontgomeryMul (aget f i) 16382))) ; 16382 = 256⁻¹ * R mod q
+
+    (conv ringElement f)))
+
+
+
+^{:go/end 296} (go/func nttMul "nttMul multiplies two nttElements.\n" [^nttElement a ^nttElement b] :results [^nttElement p]
+  (range [i p]
+    (aset p i (fieldMontgomeryMul (aget a i) (aget b i))))
+
+  ^{:line 295} p)
+
+
+
+
+
+^{:go/end 325} (go/func sampleNTT "sampleNTT samples an nttElement uniformly at random from the seed rho and the\nindices s and r. It implements Step 3 of ExpandA, RejNTTPoly, and\nCoeffFromThreeBytes from FIPS 204, passing in ρ, s, and r instead of ρ'.\n" ^nttElement [^{:tag (slice byte)} rho ^byte s ^byte r]
+  (let [G (sha3/NewShake128)]
+    (.Write G rho)
+    (.Write G (lit (slice byte) s r))
+
+    (let [^nttElement a (zero nttElement)
+        ^{:line 307 :tag int} j (zero int) ; index into a
+        ^{:line 308 :tag (array 168 byte)} buf (zero (array 168 byte)) ; buffered reads from B, matching the rate of SHAKE-128
+        ^{:line 309} off (len buf)] ; index into buf, starts in a "buffer fully consumed" state
+      (while (< j n)
+        (when (>= off (len buf))
+          (.Read G (subslice buf))
+          (set! off 0))
+
+        (let [v (bit-or (conv uint32 (aget buf off)) (<< (conv uint32 (aget buf (+ off 1))) 8) (<< (conv uint32 (aget buf (+ off 2))) 16))]
+          (set! off + 3)
+          (let [(values f err) (fieldToMontgomery (bit-and v 2r011111111111111111111111))] ; 23 bits
+            (when (!= err nil)
+              (continue))
+
+            (aset a j f)
+            (inc! j))))
+
+      ^{:line 324} a)))
+
+
+
+
+
+^{:go/end 365} (go/func sampleBoundedPoly "sampleBoundedPoly samples a ringElement with coefficients in [−η, η] from the\nseed rho and the index r. It implements RejBoundedPoly and CoeffFromHalfByte\nfrom FIPS 204, passing in ρ and r separately from ExpandS.\n" ^ringElement [^{:tag (slice byte)} rho ^byte r ^parameters p]
+  (let [H (sha3/NewShake256)]
+    (.Write H rho)
+    (.Write H (lit (slice byte) r 0)) ; IntegerToBytes(r, 2)
+
+    (let [^ringElement a (zero ringElement)
+        ^{:line 336 :tag int} j (zero int)
+        ^{:line 337 :tag (array 136 byte)} buf (zero (array 136 byte)) ; buffered reads from H, matching the rate of SHAKE-256
+        ^{:line 338} off (len buf)] ; index into buf, starts in a "buffer fully consumed" state
+      (while true
+        (when (>= off (len buf))
+          (.Read H (subslice buf))
+          (set! off 0))
+
+        (let [z0 (bit-and (aget buf off) 0x0F)
+            ^{:line 345} z1 (>> (aget buf off) 4)]
+          (inc! off)
+          (let [(values coeff ok) (coeffFromHalfByte z0 p)]
+            (when ok
+              (aset a j coeff)
+              (inc! j))
+
+            (when (>= j (len a))
+              (break))
+
+            (set! (values coeff ok) (coeffFromHalfByte z1 p))
+            (when ok
+              (aset a j coeff)
+              (inc! j))
+
+            (when (>= j (len a))
+              (break)))))
+
+
+      ^{:line 364} a)))
+
+
+
+
+^{:go/end 395} (go/func sampleInBall "sampleInBall samples a ringElement with coefficients in {−1, 0, 1}, and τ\nnon-zero coefficients. It is not constant-time.\n" ^ringElement [^{:tag (slice byte)} rho ^parameters p]
+  (let [H (sha3/NewShake256)]
+    (.Write H rho)
+    (let [s (make (slice byte) 8)]
+      (.Read H s)
+
+      (let [^ringElement c (zero ringElement)]
+        (for [i (- 256 (.-τ p))] (< i 256) (inc! i)
+          (let [j (make (slice byte) 1)]
+            (.Read H j)
+            (while (> (aget j 0) (conv byte i))
+              (.Read H j))
+
+            (aset c i (aget c (aget j 0)))
+            ;; c[j] = (−1) ^ h[i+τ−256], where h are the bits in s in little-endian.
+            ;; That is, -1⁰ = 1 if the bit is 0, -1¹ = -1 if it is 1.
+            (let [bitIdx (- (+ i (.-τ p)) 256)
+                ^{:line 386} bit (bit-and (>> (aget s (/ bitIdx 8)) (% bitIdx 8)) 1)]
+              (if (== bit 0)
+                (aset c (aget j 0) one)
+
+                (aset c (aget j 0) minusOne)))))
+
+
+
+        ^{:line 394} c))))
+
+
+
+
+
+^{:go/end 444} (go/func coeffFromHalfByte "coeffFromHalfByte implements CoeffFromHalfByte from FIPS 204.\n\nIt maps a value in [0, 15] to a coefficient in [−η, η]\n" [^byte b ^parameters p] :results [fieldElement bool]
+  (when (> b 15)
+    (panic "internal error: half-byte out of range"))
+
+  (switch (.-η p)
+    (case [2]
+      ;; Return z = 2 − (b mod 5), which maps from
+      ;;
+      ;;     b = ( 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,  0 )
+      ;;
+      ;; to
+      ;;
+      ;;   b%5 = (  4,  3,  2,  1,  0,  4,  3,  2,  1,  0,  4,  3,  2,  1,  0 )
+      ;;
+      ;; to
+      ;;
+      ;;     z = ( -2, -1,  0,  1,  2, -2, -1,  0,  1,  2, -2, -1,  0,  1,  2 )
+      ;;
+      (when (> b 14)
+        (return 0 false))
+
+      ;; Calculate b % 5 with Barrett reduction, to avoid a potentially
+      ;; variable-time division.
+      (let [^:const ^{:val 13108} barrettMultiplier 0x3334 ; ⌈2¹⁶ / 5⌉
+          ^:const ^{:line 424 :val 16} barrettShift 16 ; log₂(2¹⁶)
+          ^{:line 425} quotient (>> (* (conv uint32 b) barrettMultiplier) barrettShift)
+          ^{:line 426} remainder (- (conv uint32 b) (* quotient 5))]
+        (return (fieldSubToMontgomery 2 remainder) true)))
+    (case [4]
+      ;; Return z = 4 − b, which maps from
+      ;;
+      ;;   b = (  8,  7,  6,  5,  4,  3,  2,  1,  0 )
+      ;;
+      ;; to
+      ;;
+      ;;   z = ( −4, -3, -2, -1,  0,  1,  2,  3,  4 )
+      ;;
+      (when (> b 8)
+        (return 0 false))
+
+      (return (fieldSubToMontgomery 4 (conv uint32 b)) true))
+    (default
+      (panic "internal error: unsupported η"))))
+
+
+
+
+
+
+
+^{:go/end 460} (go/func power2Round "power2Round implements Power2Round from FIPS 204.\n\nIt separates the bottom d = 13 bits of each 23-bit coefficient, rounding the\nhigh part based on the low part, and correcting the low part accordingly.\n" [^fieldElement r] :results [^uint16 hi ^fieldElement lo]
+  (let [rr (fieldFromMontgomery r)
+      ;; Add 2¹² - 1 to round up r1 by one if r0 > 2¹².
+      ;; r is at most 2²³ - 2¹³ + 1, so rr + (2¹² - 1) won't overflow 23 bits.
+      ^{:line 454} r1 (- (+ rr (<< 1 12)) 1)]
+    (set! r1 >> 13)
+    ;; r1 <= 2¹⁰ - 1
+    ;; r1 * 2¹³ <= (2¹⁰ - 1) * 2¹³ = 2²³ - 2¹³ < q
+    (let [r0 (fieldSubToMontgomery rr (<< r1 13))]
+      (return (conv uint16 r1) r0))))
+
+
+
+^{:go/end 478} (go/func highBits "highBits implements HighBits from FIPS 204.\n" ^{:tag (array n byte)} [^ringElement r ^parameters p]
+  (let [^{:tag (array n byte)} w (zero (array n byte))]
+    (switch (.-γ2 p)
+      (case [32]
+        (range [i n]
+          (aset w i (highBits32 (fieldFromMontgomery (aget r i))))))
+
+      (case [88]
+        (range [i n]
+          (aset w i (highBits88 (fieldFromMontgomery (aget r i))))))
+
+      (default
+        (panic "mldsa: internal error: unsupported γ2")))
+
+    ^{:line 477} w))
+
+
+
+
+
+^{:go/end 498} (go/func useHint "useHint implements UseHint from FIPS 204.\n\nIt is not constant-time.\n" ^{:tag (array n byte)} [^ringElement r ^{:tag (array n byte)} h ^parameters p]
+  (let [^{:tag (array n byte)} w (zero (array n byte))]
+    (switch (.-γ2 p)
+      (case [32]
+        (range [i n]
+          (aset w i (useHint32 (aget r i) (aget h i)))))
+
+      (case [88]
+        (range [i n]
+          (aset w i (useHint88 (aget r i) (aget h i)))))
+
+      (default
+        (panic "mldsa: internal error: unsupported γ2")))
+
+    ^{:line 497} w))
+
+
+
+^{:go/end 517} (go/func makeHint "makeHint implements MakeHint from FIPS 204.\n" [^ringElement ct0 ^ringElement w ^ringElement cs2 ^parameters p] :results [^{:tag (array n byte)} h ^int count1s]
+  (switch (.-γ2 p)
+    (case [32]
+      (range [i n]
+        (aset h i (makeHint32 (aget ct0 i) (aget w i) (aget cs2 i)))
+        (set! count1s + (conv int (aget h i)))))
+
+    (case [88]
+      (range [i n]
+        (aset h i (makeHint88 (aget ct0 i) (aget w i) (aget cs2 i)))
+        (set! count1s + (conv int (aget h i)))))
+
+    (default
+      (panic "mldsa: internal error: unsupported γ2")))
+
+  (return h count1s))
+
+
+
+^{:go/end 529} (go/func highBits32 "highBits32 implements HighBits from FIPS 204 for γ2 = (q - 1) / 32.\n" ^byte [^uint32 x]
+  ;; The implementation is based on the reference implementation and on
+  ;; BoringSSL. There are exhaustive tests in TestDecompose that compare it to
+  ;; a straightforward implementation of Decompose from the spec, so for our
+  ;; purposes it only has to work and be constant-time.
+  (let [r1 (>> (+ x 127) 7)]
+    (set! r1 (>> (+ (* r1 1025) (<< 1 21)) 22))
+    (set! r1 bit-and 2r1111)
+    (conv byte r1)))
+
+
+
+
+
+^{:go/end 543} (go/func decompose32 "decompose32 implements Decompose from FIPS 204 for γ2 = (q - 1) / 32.\n\nr1 is in [0, 15].\n" [^fieldElement r] :results [^byte r1 ^int32 r0]
+  (let [x (fieldFromMontgomery r)]
+    (set! r1 (highBits32 x))
+
+    ;; r - r1 * (2 * γ2) mod± q
+    (set! r0 (- (conv int32 x) (/ (* (conv int32 r1) 2 (- q 1)) 32)))
+    (set! r0 (constantTimeSelectLessOrEqual (+ (/ q 2) 1) r0 (- r0 q) r0))
+
+    (return r1 r0)))
+
+
+
+^{:go/end 559} (go/func useHint32 "useHint32 implements UseHint from FIPS 204 for γ2 = (q - 1) / 32.\n" ^byte [^fieldElement r ^byte hint]
+  (let [^:const ^{:val 16} m 16 ; (q − 1) / (2 * γ2)
+      (values r1 r0) (decompose32 r)]
+    (when (== hint 1)
+      (if (> r0 0)
+        (set! r1 (% (+ r1 1) m))
+
+        ;; Underflow is safe, because it operates modulo 256 (since the type
+        ;; is byte), which is a multiple of m.
+        (set! r1 (% (- r1 1) m))))
+
+
+    ^{:line 558} r1))
+
+
+
+^{:go/end 570} (go/func makeHint32 "makeHint32 implements MakeHint from FIPS 204 for γ2 = (q - 1) / 32.\n" ^byte [^fieldElement ct0 ^fieldElement w ^fieldElement cs2]
+  ;; v1 = HighBits(r + z) = HighBits(w - cs2 + ct0 - ct0) = HighBits(w - cs2)
+  (let [rPlusZ (fieldSub w cs2)
+      ^{:line 565} v1 (highBits32 (fieldFromMontgomery rPlusZ))
+      ;; r1 = HighBits(r) = HighBits(w - cs2 + ct0)
+      ^{:line 567} r1 (highBits32 (fieldFromMontgomery (fieldAdd rPlusZ ct0)))]
+
+    (conv byte (bit-xor (constanttime/ByteEq v1 r1) 1))))
+
+
+
+^{:go/end 579} (go/func highBits88 "highBits88 implements HighBits from FIPS 204 for γ2 = (q - 1) / 88.\n" ^byte [^uint32 x]
+  ;; Like highBits32, this is exhaustively tested in TestDecompose.
+  (let [r1 (>> (+ x 127) 7)]
+    (set! r1 (>> (+ (* r1 11275) (<< 1 23)) 24))
+    (set! r1 (constantTimeSelectEqual r1 44 0 r1))
+    (conv byte r1)))
+
+
+
+
+
+^{:go/end 593} (go/func decompose88 "decompose88 implements Decompose from FIPS 204 for γ2 = (q - 1) / 88.\n\nr1 is in [0, 43].\n" [^fieldElement r] :results [^byte r1 ^int32 r0]
+  (let [x (fieldFromMontgomery r)]
+    (set! r1 (highBits88 x))
+
+    ;; r - r1 * (2 * γ2) mod± q
+    (set! r0 (- (conv int32 x) (/ (* (conv int32 r1) 2 (- q 1)) 88)))
+    (set! r0 (constantTimeSelectLessOrEqual (+ (/ q 2) 1) r0 (- r0 q) r0))
+
+    (return r1 r0)))
+
+
+
+^{:go/end 617} (go/func useHint88 "useHint88 implements UseHint from FIPS 204 for γ2 = (q - 1) / 88.\n" ^byte [^fieldElement r ^byte hint]
+  (let [^:const ^{:val 44} m 44 ; (q − 1) / (2 * γ2)
+      (values r1 r0) (decompose88 r)]
+    (when (== hint 1)
+      (if (> r0 0)
+        ;; (r1 + 1) mod m, for r1 in [0, m-1]
+        (if (== r1 (- m 1))
+          (set! r1 0)
+
+          (inc! r1))
+
+        (do
+          ;; (r1 - 1) % m, for r1 in [0, m-1]
+          (if (== r1 0)
+            (set! r1 (- m 1))
+
+            (dec! r1)))))
+
+
+
+    ^{:line 616} r1))
+
+
+
+^{:go/end 626} (go/func makeHint88 "makeHint88 implements MakeHint from FIPS 204 for γ2 = (q - 1) / 88.\n" ^byte [^fieldElement ct0 ^fieldElement w ^fieldElement cs2]
+  ;; Same as makeHint32 above.
+  (let [rPlusZ (fieldSub w cs2)
+      ^{:line 623} v1 (highBits88 (fieldFromMontgomery rPlusZ))
+      ^{:line 624} r1 (highBits88 (fieldFromMontgomery (fieldAdd rPlusZ ct0)))]
+    (conv byte (bit-xor (constanttime/ByteEq v1 r1) 1))))
+
+
+
+
+
+
+
+^{:go/end 642} (go/func bitPack "bitPack implements BitPack(r mod± q, γ₁-1, γ₁), which packs the centered\ncoefficients of r into little-endian γ1+1-bit chunks. It appends to buf.\n\nIt must only be applied to r with coefficients in [−γ₁+1, γ₁], as\nguaranteed by the rejection conditions in Sign.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^ringElement r ^parameters p]
+  (switch (.-γ1 p)
+    (case [17]
+      (return (bitPack18 b r)))
+    (case [19]
+      (return (bitPack20 b r)))
+    (default
+      (panic "mldsa: internal error: unsupported γ1"))))
+
+
+
+
+
+
+
+
+^{:go/end 673} (go/func bitPack18 "bitPack18 implements BitPack(r mod± q, 2¹⁷-1, 2¹⁷), which packs the centered\ncoefficients of r into little-endian 18-bit chunks. It appends to buf.\n\nIt must only be applied to r with coefficients in [−2¹⁷+1, 2¹⁷], as\nguaranteed by the rejection conditions in Sign.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^ringElement r]
+  (let [(values out v) (sliceForAppend buf (/ (* 18 n) 8))
+      ^:const ^{:line 651 :val 131072} b (<< 1 17)]
+    (for [i 0] (< i n) (set! i + 4)
+      ;; b - [−2¹⁷+1, 2¹⁷] = [0, 2²⁸-1]
+      (let [w0 (- b (fieldCenteredMod (aget r i)))]
+        (aset v 0 (conv byte (<< w0 0)))
+        (aset v 1 (conv byte (>> w0 8)))
+        (aset v 2 (conv byte (>> w0 16)))
+        (let [w1 (- b (fieldCenteredMod (aget r (+ i 1))))]
+          (set! (aget v 2) bit-or (conv byte (<< w1 2)))
+          (aset v 3 (conv byte (>> w1 6)))
+          (aset v 4 (conv byte (>> w1 14)))
+          (let [w2 (- b (fieldCenteredMod (aget r (+ i 2))))]
+            (set! (aget v 4) bit-or (conv byte (<< w2 4)))
+            (aset v 5 (conv byte (>> w2 4)))
+            (aset v 6 (conv byte (>> w2 12)))
+            (let [w3 (- b (fieldCenteredMod (aget r (+ i 3))))]
+              (set! (aget v 6) bit-or (conv byte (<< w3 6)))
+              (aset v 7 (conv byte (>> w3 2)))
+              (aset v 8 (conv byte (>> w3 10)))
+              (set! v (subslice v (/ (* 4 18) 8))))))))
+
+    ^{:line 672} out))
+
+
+
+
+
+
+
+^{:go/end 696} (go/func bitPack20 "bitPack20 implements BitPack(r mod± q, 2¹⁹-1, 2¹⁹), which packs the centered\ncoefficients of r into little-endian 20-bit chunks. It appends to buf.\n\nIt must only be applied to r with coefficients in [−2¹⁹+1, 2¹⁹], as\nguaranteed by the rejection conditions in Sign.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^ringElement r]
+  (let [(values out v) (sliceForAppend buf (/ (* 20 n) 8))
+      ^:const ^{:line 682 :val 524288} b (<< 1 19)]
+    (for [i 0] (< i n) (set! i + 2)
+      ;; b - [−2¹⁹+1, 2¹⁹] = [0, 2²⁰-1]
+      (let [w0 (- b (fieldCenteredMod (aget r i)))]
+        (aset v 0 (conv byte (<< w0 0)))
+        (aset v 1 (conv byte (>> w0 8)))
+        (aset v 2 (conv byte (>> w0 16)))
+        (let [w1 (- b (fieldCenteredMod (aget r (+ i 1))))]
+          (set! (aget v 2) bit-or (conv byte (<< w1 4)))
+          (aset v 3 (conv byte (>> w1 4)))
+          (aset v 4 (conv byte (>> w1 12)))
+          (set! v (subslice v (/ (* 2 20) 8))))))
+
+    ^{:line 695} out))
+
+
+
+
+^{:go/end 709} (go/func bitUnpack "bitUnpack implements BitUnpack(v, 2^γ1-1, 2^γ1), which unpacks each γ1+1 bits\nin little-endian into a coefficient in [-2^γ1+1, 2^γ1].\n" ^ringElement [^{:tag (slice byte)} v ^parameters p]
+  (switch (.-γ1 p)
+    (case [17]
+      (return (bitUnpack18 v)))
+    (case [19]
+      (return (bitUnpack20 v)))
+    (default
+      (panic "mldsa: internal error: unsupported γ1"))))
+
+
+
+
+
+^{:go/end 732} (go/func bitUnpack18 "bitUnpack18 implements BitUnpack(v, 2¹⁷-1, 2¹⁷), which unpacks each 18 bits\nin little-endian into a coefficient in [-2¹⁷+1, 2¹⁷].\n" ^ringElement [^{:tag (slice byte)} v]
+  (when (!= (len v) (/ (* 18 n) 8))
+    (panic "mldsa: internal error: invalid bitUnpack18 input length"))
+
+  (let [^:const ^{:val 131072} b (<< 1 17)
+      ^:const ^{:line 718 :val 262143} mask18 (- (<< 1 18) 1)
+      ^{:line 719 :tag ringElement} r (zero ringElement)]
+    (for [i 0] (< i n) (set! i + 4)
+      (let [w0 (bit-or (conv uint32 (aget v 0)) (<< (conv uint32 (aget v 1)) 8) (<< (conv uint32 (aget v 2)) 16))]
+        (aset r (+ i 0) (fieldSubToMontgomery b (bit-and w0 mask18)))
+        (let [w1 (bit-or (>> (conv uint32 (aget v 2)) 2) (<< (conv uint32 (aget v 3)) 6) (<< (conv uint32 (aget v 4)) 14))]
+          (aset r (+ i 1) (fieldSubToMontgomery b (bit-and w1 mask18)))
+          (let [w2 (bit-or (>> (conv uint32 (aget v 4)) 4) (<< (conv uint32 (aget v 5)) 4) (<< (conv uint32 (aget v 6)) 12))]
+            (aset r (+ i 2) (fieldSubToMontgomery b (bit-and w2 mask18)))
+            (let [w3 (bit-or (>> (conv uint32 (aget v 6)) 6) (<< (conv uint32 (aget v 7)) 2) (<< (conv uint32 (aget v 8)) 10))]
+              (aset r (+ i 3) (fieldSubToMontgomery b (bit-and w3 mask18)))
+              (set! v (subslice v (/ (* 4 18) 8))))))))
+
+    ^{:line 731} r))
+
+
+
+
+^{:go/end 751} (go/func bitUnpack20 "bitUnpack20 implements BitUnpack(v, 2¹⁹-1, 2¹⁹), which unpacks each 20 bits\nin little-endian into a coefficient in [-2¹⁹+1, 2¹⁹].\n" ^ringElement [^{:tag (slice byte)} v]
+  (when (!= (len v) (/ (* 20 n) 8))
+    (panic "mldsa: internal error: invalid bitUnpack20 input length"))
+
+  (let [^:const ^{:val 524288} b (<< 1 19)
+      ^:const ^{:line 741 :val 1048575} mask20 (- (<< 1 20) 1)
+      ^{:line 742 :tag ringElement} r (zero ringElement)]
+    (for [i 0] (< i n) (set! i + 2)
+      (let [w0 (bit-or (conv uint32 (aget v 0)) (<< (conv uint32 (aget v 1)) 8) (<< (conv uint32 (aget v 2)) 16))]
+        (aset r (+ i 0) (fieldSubToMontgomery b (bit-and w0 mask20)))
+        (let [w1 (bit-or (>> (conv uint32 (aget v 2)) 4) (<< (conv uint32 (aget v 3)) 4) (<< (conv uint32 (aget v 4)) 12))]
+          (aset r (+ i 1) (fieldSubToMontgomery b (bit-and w1 mask20)))
+          (set! v (subslice v (/ (* 2 20) 8))))))
+
+    ^{:line 750} r))
+
+
+
+
+
+
+^{:go/end 766} (go/func sliceForAppend "sliceForAppend takes a slice and a requested number of bytes. It returns a\nslice with the contents of the given slice followed by that many bytes and a\nsecond slice that aliases into it and contains only the extra bytes. If the\noriginal slice has sufficient capacity then no allocation is performed.\n" [^{:tag (slice byte)} in ^int n] :results [^{:tag (slice byte)} head ^{:tag (slice byte)} tail]
+  (if [total (+ (len in) n)] (>= (cap in) total)
+    (set! head (subslice in _ total))
+    (do
+      (set! head (make (slice byte) total))
+      (copy head in)))
+
+  (set! tail (subslice head (len in)))
+  (return))
+
+
+
+^{:go/end 771} (go/func constantTimeSelectLessOrEqual "constantTimeSelectLessOrEqual returns yes if a <= b, no otherwise, in constant time.\n" ^int32 [^int32 a ^int32 b ^int32 yes ^int32 no]
+  (conv int32 (constanttime/Select (constanttime/LessOrEq (conv int a) (conv int b)) (conv int yes) (conv int no))))
+
+
+
+^{:go/end 776} (go/func constantTimeSelectEqual "constantTimeSelectEqual returns yes if a == b, no otherwise, in constant time.\n" ^uint32 [^uint32 a ^uint32 b ^uint32 yes ^uint32 no]
+  (conv uint32 (constanttime/Select (constanttime/Eq (conv int32 a) (conv int32 b)) (conv int yes) (conv int no))))
+
+
+
+^{:go/end 781} (go/func constantTimeAbs "constantTimeAbs returns the absolute value of x in constant time.\n" ^uint32 [^int32 x]
+  (conv uint32 (constantTimeSelectLessOrEqual 0 x x (- x))))

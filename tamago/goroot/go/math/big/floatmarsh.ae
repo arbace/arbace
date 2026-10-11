@@ -1,0 +1,136 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements encoding/decoding of Floats.
+
+(in-ns 'go.math.big) (go/file "floatmarsh.go" :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [byteorder "internal/byteorder"]])
+
+
+
+(go/const ^{:tag byte :val 1 :doc "Gob codec version. Permits backward-compatible changes to the encoding.\n"} floatGobVersion 1)
+
+
+
+
+^{:go/end 59} (go/method GobEncode "GobEncode implements the [encoding/gob.GobEncoder] interface.\nThe [Float] value and all its attributes (precision,\nrounding mode, accuracy) are marshaled.\n" [^{:tag (* Float)} x] :results [(slice byte) error]
+  (when (== x nil)
+    (return nil nil))
+
+
+  ;; determine max. space (bytes) required for encoding
+  (let [sz (+ 1 1 4) ; version + mode|acc|form|neg (3+2+2+1bit) + prec
+      ^{:line 28} n 0] ; number of mantissa words
+    (when (== (.-form x) finite)
+      ;; add space for mantissa and exponent
+      (set! n (conv int (/ (+ (.-prec x) (- _W 1)) _W))) ; required mantissa length in words for given precision
+      ;; actual mantissa slice could be shorter (trailing 0's) or longer (unused bits):
+      ;; - if shorter, only encode the words present
+      ;; - if longer, cut off unused words when encoding in bytes
+      ;;   (in practice, this should never happen since rounding
+      ;;   takes care of it, but be safe and do it always)
+      (when (< (len (.-mant x)) n)
+        (set! n (len (.-mant x))))
+
+      ;; len(x.mant) >= n
+      (set! sz + (+ 4 (* n _S)))) ; exp + mant
+
+    (let [buf (make (slice byte) sz)]
+
+      (aset buf 0 floatGobVersion)
+      (let [b (bit-or (<< (conv byte (bit-and (.-mode x) 7)) 5) (<< (conv byte (bit-and (+ (.-acc x) 1) 3)) 3) (<< (conv byte (bit-and (.-form x) 3)) 1))]
+        (when (.-neg x)
+          (set! b bit-or 1))
+
+        (aset buf 1 b)
+        (byteorder/BEPutUint32 (subslice buf 2) (.-prec x))
+
+        (when (== (.-form x) finite)
+          (byteorder/BEPutUint32 (subslice buf 6) (conv uint32 (.-exp x)))
+          (.bytes (subslice (.-mant x) (- (len (.-mant x)) n)) (subslice buf 10))) ; cut off unused trailing words
+
+
+        (return buf nil)))))
+
+
+
+
+
+
+^{:go/end 107} (go/method GobDecode "GobDecode implements the [encoding/gob.GobDecoder] interface.\nThe result is rounded per the precision and rounding mode of\nz unless z's precision is 0, in which case z is set exactly\nto the decoded value.\n" ^error [^{:tag (* Float)} z ^{:tag (slice byte)} buf]
+  (when (== (len buf) 0)
+    ;; Other side sent a nil or default value.
+    (set! @z (lit Float))
+    (return nil))
+
+  (when (< (len buf) 6)
+    (return (errors/New "Float.GobDecode: buffer too small")))
+
+
+  (when (!= (aget buf 0) floatGobVersion)
+    (return (fmt/Errorf "Float.GobDecode: encoding version %d not supported" (aget buf 0))))
+
+
+  ^{:go/breaks [[10 106]]} (let [oldPrec (.-prec z)
+      ^{:line 80} oldMode (.-mode z)
+
+      ^{:line 82} b (aget buf 1)]
+    (set! (.-mode z) (conv RoundingMode (bit-and (>> b 5) 7)))
+    (set! (.-acc z) (- (conv Accuracy (bit-and (>> b 3) 3)) 1))
+    (set! (.-form z) (conv form (bit-and (>> b 1) 3)))
+    (set! (.-neg z) (!= (bit-and b 1) 0))
+    (set! (.-prec z) (byteorder/BEUint32 (subslice buf 2)))
+
+    (when (== (.-form z) finite)
+      (when (< (len buf) 10)
+        (return (errors/New "Float.GobDecode: buffer too small for finite form float")))
+
+      (set! (.-exp z) (conv int32 (byteorder/BEUint32 (subslice buf 6))))
+      (set! (.-mant z) (.setBytes (.-mant z) (subslice buf 10))))
+
+
+    (when (!= oldPrec 0)
+      (set! (.-mode z) oldMode)
+      (.SetPrec z (conv uint oldPrec)))
+
+
+    (when [msg (.validate0 z)] (!= msg "")
+      (return (errors/New (+ "Float.GobDecode: " msg))))
+
+
+    nil))
+
+
+
+
+
+^{:go/end 117} (go/method AppendText "AppendText implements the [encoding.TextAppender] interface.\nOnly the [Float] value is marshaled (in full precision), other\nattributes such as precision or accuracy are ignored.\n" [^{:tag (* Float)} x ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (when (== x nil)
+    (return (append b (spread "<nil>")) nil))
+
+  (return (.Append x b \g -1) nil))
+
+
+
+
+
+^{:go/end 124} (go/method MarshalText "MarshalText implements the [encoding.TextMarshaler] interface.\nOnly the [Float] value is marshaled (in full precision), other\nattributes such as precision or accuracy are ignored.\n" [^{:tag (* Float)} x] :results [^{:tag (slice byte)} text ^error err]
+  (.AppendText x nil))
+
+
+
+
+
+
+^{:go/end 137} (go/method UnmarshalText "UnmarshalText implements the [encoding.TextUnmarshaler] interface.\nThe result is rounded per the precision and rounding mode of z.\nIf z's precision is 0, it is changed to 64 before rounding takes\neffect.\n" ^error [^{:tag (* Float)} z ^{:tag (slice byte)} text]
+  ;; TODO(gri): get rid of the []byte/string conversion
+  (let [(values _ _ err) (.Parse z (conv string text) 0)]
+    (when (!= err nil)
+      (set! err (fmt/Errorf "math/big: cannot unmarshal %q into a *big.Float (%v)" text err)))
+
+    ^{:line 136} err))

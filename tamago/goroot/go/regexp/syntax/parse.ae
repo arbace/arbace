@@ -1,0 +1,2235 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.regexp.syntax) (go/file "parse.go" :imports [
+
+
+    ^{:line 8} [sort "sort"]
+    ^{:line 9} [strings "strings"]
+    ^{:line 10} [sync "sync"]
+    ^{:line 11} [unicode "unicode"]
+    ^{:line 12} [utf8 "unicode/utf8"]])
+
+
+
+
+(go/type Error "An Error describes a failure to parse a regular expression\nand gives the offending expression.\n" (struct
+    ^{:line 18 :tag ErrorCode} Code
+    ^{:line 19 :tag string} Expr))
+
+
+^{:go/end 24} (go/method Error ^string [^{:tag (* Error)} e]
+  (+ "error parsing regexp: " (.String (.-Code e)) ": `" (.-Expr e) "`"))
+
+
+
+(go/type ErrorCode "An ErrorCode describes a failure to parse a regular expression.\n" string)
+
+(go/const
+
+  ^{:line 31} [^{:tag ErrorCode :val "regexp/syntax: internal error" :doc "Unexpected error\n"} ErrInternalError "regexp/syntax: internal error"]
+
+
+  ^{:line 34} [^{:tag ErrorCode :val "invalid character class" :doc "Parse errors\n"} ErrInvalidCharClass "invalid character class"]
+  ^{:line 35} [^{:tag ErrorCode :val "invalid character class range"} ErrInvalidCharRange "invalid character class range"]
+  ^{:line 36} [^{:tag ErrorCode :val "invalid escape sequence"} ErrInvalidEscape "invalid escape sequence"]
+  ^{:line 37} [^{:tag ErrorCode :val "invalid named capture"} ErrInvalidNamedCapture "invalid named capture"]
+  ^{:line 38} [^{:tag ErrorCode :val "invalid or unsupported Perl syntax"} ErrInvalidPerlOp "invalid or unsupported Perl syntax"]
+  ^{:line 39} [^{:tag ErrorCode :val "invalid nested repetition operator"} ErrInvalidRepeatOp "invalid nested repetition operator"]
+  ^{:line 40} [^{:tag ErrorCode :val "invalid repeat count"} ErrInvalidRepeatSize "invalid repeat count"]
+  ^{:line 41} [^{:tag ErrorCode :val "invalid UTF-8"} ErrInvalidUTF8 "invalid UTF-8"]
+  ^{:line 42} [^{:tag ErrorCode :val "missing closing ]"} ErrMissingBracket "missing closing ]"]
+  ^{:line 43} [^{:tag ErrorCode :val "missing closing )"} ErrMissingParen "missing closing )"]
+  ^{:line 44} [^{:tag ErrorCode :val "missing argument to repetition operator"} ErrMissingRepeatArgument "missing argument to repetition operator"]
+  ^{:line 45} [^{:tag ErrorCode :val "trailing backslash at end of expression"} ErrTrailingBackslash "trailing backslash at end of expression"]
+  ^{:line 46} [^{:tag ErrorCode :val "unexpected )"} ErrUnexpectedParen "unexpected )"]
+  ^{:line 47} [^{:tag ErrorCode :val "expression nests too deeply"} ErrNestingDepth "expression nests too deeply"]
+  ^{:line 48} [^{:tag ErrorCode :val "expression too large"} ErrLarge "expression too large"])
+
+
+^{:go/end 53} (go/method String ^string [^ErrorCode e]
+  (conv string e))
+
+
+
+(go/type Flags "Flags control the behavior of the parser and record information about regexp context.\n" uint16)
+
+(go/const
+  ^{:line 59} [^{:tag Flags :val 1} FoldCase (<< 1 iota)] ; case-insensitive match
+  ^{:line 60} [^{:val 2} Literal] ; treat pattern as literal string
+  ^{:line 61} [^{:val 4} ClassNL] ; allow character classes like [^a-z] and [[:space:]] to match newline
+  ^{:line 62} [^{:val 8} DotNL] ; allow . to match newline
+  ^{:line 63} [^{:val 16} OneLine] ; treat ^ and $ as only matching at beginning and end of text
+  ^{:line 64} [^{:val 32} NonGreedy] ; make repetition operators default to non-greedy
+  ^{:line 65} [^{:val 64} PerlX] ; allow Perl extensions
+  ^{:line 66} [^{:val 128} UnicodeGroups] ; allow \p{Han}, \P{Han} for Unicode group and negation
+  ^{:line 67} [^{:val 256} WasDollar] ; regexp OpEndText was $, not \z
+  ^{:line 68} [^{:val 512} Simple] ; regexp contains no counted repetition
+
+  ^{:line 70} [^{:val 12} MatchNL (bit-or ClassNL DotNL)]
+
+  ^{:line 72} [^{:val 212} Perl (bit-or ClassNL OneLine PerlX UnicodeGroups)] ; as close to Perl as possible
+  ^{:line 73} [^{:tag Flags :val 0} POSIX 0]) ; POSIX syntax
+
+
+
+(go/const "Pseudo-ops for parsing stack.\n"
+  ^{:line 78} [^{:val 128} opLeftParen (+ opPseudo iota)]
+  ^{:line 79} [^{:val 129} opVerticalBar])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const ^{:val 1000 :doc "maxHeight is the maximum height of a regexp parse tree.\nIt is somewhat arbitrarily chosen, but the idea is to be large enough\nthat no one will actually hit in real use but at the same time small enough\nthat recursion on the Regexp tree will not hit the 1GB Go stack limit.\nThe maximum amount of stack for a single recursive frame is probably\ncloser to 1kB, so this could potentially be raised, but it seems unlikely\nthat people have regexps nested even this deeply.\nWe ran a test on Google's C++ code base and turned up only\na single use case with depth > 100; it had depth 128.\nUsing depth 1000 should be plenty of margin.\nAs an optimization, we don't even bother calculating heights\nuntil we've allocated at least maxHeight Regexp structures.\n"} maxHeight 1000)
+
+
+
+
+
+
+
+(go/const "maxSize is the maximum size of a compiled regexp in Insts.\nIt too is somewhat arbitrarily chosen, but the idea is to be large enough\nto allow significant regexps while at the same time small enough that\nthe compiled form will not take up too much memory.\n128 MB is enough for a 3.3 million Inst structures, which roughly\ncorresponds to a 3.3 MB regexp.\n"
+  ^{:line 103} [^{:val 3355443} maxSize (/ (<< 128 20) instSize)]
+  ^{:line 104} [^{:val 40} instSize (* 5 8)]) ; byte, 2 uint32, slice is 5 64-bit words
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const "maxRunes is the maximum number of runes allowed in a regexp tree\ncounting the runes in all the nodes.\nIgnoring character classes p.numRunes is always less than the length of the regexp.\nCharacter classes can make it much larger: each \\pL adds 1292 runes.\n128 MB is enough for 32M runes, which is over 26k \\pL instances.\nNote that repetitions do not make copies of the rune slices,\nso \\pL{1000} is only one rune slice, not 1000.\nWe could keep a cache of character classes we've seen,\nso that all the \\pL we see use the same rune list,\nbut that doesn't remove the problem entirely:\nconsider something like [\\pL01234][\\pL01235][\\pL01236]...[\\pL^&*()].\nAnd because the Rune slice is exposed directly in the Regexp,\nthere is not an opportunity to change the representation to allow\npartial sharing between different character classes.\nSo the limit is the best we can do.\n"
+  ^{:line 123} [^{:val 33554432} maxRunes (/ (<< 128 20) runeSize)]
+  ^{:line 124} [^{:val 4} runeSize 4]) ; rune is int32
+
+
+(go/type parser (struct
+    ^{:line 128 :tag Flags} flags ; parse mode flags
+    ^{:line 129 :tag (slice (* Regexp))} stack ; stack of parsed expressions
+    ^{:line 130 :tag (* Regexp)} free
+    ^{:line 131 :tag int} numCap ; number of capturing groups seen
+    ^{:line 132 :tag string} wholeRegexp
+    ^{:line 133 :tag (slice rune)} tmpClass ; temporary char class work space
+    ^{:line 134 :tag int} numRegexp ; number of regexps allocated
+    ^{:line 135 :tag int} numRunes ; number of runes in char classes
+    ^{:line 136 :tag int64} repeats ; product of all repetitions seen
+    ^{:line 137 :tag (map (* Regexp) int)} height ; regexp height, for height limit check
+    ^{:line 138 :tag (map (* Regexp) int64)} size)) ; regexp compiled size, for size limit check
+
+
+^{:go/end 152} (go/method newRegexp ^{:tag (* Regexp)} [^{:tag (* parser)} p ^Op op]
+  (let [re (.-free p)]
+    (if (!= re nil) (do
+        (set! (.-free p) (aget (.-Sub0 re) 0))
+        (set! @re (lit Regexp)))
+      (do
+        (set! re (new Regexp))
+        (inc! (.-numRegexp p))))
+
+    (set! (.-Op re) op)
+    ^{:line 151} re))
+
+
+^{:go/end 160} (go/method reuse [^{:tag (* parser)} p ^{:tag (* Regexp)} re]
+  (when (!= (.-height p) nil)
+    (delete (.-height p) re))
+
+  (aset (.-Sub0 re) 0 (.-free p))
+  (set! (.-free p) re))
+
+
+^{:go/end 168} (go/method checkLimits [^{:tag (* parser)} p ^{:tag (* Regexp)} re]
+  (when (> (.-numRunes p) maxRunes)
+    (panic ErrLarge))
+
+  (.checkSize p re)
+  (.checkHeight p re))
+
+
+^{:go/end 210} (go/method checkSize [^{:tag (* parser)} p ^{:tag (* Regexp)} re]
+  (when (== (.-size p) nil)
+    ;; We haven't started tracking size yet.
+    ;; Do a relatively cheap check to see if we need to start.
+    ;; Maintain the product of all the repeats we've seen
+    ;; and don't track if the total number of regexp nodes
+    ;; we've seen times the repeat product is in budget.
+    (when (== (.-repeats p) 0)
+      (set! (.-repeats p) 1))
+
+    (when (== (.-Op re) OpRepeat)
+      (let [n (.-Max re)]
+        (when (== n -1)
+          (set! n (.-Min re)))
+
+        (when (<= n 0)
+          (set! n 1))
+
+        (if (> (conv int64 n) (/ maxSize (.-repeats p)))
+          (set! (.-repeats p) maxSize)
+
+          (set! (.-repeats p) * (conv int64 n)))))
+
+
+    (when (< (conv int64 (.-numRegexp p)) (/ maxSize (.-repeats p)))
+      (return))
+
+
+    ;; We need to start tracking size.
+    ;; Make the map and belatedly populate it
+    ;; with info about everything we've constructed so far.
+    (set! (.-size p) (make (map (* Regexp) int64)))
+    (range [_ re (.-stack p)]
+      (.checkSize p re)))
+
+
+
+  (when (> (.calcSize p re true) maxSize)
+    (panic ErrLarge)))
+
+
+
+^{:go/end 256} (go/method calcSize ^int64 [^{:tag (* parser)} p ^{:tag (* Regexp)} re ^bool force]
+  (when (not force)
+    (when [(values size ok) (aget (.-size p) re)] ok
+      (return size)))
+
+
+
+  (let [^int64 size (zero int64)]
+    (switch (.-Op re)
+      (case [OpLiteral]
+        (set! size (conv int64 (len (.-Rune re)))))
+      (case [OpCapture OpStar]
+        ;; star can be 1+ or 2+; assume 2 pessimistically
+        (set! size (+ 2 (.calcSize p (aget (.-Sub re) 0) false))))
+      (case [OpPlus OpQuest]
+        (set! size (+ 1 (.calcSize p (aget (.-Sub re) 0) false))))
+      (case [OpConcat]
+        (range [_ sub (.-Sub re)]
+          (set! size + (.calcSize p sub false))))
+
+      (case [OpAlternate]
+        (range [_ sub (.-Sub re)]
+          (set! size + (.calcSize p sub false)))
+
+        (when (> (len (.-Sub re)) 1)
+          (set! size + (- (conv int64 (len (.-Sub re))) 1))))
+
+      (case [OpRepeat]
+        (let [sub (.calcSize p (aget (.-Sub re) 0) false)]
+          (when (== (.-Max re) -1)
+            (if (== (.-Min re) 0)
+              (set! size (+ 2 sub)) ; x*
+
+              (set! size (+ 1 (* (conv int64 (.-Min re)) sub)))) ; xxx+
+
+            (break))
+
+          ;; x{2,5} = xx(x(x(x)?)?)?
+          (set! size (+ (* (conv int64 (.-Max re)) sub) (conv int64 (- (.-Max re) (.-Min re))))))))
+
+
+    (set! size (max 1 size))
+    (aset (.-size p) re size)
+    ^{:line 255} size))
+
+
+^{:go/end 271} (go/method checkHeight [^{:tag (* parser)} p ^{:tag (* Regexp)} re]
+  (when (< (.-numRegexp p) maxHeight)
+    (return))
+
+  (when (== (.-height p) nil)
+    (set! (.-height p) (make (map (* Regexp) int)))
+    (range [_ re (.-stack p)]
+      (.checkHeight p re)))
+
+
+  (when (> (.calcHeight p re true) maxHeight)
+    (panic ErrNestingDepth)))
+
+
+
+^{:go/end 288} (go/method calcHeight ^int [^{:tag (* parser)} p ^{:tag (* Regexp)} re ^bool force]
+  (when (not force)
+    (when [(values h ok) (aget (.-height p) re)] ok
+      (return h)))
+
+
+  (let [h 1]
+    (range [_ sub (.-Sub re)]
+      (let [hsub (.calcHeight p sub false)]
+        (when (< h (+ 1 hsub))
+          (set! h (+ 1 hsub)))))
+
+
+    (aset (.-height p) re h)
+    ^{:line 287} h))
+
+
+;; Parse stack manipulation.
+
+
+^{:go/end 328} (go/method push "push pushes the regexp re onto the parse stack and returns the regexp.\n" ^{:tag (* Regexp)} [^{:tag (* parser)} p ^{:tag (* Regexp)} re]
+  (set! (.-numRunes p) + (len (.-Rune re)))
+  (cond (and (== (.-Op re) OpCharClass) (== (len (.-Rune re)) 2) (== (aget (.-Rune re) 0) (aget (.-Rune re) 1))) (do
+      ;; Single rune.
+      (when (.maybeConcat p (aget (.-Rune re) 0) (bit-and-not (.-flags p) FoldCase))
+        (return nil))
+
+      (set! (.-Op re) OpLiteral)
+      (set! (.-Rune re) (subslice (.-Rune re) _ 1))
+      (set! (.-Flags re) (bit-and-not (.-flags p) FoldCase)))
+    (or (and (== (.-Op re) OpCharClass) (== (len (.-Rune re)) 4)
+        (== (aget (.-Rune re) 0) (aget (.-Rune re) 1)) (== (aget (.-Rune re) 2) (aget (.-Rune re) 3))
+        (== (unicode/SimpleFold (aget (.-Rune re) 0)) (aget (.-Rune re) 2))
+        (== (unicode/SimpleFold (aget (.-Rune re) 2)) (aget (.-Rune re) 0)))
+      (and (== (.-Op re) OpCharClass) (== (len (.-Rune re)) 2)
+        (== (+ (aget (.-Rune re) 0) 1) (aget (.-Rune re) 1))
+        (== (unicode/SimpleFold (aget (.-Rune re) 0)) (aget (.-Rune re) 1))
+        (== (unicode/SimpleFold (aget (.-Rune re) 1)) (aget (.-Rune re) 0)))) (do
+      ;; Case-insensitive rune like [Aa] or [Δδ].
+      (when (.maybeConcat p (aget (.-Rune re) 0) (bit-or (.-flags p) FoldCase))
+        (return nil))
+
+
+      ;; Rewrite as (case-insensitive) literal.
+      (set! (.-Op re) OpLiteral)
+      (set! (.-Rune re) (subslice (.-Rune re) _ 1))
+      (set! (.-Flags re) (bit-or (.-flags p) FoldCase))) :else
+
+    ;; Incremental concatenation.
+    (.maybeConcat p -1 0))
+
+
+  (set! (.-stack p) (append (.-stack p) re))
+  (.checkLimits p re)
+  ^{:line 327} re)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 365} (go/method maybeConcat "maybeConcat implements incremental concatenation\nof literal runes into string nodes. The parser calls this\nbefore each push, so only the top fragment of the stack\nmight need processing. Since this is called before a push,\nthe topmost literal is no longer subject to operators like *\n(Otherwise ab* would turn into (ab)*.)\nIf r >= 0 and there's a node left over, maybeConcat uses it\nto push r with the given flags.\nmaybeConcat reports whether r was pushed.\n" ^bool [^{:tag (* parser)} p ^rune r ^Flags flags]
+  (let [n (len (.-stack p))]
+    (when (< n 2)
+      (return false))
+
+
+    ^{:go/breaks [7]} (let [re1 (aget (.-stack p) (- n 1))
+        ^{:line 346} re2 (aget (.-stack p) (- n 2))]
+      (when (or (!= (.-Op re1) OpLiteral) (!= (.-Op re2) OpLiteral) (!= (bit-and (.-Flags re1) FoldCase) (bit-and (.-Flags re2) FoldCase)))
+        (return false))
+
+
+      ;; Push re1 into re2.
+      (set! (.-Rune re2) (append (.-Rune re2) (spread (.-Rune re1))))
+
+      ;; Reuse re1 if possible.
+      (when (>= r 0)
+        (set! (.-Rune re1) (subslice (.-Rune0 re1) _ 1))
+        (aset (.-Rune re1) 0 r)
+        (set! (.-Flags re1) flags)
+        (return true))
+
+
+      (set! (.-stack p) (subslice (.-stack p) _ (- n 1)))
+      (.reuse p re1)
+      false))) ; did not push r
+
+
+
+^{:go/end 377} (go/method literal "literal pushes a literal regexp for the rune r on the stack.\n" [^{:tag (* parser)} p ^rune r]
+  (let [re (.newRegexp p OpLiteral)]
+    (set! (.-Flags re) (.-flags p))
+    (when (!= (bit-and (.-flags p) FoldCase) 0)
+      (set! r (minFoldRune r)))
+
+    (aset (.-Rune0 re) 0 r)
+    (set! (.-Rune re) (subslice (.-Rune0 re) _ 1))
+    (.push p re)))
+
+
+
+^{:go/end 390} (go/func minFoldRune "minFoldRune returns the minimum rune fold-equivalent to r.\n" ^rune [^rune r]
+  (when (or (< r minFold) (> r maxFold))
+    (return r))
+
+  (let [m r
+      ^{:line 385} r0 r]
+    (for [(set! r (unicode/SimpleFold r))] (!= r r0) (set! r (unicode/SimpleFold r))
+      (set! m (min m r)))
+
+    ^{:line 389} m))
+
+
+
+
+^{:go/end 398} (go/method op "op pushes a regexp with the given op onto the stack\nand returns that regexp.\n" ^{:tag (* Regexp)} [^{:tag (* parser)} p ^Op op]
+  (let [re (.newRegexp p op)]
+    (set! (.-Flags re) (.-flags p))
+    (.push p re)))
+
+
+
+
+
+
+^{:go/end 441} (go/method repeat "repeat replaces the top stack element with itself repeated according to op, min, max.\nbefore is the regexp suffix starting at the repetition operator.\nafter is the regexp suffix following after the repetition operator.\nrepeat returns an updated 'after' and an error, if any.\n" [^{:tag (* parser)} p ^Op op ^int min ^int max ^string before ^string after ^string lastRepeat] :results [string error]
+  (let [flags (.-flags p)]
+    (when (!= (bit-and (.-flags p) PerlX) 0)
+      (when (and (> (len after) 0) (== (aget after 0) \?))
+        (set! after (subslice after 1))
+        (set! flags bit-xor NonGreedy))
+
+      (when (!= lastRepeat "")
+        ;; In Perl it is not allowed to stack repetition operators:
+        ;; a** is a syntax error, not a doubled star, and a++ means
+        ;; something else entirely, which we don't support!
+        (return "" (addr (lit Error ErrInvalidRepeatOp (subslice lastRepeat _ (- (len lastRepeat) (len after))))))))
+
+
+    (let [n (len (.-stack p))]
+      (when (== n 0)
+        (return "" (addr (lit Error ErrMissingRepeatArgument (subslice before _ (- (len before) (len after)))))))
+
+      (let [sub (aget (.-stack p) (- n 1))]
+        (when (>= (.-Op sub) opPseudo)
+          (return "" (addr (lit Error ErrMissingRepeatArgument (subslice before _ (- (len before) (len after)))))))
+
+
+        (let [re (.newRegexp p op)]
+          (set! (.-Min re) min)
+          (set! (.-Max re) max)
+          (set! (.-Flags re) flags)
+          (set! (.-Sub re) (subslice (.-Sub0 re) _ 1))
+          (aset (.-Sub re) 0 sub)
+          (aset (.-stack p) (- n 1) re)
+          (.checkLimits p re)
+
+          (when (and (== op OpRepeat) ^:go/paren (or (>= min 2) (>= max 2)) (not (repeatIsValid re 1000)))
+            (return "" (addr (lit Error ErrInvalidRepeatSize (subslice before _ (- (len before) (len after)))))))
+
+
+          (return after nil))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 473]] :go/end 474} (go/func repeatIsValid "repeatIsValid reports whether the repetition re is valid.\nValid means that the combination of the top-level repetition\nand any inner repetitions does not exceed n copies of the\ninnermost thing.\nThis function rewalks the regexp tree and is called for every repetition,\nso we have to worry about inducing quadratic behavior in the parser.\nWe avoid this by only calling repeatIsValid when min or max >= 2.\nIn that case the depth of any >= 2 nesting can only get to 9 without\ntriggering a parse error, so each subtree can only be rewalked 9 times.\n" ^bool [^{:tag (* Regexp)} re ^int n]
+  (when (== (.-Op re) OpRepeat)
+    (let [m (.-Max re)]
+      (when (== m 0)
+        (return true))
+
+      (when (< m 0)
+        (set! m (.-Min re)))
+
+      (when (> m n)
+        (return false))
+
+      (when (> m 0)
+        (set! n / m))))
+
+
+  (range [_ sub (.-Sub re)]
+    (when (not (repeatIsValid sub n))
+      (return false)))
+
+
+  true)
+
+
+
+^{:go/end 494} (go/method concat "concat replaces the top of the stack (above the topmost '|' or '(') with its concatenation.\n" ^{:tag (* Regexp)} [^{:tag (* parser)} p]
+  (.maybeConcat p -1 0)
+
+  ;; Scan down to find pseudo-operator | or (.
+  (let [i (len (.-stack p))]
+    (while (and (> i 0) (< (.-Op (aget (.-stack p) (- i 1))) opPseudo))
+      (dec! i))
+
+    (let [subs (subslice (.-stack p) i)]
+      (set! (.-stack p) (subslice (.-stack p) _ i))
+
+      ;; Empty concatenation is special case.
+      (when (== (len subs) 0)
+        (return (.push p (.newRegexp p OpEmptyMatch))))
+
+
+      (.push p (.collapse p subs OpConcat)))))
+
+
+
+^{:go/end 520} (go/method alternate "alternate replaces the top of the stack (above the topmost '(') with its alternation.\n" ^{:tag (* Regexp)} [^{:tag (* parser)} p]
+  ;; Scan down to find pseudo-operator (.
+  ;; There are no | above (.
+  (let [i (len (.-stack p))]
+    (while (and (> i 0) (< (.-Op (aget (.-stack p) (- i 1))) opPseudo))
+      (dec! i))
+
+    (let [subs (subslice (.-stack p) i)]
+      (set! (.-stack p) (subslice (.-stack p) _ i))
+
+      ;; Make sure top class is clean.
+      ;; All the others already are (see swapVerticalBar).
+      (when (> (len subs) 0)
+        (cleanAlt (aget subs (- (len subs) 1))))
+
+
+      ;; Empty alternate is special case
+      ;; (shouldn't happen but easy to handle).
+      (when (== (len subs) 0)
+        (return (.push p (.newRegexp p OpNoMatch))))
+
+
+      (.push p (.collapse p subs OpAlternate)))))
+
+
+
+^{:go/end 543} (go/func cleanAlt "cleanAlt cleans re for eventual inclusion in an alternation.\n" [^{:tag (* Regexp)} re]
+  (switch (.-Op re)
+    (case [OpCharClass]
+      (set! (.-Rune re) (cleanClass (addr (.-Rune re))))
+      (when (and (== (len (.-Rune re)) 2) (== (aget (.-Rune re) 0) 0) (== (aget (.-Rune re) 1) unicode/MaxRune))
+        (set! (.-Rune re) nil)
+        (set! (.-Op re) OpAnyChar)
+        (return))
+
+      (when (and (== (len (.-Rune re)) 4) (== (aget (.-Rune re) 0) 0) (== (aget (.-Rune re) 1) (- \newline 1)) (== (aget (.-Rune re) 2) (+ \newline 1)) (== (aget (.-Rune re) 3) unicode/MaxRune))
+        (set! (.-Rune re) nil)
+        (set! (.-Op re) OpAnyCharNotNL)
+        (return))
+
+      (when (> (- (cap (.-Rune re)) (len (.-Rune re))) 100)
+        ;; re.Rune will not grow any more.
+        ;; Make a copy or inline to reclaim storage.
+        (set! (.-Rune re) (append (subslice (.-Rune0 re) _ 0) (spread (.-Rune re))))))))
+
+
+
+
+
+
+
+
+^{:go/end 572} (go/method collapse "collapse returns the result of applying op to sub.\nIf sub contains op nodes, they all get hoisted up\nso that there is never a concat of a concat or an\nalternate of an alternate.\n" ^{:tag (* Regexp)} [^{:tag (* parser)} p ^{:tag (slice (* Regexp))} subs ^Op op]
+  (when (== (len subs) 1)
+    (return (aget subs 0)))
+
+  (let [re (.newRegexp p op)]
+    (set! (.-Sub re) (subslice (.-Sub0 re) _ 0))
+    (range [_ sub subs]
+      (if (== (.-Op sub) op) (do
+          (set! (.-Sub re) (append (.-Sub re) (spread (.-Sub sub))))
+          (.reuse p sub))
+
+        (set! (.-Sub re) (append (.-Sub re) sub))))
+
+
+    (when (== op OpAlternate)
+      (set! (.-Sub re) (.factor p (.-Sub re)))
+      (when (== (len (.-Sub re)) 1)
+        (let [old re]
+          (set! re (aget (.-Sub re) 0))
+          (.reuse p old))))
+
+
+    ^{:line 571} re))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 774} (go/method factor "factor factors common prefixes from the alternation list sub.\nIt returns a replacement list that reuses the same storage and\nfrees (passes to p.reuse) any removed *Regexps.\n\nFor example,\n\n\tABC|ABD|AEF|BCX|BCY\n\nsimplifies by literal prefix extraction to\n\n\tA(B(C|D)|EF)|BC(X|Y)\n\nwhich simplifies by character class introduction to\n\n\tA(B[CD]|EF)|BC[XY]\n" ^{:tag (slice (* Regexp))} [^{:tag (* parser)} p ^{:tag (slice (* Regexp))} sub]
+  (when (< (len sub) 2)
+    (return sub))
+
+
+  ;; Round 1: Factor out common literal prefixes.
+  (let [^{:tag (slice rune)} str (zero (slice rune))
+      ^{:line 596 :tag Flags} strflags (zero Flags)
+      ^{:line 597} start 0
+      ^{:line 598} out (subslice sub _ 0)]
+    (for [i 0] (<= i (len sub)) (inc! i)
+      ;; Invariant: the Regexps that were in sub[0:start] have been
+      ;; used or marked for reuse, and the slice space has been reused
+      ;; for out (len(out) <= start).
+      ;;
+      ;; Invariant: sub[start:i] consists of regexps that all begin
+      ;; with str as modified by strflags.
+      (let [^{:tag (slice rune)} istr (zero (slice rune))
+          ^{:line 607 :tag Flags} iflags (zero Flags)]
+        (when (< i (len sub))
+          (set! (values istr iflags) (.leadingString p (aget sub i)))
+          (when (== iflags strflags)
+            (let [same 0]
+              (while (and (< same (len str)) (< same (len istr)) (== (aget str same) (aget istr same)))
+                (inc! same))
+
+              (when (> same 0)
+                ;; Matches at least one rune in current range.
+                ;; Keep going around.
+                (set! str (subslice str _ same))
+                (continue)))))
+
+
+
+
+        ;; Found end of a run with common leading literal string:
+        ;; sub[start:i] all begin with str[:len(str)], but sub[i]
+        ;; does not even begin with str[0].
+        ;;
+        ;; Factor out common string and append factored expression to out.
+        (cond (== i start) (do)
+          ;; Nothing to do - run of length 0.
+          (== i (+ start 1))
+          ;; Just one: don't bother factoring.
+          (set! out (append out (aget sub start))) :else
+
+          ;; Construct factored form: prefix(suffix1|suffix2|...)
+          (let [prefix (.newRegexp p OpLiteral)]
+            (set! (.-Flags prefix) strflags)
+            (set! (.-Rune prefix) (append (subslice (.-Rune prefix) _ 0) (spread str)))
+
+            (for [j start] (< j i) (inc! j)
+              (aset sub j (.removeLeadingString p (aget sub j) (len str)))
+              (.checkLimits p (aget sub j)))
+
+            (let [suffix (.collapse p (subslice sub start i) OpAlternate) ; recurse
+
+                ^{:line 646} re (.newRegexp p OpConcat)]
+              (set! (.-Sub re) (append (subslice (.-Sub re) _ 0) prefix suffix))
+              (set! out (append out re)))))
+
+
+        ;; Prepare for next iteration.
+        (set! start i)
+        (set! str istr)
+        (set! strflags iflags)))
+
+    (set! sub out)
+
+    ;; Round 2: Factor out common simple prefixes,
+    ;; just the first piece of each concatenation.
+    ;; This will be good enough a lot of the time.
+    ;;
+    ;; Complex subexpressions (e.g. involving quantifiers)
+    ;; are not safe to factor because that collapses their
+    ;; distinct paths through the automaton, which affects
+    ;; correctness in some cases.
+    (set! start 0)
+    (set! out (subslice sub _ 0))
+    (let [^{:tag (* Regexp)} first (zero (* Regexp))]
+      (for [i 0] (<= i (len sub)) (inc! i)
+        ;; Invariant: the Regexps that were in sub[0:start] have been
+        ;; used or marked for reuse, and the slice space has been reused
+        ;; for out (len(out) <= start).
+        ;;
+        ;; Invariant: sub[start:i] consists of regexps that all begin with ifirst.
+        (let [^{:tag (* Regexp)} ifirst (zero (* Regexp))]
+          (when (< i (len sub))
+            (set! ifirst (.leadingRegexp p (aget sub i)))
+            (when (and (!= first nil) (.Equal first ifirst)
+                ;; first must be a character class OR a fixed repeat of a character class.
+                ^:go/paren (or (isCharClass first) ^:go/paren (and (== (.-Op first) OpRepeat) (== (.-Min first) (.-Max first)) (isCharClass (aget (.-Sub first) 0)))))
+              (continue)))
+
+
+
+          ;; Found end of a run with common leading regexp:
+          ;; sub[start:i] all begin with first but sub[i] does not.
+          ;;
+          ;; Factor out common regexp and append factored expression to out.
+          (cond (== i start) (do)
+            ;; Nothing to do - run of length 0.
+            (== i (+ start 1))
+            ;; Just one: don't bother factoring.
+            (set! out (append out (aget sub start))) :else
+
+            ;; Construct factored form: prefix(suffix1|suffix2|...)
+            (let [prefix first]
+              (for [j start] (< j i) (inc! j)
+                (let [reuse (!= j start)] ; prefix came from sub[start]
+                  (aset sub j (.removeLeadingRegexp p (aget sub j) reuse))
+                  (.checkLimits p (aget sub j))))
+
+              (let [suffix (.collapse p (subslice sub start i) OpAlternate) ; recurse
+
+                  ^{:line 704} re (.newRegexp p OpConcat)]
+                (set! (.-Sub re) (append (subslice (.-Sub re) _ 0) prefix suffix))
+                (set! out (append out re)))))
+
+
+          ;; Prepare for next iteration.
+          (set! start i)
+          (set! first ifirst)))
+
+      (set! sub out)
+
+      ;; Round 3: Collapse runs of single literals into character classes.
+      (set! start 0)
+      (set! out (subslice sub _ 0))
+      (for [i 0] (<= i (len sub)) (inc! i)
+        ;; Invariant: the Regexps that were in sub[0:start] have been
+        ;; used or marked for reuse, and the slice space has been reused
+        ;; for out (len(out) <= start).
+        ;;
+        ;; Invariant: sub[start:i] consists of regexps that are either
+        ;; literal runes or character classes.
+        (when (and (< i (len sub)) (isCharClass (aget sub i)))
+          (continue))
+
+
+        ;; sub[i] is not a char or char class;
+        ;; emit char class for sub[start:i]...
+        (cond (== i start) (do)
+          ;; Nothing to do - run of length 0.
+          (== i (+ start 1))
+          (set! out (append out (aget sub start))) :else
+
+          ;; Make new char class.
+          ;; Start with most complex regexp in sub[start].
+          (let [max start]
+            (for [j (+ start 1)] (< j i) (inc! j)
+              (when (or (< (.-Op (aget sub max)) (.-Op (aget sub j))) (and (== (.-Op (aget sub max)) (.-Op (aget sub j))) (< (len (.-Rune (aget sub max))) (len (.-Rune (aget sub j))))))
+                (set! max j)))
+
+
+            (set! (values (aget sub start) (aget sub max)) (values (aget sub max) (aget sub start)))
+
+            (for [j (+ start 1)] (< j i) (inc! j)
+              (mergeCharClass (aget sub start) (aget sub j))
+              (.reuse p (aget sub j)))
+
+            (cleanAlt (aget sub start))
+            (set! out (append out (aget sub start)))))
+
+
+        ;; ... and then emit sub[i].
+        (when (< i (len sub))
+          (set! out (append out (aget sub i))))
+
+        (set! start (+ i 1)))
+
+      (set! sub out)
+
+      ;; Round 4: Collapse runs of empty matches into a single empty match.
+      (set! start 0)
+      (set! out (subslice sub _ 0))
+      (range [i sub]
+        (when (and (< (+ i 1) (len sub)) (== (.-Op (aget sub i)) OpEmptyMatch) (== (.-Op (aget sub (+ i 1))) OpEmptyMatch))
+          (continue))
+
+        (set! out (append out (aget sub i))))
+
+      (set! sub out)
+
+      ^{:line 773} sub)))
+
+
+
+
+^{:go/end 786} (go/method leadingString "leadingString returns the leading literal string that re begins with.\nThe string refers to storage in re or its children.\n" [^{:tag (* parser)} p ^{:tag (* Regexp)} re] :results [(slice rune) Flags]
+  (when (and (== (.-Op re) OpConcat) (> (len (.-Sub re)) 0))
+    (set! re (aget (.-Sub re) 0)))
+
+  (when (!= (.-Op re) OpLiteral)
+    (return nil 0))
+
+  (return (.-Rune re) (bit-and (.-Flags re) FoldCase)))
+
+
+
+
+^{:go/end 823} (go/method removeLeadingString "removeLeadingString removes the first n leading runes\nfrom the beginning of re. It returns the replacement for re.\n" ^{:tag (* Regexp)} [^{:tag (* parser)} p ^{:tag (* Regexp)} re ^int n]
+  (when (and (== (.-Op re) OpConcat) (> (len (.-Sub re)) 0))
+    ;; Removing a leading string in a concatenation
+    ;; might simplify the concatenation.
+    (let [sub (aget (.-Sub re) 0)]
+      (set! sub (.removeLeadingString p sub n))
+      (aset (.-Sub re) 0 sub)
+      (when (== (.-Op sub) OpEmptyMatch)
+        (.reuse p sub)
+        (switch (len (.-Sub re))
+          (case [0 1]
+            ;; Impossible but handle.
+            (set! (.-Op re) OpEmptyMatch)
+            (set! (.-Sub re) nil))
+          (case [2]
+            (let [old re]
+              (set! re (aget (.-Sub re) 1))
+              (.reuse p old)))
+          (default
+            (copy (.-Sub re) (subslice (.-Sub re) 1))
+            (set! (.-Sub re) (subslice (.-Sub re) _ (- (len (.-Sub re)) 1))))))
+
+
+      (return re)))
+
+
+  (when (== (.-Op re) OpLiteral)
+    (set! (.-Rune re) (subslice (.-Rune re) _ (copy (.-Rune re) (subslice (.-Rune re) n))))
+    (when (== (len (.-Rune re)) 0)
+      (set! (.-Op re) OpEmptyMatch)))
+
+
+  ^{:line 822} re)
+
+
+
+
+^{:go/end 839} (go/method leadingRegexp "leadingRegexp returns the leading regexp that re begins with.\nThe regexp refers to storage in re or its children.\n" ^{:tag (* Regexp)} [^{:tag (* parser)} p ^{:tag (* Regexp)} re]
+  (when (== (.-Op re) OpEmptyMatch)
+    (return nil))
+
+  (when (and (== (.-Op re) OpConcat) (> (len (.-Sub re)) 0))
+    (let [sub (aget (.-Sub re) 0)]
+      (when (== (.-Op sub) OpEmptyMatch)
+        (return nil))
+
+      (return sub)))
+
+  ^{:line 838} re)
+
+
+
+
+
+^{:go/end 865} (go/method removeLeadingRegexp "removeLeadingRegexp removes the leading regexp in re.\nIt returns the replacement for re.\nIf reuse is true, it passes the removed regexp (if no longer needed) to p.reuse.\n" ^{:tag (* Regexp)} [^{:tag (* parser)} p ^{:tag (* Regexp)} re ^bool reuse]
+  (when (and (== (.-Op re) OpConcat) (> (len (.-Sub re)) 0))
+    (when reuse
+      (.reuse p (aget (.-Sub re) 0)))
+
+    (set! (.-Sub re) (subslice (.-Sub re) _ (copy (.-Sub re) (subslice (.-Sub re) 1))))
+    (switch (len (.-Sub re))
+      (case [0]
+        (set! (.-Op re) OpEmptyMatch)
+        (set! (.-Sub re) nil))
+      (case [1]
+        (let [old re]
+          (set! re (aget (.-Sub re) 0))
+          (.reuse p old))))
+
+    (return re))
+
+  (when reuse
+    (.reuse p re))
+
+  (.newRegexp p OpEmptyMatch))
+
+
+^{:go/end 880} (go/func literalRegexp ^{:tag (* Regexp)} [^string s ^Flags flags]
+  (let [re (addr (lit Regexp :Op OpLiteral))]
+    (set! (.-Flags re) flags)
+    (set! (.-Rune re) (subslice (.-Rune0 re) _ 0)) ; use local storage for small strings
+    (range [_ c s]
+      (when (>= (len (.-Rune re)) (cap (.-Rune re)))
+        ;; string is too long to fit in Rune0.  let Go handle it
+        (set! (.-Rune re) (conv (slice rune) s))
+        (break))
+
+      (set! (.-Rune re) (append (.-Rune re) c)))
+
+    ^{:line 879} re))
+
+
+;; Parsing.
+
+
+
+
+^{:go/end 889} (go/func Parse "Parse parses a regular expression string s, controlled by the specified\nFlags, and returns a regular expression parse tree. The syntax is\ndescribed in the top-level comment.\n" [^string s ^Flags flags] :results [(* Regexp) error]
+  (parse s flags))
+
+
+^{:go/end 1097} (go/func parse [^string s ^Flags flags] :results [^{:tag (* Regexp)} _ ^error err]
+  (defer (^{:go/end 903} (fn []
+        (switch [r (recover)] r
+          (default
+            (panic r))
+          (case [nil])
+          ;; ok
+          (case [ErrLarge] ; too big
+            (set! err (addr (lit Error :Code ErrLarge :Expr s))))
+          (case [ErrNestingDepth]
+            (set! err (addr (lit Error :Code ErrNestingDepth :Expr s))))))))
+
+
+
+  (when (!= (bit-and flags Literal) 0)
+    ;; Trivial parser for literal string.
+    (when [err (checkUTF8 s)] (!= err nil)
+      (return nil err))
+
+    (return (literalRegexp s flags) nil))
+
+
+  ;; Otherwise, must do real work.
+  (let [
+      ^{:line 915 :tag parser} p (zero parser)
+      ^{:line 916 :tag rune} c (zero rune)
+      ^{:line 917 :tag Op} op (zero Op)
+      ^{:line 918 :tag string} lastRepeat (zero string)]
+
+    (set! (.-flags p) flags)
+    (set! (.-wholeRegexp p) s)
+    (let [t s]
+      (while (!= t "")
+        (let [repeat ""]
+          (label :BigSwitch
+            (switch (aget t 0)
+              (default
+                (when [(set! (values c t err) (nextRune t))] (!= err nil)
+                  (return nil err))
+
+                (.literal p c))
+
+              (case [\(]
+                (when (and (!= (bit-and (.-flags p) PerlX) 0) (>= (len t) 2) (== (aget t 1) \?))
+                  ;; Flag changes and non-capturing groups.
+                  (when [(set! (values t err) (.parsePerlFlags p t))] (!= err nil)
+                    (return nil err))
+
+                  (break))
+
+                (inc! (.-numCap p))
+                (set! (.-Cap (.op p opLeftParen)) (.-numCap p))
+                (set! t (subslice t 1)))
+              (case [\|]
+                (.parseVerticalBar p)
+                (set! t (subslice t 1)))
+              (case [\)]
+                (when [(set! err (.parseRightParen p))] (!= err nil)
+                  (return nil err))
+
+                (set! t (subslice t 1)))
+              (case [\^]
+                (if (!= (bit-and (.-flags p) OneLine) 0)
+                  (.op p OpBeginText)
+
+                  (.op p OpBeginLine))
+
+                (set! t (subslice t 1)))
+              (case [\$]
+                (if (!= (bit-and (.-flags p) OneLine) 0)
+                  (set! (.-Flags (.op p OpEndText)) bit-or WasDollar)
+
+                  (.op p OpEndLine))
+
+                (set! t (subslice t 1)))
+              (case [\.]
+                (if (!= (bit-and (.-flags p) DotNL) 0)
+                  (.op p OpAnyChar)
+
+                  (.op p OpAnyCharNotNL))
+
+                (set! t (subslice t 1)))
+              (case [\[]
+                (when [(set! (values t err) (.parseClass p t))] (!= err nil)
+                  (return nil err)))
+
+              (case [\* \+ \?]
+                (let [before t]
+                  (switch (aget t 0)
+                    (case [\*]
+                      (set! op OpStar))
+                    (case [\+]
+                      (set! op OpPlus))
+                    (case [\?]
+                      (set! op OpQuest)))
+
+                  (let [after (subslice t 1)]
+                    (when [(set! (values after err) (.repeat p op 0 0 before after lastRepeat))] (!= err nil)
+                      (return nil err))
+
+                    (set! repeat before)
+                    (set! t after))))
+              (case [\{]
+                (set! op OpRepeat)
+                (let [before t
+                    (values min max after ok) (.parseRepeat p t)]
+                  (when (not ok)
+                    ;; If the repeat cannot be parsed, { is a literal.
+                    (.literal p \{)
+                    (set! t (subslice t 1))
+                    (break))
+
+                  (when (or (< min 0) (> min 1000) (> max 1000) (and (>= max 0) (> min max)))
+                    ;; Numbers were too big, or max is present and min > max.
+                    (return nil (addr (lit Error ErrInvalidRepeatSize (subslice before _ (- (len before) (len after)))))))
+
+                  (when [(set! (values after err) (.repeat p op min max before after lastRepeat))] (!= err nil)
+                    (return nil err))
+
+                  (set! repeat before)
+                  (set! t after)))
+              (case [\\]
+                (when (and (!= (bit-and (.-flags p) PerlX) 0) (>= (len t) 2))
+                  (switch (aget t 1)
+                    (case [\A]
+                      (.op p OpBeginText)
+                      (set! t (subslice t 2))
+                      (break :BigSwitch))
+                    (case [\b]
+                      (.op p OpWordBoundary)
+                      (set! t (subslice t 2))
+                      (break :BigSwitch))
+                    (case [\B]
+                      (.op p OpNoWordBoundary)
+                      (set! t (subslice t 2))
+                      (break :BigSwitch))
+                    (case [\C]
+                      ;; any byte; not supported
+                      (return nil (addr (lit Error ErrInvalidEscape (subslice t _ 2)))))
+                    (case [\Q]
+                      ;; \Q ... \E: the ... is always literals
+                      (let [^string lit (zero string)]
+                        (set! (values lit t _) (strings/Cut (subslice t 2) "\\E"))
+                        (while (!= lit "")
+                          (let [(values c rest err) (nextRune lit)]
+                            (when (!= err nil)
+                              (return nil err))
+
+                            (.literal p c)
+                            (set! lit rest)))
+
+                        (break :BigSwitch)))
+                    (case [\z]
+                      (.op p OpEndText)
+                      (set! t (subslice t 2))
+                      (break :BigSwitch))))
+
+
+
+                (let [re (.newRegexp p OpCharClass)]
+                  (set! (.-Flags re) (.-flags p))
+
+                  ;; Look for Unicode character group like \p{Han}
+                  (when (and (>= (len t) 2) ^:go/paren (or (== (aget t 1) \p) (== (aget t 1) \P)))
+                    (let [(values r rest err) (.parseUnicodeClass p t (subslice (.-Rune0 re) _ 0))]
+                      (when (!= err nil)
+                        (return nil err))
+
+                      (when (!= r nil)
+                        (set! (.-Rune re) r)
+                        (set! t rest)
+                        (.push p re)
+                        (break :BigSwitch))))
+
+
+
+                  ;; Perl character class escape.
+                  (when [(values r rest) (.parsePerlClassEscape p t (subslice (.-Rune0 re) _ 0))] (!= r nil)
+                    (set! (.-Rune re) r)
+                    (set! t rest)
+                    (.push p re)
+                    (break :BigSwitch))
+
+                  (.reuse p re)
+
+                  ;; Ordinary single-character escape.
+                  (when [(set! (values c t err) (.parseEscape p t))] (!= err nil)
+                    (return nil err))
+
+                  (.literal p c)))))
+
+          (set! lastRepeat repeat)))
+
+
+      (.concat p)
+      (when (.swapVerticalBar p)
+        ;; pop vertical bar
+        (set! (.-stack p) (subslice (.-stack p) _ (- (len (.-stack p)) 1))))
+
+      (.alternate p)
+
+      (let [n (len (.-stack p))]
+        (when (!= n 1)
+          (return nil (addr (lit Error ErrMissingParen s))))
+
+        (return (aget (.-stack p) 0) nil)))))
+
+
+
+
+
+^{:go/end 1136} (go/method parseRepeat "parseRepeat parses {min} (max=min) or {min,} (max=-1) or {min,max}.\nIf s is not of that form, it returns ok == false.\nIf s has the right form but the values are too big, it returns min == -1, ok == true.\n" [^{:tag (* parser)} p ^string s] :results [^int min ^int max ^string rest ^bool ok]
+  (when (or (== s "") (!= (aget s 0) \{))
+    (return))
+
+  (set! s (subslice s 1))
+  (let [^bool ok1 (zero bool)]
+    (when [(set! (values min s ok1) (.parseInt p s))] (not ok1)
+      (return))
+
+    (when (== s "")
+      (return))
+
+    (if (!= (aget s 0) \,)
+      (set! max min)
+      (do
+        (set! s (subslice s 1))
+        (when (== s "")
+          (return))
+
+        (if (== (aget s 0) \})
+          (set! max -1)
+          (if [(set! (values max s ok1) (.parseInt p s))] (not ok1)
+            (return)
+            (when (< max 0)
+              ;; parseInt found too big a number
+              (set! min -1))))))
+
+
+    (when (or (== s "") (!= (aget s 0) \}))
+      (return))
+
+    (set! rest (subslice s 1))
+    (set! ok true)
+    (return)))
+
+
+
+
+
+^{:go/end 1253} (go/method parsePerlFlags "parsePerlFlags parses a Perl flag setting or non-capturing group or both,\nlike (?i) or (?: or (?i:.  It removes the prefix from s and updates the parse state.\nThe caller must have ensured that s begins with \"(?\".\n" [^{:tag (* parser)} p ^string s] :results [^string rest ^error err]
+  (let [t s
+
+      ;; Check for named captures, first introduced in Python's regexp library.
+      ;; As usual, there are three slightly different syntaxes:
+      ;;
+      ;;   (?P<name>expr)   the original, introduced by Python
+      ;;   (?<name>expr)    the .NET alteration, adopted by Perl 5.10
+      ;;   (?'name'expr)    another .NET alteration, adopted by Perl 5.10
+      ;;
+      ;; Perl 5.10 gave in and implemented the Python version too,
+      ;; but they claim that the last two are the preferred forms.
+      ;; PCRE and languages based on it (specifically, PHP and Ruby)
+      ;; support all three as well. EcmaScript 4 uses only the Python form.
+      ;;
+      ;; In both the open source world (via Code Search) and the
+      ;; Google source tree, (?P<expr>name) and (?<expr>name) are the
+      ;; dominant forms of named captures and both are supported.
+      ^{:line 1159} startsWithP (and (> (len t) 4) (== (aget t 2) \P) (== (aget t 3) \<))
+      ^{:line 1160} startsWithName (and (> (len t) 3) (== (aget t 2) \<))]
+
+    (when (or startsWithP startsWithName)
+      ;; position of expr start
+      (let [exprStartPos 4]
+        (when startsWithName
+          (set! exprStartPos 3))
+
+
+        ;; Pull out name.
+        (let [end (strings/IndexRune t \>)]
+          (when (< end 0)
+            (when [(set! err (checkUTF8 t))] (!= err nil)
+              (return "" err))
+
+            (return "" (addr (lit Error ErrInvalidNamedCapture s))))
+
+
+          (let [capture (subslice t _ (+ end 1)) ; "(?P<name>" or "(?<name>"
+              ^{:line 1179} name (subslice t exprStartPos end)] ; "name"
+            (when [(set! err (checkUTF8 name))] (!= err nil)
+              (return "" err))
+
+            (when (not (isValidCaptureName name))
+              (return "" (addr (lit Error ErrInvalidNamedCapture capture))))
+
+
+            ;; Like ordinary capture, but named.
+            (inc! (.-numCap p))
+            (let [re (.op p opLeftParen)]
+              (set! (.-Cap re) (.-numCap p))
+              (set! (.-Name re) name)
+              (return (subslice t (+ end 1)) nil))))))
+
+
+    ;; Non-capturing group. Might also twiddle Perl flags.
+    (let [^rune c (zero rune)]
+      (set! t (subslice t 2)) ; skip (?
+      (let [flags (.-flags p)
+          ^{:line 1199} sign (+ 1)
+          ^{:line 1200} sawFlag false]
+        (label :Loop
+          (while (!= t "")
+            (when [(set! (values c t err) (nextRune t))] (!= err nil)
+              (return "" err))
+
+            (switch c
+              (default
+                (break :Loop))
+
+              ;; Flags.
+              (case [\i]
+                (set! flags bit-or FoldCase)
+                (set! sawFlag true))
+              (case [\m]
+                (set! flags bit-and-not OneLine)
+                (set! sawFlag true))
+              (case [\s]
+                (set! flags bit-or DotNL)
+                (set! sawFlag true))
+              (case [\U]
+                (set! flags bit-or NonGreedy)
+                (set! sawFlag true))
+
+              ;; Switch to negation.
+              (case [\-]
+                (when (< sign 0)
+                  (break :Loop))
+
+                (set! sign -1)
+                ;; Invert flags so that | above turn into &^ and vice versa.
+                ;; We'll invert flags again before using it below.
+                (set! flags (bit-not flags))
+                (set! sawFlag false))
+
+              ;; End of flags, starting group or not.
+              (case [\: \)]
+                (when (< sign 0)
+                  (when (not sawFlag)
+                    (break :Loop))
+
+                  (set! flags (bit-not flags)))
+
+                (when (== c \:)
+                  ;; Open new group
+                  (.op p opLeftParen))
+
+                (set! (.-flags p) flags)
+                (return t nil)))))
+
+
+
+        (return "" (addr (lit Error ErrInvalidPerlOp (subslice s _ (- (len s) (len t))))))))))
+
+
+
+
+
+
+
+^{:go/breaks [[6 1269]] :go/end 1270} (go/func isValidCaptureName "isValidCaptureName reports whether name\nis a valid capture name: [A-Za-z0-9_]+.\nPCRE limits names to 32 bytes.\nPython rejects names starting with digits.\nWe don't enforce either of those.\n" ^bool [^string name]
+  (when (== name "")
+    (return false))
+
+  (range [_ c name]
+    (when (and (!= c \_) (not (isalnum c)))
+      (return false)))
+
+
+  true)
+
+
+
+^{:go/end 1298} (go/method parseInt "parseInt parses a decimal integer.\n" [^{:tag (* parser)} p ^string s] :results [^int n ^string rest ^bool ok]
+  (when (or (== s "") (< (aget s 0) \0) (< \9 (aget s 0)))
+    (return))
+
+  ;; Disallow leading zeros.
+  (when (and (>= (len s) 2) (== (aget s 0) \0) (<= \0 (aget s 1)) (<= (aget s 1) \9))
+    (return))
+
+  (let [t s]
+    (while (and (!= s "") (<= \0 (aget s 0)) (<= (aget s 0) \9))
+      (set! s (subslice s 1)))
+
+    (set! rest s)
+    (set! ok true)
+    ;; Have digits, compute value.
+    (set! t (subslice t _ (- (len t) (len s))))
+    (for [i 0] (< i (len t)) (inc! i)
+      ;; Avoid overflow.
+      (when (>= n 1.0E8)
+        (set! n -1)
+        (break))
+
+      (set! n (- (+ (* n 10) (conv int (aget t i))) \0)))
+
+    (return)))
+
+
+
+
+^{:go/end 1307} (go/func isCharClass "can this be represented as a character class?\nsingle-rune literal string, char class, ., and .|\\n.\n" ^bool [^{:tag (* Regexp)} re]
+  (or (and (== (.-Op re) OpLiteral) (== (len (.-Rune re)) 1))
+    (== (.-Op re) OpCharClass)
+    (== (.-Op re) OpAnyCharNotNL)
+    (== (.-Op re) OpAnyChar)))
+
+
+
+^{:go/breaks [[5 1326]] :go/end 1327} (go/func matchRune "does re match r?\n" ^bool [^{:tag (* Regexp)} re ^rune r]
+  (switch (.-Op re)
+    (case [OpLiteral]
+      (return (and (== (len (.-Rune re)) 1) (== (aget (.-Rune re) 0) r))))
+    (case [OpCharClass]
+      (for [i 0] (< i (len (.-Rune re))) (set! i + 2)
+        (when (and (<= (aget (.-Rune re) i) r) (<= r (aget (.-Rune re) (+ i 1))))
+          (return true)))
+
+
+      (return false))
+    (case [OpAnyCharNotNL]
+      (return (!= r \newline)))
+    (case [OpAnyChar]
+      (return true)))
+
+  false)
+
+
+
+^{:go/end 1340} (go/method parseVerticalBar "parseVerticalBar handles a | in the input.\n" [^{:tag (* parser)} p]
+  (.concat p)
+
+  ;; The concatenation we just parsed is on top of the stack.
+  ;; If it sits above an opVerticalBar, swap it below
+  ;; (things below an opVerticalBar become an alternation).
+  ;; Otherwise, push a new vertical bar.
+  (when (not (.swapVerticalBar p))
+    (.op p opVerticalBar)))
+
+
+
+
+
+
+^{:go/end 1370} (go/func mergeCharClass "mergeCharClass makes dst = dst|src.\nThe caller must ensure that dst.Op >= src.Op,\nto reduce the amount of copying.\n" [^{:tag (* Regexp)} dst ^{:tag (* Regexp)} src]
+  (switch (.-Op dst)
+    (case [OpAnyChar])
+    ;; src doesn't add anything.
+    (case [OpAnyCharNotNL]
+      ;; src might add \n
+      (when (matchRune src \newline)
+        (set! (.-Op dst) OpAnyChar)))
+
+    (case [OpCharClass]
+      ;; src is simpler, so either literal or char class
+      (if (== (.-Op src) OpLiteral)
+        (set! (.-Rune dst) (appendLiteral (.-Rune dst) (aget (.-Rune src) 0) (.-Flags src)))
+
+        (set! (.-Rune dst) (appendClass (.-Rune dst) (.-Rune src)))))
+
+    (case [OpLiteral]
+      ;; both literal
+      (when (and (== (aget (.-Rune src) 0) (aget (.-Rune dst) 0)) (== (.-Flags src) (.-Flags dst)))
+        (break))
+
+      (set! (.-Op dst) OpCharClass)
+      (set! (.-Rune dst) (appendLiteral (subslice (.-Rune dst) _ 0) (aget (.-Rune dst) 0) (.-Flags dst)))
+      (set! (.-Rune dst) (appendLiteral (.-Rune dst) (aget (.-Rune src) 0) (.-Flags src))))))
+
+
+
+
+
+
+^{:go/end 1408} (go/method swapVerticalBar "If the top of the stack is an element followed by an opVerticalBar\nswapVerticalBar swaps the two and returns true.\nOtherwise it returns false.\n" ^bool [^{:tag (* parser)} p]
+  ;; If above and below vertical bar are literal or char class,
+  ;; can merge into a single char class.
+  ^{:go/breaks [[4 1407]]} (let [n (len (.-stack p))]
+    (when (and (>= n 3) (== (.-Op (aget (.-stack p) (- n 2))) opVerticalBar) (isCharClass (aget (.-stack p) (- n 1))) (isCharClass (aget (.-stack p) (- n 3))))
+      (let [re1 (aget (.-stack p) (- n 1))
+          ^{:line 1381} re3 (aget (.-stack p) (- n 3))]
+        ;; Make re3 the more complex of the two.
+        (when (> (.-Op re1) (.-Op re3))
+          (set! (values re1 re3) (values re3 re1))
+          (aset (.-stack p) (- n 3) re3))
+
+        (mergeCharClass re3 re1)
+        (.reuse p re1)
+        (set! (.-stack p) (subslice (.-stack p) _ (- n 1)))
+        (return true)))
+
+
+    (when (>= n 2)
+      (let [re1 (aget (.-stack p) (- n 1))
+          ^{:line 1395} re2 (aget (.-stack p) (- n 2))]
+        (when (== (.-Op re2) opVerticalBar)
+          (when (>= n 3)
+            ;; Now out of reach.
+            ;; Clean opportunistically.
+            (cleanAlt (aget (.-stack p) (- n 3))))
+
+          (aset (.-stack p) (- n 2) re1)
+          (aset (.-stack p) (- n 1) re2)
+          (return true))))
+
+
+    false))
+
+
+
+^{:go/end 1441} (go/method parseRightParen "parseRightParen handles a ) in the input.\n" ^error [^{:tag (* parser)} p]
+  (.concat p)
+  (when (.swapVerticalBar p)
+    ;; pop vertical bar
+    (set! (.-stack p) (subslice (.-stack p) _ (- (len (.-stack p)) 1))))
+
+  (.alternate p)
+
+  (let [n (len (.-stack p))]
+    (when (< n 2)
+      (return (addr (lit Error ErrUnexpectedParen (.-wholeRegexp p)))))
+
+    ^{:go/breaks [[6 1440]]} (let [re1 (aget (.-stack p) (- n 1))
+        ^{:line 1424} re2 (aget (.-stack p) (- n 2))]
+      (set! (.-stack p) (subslice (.-stack p) _ (- n 2)))
+      (when (!= (.-Op re2) opLeftParen)
+        (return (addr (lit Error ErrUnexpectedParen (.-wholeRegexp p)))))
+
+      ;; Restore flags at time of paren.
+      (set! (.-flags p) (.-Flags re2))
+      (if (== (.-Cap re2) 0)
+        ;; Just for grouping.
+        (.push p re1)
+        (do
+          (set! (.-Op re2) OpCapture)
+          (set! (.-Sub re2) (subslice (.-Sub0 re2) _ 1))
+          (aset (.-Sub re2) 0 re1)
+          (.push p re2)))
+
+      nil)))
+
+
+
+
+^{:go/end 1557} (go/method parseEscape "parseEscape parses an escape sequence at the beginning of s\nand returns the rune.\n" [^{:tag (* parser)} p ^string s] :results [^rune r ^string rest ^error err]
+  (let [t (subslice s 1)]
+    (when (== t "")
+      (return 0 "" (addr (lit Error ErrTrailingBackslash ""))))
+
+    (let [(values c ^:assign t ^:assign err) (nextRune t)]
+      (when (!= err nil)
+        (return 0 "" err))
+
+
+      (label :Switch
+        (switch c
+          (default
+            (when (and (< c utf8/RuneSelf) (not (isalnum c)))
+              ;; Escaped non-word characters are always themselves.
+              ;; PCRE is not quite so rigorous: it accepts things like
+              ;; \q, but we don't. We once rejected \_, but too many
+              ;; programs and people insist on using it, so allow \_.
+              (return c t nil)))
+
+
+          ;; Octal escapes.
+          (case [\1 \2 \3 \4 \5 \6 \7]
+            ;; Single non-zero digit is a backreference; not supported
+            (when (or (== t "") (< (aget t 0) \0) (> (aget t 0) \7))
+              (break))
+
+            (fallthrough))
+          (case [\0]
+            ;; Consume up to three octal digits; already have one.
+            (set! r (- c \0))
+            (for [i 1] (< i 3) (inc! i)
+              (when (or (== t "") (< (aget t 0) \0) (> (aget t 0) \7))
+                (break))
+
+              (set! r (- (+ (* r 8) (conv rune (aget t 0))) \0))
+              (set! t (subslice t 1)))
+
+            (return r t nil))
+
+          ;; Hexadecimal escapes.
+          (case [\x]
+            (when (== t "")
+              (break))
+
+            (when [(set! (values c t err) (nextRune t))] (!= err nil)
+              (return 0 "" err))
+
+            (when (== c \{)
+              ;; Any number of digits in braces.
+              ;; Perl accepts any text at all; it ignores all text
+              ;; after the first non-hex digit. We require only hex digits,
+              ;; and at least one.
+              (let [nhex 0]
+                (set! r 0)
+                (while true
+                  (when (== t "")
+                    (break :Switch))
+
+                  (when [(set! (values c t err) (nextRune t))] (!= err nil)
+                    (return 0 "" err))
+
+                  (when (== c \})
+                    (break))
+
+                  (let [v (unhex c)]
+                    (when (< v 0)
+                      (break :Switch))
+
+                    (set! r (+ (* r 16) v))
+                    (when (> r unicode/MaxRune)
+                      (break :Switch))
+
+                    (inc! nhex)))
+
+                (when (== nhex 0)
+                  (break :Switch))
+
+                (return r t nil)))
+
+
+            ;; Easy case: two hex digits.
+            (let [x (unhex c)]
+              (when [(set! (values c t err) (nextRune t))] (!= err nil)
+                (return 0 "" err))
+
+              (let [y (unhex c)]
+                (when (or (< x 0) (< y 0))
+                  (break))
+
+                (return (+ (* x 16) y) t nil))))
+
+          ;; C escapes. There is no case 'b', to avoid misparsing
+          ;; the Perl word-boundary \b as the C backspace \b
+          ;; when in POSIX mode. In Perl, /\b/ means word-boundary
+          ;; but /[\b]/ means backspace. We don't support that.
+          ;; If you want a backspace, embed a literal backspace
+          ;; character or use \x08.
+          (case [\a]
+            (return \u0007 t err))
+          (case [\f]
+            (return \formfeed t err))
+          (case [\n]
+            (return \newline t err))
+          (case [\r]
+            (return \return t err))
+          (case [\t]
+            (return \tab t err))
+          (case [\v]
+            (return \u000b t err))))
+
+      (return 0 "" (addr (lit Error ErrInvalidEscape (subslice s _ (- (len s) (len t)))))))))
+
+
+
+
+^{:go/end 1573} (go/method parseClassChar "parseClassChar parses a character class character at the beginning of s\nand returns it.\n" [^{:tag (* parser)} p ^string s ^string wholeClass] :results [^rune r ^string rest ^error err]
+  (when (== s "")
+    (return 0 "" (addr (lit Error :Code ErrMissingBracket :Expr wholeClass))))
+
+
+  ;; Allow regular escape sequences even though
+  ;; many need not be escaped in this context.
+  (when (== (aget s 0) \\)
+    (return (.parseEscape p s)))
+
+
+  (nextRune s))
+
+
+(go/type charGroup (struct
+    ^{:line 1576 :tag int} sign
+    ^{:line 1577 :tag (slice rune)} class))
+
+
+(go/directive "//go:generate perl make_perl_groups.pl perl_groups.go")
+
+
+
+
+^{:go/end 1594} (go/method parsePerlClassEscape "parsePerlClassEscape parses a leading Perl character class escape like \\d\nfrom the beginning of s. If one is present, it appends the characters to r\nand returns the new slice r and the remainder of the string.\n" [^{:tag (* parser)} p ^string s ^{:tag (slice rune)} r] :results [^{:tag (slice rune)} out ^string rest]
+  (when (or (== (bit-and (.-flags p) PerlX) 0) (< (len s) 2) (!= (aget s 0) \\))
+    (return))
+
+  (let [g (aget perlGroup (subslice s 0 2))]
+    (when (== (.-sign g) 0)
+      (return))
+
+    (return (.appendGroup p r g) (subslice s 2))))
+
+
+
+
+
+^{:go/end 1615} (go/method parseNamedClass "parseNamedClass parses a leading POSIX named character class like [:alnum:]\nfrom the beginning of s. If one is present, it appends the characters to r\nand returns the new slice r and the remainder of the string.\n" [^{:tag (* parser)} p ^string s ^{:tag (slice rune)} r] :results [^{:tag (slice rune)} out ^string rest ^error err]
+  (when (or (< (len s) 2) (!= (aget s 0) \[) (!= (aget s 1) \:))
+    (return))
+
+
+  (let [i (strings/Index (subslice s 2) ":]")]
+    (when (< i 0)
+      (return))
+
+    (set! i + 2)
+    (let [(values name ^:assign s) (values (subslice s 0 (+ i 2)) (subslice s (+ i 2)))
+        ^{:line 1610} g (aget posixGroup name)]
+      (when (== (.-sign g) 0)
+        (return nil "" (addr (lit Error ErrInvalidCharRange name))))
+
+      (return (.appendGroup p r g) s nil))))
+
+
+^{:go/end 1636} (go/method appendGroup ^{:tag (slice rune)} [^{:tag (* parser)} p ^{:tag (slice rune)} r ^charGroup g]
+  (if (== (bit-and (.-flags p) FoldCase) 0)
+    (if (< (.-sign g) 0)
+      (set! r (appendNegatedClass r (.-class g)))
+
+      (set! r (appendClass r (.-class g))))
+
+
+    (let [tmp (subslice (.-tmpClass p) _ 0)]
+      (set! tmp (appendFoldedClass tmp (.-class g)))
+      (set! (.-tmpClass p) tmp)
+      (set! tmp (cleanClass (addr (.-tmpClass p))))
+      (if (< (.-sign g) 0)
+        (set! r (appendNegatedClass r tmp))
+
+        (set! r (appendClass r tmp)))))
+
+
+  ^{:line 1635} r)
+
+
+(go/var anyTable (addr ^{:go/breaks [2 4]} (lit unicode/RangeTable
+      :R16 (lit (slice unicode/Range16) (lit _ :Lo 0 :Hi (- (<< 1 16) 1) :Stride 1))
+      :R32 (lit (slice unicode/Range32) (lit _ :Lo (<< 1 16) :Hi unicode/MaxRune :Stride 1)))))
+
+
+(go/var asciiTable (addr ^{:go/breaks [2]} (lit unicode/RangeTable
+      :R16 (lit (slice unicode/Range16) (lit _ :Lo 0 :Hi 0x7F :Stride 1)))))
+
+
+(go/var asciiFoldTable (addr ^{:go/breaks [2]} (lit unicode/RangeTable
+      :R16 (lit (slice unicode/Range16)
+        (lit _ :Lo 0 :Hi 0x7F :Stride 1)
+        (lit _ :Lo 0x017F :Hi 0x017F :Stride 1) ; Old English long s (ſ), folds to S/s.
+        (lit _ :Lo 0x212A :Hi 0x212A :Stride 1))))) ; Kelvin K, folds to K/k.
+
+
+
+
+
+(go/var ^{:tag (struct ^sync/Once once ^{:tag (map string string)} categories ^{:tag (map string string)} scripts) :doc "aliases is a lazily constructed copy of unicode.CategoryAliases and unicode.Scripts\nbut with the keys passed through canonicalName, to support inexact matches.\n"} aliases)
+
+
+
+
+
+
+^{:go/end 1673} (go/func initAliases "initAliases initializes categoryAliases by canonicalizing unicode.CategoryAliases.\n" []
+  (set! (.-categories aliases) (make (map string string)))
+  (set! (.-scripts aliases) (make (map string string)))
+  (range [name actual unicode/CategoryAliases]
+    (aset (.-categories aliases) (canonicalName name) actual))
+
+  (range [name unicode/Scripts]
+    (aset (.-scripts aliases) (canonicalName name) name)))
+
+
+
+
+
+
+
+
+^{:go/end 1715} (go/func canonicalName "canonicalName returns the canonical lookup string for name.\nThe canonical name has a leading uppercase letter and then lowercase letters,\nand it omits all underscores, spaces, and hyphens.\n(We could have used all lowercase, but this way most package unicode\nmap keys are already canonical.)\n" ^string [^string name]
+  (let [^{:tag (slice byte)} b (zero (slice byte))
+      ^{:line 1682} first true]
+    (range [i (len name)]
+      (let [c (aget name i)]
+        (switch
+          (case [(or (== c \_) (== c \-) (== c \space))]
+            (set! c \space))
+          (case [first]
+            (when (and (<= \a c) (<= c \z))
+              (set! c - (- \a \A)))
+
+            (set! first false))
+          (default
+            (when (and (<= \A c) (<= c \Z))
+              (set! c + (- \a \A)))))
+
+
+        (when (== b nil)
+          (when (and (== c (aget name i)) (!= c \space))
+            ;; No changes so far, avoid allocating b.
+            (continue))
+
+          (set! b (make (slice byte) i (len name)))
+          (copy b (subslice name _ i)))
+
+        (when (== c \space)
+          (continue))
+
+        (set! b (append b c))))
+
+    (when (== b nil)
+      (return name))
+
+    (conv string b)))
+
+
+
+
+
+^{:go/end 1755} (go/func unicodeTable "unicodeTable returns the unicode.RangeTable identified by name\nand the table of additional fold-equivalent code points.\nIf sign < 0, the result should be inverted.\n" [^string name] :results [^{:tag (* unicode/RangeTable)} tab ^{:tag (* unicode/RangeTable)} fold ^int sign]
+  (set! name (canonicalName name))
+
+  ;; Special cases: Any, Assigned, and ASCII.
+  ;; Also LC is the only non-canonical Categories key, so handle it here.
+  (switch name
+    (case ["Any"]
+      (return anyTable anyTable (+ 1)))
+    (case ["Assigned"]
+      (return unicode/Cn unicode/Cn -1)) ; invert Cn (unassigned)
+    (case ["Ascii"]
+      (return asciiTable asciiFoldTable (+ 1)))
+    (case ["Lc"]
+      (return (aget unicode/Categories "LC") (aget unicode/FoldCategory "LC") (+ 1))))
+
+  (when [t (aget unicode/Categories name)] (!= t nil)
+    (return t (aget unicode/FoldCategory name) (+ 1)))
+
+  (when [t (aget unicode/Scripts name)] (!= t nil)
+    (return t (aget unicode/FoldScript name) (+ 1)))
+
+
+  ;; unicode.CategoryAliases makes liberal use of underscores in its names
+  ;; (they are defined that way by Unicode), but we want to match ignoring
+  ;; the underscores, so make our own map with canonical names.
+  (.Do (.-once aliases) initAliases)
+  (when [actual (aget (.-categories aliases) name)] (!= actual "")
+    (let [t (aget unicode/Categories actual)]
+      (return t (aget unicode/FoldCategory actual) (+ 1))))
+
+  (when [actual (aget (.-scripts aliases) name)] (!= actual "")
+    (let [t (aget unicode/Scripts actual)]
+      (return t (aget unicode/FoldScript actual) (+ 1))))
+
+  (return nil nil 0))
+
+
+
+
+
+^{:go/end 1832} (go/method parseUnicodeClass "parseUnicodeClass parses a leading Unicode character class like \\p{Han}\nfrom the beginning of s. If one is present, it appends the characters to r\nand returns the new slice r and the remainder of the string.\n" [^{:tag (* parser)} p ^string s ^{:tag (slice rune)} r] :results [^{:tag (slice rune)} out ^string rest ^error err]
+  (when (or (== (bit-and (.-flags p) UnicodeGroups) 0) (< (len s) 2) (!= (aget s 0) \\) (and (!= (aget s 1) \p) (!= (aget s 1) \P)))
+    (return))
+
+
+  ;; Committed to parse or return error.
+  (let [sign (+ 1)]
+    (when (== (aget s 1) \P)
+      (set! sign -1))
+
+    (let [t (subslice s 2)
+        (values c ^:assign t ^:assign err) (nextRune t)]
+      (when (!= err nil)
+        (return))
+
+      (let [(values ^string seq ^string name) (zero string)]
+        (if (!= c \{) (do
+            ;; Single-letter name.
+            (set! seq (subslice s _ (- (len s) (len t))))
+            (set! name (subslice seq 2)))
+
+          ;; Name is in braces.
+          (let [end (strings/IndexRune s \})]
+            (when (< end 0)
+              (when [(set! err (checkUTF8 s))] (!= err nil)
+                (return))
+
+              (return nil "" (addr (lit Error ErrInvalidCharRange s))))
+
+            (set! (values seq t) (values (subslice s _ (+ end 1)) (subslice s (+ end 1))))
+            (set! name (subslice s 3 end))
+            (when [(set! err (checkUTF8 name))] (!= err nil)
+              (return))))
+
+
+
+        ;; Group can have leading negation too.  \p{^Han} == \P{Han}, \P{^Han} == \p{Han}.
+        (when (and (!= name "") (== (aget name 0) \^))
+          (set! sign (- sign))
+          (set! name (subslice name 1)))
+
+
+        (let [(values tab fold tsign) (unicodeTable name)]
+          (when (== tab nil)
+            (return nil "" (addr (lit Error ErrInvalidCharRange seq))))
+
+          (when (< tsign 0)
+            (set! sign (- sign)))
+
+
+          (if (or (== (bit-and (.-flags p) FoldCase) 0) (== fold nil))
+            (if (> sign 0)
+              (set! r (appendTable r tab))
+
+              (set! r (appendNegatedTable r tab)))
+
+
+            ;; Merge and clean tab and fold in a temporary buffer.
+            ;; This is necessary for the negative case and just tidy
+            ;; for the positive case.
+            (let [tmp (subslice (.-tmpClass p) _ 0)]
+              (set! tmp (appendTable tmp tab))
+              (set! tmp (appendTable tmp fold))
+              (set! (.-tmpClass p) tmp)
+              (set! tmp (cleanClass (addr (.-tmpClass p))))
+              (if (> sign 0)
+                (set! r (appendClass r tmp))
+
+                (set! r (appendNegatedClass r tmp)))))
+
+
+          (return r t nil))))))
+
+
+
+
+^{:go/end 1928} (go/method parseClass "parseClass parses a character class at the beginning of s\nand pushes it onto the parse stack.\n" [^{:tag (* parser)} p ^string s] :results [^string rest ^error err]
+  (let [t (subslice s 1) ; chop [
+      ^{:line 1838} re (.newRegexp p OpCharClass)]
+    (set! (.-Flags re) (.-flags p))
+    (set! (.-Rune re) (subslice (.-Rune0 re) _ 0))
+
+    (let [sign (+ 1)]
+      (when (and (!= t "") (== (aget t 0) \^))
+        (set! sign -1)
+        (set! t (subslice t 1))
+
+        ;; If character class does not match \n, add it here,
+        ;; so that negation later will do the right thing.
+        (when (== (bit-and (.-flags p) ClassNL) 0)
+          (set! (.-Rune re) (append (.-Rune re) \newline \newline))))
+
+
+
+      (let [class (.-Rune re)
+          ^{:line 1855} first true] ; ] and - are okay as first char in class
+        (while (or (== t "") (!= (aget t 0) \]) first)
+          ;; POSIX: - is only okay unescaped as first or last in class.
+          ;; Perl: - is okay anywhere.
+          (when (and (!= t "") (== (aget t 0) \-) (== (bit-and (.-flags p) PerlX) 0) (not first) ^:go/paren (or (== (len t) 1) (!= (aget t 1) \])))
+            (let [(values _ size) (utf8/DecodeRuneInString (subslice t 1))]
+              (return "" (addr (lit Error :Code ErrInvalidCharRange :Expr (subslice t _ (+ 1 size)))))))
+
+          (set! first false)
+
+          ;; Look for POSIX [:alnum:] etc.
+          (when (and (> (len t) 2) (== (aget t 0) \[) (== (aget t 1) \:))
+            (let [(values nclass nt err) (.parseNamedClass p t class)]
+              (when (!= err nil)
+                (return "" err))
+
+              (when (!= nclass nil)
+                (set! (values class t) (values nclass nt))
+                (continue))))
+
+
+
+          ;; Look for Unicode character group like \p{Han}.
+          (let [(values nclass nt err) (.parseUnicodeClass p t class)]
+            (when (!= err nil)
+              (return "" err))
+
+            (when (!= nclass nil)
+              (set! (values class t) (values nclass nt))
+              (continue))
+
+
+            ;; Look for Perl character class symbols (extension).
+            (when [(values nclass nt) (.parsePerlClassEscape p t class)] (!= nclass nil)
+              (set! (values class t) (values nclass nt))
+              (continue))
+
+
+            ;; Single character or simple range.
+            (let [rng t
+                (values ^rune lo ^rune hi) (zero rune)]
+              (when [(set! (values lo t err) (.parseClassChar p t s))] (!= err nil)
+                (return "" err))
+
+              (set! hi lo)
+              ;; [a-] means (a|-) so check for final ].
+              (when (and (>= (len t) 2) (== (aget t 0) \-) (!= (aget t 1) \]))
+                (set! t (subslice t 1))
+                (when [(set! (values hi t err) (.parseClassChar p t s))] (!= err nil)
+                  (return "" err))
+
+                (when (< hi lo)
+                  (set! rng (subslice rng _ (- (len rng) (len t))))
+                  (return "" (addr (lit Error :Code ErrInvalidCharRange :Expr rng)))))
+
+
+              (if (== (bit-and (.-flags p) FoldCase) 0)
+                (set! class (appendRange class lo hi))
+
+                (set! class (appendFoldedRange class lo hi))))))
+
+
+        (set! t (subslice t 1)) ; chop ]
+
+        ;; Use &re.Rune instead of &class to avoid allocation.
+        (set! (.-Rune re) class)
+        (set! class (cleanClass (addr (.-Rune re))))
+        (when (< sign 0)
+          (set! class (negateClass class)))
+
+        (set! (.-Rune re) class)
+        (.push p re)
+        (return t nil)))))
+
+
+
+
+^{:go/end 1960} (go/func cleanClass "cleanClass sorts the ranges (pairs of elements of r),\nmerges them, and eliminates duplicates.\n" ^{:tag (slice rune)} [^{:tag (* (slice rune))} rp]
+
+  ;; Sort by lo increasing, hi decreasing to break ties.
+  (sort/Sort (lit ranges rp))
+
+  (let [r @rp]
+    (when (< (len r) 2)
+      (return r))
+
+
+    ;; Merge abutting, overlapping.
+    (let [w 2] ; write index
+      (for [i 2] (< i (len r)) (set! i + 2)
+        (let [(values lo hi) (values (aget r i) (aget r (+ i 1)))]
+          (when (<= lo (+ (aget r (- w 1)) 1))
+            ;; merge with previous range
+            (when (> hi (aget r (- w 1)))
+              (aset r (- w 1) hi))
+
+            (continue))
+
+          ;; new disjoint range
+          (aset r w lo)
+          (aset r (+ w 1) hi)
+          (set! w + 2)))
+
+
+      (subslice r _ w))))
+
+
+
+
+^{:go/end 1976} (go/func inCharClass "inCharClass reports whether r is in the class.\nIt assumes the class has been cleaned by cleanClass.\n" ^bool [^rune r ^{:tag (slice rune)} class]
+  (let [(values _ ok) (sort/Find (/ (len class) 2) ^{:go/end 1974} (fn ^int [^int i]
+          ^{:go/breaks [[4 1973]]} (let [(values lo hi) (values (aget class (* 2 i)) (aget class (+ (* 2 i) 1)))]
+            (when (> r hi)
+              (return (+ 1)))
+
+            (when (< r lo)
+              (return -1))
+
+            0)))]
+
+    ^{:line 1975} ok))
+
+
+
+^{:go/end 1984} (go/func appendLiteral "appendLiteral returns the result of appending the literal x to the class r.\n" ^{:tag (slice rune)} [^{:tag (slice rune)} r ^rune x ^Flags flags]
+  (when (!= (bit-and flags FoldCase) 0)
+    (return (appendFoldedRange r x x)))
+
+  (appendRange r x x))
+
+
+
+^{:go/end 2009} (go/func appendRange "appendRange returns the result of appending the range lo-hi to the class r.\n" ^{:tag (slice rune)} [^{:tag (slice rune)} r ^rune lo ^rune hi]
+  ;; Expand last range or next to last range if it overlaps or abuts.
+  ;; Checking two ranges helps when appending case-folded
+  ;; alphabets, so that one range can be expanding A-Z and the
+  ;; other expanding a-z.
+  (let [n (len r)]
+    (for [i 2] (<= i 4) (set! i + 2) ; twice, using i=2, i=4
+      (when (>= n i)
+        (let [(values rlo rhi) (values (aget r (- n i)) (aget r (+ (- n i) 1)))]
+          (when (and (<= lo (+ rhi 1)) (<= rlo (+ hi 1)))
+            (when (< lo rlo)
+              (aset r (- n i) lo))
+
+            (when (> hi rhi)
+              (aset r (+ (- n i) 1) hi))
+
+            (return r)))))
+
+
+
+
+    (append r lo hi)))
+
+
+(go/const
+
+
+  ^{:line 2014} [^{:val 65 :doc "minimum and maximum runes involved in folding.\nchecked during test.\n"} minFold 0x0041]
+  ^{:line 2015} [^{:val 125251} maxFold 0x1e943])
+
+
+
+
+^{:go/end 2051} (go/func appendFoldedRange "appendFoldedRange returns the result of appending the range lo-hi\nand its case folding-equivalent runes to the class r.\n" ^{:tag (slice rune)} [^{:tag (slice rune)} r ^rune lo ^rune hi]
+  ;; Optimizations.
+  (when (and (<= lo minFold) (>= hi maxFold))
+    ;; Range is full: folding can't add more.
+    (return (appendRange r lo hi)))
+
+  (when (or (< hi minFold) (> lo maxFold))
+    ;; Range is outside folding possibilities.
+    (return (appendRange r lo hi)))
+
+  (when (< lo minFold)
+    ;; [lo, minFold-1] needs no folding.
+    (set! r (appendRange r lo (- minFold 1)))
+    (set! lo minFold))
+
+  (when (> hi maxFold)
+    ;; [maxFold+1, hi] needs no folding.
+    (set! r (appendRange r (+ maxFold 1) hi))
+    (set! hi maxFold))
+
+
+  ;; Brute force. Depend on appendRange to coalesce ranges on the fly.
+  (for [c lo] (<= c hi) (inc! c)
+    (set! r (appendRange r c c))
+    (let [f (unicode/SimpleFold c)]
+      (while (!= f c)
+        (set! r (appendRange r f f))
+        (set! f (unicode/SimpleFold f)))))
+
+
+  ^{:line 2050} r)
+
+
+
+
+^{:go/end 2060} (go/func appendClass "appendClass returns the result of appending the class x to the class r.\nIt assume x is clean.\n" ^{:tag (slice rune)} [^{:tag (slice rune)} r ^{:tag (slice rune)} x]
+  (for [i 0] (< i (len x)) (set! i + 2)
+    (set! r (appendRange r (aget x i) (aget x (+ i 1)))))
+
+  ^{:line 2059} r)
+
+
+
+^{:go/end 2068} (go/func appendFoldedClass "appendFoldedClass returns the result of appending the case folding of the class x to the class r.\n" ^{:tag (slice rune)} [^{:tag (slice rune)} r ^{:tag (slice rune)} x]
+  (for [i 0] (< i (len x)) (set! i + 2)
+    (set! r (appendFoldedRange r (aget x i) (aget x (+ i 1)))))
+
+  ^{:line 2067} r)
+
+
+
+
+^{:go/end 2085} (go/func appendNegatedClass "appendNegatedClass returns the result of appending the negation of the class x to the class r.\nIt assumes x is clean.\n" ^{:tag (slice rune)} [^{:tag (slice rune)} r ^{:tag (slice rune)} x]
+  (let [nextLo \u0000]
+    (for [i 0] (< i (len x)) (set! i + 2)
+      (let [(values lo hi) (values (aget x i) (aget x (+ i 1)))]
+        (when (<= nextLo (- lo 1))
+          (set! r (appendRange r nextLo (- lo 1))))
+
+        (set! nextLo (+ hi 1))))
+
+    (when (<= nextLo unicode/MaxRune)
+      (set! r (appendRange r nextLo unicode/MaxRune)))
+
+    ^{:line 2084} r))
+
+
+
+^{:go/end 2110} (go/func appendTable "appendTable returns the result of appending x to the class r.\n" ^{:tag (slice rune)} [^{:tag (slice rune)} r ^{:tag (* unicode/RangeTable)} x]
+  (range [_ xr (.-R16 x)]
+    (let [(values lo hi stride) (values (conv rune (.-Lo xr)) (conv rune (.-Hi xr)) (conv rune (.-Stride xr)))]
+      (when (== stride 1)
+        (set! r (appendRange r lo hi))
+        (continue))
+
+      (for [c lo] (<= c hi) (set! c + stride)
+        (set! r (appendRange r c c)))))
+
+
+  (range [_ xr (.-R32 x)]
+    (let [(values lo hi stride) (values (conv rune (.-Lo xr)) (conv rune (.-Hi xr)) (conv rune (.-Stride xr)))]
+      (when (== stride 1)
+        (set! r (appendRange r lo hi))
+        (continue))
+
+      (for [c lo] (<= c hi) (set! c + stride)
+        (set! r (appendRange r c c)))))
+
+
+  ^{:line 2109} r)
+
+
+
+^{:go/end 2151} (go/func appendNegatedTable "appendNegatedTable returns the result of appending the negation of x to the class r.\n" ^{:tag (slice rune)} [^{:tag (slice rune)} r ^{:tag (* unicode/RangeTable)} x]
+  (let [nextLo \u0000] ; lo end of next class to add
+    (range [_ xr (.-R16 x)]
+      (let [(values lo hi stride) (values (conv rune (.-Lo xr)) (conv rune (.-Hi xr)) (conv rune (.-Stride xr)))]
+        (when (== stride 1)
+          (when (<= nextLo (- lo 1))
+            (set! r (appendRange r nextLo (- lo 1))))
+
+          (set! nextLo (+ hi 1))
+          (continue))
+
+        (for [c lo] (<= c hi) (set! c + stride)
+          (when (<= nextLo (- c 1))
+            (set! r (appendRange r nextLo (- c 1))))
+
+          (set! nextLo (+ c 1)))))
+
+
+    (range [_ xr (.-R32 x)]
+      (let [(values lo hi stride) (values (conv rune (.-Lo xr)) (conv rune (.-Hi xr)) (conv rune (.-Stride xr)))]
+        (when (== stride 1)
+          (when (<= nextLo (- lo 1))
+            (set! r (appendRange r nextLo (- lo 1))))
+
+          (set! nextLo (+ hi 1))
+          (continue))
+
+        (for [c lo] (<= c hi) (set! c + stride)
+          (when (<= nextLo (- c 1))
+            (set! r (appendRange r nextLo (- c 1))))
+
+          (set! nextLo (+ c 1)))))
+
+
+    (when (<= nextLo unicode/MaxRune)
+      (set! r (appendRange r nextLo unicode/MaxRune)))
+
+    ^{:line 2150} r))
+
+
+
+
+^{:go/end 2174} (go/func negateClass "negateClass overwrites r and returns r's negation.\nIt assumes the class r is already clean.\n" ^{:tag (slice rune)} [^{:tag (slice rune)} r]
+  (let [nextLo \u0000 ; lo end of next class to add
+      ^{:line 2157} w 0] ; write index
+    (for [i 0] (< i (len r)) (set! i + 2)
+      (let [(values lo hi) (values (aget r i) (aget r (+ i 1)))]
+        (when (<= nextLo (- lo 1))
+          (aset r w nextLo)
+          (aset r (+ w 1) (- lo 1))
+          (set! w + 2))
+
+        (set! nextLo (+ hi 1))))
+
+    (set! r (subslice r _ w))
+    (when (<= nextLo unicode/MaxRune)
+      ;; It's possible for the negation to have one more
+      ;; range - this one - than the original class, so use append.
+      (set! r (append r nextLo unicode/MaxRune)))
+
+    ^{:line 2173} r))
+
+
+
+
+
+
+(go/type ranges "ranges implements sort.Interface on a []rune.\nThe choice of receiver type definition is strange\nbut avoids an allocation since we already have\na *[]rune.\n" (struct
+    ^{:line 2181 :tag (* (slice rune))} p))
+
+
+^{:go/end 2189} (go/method Less ^bool [^ranges ra ^int i ^int j]
+  (let [p @(.-p ra)]
+    (set! i * 2)
+    (set! j * 2)
+    (or (< (aget p i) (aget p j)) (and (== (aget p i) (aget p j)) (> (aget p (+ i 1)) (aget p (+ j 1)))))))
+
+
+^{:go/end 2193} (go/method Len ^int [^ranges ra]
+  (/ (len @(.-p ra)) 2))
+
+
+^{:go/end 2200} (go/method Swap [^ranges ra ^int i ^int j]
+  (let [p @(.-p ra)]
+    (set! i * 2)
+    (set! j * 2)
+    (set! (values (aget p i) (aget p (+ i 1)) (aget p j) (aget p (+ j 1))) (values (aget p j) (aget p (+ j 1)) (aget p i) (aget p (+ i 1))))))
+
+
+^{:go/breaks [[4 2210]] :go/end 2211} (go/func checkUTF8 ^error [^string s]
+  (while (!= s "")
+    (let [(values rune size) (utf8/DecodeRuneInString s)]
+      (when (and (== rune utf8/RuneError) (== size 1))
+        (return (addr (lit Error :Code ErrInvalidUTF8 :Expr s))))
+
+      (set! s (subslice s size))))
+
+  nil)
+
+
+^{:go/end 2219} (go/func nextRune [^string s] :results [^rune c ^string t ^error err]
+  (let [(values ^:assign c size) (utf8/DecodeRuneInString s)]
+    (when (and (== c utf8/RuneError) (== size 1))
+      (return 0 "" (addr (lit Error :Code ErrInvalidUTF8 :Expr s))))
+
+    (return c (subslice s size) nil)))
+
+
+^{:go/end 2223} (go/func isalnum ^bool [^rune c]
+  (or (and (<= \0 c) (<= c \9)) (and (<= \A c) (<= c \Z)) (and (<= \a c) (<= c \z))))
+
+
+^{:go/breaks [[6 2235]] :go/end 2236} (go/func unhex ^rune [^rune c]
+  (when (and (<= \0 c) (<= c \9))
+    (return (- c \0)))
+
+  (when (and (<= \a c) (<= c \f))
+    (return (+ (- c \a) 10)))
+
+  (when (and (<= \A c) (<= c \F))
+    (return (+ (- c \A) 10)))
+
+  -1)

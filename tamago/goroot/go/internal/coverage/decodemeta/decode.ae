@@ -1,0 +1,135 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.coverage.decodemeta) (go/file "decode.go" :imports [
+
+    ;; This package contains APIs and helpers for decoding a single package's
+    ;; meta data "blob" emitted by the compiler when coverage instrumentation
+    ;; is turned on.
+
+
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [coverage "internal/coverage"]
+    ^{:line 15} [slicereader "internal/coverage/slicereader"]
+    ^{:line 16} [stringtab "internal/coverage/stringtab"]
+    ^{:line 17} [io "io"]
+    ^{:line 18} [os "os"]])
+
+
+;; See comments in the encodecovmeta package for details on the format.
+
+(go/type CoverageMetaDataDecoder (struct
+    ^{:line 24 :tag (* slicereader/Reader)} r
+    ^{:line 25 :tag coverage/MetaSymbolHeader} hdr
+    ^{:line 26 :tag (* stringtab/Reader)} strtab
+    ^{:line 27 :tag (slice byte)} tmp
+    ^{:line 28 :tag bool} debug))
+
+
+^{:go/end 44} (go/func NewCoverageMetaDataDecoder [^{:tag (slice byte)} b ^bool readonly] :results [(* CoverageMetaDataDecoder) error]
+  (let [slr (slicereader/NewReader b readonly)
+      ^{:line 33} x (addr ^{:go/breaks [2 4]} (lit CoverageMetaDataDecoder
+          :r slr
+          :tmp (make (slice byte) 0 256)))]
+
+    (when [err (.readHeader x)] (!= err nil)
+      (return nil err))
+
+    (when [err (.readStringTable x)] (!= err nil)
+      (return nil err))
+
+    (return x nil)))
+
+
+^{:go/breaks [[5 53]] :go/end 54} (go/method readHeader ^error [^{:tag (* CoverageMetaDataDecoder)} d]
+  (when [err (binary/Read (.-r d) binary/LittleEndian (addr (.-hdr d)))] (!= err nil)
+    (return err))
+
+  (when (.-debug d)
+    (fmt/Fprintf os/Stderr "=-= after readHeader: %+v\n" (.-hdr d)))
+
+  nil)
+
+
+^{:go/end 67} (go/method readStringTable ^error [^{:tag (* CoverageMetaDataDecoder)} d]
+  ;; Seek to the correct location to read the string table.
+  ^{:go/breaks [5]} (let [stringTableLocation (conv int64 (+ coverage/CovMetaHeaderSize (* 4 (.-NumFuncs (.-hdr d)))))]
+    (when [(values _ err) (.Seek (.-r d) stringTableLocation io/SeekStart)] (!= err nil)
+      (return err))
+
+
+    ;; Read the table itself.
+    (set! (.-strtab d) (stringtab/NewReader (.-r d)))
+    (.Read (.-strtab d))
+    nil))
+
+
+^{:go/end 71} (go/method PackagePath ^string [^{:tag (* CoverageMetaDataDecoder)} d]
+  (.Get (.-strtab d) (.-PkgPath (.-hdr d))))
+
+
+^{:go/end 75} (go/method PackageName ^string [^{:tag (* CoverageMetaDataDecoder)} d]
+  (.Get (.-strtab d) (.-PkgName (.-hdr d))))
+
+
+^{:go/end 79} (go/method ModulePath ^string [^{:tag (* CoverageMetaDataDecoder)} d]
+  (.Get (.-strtab d) (.-ModulePath (.-hdr d))))
+
+
+^{:go/end 83} (go/method NumFuncs ^uint32 [^{:tag (* CoverageMetaDataDecoder)} d]
+  (.-NumFuncs (.-hdr d)))
+
+
+
+
+^{:go/end 136} (go/method ReadFunc "ReadFunc reads the coverage meta-data for the function with index\n'findex', filling it into the FuncDesc pointed to by 'f'.\n" ^error [^{:tag (* CoverageMetaDataDecoder)} d ^uint32 fidx ^{:tag (* coverage/FuncDesc)} f]
+  (when (>= fidx (.-NumFuncs (.-hdr d)))
+    (return (fmt/Errorf "illegal function index")))
+
+
+  ;; Seek to the correct location to read the function offset and read it.
+  (let [funcOffsetLocation (conv int64 (+ coverage/CovMetaHeaderSize (* 4 fidx)))]
+    (when [(values _ err) (.Seek (.-r d) funcOffsetLocation io/SeekStart)] (!= err nil)
+      (return err))
+
+    (let [foff (.ReadUint32 (.-r d))]
+
+      ;; Check assumptions
+      (when (or (< foff (conv uint32 funcOffsetLocation)) (> foff (.-Length (.-hdr d))))
+        (return (fmt/Errorf "malformed func offset %d" foff)))
+
+
+      ;; Seek to the correct location to read the function.
+      (let [floc (conv int64 foff)]
+        (when [(values _ err) (.Seek (.-r d) floc io/SeekStart)] (!= err nil)
+          (return err))
+
+
+        ;; Preamble containing number of units, file, and function.
+        (let [numUnits (conv uint32 (.ReadULEB128 (.-r d)))
+            ^{:line 112} fnameidx (conv uint32 (.ReadULEB128 (.-r d)))
+            ^{:line 113} fileidx (conv uint32 (.ReadULEB128 (.-r d)))]
+
+          (set! (.-Srcfile f) (.Get (.-strtab d) fileidx))
+          (set! (.-Funcname f) (.Get (.-strtab d) fnameidx))
+
+          ;; Now the units
+          (set! (.-Units f) (subslice (.-Units f) _ 0))
+          (when (< (cap (.-Units f)) (conv int numUnits))
+            (set! (.-Units f) (make (slice coverage/CoverableUnit) 0 numUnits)))
+
+          (for [k (conv uint32 0)] (< k numUnits) (inc! k)
+            (set! (.-Units f) (append (.-Units f)
+                ^{:go/breaks [2 4 6 8 10]} (lit coverage/CoverableUnit
+                  :StLine (conv uint32 (.ReadULEB128 (.-r d)))
+                  :StCol (conv uint32 (.ReadULEB128 (.-r d)))
+                  :EnLine (conv uint32 (.ReadULEB128 (.-r d)))
+                  :EnCol (conv uint32 (.ReadULEB128 (.-r d)))
+                  :NxStmts (conv uint32 (.ReadULEB128 (.-r d)))))))
+
+
+          ^{:go/breaks [3]} (let [lit (.ReadULEB128 (.-r d))]
+            (set! (.-Lit f) (!= lit 0))
+            nil))))))

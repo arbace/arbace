@@ -1,0 +1,236 @@
+;; VirtIO over PCI driver (legacy)
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.virtio) (go/file "legacy.go" :imports [
+
+
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]
+
+    ^{:line 15} [amd64 "github.com/usbarmory/tamago/amd64"]
+    ^{:line 16} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 17} [pci "github.com/usbarmory/tamago/soc/intel/pci"]])
+
+
+(go/const
+  ^{:line 21} [^{:val 4096} deviceMin 0x1000]
+  ^{:line 22} [^{:val 4159} deviceMax 0x103f])
+
+
+(go/const
+  ^{:line 26} [^{:val 4096} pageSize 4096]
+  ^{:line 27} [^{:val 20} configurationLength 20])
+
+
+
+(go/const "VirtIO Common Configuration offsets (legacy interface)\n"
+  ^{:line 32} [^{:val 0} legacyDeviceFeatures 0x00]
+  ^{:line 33} [^{:val 4} legacyDriverFeatures 0x04]
+  ^{:line 34} [^{:val 8} legacyQueueAddress 0x08]
+  ^{:line 35} [^{:val 12} legacyQueueSize 0x0c]
+  ^{:line 36} [^{:val 14} legacyQueueSelect 0x0e]
+  ^{:line 37} [^{:val 16} legacyQueueNotify 0x10]
+  ^{:line 38} [^{:val 18} legacyDeviceStatus 0x12]
+  ^{:line 39} [^{:val 19} legacyISRStatus 0x13]
+  ^{:line 40} [^{:val 20} legacyDeviceConfig 0x14]
+  ^{:line 41} [^{:val 20} legacyConfigMSIXVector 0x14]
+  ^{:line 42} [^{:val 22} legacyQueueMSIXVector 0x16]
+  ^{:line 43} [^{:val 24} legacyDeviceConfigMSI 0x18])
+
+
+
+(go/type LegacyPCI "LegacyPCI represents a legacy VirtIO over PCI device.\n" (struct
+
+    ^{:line 49 :tag (* pci/Device) :doc "Device represents the probed PCI device.\n"} Device
+
+
+    ^{:line 52 :tag uint16 :doc "I/O port space\n"} config
+    ^{:line 53 :tag uint64} features
+
+    ^{:line 55 :tag (* pci/CapabilityMSIX)} msix
+    ^{:line 56 :tag bool} msixEnabled))
+
+
+^{:go/breaks [[4 73]] :go/end 74} (go/method addCapability ^error [^{:tag (* LegacyPCI)} io ^uint32 off ^{:tag (* pci/CapabilityHeader)} hdr]
+  (switch (.-Vendor hdr)
+    (case [pci/VendorSpecific]
+      (return (fmt/Errorf "unexpected PCI capability %x" (.-Vendor hdr))))
+    (case [pci/MSIX]
+      (let [c (addr (lit pci/CapabilityMSIX))]
+
+        (when [err (.Unmarshal c (.-Device io) off)] (!= err nil)
+          (return err))
+
+
+        (set! (.-msix io) c))))
+
+
+  nil)
+
+
+^{:go/end 79} (go/method negotiate [^{:tag (* LegacyPCI)} io ^uint64 driverFeatures]
+  (set! (.-features io) (negotiate (.DeviceFeatures io) driverFeatures))
+  (.SetDriverFeatures io (.-features io)))
+
+
+
+^{:go/end 121} (go/method Init "Init initializes a legacy VirtIO over PCI device instance.\n" [^{:tag (* LegacyPCI)} io ^uint64 features] :results [^error err]
+  (when (== (.-Device io) nil)
+    (return (errors/New "invalid VirtIO instance")))
+
+
+  (when [rev (.Read (.-Device io) 0 pci/RevisionID)] (!= (bit-and rev 0xff) 0)
+    (return (errors/New "not a transitional device")))
+
+
+  (when (or (< (.-Device (.-Device io)) deviceMin) (> (.-Device (.-Device io)) deviceMax))
+    (return (errors/New "not a transitional device")))
+
+
+  (let [bar0 (.BaseAddress (.-Device io) 0)]
+
+    (when (!= (bit-and bar0 1) 1)
+      (return (errors/New "unexpected PCI BAR type, expected I/O port")))
+
+
+    (range [off hdr (.Capabilities (.-Device io))]
+      (when [(set! err (.addCapability io off hdr))] (!= err nil)
+        (return)))
+
+
+
+    (set! (.-config io) (bit-and (conv uint16 bar0) 0xfff0))
+
+    ;; reset
+    (.setStatus io 0)
+
+    ;; initialize driver
+    (let [s (.Status io)]
+      (set! s bit-or (<< 1 Acknowledge))
+      (set! s bit-or (<< 1 Driver))
+      (.setStatus io s)
+
+      (.negotiate io features)
+
+      (return))))
+
+
+
+^{:go/end 140} (go/method Config "Config returns the device configuration.\n" [^{:tag (* LegacyPCI)} io ^int size] :results [^{:tag (slice byte)} config]
+  (let [^int off (zero int)]
+
+    (if (.-msixEnabled io)
+      (set! off legacyDeviceConfigMSI)
+
+      (set! off legacyDeviceConfig))
+
+
+    (set! config (make (slice byte) size))
+
+    (for [i 0] (< i size) (set! i + 1)
+      (aset config i (reg/In8 (+ (.-config io) (conv uint16 (+ off i))))))
+
+
+    (return)))
+
+
+
+^{:go/end 145} (go/method DeviceID "DeviceID returns the VirtIO subsystem device ID\n" ^uint32 [^{:tag (* LegacyPCI)} io]
+  (conv uint32 (+ (- (.-Device (.-Device io)) 0x1000) 1)))
+
+
+
+^{:go/end 150} (go/method DeviceFeatures "DeviceFeatures returns the device feature bits,\n" [^{:tag (* LegacyPCI)} io] :results [^uint64 features]
+  (conv uint64 (reg/In32 (+ (.-config io) legacyDeviceFeatures))))
+
+
+
+^{:go/end 155} (go/method DriverFeatures "DriverFeatures returns the driver feature bits.\n" [^{:tag (* LegacyPCI)} io] :results [^uint64 features]
+  (conv uint64 (reg/In32 (+ (.-config io) legacyDriverFeatures))))
+
+
+
+
+^{:go/end 161} (go/method SetDriverFeatures "SetDriverFeatures sets the driver feature bits (note that only the first 32\nfeature bits are accessible through the legacy interface).\n" [^{:tag (* LegacyPCI)} io ^uint64 features]
+  (reg/Out32 (+ (.-config io) legacyDriverFeatures) (conv uint32 features)))
+
+
+
+^{:go/end 166} (go/method NegotiatedFeatures "NegotiatedFeatures returns the set of negotiated feature bits.\n" [^{:tag (* LegacyPCI)} io] :results [^uint64 features]
+  (.-features io))
+
+
+
+^{:go/end 172} (go/method QueueReady "QueueReady returns whether a queue is ready for use.\n" [^{:tag (* LegacyPCI)} io ^int index] :results [^bool ready]
+  (reg/Out16 (+ (.-config io) legacyQueueSelect) (conv uint16 index))
+  (!= (reg/In32 (+ (.-config io) legacyQueueAddress)) 0))
+
+
+
+^{:go/end 178} (go/method MaxQueueSize "MaxQueueSize returns the maximum virtual queue size.\n" ^int [^{:tag (* LegacyPCI)} io ^int index]
+  (reg/Out16 (+ (.-config io) legacyQueueSelect) (conv uint16 index))
+  (conv int (reg/In16 (+ (.-config io) legacyQueueSize))))
+
+
+
+^{:go/end 181} (go/method SetQueueSize "SetQueueSize is unsupported on legacy devuces.\n" [^{:tag (* LegacyPCI)} io ^int _ ^int _])
+
+
+^{:go/end 186} (go/method Status "Status returns the device status.\n" ^uint32 [^{:tag (* LegacyPCI)} io]
+  (conv uint32 (reg/In16 (+ (.-config io) legacyDeviceStatus))))
+
+
+^{:go/end 190} (go/method setStatus [^{:tag (* LegacyPCI)} io ^uint32 s]
+  (reg/Out8 (+ (.-config io) legacyDeviceStatus) (conv uint8 s)))
+
+
+
+^{:go/end 197} (go/method SetQueue "SetQueue registers the indexed virtual queue for device access.\n" [^{:tag (* LegacyPCI)} io ^int index ^{:tag (* VirtualQueue)} queue]
+  (let [(values desc _ _) (.Address queue)]
+    (reg/Out16 (+ (.-config io) legacyQueueSelect) (conv uint16 index))
+    (reg/Out32 (+ (.-config io) legacyQueueAddress) (conv uint32 (/ desc pageSize)))))
+
+
+
+^{:go/end 204} (go/method SetReady "SetReady indicates that the driver is set up and ready to drive the device.\n" [^{:tag (* LegacyPCI)} io]
+  (let [s (.Status io)]
+    (set! s bit-or (<< 1 DriverOk))
+    (.setStatus io s)))
+
+
+
+^{:go/end 209} (go/method QueueNotify "QueueNotify notifies the device that a queue can be processed.\n" [^{:tag (* LegacyPCI)} io ^int index]
+  (reg/Out16 (+ (.-config io) legacyQueueNotify) (conv uint16 index)))
+
+
+
+
+^{:go/breaks [4] :go/end 215} (go/method ConfigVersion "ConfigVersion always returns 0 as legacy devices do not support a generation\ncount for the configuration space.\n" ^uint32 [^{:tag (* LegacyPCI)} io]
+  0)
+
+
+
+
+^{:go/end 237} (go/method EnableInterrupt "EnableInterrupt enables MSI-X interrupt vector routing to a LAPIC instance\nfor the indexed virtual queue.\n" [^{:tag (* LegacyPCI)} io ^int id ^int index] :results [^error err]
+  (when (== (.-msix io) nil)
+    (return (errors/New "missing required capabilities")))
+
+
+  (let [entry 0
+      ^{:line 225} addr (conv uint64 amd64/LAPIC_BASE)
+      ^{:line 226} data (conv uint32 id)]
+
+    (when [(set! err (.EnableInterrupt (.-msix io) entry addr data))] (!= err nil)
+      (return))
+
+
+    (set! (.-msixEnabled io) true)
+    (reg/Out16 (+ (.-config io) legacyQueueSelect) (conv uint16 index))
+    (reg/Out16 (+ (.-config io) legacyQueueMSIXVector) (conv uint16 entry))
+
+    (return)))

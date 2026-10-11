@@ -1,0 +1,462 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.regexp.syntax) (go/file "regexp.go" :imports [
+
+    ;; Note to implementers:
+    ;; In this package, re is always a *Regexp and r is always a rune.
+
+
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [unicode "unicode"]])
+
+
+
+(go/type Regexp "A Regexp is a node in a regular expression syntax tree.\n" (struct
+    ^{:line 19 :tag Op} Op ; operator
+    ^{:line 20 :tag Flags} Flags
+    ^{:line 21 :tag (slice (* Regexp))} Sub ; subexpressions, if any
+    ^{:line 22 :tag (array 1 (* Regexp))} Sub0 ; storage for short Sub
+    ^{:line 23 :tag (slice rune)} Rune ; matched runes, for OpLiteral, OpCharClass
+    ^{:line 24 :tag (array 2 rune)} Rune0 ; storage for short Rune
+    ^{:line 25 :tag int} Min ^int Max ; min, max for OpRepeat
+    ^{:line 26 :tag int} Cap ; capturing index, for OpCapture
+    ^{:line 27 :tag string} Name)) ; capturing name, for OpCapture
+
+
+(go/directive "//go:generate stringer -type Op -trimprefix Op")
+
+
+(go/type Op "An Op is a single regular expression operator.\n" uint8)
+
+;; Operators are listed in precedence order, tightest binding to weakest.
+;; Character class operators are listed simplest to most complex
+;; (OpLiteral, OpCharClass, OpAnyCharNotNL, OpAnyChar).
+
+(go/const
+  ^{:line 40} [^{:tag Op :val 1} OpNoMatch (+ 1 iota)] ; matches no strings
+  ^{:line 41} [^{:val 2} OpEmptyMatch] ; matches empty string
+  ^{:line 42} [^{:val 3} OpLiteral] ; matches Runes sequence
+  ^{:line 43} [^{:val 4} OpCharClass] ; matches Runes interpreted as range pair list
+  ^{:line 44} [^{:val 5} OpAnyCharNotNL] ; matches any character except newline
+  ^{:line 45} [^{:val 6} OpAnyChar] ; matches any character
+  ^{:line 46} [^{:val 7} OpBeginLine] ; matches empty string at beginning of line
+  ^{:line 47} [^{:val 8} OpEndLine] ; matches empty string at end of line
+  ^{:line 48} [^{:val 9} OpBeginText] ; matches empty string at beginning of text
+  ^{:line 49} [^{:val 10} OpEndText] ; matches empty string at end of text
+  ^{:line 50} [^{:val 11} OpWordBoundary] ; matches word boundary `\b`
+  ^{:line 51} [^{:val 12} OpNoWordBoundary] ; matches word non-boundary `\B`
+  ^{:line 52} [^{:val 13} OpCapture] ; capturing subexpression with index Cap, optional name Name
+  ^{:line 53} [^{:val 14} OpStar] ; matches Sub[0] zero or more times
+  ^{:line 54} [^{:val 15} OpPlus] ; matches Sub[0] one or more times
+  ^{:line 55} [^{:val 16} OpQuest] ; matches Sub[0] zero or one times
+  ^{:line 56} [^{:val 17} OpRepeat] ; matches Sub[0] at least Min times, at most Max (Max == -1 is no limit)
+  ^{:line 57} [^{:val 18} OpConcat] ; matches concatenation of Subs
+  ^{:line 58} [^{:val 19} OpAlternate]) ; matches alternation of Subs
+
+
+(go/const ^{:tag Op :val 128} opPseudo 128) ; where pseudo-ops start
+
+
+^{:go/breaks [[7 99]] :go/end 100} (go/method Equal "Equal reports whether x and y have identical structure.\n" ^bool [^{:tag (* Regexp)} x ^{:tag (* Regexp)} y]
+  (when (or (== x nil) (== y nil))
+    (return (== x y)))
+
+  (when (!= (.-Op x) (.-Op y))
+    (return false))
+
+  (switch (.-Op x)
+    (case [OpEndText]
+      ;; The parse flags remember whether this is \z or \Z.
+      (when (!= (bit-and (.-Flags x) WasDollar) (bit-and (.-Flags y) WasDollar))
+        (return false)))
+
+
+    (case [OpLiteral OpCharClass]
+      (return (and (== (bit-and (.-Flags x) FoldCase) (bit-and (.-Flags y) FoldCase)) (^{:inst [(slice rune) rune]} slices/Equal (.-Rune x) (.-Rune y)))))
+
+    (case [OpAlternate OpConcat]
+      (return (^{:inst [(slice (* Regexp)) (slice (* Regexp)) (* Regexp) (* Regexp)]} slices/EqualFunc (.-Sub x) (.-Sub y) (method-expr (* Regexp) Equal))))
+
+    (case [OpStar OpPlus OpQuest]
+      (when (or (!= (bit-and (.-Flags x) NonGreedy) (bit-and (.-Flags y) NonGreedy)) (not (.Equal (aget (.-Sub x) 0) (aget (.-Sub y) 0))))
+        (return false)))
+
+
+    (case [OpRepeat]
+      (when (or (!= (bit-and (.-Flags x) NonGreedy) (bit-and (.-Flags y) NonGreedy)) (!= (.-Min x) (.-Min y)) (!= (.-Max x) (.-Max y)) (not (.Equal (aget (.-Sub x) 0) (aget (.-Sub y) 0))))
+        (return false)))
+
+
+    (case [OpCapture]
+      (when (or (!= (.-Cap x) (.-Cap y)) (!= (.-Name x) (.-Name y)) (not (.Equal (aget (.-Sub x) 0) (aget (.-Sub y) 0))))
+        (return false))))
+
+
+  true)
+
+
+
+(go/type printFlags "printFlags is a bit set indicating which flags (including non-capturing parens) to print around a regexp.\n" uint8)
+
+(go/const
+  ^{:line 106} [^{:tag printFlags :val 1} flagI (<< 1 iota)] ; (?i:
+  ^{:line 107} [^{:val 2} flagM] ; (?m:
+  ^{:line 108} [^{:val 4} flagS] ; (?s:
+  ^{:line 109} [^{:val 8} flagOff] ; )
+  ^{:line 110} [^{:val 16} flagPrec] ; (?: )
+  ^{:line 111} [^{:val 5} negShift 5]) ; flagI<<negShift is (?-i:
+
+
+
+
+^{:go/end 122} (go/func addSpan "addSpan enables the flags f around start..last,\nby setting flags[start] = f and flags[last] = flagOff.\n" [^{:tag (* Regexp)} start ^{:tag (* Regexp)} last ^printFlags f ^{:tag (* (map (* Regexp) printFlags))} flags]
+  (when (== @flags nil)
+    (set! @flags (make (map (* Regexp) printFlags))))
+
+  (aset @flags start f)
+  (set! (aget @flags last) bit-or flagOff)) ; maybe start==last
+
+
+
+
+
+
+
+^{:go/end 222} (go/func calcFlags "calcFlags calculates the flags to print around each subexpression in re,\nstoring that information in (*flags)[sub] for each affected subexpression.\nThe first time an entry needs to be written to *flags, calcFlags allocates the map.\ncalcFlags also calculates the flags that must be active or can't be active\naround re and returns those flags.\n" [^{:tag (* Regexp)} re ^{:tag (* (map (* Regexp) printFlags))} flags] :results [^printFlags must ^printFlags cant]
+  (switch (.-Op re)
+    (default
+      (return 0 0))
+
+    (case [OpLiteral]
+      ;; If literal is fold-sensitive, return (flagI, 0) or (0, flagI)
+      ;; according to whether (?i) is active.
+      ;; If literal is not fold-sensitive, return 0, 0.
+      (range [_ r (.-Rune re)]
+        (when (and (<= minFold r) (<= r maxFold) (!= (unicode/SimpleFold r) r))
+          (if (!= (bit-and (.-Flags re) FoldCase) 0)
+            (return flagI 0)
+
+            (return 0 flagI))))
+
+
+
+      (return 0 0))
+
+    (case [OpCharClass]
+      ;; If literal is fold-sensitive, return 0, flagI - (?i) has been compiled out.
+      ;; If literal is not fold-sensitive, return 0, 0.
+      (for [i 0] (< i (len (.-Rune re))) (set! i + 2)
+        (let [lo (max minFold (aget (.-Rune re) i))
+            ^{:line 154} hi (min maxFold (aget (.-Rune re) (+ i 1)))]
+          (for [r lo] (<= r hi) (inc! r)
+            (for [f (unicode/SimpleFold r)] (!= f r) (set! f (unicode/SimpleFold f))
+              (when (and (not (and (<= lo f) (<= f hi))) (not (inCharClass f (.-Rune re))))
+                (return 0 flagI))))))
+
+
+
+
+      (return 0 0))
+
+    (case [OpAnyCharNotNL] ; (?-s).
+      (return 0 flagS))
+
+    (case [OpAnyChar] ; (?s).
+      (return flagS 0))
+
+    (case [OpBeginLine OpEndLine] ; (?m)^ (?m)$
+      (return flagM 0))
+
+    (case [OpEndText]
+      (when (!= (bit-and (.-Flags re) WasDollar) 0) ; (?-m)$
+        (return 0 flagM))
+
+      (return 0 0))
+
+    (case [OpCapture OpStar OpPlus OpQuest OpRepeat]
+      (return (calcFlags (aget (.-Sub re) 0) flags)))
+
+    (case [OpConcat OpAlternate]
+      ;; Gather the must and cant for each subexpression.
+      ;; When we find a conflicting subexpression, insert the necessary
+      ;; flags around the previously identified span and start over.
+      (let [(values ^printFlags must ^printFlags cant ^printFlags allCant) (zero printFlags)
+          ^{:line 188} start 0
+          ^{:line 189} last 0
+          ^{:line 190} did false]
+        (range [i sub (.-Sub re)]
+          (let [(values subMust subCant) (calcFlags sub flags)]
+            (when (or (!= (bit-and must subCant) 0) (!= (bit-and subMust cant) 0))
+              (when (!= must 0)
+                (addSpan (aget (.-Sub re) start) (aget (.-Sub re) last) must flags))
+
+              (set! must 0)
+              (set! cant 0)
+              (set! start i)
+              (set! did true))
+
+            (set! must bit-or subMust)
+            (set! cant bit-or subCant)
+            (set! allCant bit-or subCant)
+            (when (!= subMust 0)
+              (set! last i))
+
+            (when (and (== must 0) (== start i))
+              (inc! start))))
+
+
+        (when (not did)
+          ;; No conflicts: pass the accumulated must and cant upward.
+          (return must cant))
+
+        (when (!= must 0)
+          ;; Conflicts found; need to finish final span.
+          (addSpan (aget (.-Sub re) start) (aget (.-Sub re) last) must flags))
+
+        (return 0 allCant)))))
+
+
+
+
+^{:go/end 382} (go/func writeRegexp "writeRegexp writes the Perl syntax for the regular expression re to b.\n" [^{:tag (* strings/Builder)} b ^{:tag (* Regexp)} re ^printFlags f ^{:tag (map (* Regexp) printFlags)} flags]
+  (set! f bit-or (aget flags re))
+  (when (and (!= (bit-and f flagPrec) 0) (!= (bit-and-not f (bit-or flagOff flagPrec)) 0) (!= (bit-and f flagOff) 0))
+    ;; flagPrec is redundant with other flags being added and terminated
+    (set! f bit-and-not flagPrec))
+
+  (when (!= (bit-and-not f (bit-or flagOff flagPrec)) 0)
+    (.WriteString b "(?")
+    (when (!= (bit-and f flagI) 0)
+      (.WriteString b "i"))
+
+    (when (!= (bit-and f flagM) 0)
+      (.WriteString b "m"))
+
+    (when (!= (bit-and f flagS) 0)
+      (.WriteString b "s"))
+
+    (when (!= (bit-and f (<< (bit-or flagM flagS) negShift)) 0)
+      (.WriteString b "-")
+      (when (!= (bit-and f (<< flagM negShift)) 0)
+        (.WriteString b "m"))
+
+      (when (!= (bit-and f (<< flagS negShift)) 0)
+        (.WriteString b "s")))
+
+
+    (.WriteString b ":"))
+
+  (when (!= (bit-and f flagOff) 0)
+    (defer (.WriteString b ")")))
+
+  (when (!= (bit-and f flagPrec) 0)
+    (.WriteString b "(?:")
+    (defer (.WriteString b ")")))
+
+
+  (switch (.-Op re)
+    (default
+      (.WriteString b (+ "<invalid op" (strconv/Itoa (conv int (.-Op re))) ">")))
+    (case [OpNoMatch]
+      (.WriteString b "[^\\x00-\\x{10FFFF}]"))
+    (case [OpEmptyMatch]
+      (.WriteString b "(?:)"))
+    (case [OpLiteral]
+      (range [_ r (.-Rune re)]
+        (escape b r false)))
+
+    (case [OpCharClass]
+      (when (!= (% (len (.-Rune re)) 2) 0)
+        (.WriteString b "[invalid char class]")
+        (break))
+
+      (.WriteRune b \[)
+      (cond (== (len (.-Rune re)) 0)
+        (.WriteString b "^\\x00-\\x{10FFFF}")
+        (and (== (aget (.-Rune re) 0) 0) (== (aget (.-Rune re) (- (len (.-Rune re)) 1)) unicode/MaxRune) (> (len (.-Rune re)) 2)) (do
+          ;; Contains 0 and MaxRune. Probably a negated class.
+          ;; Print the gaps.
+          (.WriteRune b \^)
+          (for [i 1] (< i (- (len (.-Rune re)) 1)) (set! i + 2)
+            (let [(values lo hi) (values (+ (aget (.-Rune re) i) 1) (- (aget (.-Rune re) (+ i 1)) 1))]
+              (escape b lo (== lo \-))
+              (when (!= lo hi)
+                (when (!= hi (+ lo 1))
+                  (.WriteRune b \-))
+
+                (escape b hi (== hi \-)))))) :else
+
+
+
+        (for [i 0] (< i (len (.-Rune re))) (set! i + 2)
+          (let [(values lo hi) (values (aget (.-Rune re) i) (aget (.-Rune re) (+ i 1)))]
+            (escape b lo (== lo \-))
+            (when (!= lo hi)
+              (when (!= hi (+ lo 1))
+                (.WriteRune b \-))
+
+              (escape b hi (== hi \-))))))
+
+
+
+      (.WriteRune b \]))
+    (case [OpAnyCharNotNL OpAnyChar]
+      (.WriteString b "."))
+    (case [OpBeginLine]
+      (.WriteString b "^"))
+    (case [OpEndLine]
+      (.WriteString b "$"))
+    (case [OpBeginText]
+      (.WriteString b "\\A"))
+    (case [OpEndText]
+      (if (!= (bit-and (.-Flags re) WasDollar) 0)
+        (.WriteString b "$")
+
+        (.WriteString b "\\z")))
+
+    (case [OpWordBoundary]
+      (.WriteString b "\\b"))
+    (case [OpNoWordBoundary]
+      (.WriteString b "\\B"))
+    (case [OpCapture]
+      (if (!= (.-Name re) "") (do
+          (.WriteString b "(?P<")
+          (.WriteString b (.-Name re))
+          (.WriteRune b \>))
+
+        (.WriteRune b \())
+
+      (when (!= (.-Op (aget (.-Sub re) 0)) OpEmptyMatch)
+        (writeRegexp b (aget (.-Sub re) 0) (aget flags (aget (.-Sub re) 0)) flags))
+
+      (.WriteRune b \)))
+    (case [OpStar OpPlus OpQuest OpRepeat]
+      (let [p (conv printFlags 0)
+          ^{:line 339} sub (aget (.-Sub re) 0)]
+        (when (or (> (.-Op sub) OpCapture) (and (== (.-Op sub) OpLiteral) (> (len (.-Rune sub)) 1)))
+          (set! p flagPrec))
+
+        (writeRegexp b sub p flags)
+
+        (switch (.-Op re)
+          (case [OpStar]
+            (.WriteRune b \*))
+          (case [OpPlus]
+            (.WriteRune b \+))
+          (case [OpQuest]
+            (.WriteRune b \?))
+          (case [OpRepeat]
+            (.WriteRune b \{)
+            (.WriteString b (strconv/Itoa (.-Min re)))
+            (when (!= (.-Max re) (.-Min re))
+              (.WriteRune b \,)
+              (when (>= (.-Max re) 0)
+                (.WriteString b (strconv/Itoa (.-Max re)))))
+
+
+            (.WriteRune b \})))
+
+        (when (!= (bit-and (.-Flags re) NonGreedy) 0)
+          (.WriteRune b \?))))
+
+    (case [OpConcat]
+      (range [_ sub (.-Sub re)]
+        (let [p (conv printFlags 0)]
+          (when (== (.-Op sub) OpAlternate)
+            (set! p flagPrec))
+
+          (writeRegexp b sub p flags))))
+
+    (case [OpAlternate]
+      (range [i sub (.-Sub re)]
+        (when (> i 0)
+          (.WriteRune b \|))
+
+        (writeRegexp b sub 0 flags)))))
+
+
+
+
+^{:go/end 394} (go/method String ^string [^{:tag (* Regexp)} re]
+  (let [^strings/Builder b (zero strings/Builder)
+      ^{:line 386 :tag (map (* Regexp) printFlags)} flags (zero (map (* Regexp) printFlags))
+      (values must cant) (calcFlags re (addr flags))]
+    (set! must bit-or (<< (bit-and-not cant flagI) negShift))
+    (when (!= must 0)
+      (set! must bit-or flagOff))
+
+    (writeRegexp (addr b) re must flags)
+    (.String b)))
+
+
+(go/const ^{:val "\\.+*?()|[]{}^$"} meta "\\.+*?()|[]{}^$")
+
+^{:go/end 434} (go/func escape [^{:tag (* strings/Builder)} b ^rune r ^bool force]
+  (when (unicode/IsPrint r)
+    (when (or (strings/ContainsRune meta r) force)
+      (.WriteRune b \\))
+
+    (.WriteRune b r)
+    (return))
+
+
+  (switch r
+    (case [\u0007]
+      (.WriteString b "\\a"))
+    (case [\formfeed]
+      (.WriteString b "\\f"))
+    (case [\newline]
+      (.WriteString b "\\n"))
+    (case [\return]
+      (.WriteString b "\\r"))
+    (case [\tab]
+      (.WriteString b "\\t"))
+    (case [\u000b]
+      (.WriteString b "\\v"))
+    (default
+      (when (< r 0x100)
+        (.WriteString b "\\x")
+        (let [s (strconv/FormatInt (conv int64 r) 16)]
+          (when (== (len s) 1)
+            (.WriteRune b \0))
+
+          (.WriteString b s)
+          (break)))
+
+      (.WriteString b "\\x{")
+      (.WriteString b (strconv/FormatInt (conv int64 r) 16))
+      (.WriteString b "}"))))
+
+
+
+
+^{:go/end 448} (go/method MaxCap "MaxCap walks the regexp to find the maximum capture index.\n" ^int [^{:tag (* Regexp)} re]
+  (let [m 0]
+    (when (== (.-Op re) OpCapture)
+      (set! m (.-Cap re)))
+
+    (range [_ sub (.-Sub re)]
+      (when [n (.MaxCap sub)] (< m n)
+        (set! m n)))
+
+
+    ^{:line 447} m))
+
+
+
+^{:go/end 455} (go/method CapNames "CapNames walks the regexp to find the names of capturing groups.\n" ^{:tag (slice string)} [^{:tag (* Regexp)} re]
+  (let [names (make (slice string) (+ (.MaxCap re) 1))]
+    (.capNames re names)
+    ^{:line 454} names))
+
+
+^{:go/end 464} (go/method capNames [^{:tag (* Regexp)} re ^{:tag (slice string)} names]
+  (when (== (.-Op re) OpCapture)
+    (aset names (.-Cap re) (.-Name re)))
+
+  (range [_ sub (.-Sub re)]
+    (.capNames sub names)))

@@ -1,0 +1,463 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.image.gif) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [lzw "compress/lzw"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [image "image"]
+    ^{:line 13} [color "image/color"]
+    ^{:line 14} [palette "image/color/palette"]
+    ^{:line 15} [draw "image/draw"]
+    ^{:line 16} [byteorder "internal/byteorder"]
+    ^{:line 17} [io "io"]
+    ^{:line 18} [bits "math/bits"]])
+
+
+
+(go/const "Graphic control extension fields.\n"
+  ^{:line 23} [^{:val 249} gcLabel 0xF9]
+  ^{:line 24} [^{:val 4} gcBlockSize 0x04])
+
+
+^{:go/end 32} (go/func log2 ^int [^int x]
+  (when (< x 2)
+    (return 0))
+
+  (- (bits/Len (conv uint (- x 1))) 1))
+
+
+
+(go/type writer "writer is a buffered writer.\n" (interface
+    (Flush ^error [])
+    ^{:line 37} io/Writer
+    ^{:line 38} io/ByteWriter))
+
+
+
+(go/type encoder "encoder encodes an image to the GIF format.\n" (struct
+
+
+    ^{:line 45 :tag writer :doc "w is the writer to write to. err is the first error encountered during\nwriting. All attempted writes after the first error become no-ops.\n"} w
+    ^{:line 46 :tag error} err
+
+    ^{:line 48 :tag GIF :doc "g is a reference to the data that is being encoded.\n"} g
+
+    ^{:line 50 :tag int :doc "globalCT is the size in bytes of the global color table.\n"} globalCT
+
+    ^{:line 52 :tag (array 256 byte) :doc "buf is a scratch buffer. It must be at least 256 for the blockWriter.\n"} buf
+    ^{:line 53 :tag (array (* 3 256) byte)} globalColorTable
+    ^{:line 54 :tag (array (* 3 256) byte)} localColorTable))
+
+
+
+
+
+
+(go/type blockWriter "blockWriter writes the block structure of GIF image data, which\ncomprises (n, (n bytes)) blocks, with 1 <= n <= 255. It is the\nwriter given to the LZW encoder, which is thus immune to the\nblocking.\n" (struct
+    ^{:line 62 :tag (* encoder)} e))
+
+
+^{:go/end 67} (go/method setup [^blockWriter b]
+  (aset (.-buf (.-e b)) 0 0))
+
+
+^{:go/end 71} (go/method Flush ^error [^blockWriter b]
+  (.-err (.-e b)))
+
+
+^{:go/end 89} (go/method WriteByte ^error [^blockWriter b ^byte c]
+  (when (!= (.-err (.-e b)) nil)
+    (return (.-err (.-e b))))
+
+
+  ;; Append c to buffered sub-block.
+  (inc! (aget (.-buf (.-e b)) 0))
+  (aset (.-buf (.-e b)) (aget (.-buf (.-e b)) 0) c)
+  (when (< (aget (.-buf (.-e b)) 0) 255)
+    (return nil))
+
+
+  ;; Flush block
+  (.write (.-e b) (subslice (.-buf (.-e b)) _ 256))
+  (aset (.-buf (.-e b)) 0 0)
+  (.-err (.-e b)))
+
+
+
+
+^{:go/end 100} (go/method Write "blockWriter must be an io.Writer for lzw.NewWriter, but this is never\nactually called.\n" [^blockWriter b ^{:tag (slice byte)} data] :results [int error]
+  (range [i c data]
+    (when [err (.WriteByte b c)] (!= err nil)
+      (return i err)))
+
+
+  (return (len data) nil))
+
+
+^{:go/end 113} (go/method close [^blockWriter b]
+  ;; Write the block terminator (0x00), either by itself, or along with a
+  ;; pending sub-block.
+  (if (== (aget (.-buf (.-e b)) 0) 0)
+    (.writeByte (.-e b) 0)
+
+    (let [n (conv uint (aget (.-buf (.-e b)) 0))]
+      (aset (.-buf (.-e b)) (+ n 1) 0)
+      (.write (.-e b) (subslice (.-buf (.-e b)) _ (+ n 2)))))
+
+  (.flush (.-e b)))
+
+
+^{:go/end 120} (go/method flush [^{:tag (* encoder)} e]
+  (when (!= (.-err e) nil)
+    (return))
+
+  (set! (.-err e) (.Flush (.-w e))))
+
+
+^{:go/end 127} (go/method write [^{:tag (* encoder)} e ^{:tag (slice byte)} p]
+  (when (!= (.-err e) nil)
+    (return))
+
+  (set! (values _ (.-err e)) (.Write (.-w e) p)))
+
+
+^{:go/end 134} (go/method writeByte [^{:tag (* encoder)} e ^byte b]
+  (when (!= (.-err e) nil)
+    (return))
+
+  (set! (.-err e) (.WriteByte (.-w e) b)))
+
+
+^{:go/end 189} (go/method writeHeader [^{:tag (* encoder)} e]
+  (when (!= (.-err e) nil)
+    (return))
+
+  (set! (values _ (.-err e)) (io/WriteString (.-w e) "GIF89a"))
+  (when (!= (.-err e) nil)
+    (return))
+
+
+  ;; Logical screen width and height.
+  (byteorder/LEPutUint16 (subslice (.-buf e) 0 2) (conv uint16 (.-Width (.-Config (.-g e)))))
+  (byteorder/LEPutUint16 (subslice (.-buf e) 2 4) (conv uint16 (.-Height (.-Config (.-g e)))))
+  (.write e (subslice (.-buf e) _ 4))
+
+  (if [(values p ok) (assert color/Palette (.-ColorModel (.-Config (.-g e))))] (and ok (> (len p) 0))
+    (let [paddedSize (log2 (len p))] ; Size of Global Color Table: 2^(1+n).
+      (aset (.-buf e) 0 (bit-or fColorTable (conv uint8 paddedSize)))
+      (aset (.-buf e) 1 (.-BackgroundIndex (.-g e)))
+      (aset (.-buf e) 2 0x00) ; Pixel Aspect Ratio.
+      (.write e (subslice (.-buf e) _ 3))
+      (let [^error err (zero error)]
+        (set! (values (.-globalCT e) err) (encodeColorTable (subslice (.-globalColorTable e)) p paddedSize))
+        (when (and (!= err nil) (== (.-err e) nil))
+          (set! (.-err e) err)
+          (return))
+
+        (.write e (subslice (.-globalColorTable e) _ (.-globalCT e)))))
+    (do
+      ;; All frames have a local color table, so a global color table
+      ;; is not needed.
+      (aset (.-buf e) 0 0x00)
+      (aset (.-buf e) 1 0x00) ; Background Color Index.
+      (aset (.-buf e) 2 0x00) ; Pixel Aspect Ratio.
+      (.write e (subslice (.-buf e) _ 3))))
+
+
+  ;; Add animation info if necessary.
+  (when (and (> (len (.-Image (.-g e))) 1) (>= (.-LoopCount (.-g e)) 0))
+    (aset (.-buf e) 0 0x21) ; Extension Introducer.
+    (aset (.-buf e) 1 0xff) ; Application Label.
+    (aset (.-buf e) 2 0x0b) ; Block Size.
+    (.write e (subslice (.-buf e) _ 3))
+    (let [(values _ err) (io/WriteString (.-w e) "NETSCAPE2.0")] ; Application Identifier.
+      (when (and (!= err nil) (== (.-err e) nil))
+        (set! (.-err e) err)
+        (return))
+
+      (aset (.-buf e) 0 0x03) ; Block Size.
+      (aset (.-buf e) 1 0x01) ; Sub-block Index.
+      (byteorder/LEPutUint16 (subslice (.-buf e) 2 4) (conv uint16 (.-LoopCount (.-g e))))
+      (aset (.-buf e) 4 0x00) ; Block Terminator.
+      (.write e (subslice (.-buf e) _ 5)))))
+
+
+
+^{:go/end 218} (go/func encodeColorTable [^{:tag (slice byte)} dst ^color/Palette p ^int size] :results [int error]
+  (when (>= (conv uint size) 8)
+    (return 0 (errors/New "gif: cannot encode color table with more than 256 entries")))
+
+  (range [i c p]
+    (when (== c nil)
+      (return 0 (errors/New "gif: cannot encode color table with nil entries")))
+
+    (let [(values ^uint8 r ^uint8 g ^uint8 b) (zero uint8)]
+      ;; It is most likely that the palette is full of color.RGBAs, so they
+      ;; get a fast path.
+      (if [(values rgba ok) (assert color/RGBA c)] ok
+        (set! (values r g b) (values (.-R rgba) (.-G rgba) (.-B rgba)))
+
+        (let [(values rr gg bb _) (.RGBA c)]
+          (set! (values r g b) (values (conv uint8 (>> rr 8)) (conv uint8 (>> gg 8)) (conv uint8 (>> bb 8))))))
+
+      (aset dst (+ (* 3 i) 0) r)
+      (aset dst (+ (* 3 i) 1) g)
+      (aset dst (+ (* 3 i) 2) b)))
+
+  (let [n ^int (<< 1 (+ size 1))]
+    (when (> n (len p))
+      ;; Pad with black.
+      (clear (subslice dst (* 3 (len p)) (* 3 n))))
+
+    (return (* 3 n) nil)))
+
+
+^{:go/end 228} (go/method colorTablesMatch ^bool [^{:tag (* encoder)} e ^int localLen ^int transparentIndex]
+  (let [localSize (* 3 localLen)]
+    (when (>= transparentIndex 0)
+      (let [trOff (* 3 transparentIndex)]
+        (return (and (bytes/Equal (subslice (.-globalColorTable e) _ trOff) (subslice (.-localColorTable e) _ trOff))
+            (bytes/Equal (subslice (.-globalColorTable e) (+ trOff 3) localSize) (subslice (.-localColorTable e) (+ trOff 3) localSize))))))
+
+    (bytes/Equal (subslice (.-globalColorTable e) _ localSize) (subslice (.-localColorTable e) _ localSize))))
+
+
+^{:go/end 342} (go/method writeImageBlock [^{:tag (* encoder)} e ^{:tag (* image/Paletted)} pm ^int delay ^byte disposal]
+  (when (!= (.-err e) nil)
+    (return))
+
+
+  (when (== (len (.-Palette pm)) 0)
+    (set! (.-err e) (errors/New "gif: cannot encode image block with empty palette"))
+    (return))
+
+
+  (let [b (.Bounds pm)]
+    (when (or (< (.-X (.-Min b)) 0) (>= (.-X (.-Max b)) (<< 1 16)) (< (.-Y (.-Min b)) 0) (>= (.-Y (.-Max b)) (<< 1 16)))
+      (set! (.-err e) (errors/New "gif: image block is too large to encode"))
+      (return))
+
+    (when (not (.In b (lit image/Rectangle :Max (lit image/Point (.-Width (.-Config (.-g e))) (.-Height (.-Config (.-g e)))))))
+      (set! (.-err e) (errors/New "gif: image block is out of bounds"))
+      (return))
+
+
+    (let [transparentIndex -1]
+      (range [i c (.-Palette pm)]
+        (when (== c nil)
+          (set! (.-err e) (errors/New "gif: cannot encode color table with nil entries"))
+          (return))
+
+        (when [(values _ _ _ a) (.RGBA c)] (== a 0)
+          (set! transparentIndex i)
+          (break)))
+
+
+
+      (when (or (> delay 0) (!= disposal 0) (!= transparentIndex -1))
+        (aset (.-buf e) 0 sExtension) ; Extension Introducer.
+        (aset (.-buf e) 1 gcLabel) ; Graphic Control Label.
+        (aset (.-buf e) 2 gcBlockSize) ; Block Size.
+        (if (!= transparentIndex -1)
+          (aset (.-buf e) 3 (bit-or 0x01 (<< disposal 2)))
+
+          (aset (.-buf e) 3 (bit-or 0x00 (<< disposal 2))))
+
+        (byteorder/LEPutUint16 (subslice (.-buf e) 4 6) (conv uint16 delay)) ; Delay Time (1/100ths of a second)
+
+        ;; Transparent color index.
+        (if (!= transparentIndex -1)
+          (aset (.-buf e) 6 (conv uint8 transparentIndex))
+
+          (aset (.-buf e) 6 0x00))
+
+        (aset (.-buf e) 7 0x00) ; Block Terminator.
+        (.write e (subslice (.-buf e) _ 8)))
+
+      (aset (.-buf e) 0 sImageDescriptor)
+      (byteorder/LEPutUint16 (subslice (.-buf e) 1 3) (conv uint16 (.-X (.-Min b))))
+      (byteorder/LEPutUint16 (subslice (.-buf e) 3 5) (conv uint16 (.-Y (.-Min b))))
+      (byteorder/LEPutUint16 (subslice (.-buf e) 5 7) (conv uint16 (.Dx b)))
+      (byteorder/LEPutUint16 (subslice (.-buf e) 7 9) (conv uint16 (.Dy b)))
+      (.write e (subslice (.-buf e) _ 9))
+
+      ;; To determine whether or not this frame's palette is the same as the
+      ;; global palette, we can check a couple things. First, do they actually
+      ;; point to the same []color.Color? If so, they are equal so long as the
+      ;; frame's palette is not longer than the global palette...
+      (let [paddedSize (log2 (len (.-Palette pm)))] ; Size of Local Color Table: 2^(1+n).
+        (if [(values gp ok) (assert color/Palette (.-ColorModel (.-Config (.-g e))))] (and ok (<= (len (.-Palette pm)) (len gp)) (== (addr (aget gp 0)) (addr (aget (.-Palette pm) 0))))
+          (.writeByte e 0) ; Use the global color table.
+
+          (let [(values ct err) (encodeColorTable (subslice (.-localColorTable e)) (.-Palette pm) paddedSize)]
+            (when (!= err nil)
+              (when (== (.-err e) nil)
+                (set! (.-err e) err))
+
+              (return))
+
+            ;; This frame's palette is not the very same slice as the global
+            ;; palette, but it might be a copy, possibly with one value turned into
+            ;; transparency by DecodeAll.
+            (if (and (<= ct (.-globalCT e)) (.colorTablesMatch e (len (.-Palette pm)) transparentIndex))
+              (.writeByte e 0) ; Use the global color table.
+              (do
+                ;; Use a local color table.
+                (.writeByte e (bit-or fColorTable (conv uint8 paddedSize)))
+                (.write e (subslice (.-localColorTable e) _ ct))))))
+
+
+
+        (let [litWidth (+ paddedSize 1)]
+          (when (< litWidth 2)
+            (set! litWidth 2))
+
+          (.writeByte e (conv uint8 litWidth)) ; LZW Minimum Code Size.
+
+          (let [bw (lit blockWriter :e e)]
+            (.setup bw)
+            (let [lzww (lzw/NewWriter bw lzw/LSB litWidth)]
+              (if [dx (.Dx b)] (== dx (.-Stride pm)) (do
+                  (set! (values _ (.-err e)) (.Write lzww (subslice (.-Pix pm) _ (* dx (.Dy b)))))
+                  (when (!= (.-err e) nil)
+                    (.Close lzww)
+                    (return)))
+
+
+                (for [(values i y) (values 0 (.-Y (.-Min b)))] (< y (.-Y (.-Max b))) (set! (values i y) (values (+ i (.-Stride pm)) (+ y 1)))
+                  (set! (values _ (.-err e)) (.Write lzww (subslice (.-Pix pm) i (+ i dx))))
+                  (when (!= (.-err e) nil)
+                    (.Close lzww)
+                    (return))))
+
+
+
+              (.Close lzww) ; flush to bw
+              (.close bw)))))))) ; flush to e.w
+
+
+
+(go/type Options "Options are the encoding parameters.\n" (struct
+
+
+    ^{:line 348 :tag int :doc "NumColors is the maximum number of colors used in the image.\nIt ranges from 1 to 256.\n"} NumColors
+
+
+
+    ^{:line 352 :tag draw/Quantizer :doc "Quantizer is used to produce a palette with size NumColors.\npalette.Plan9 is used in place of a nil Quantizer.\n"} Quantizer
+
+
+
+    ^{:line 356 :tag draw/Drawer :doc "Drawer is used to convert the source image to the desired palette.\ndraw.FloydSteinberg is used in place of a nil Drawer.\n"} Drawer))
+
+
+
+
+^{:go/end 404} (go/func EncodeAll "EncodeAll writes the images in g to w in GIF format with the\ngiven loop count and delay between frames.\n" ^error [^io/Writer w ^{:tag (* GIF)} g]
+  (when (== (len (.-Image g)) 0)
+    (return (errors/New "gif: must provide at least one image")))
+
+
+  (when (!= (len (.-Image g)) (len (.-Delay g)))
+    (return (errors/New "gif: mismatched image and delay lengths")))
+
+
+  (let [e (lit encoder :g @g)]
+    ;; The GIF.Disposal, GIF.Config and GIF.BackgroundIndex fields were added
+    ;; in Go 1.5. Valid Go 1.4 code, such as when the Disposal field is omitted
+    ;; in a GIF struct literal, should still produce valid GIFs.
+    (when (and (!= (.-Disposal (.-g e)) nil) (!= (len (.-Image (.-g e))) (len (.-Disposal (.-g e)))))
+      (return (errors/New "gif: mismatched image and disposal lengths")))
+
+    (cond (== (.-Config (.-g e)) (lit image/Config))
+      (let [p (.-Max (.Bounds (aget (.-Image g) 0)))]
+        (set! (.-Width (.-Config (.-g e))) (.-X p))
+        (set! (.-Height (.-Config (.-g e))) (.-Y p)))
+      (!= (.-ColorModel (.-Config (.-g e))) nil)
+      (when [(values _ ok) (assert color/Palette (.-ColorModel (.-Config (.-g e))))] (not ok)
+        (return (errors/New "gif: GIF color model must be a color.Palette"))))
+
+
+
+    (if [(values ww ok) (assert writer w)] ok
+      (set! (.-w e) ww)
+
+      (set! (.-w e) (bufio/NewWriter w)))
+
+
+    (.writeHeader e)
+    (range [i pm (.-Image g)]
+      (let [disposal (conv uint8 0)]
+        (when (!= (.-Disposal g) nil)
+          (set! disposal (aget (.-Disposal g) i)))
+
+        (.writeImageBlock e pm (aget (.-Delay g) i) disposal)))
+
+    (.writeByte e sTrailer)
+    (.flush e)
+    (.-err e)))
+
+
+
+^{:go/end 466} (go/func Encode "Encode writes the Image m to w in GIF format.\n" ^error [^io/Writer w ^image/Image m ^{:tag (* Options)} o]
+  ;; Check for bounds and size restrictions.
+  (let [b (.Bounds m)]
+    (when (or (>= (.Dx b) (<< 1 16)) (>= (.Dy b) (<< 1 16)))
+      (return (errors/New "gif: image is too large to encode")))
+
+
+    (let [opts (lit Options)]
+      (when (!= o nil)
+        (set! opts @o))
+
+      (when (or (< (.-NumColors opts) 1) (< 256 (.-NumColors opts)))
+        (set! (.-NumColors opts) 256))
+
+      (when (== (.-Drawer opts) nil)
+        (set! (.-Drawer opts) draw/FloydSteinberg))
+
+
+      (let [(values pm _) (assert (* image/Paletted) m)]
+        (when (== pm nil)
+          (when [(values cp ok) (assert color/Palette (.ColorModel m))] ok
+            (set! pm (image/NewPaletted b cp))
+            (for [y (.-Y (.-Min b))] (< y (.-Y (.-Max b))) (inc! y)
+              (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+                (.Set pm x y (.Convert cp (.At m x y)))))))
+
+
+
+
+        (when (or (== pm nil) (> (len (.-Palette pm)) (.-NumColors opts)))
+          ;; Set pm to be a palettedized copy of m, including its bounds, which
+          ;; might not start at (0, 0).
+          ;;
+          ;; TODO: Pick a better sub-sample of the Plan 9 palette.
+          (set! pm (image/NewPaletted b (subslice palette/Plan9 _ (.-NumColors opts))))
+          (when (!= (.-Quantizer opts) nil)
+            (set! (.-Palette pm) (.Quantize (.-Quantizer opts) (make color/Palette 0 (.-NumColors opts)) m)))
+
+          (.Draw (.-Drawer opts) pm b m (.-Min b)))
+
+
+        ;; When calling Encode instead of EncodeAll, the single-frame image is
+        ;; translated such that its top-left corner is (0, 0), so that the single
+        ;; frame completely fills the overall GIF's bounds.
+        (when (!= (.-Min (.-Rect pm)) (lit image/Point))
+          (let [dup @pm]
+            (set! (.-Rect dup) (.Sub (.-Rect dup) (.-Min (.-Rect dup))))
+            (set! pm (addr dup))))
+
+
+        (EncodeAll w (addr ^{:go/breaks [2 4 6]} (lit GIF
+              :Image (lit (slice (* image/Paletted)) pm)
+              :Delay (lit (slice int) 0)
+              :Config ^{:go/breaks [2 4 6]} (lit image/Config
+                :ColorModel (.-Palette pm)
+                :Width (.Dx b)
+                :Height (.Dy b)))))))))

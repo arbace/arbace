@@ -1,0 +1,202 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.buildcfg) (go/file "exp.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [reflect "reflect"]
+    ^{:line 10} [strings "strings"]
+
+    ^{:line 12} [goexperiment "internal/goexperiment"]])
+
+
+
+
+(go/type ExperimentFlags "ExperimentFlags represents a set of GOEXPERIMENT flags relative to a baseline\n(platform-default) experiment configuration.\n" (struct
+    ^{:line 18} goexperiment/Flags
+    ^{:line 19 :tag goexperiment/Flags} baseline))
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag ExperimentFlags :doc "Experiment contains the toolchain experiments enabled for the\ncurrent build.\n\n(This is not necessarily the set of experiments the compiler itself\nwas built with.)\n\nExperiment.baseline specifies the experiment flags that are enabled by\ndefault in the current toolchain. This is, in effect, the \"control\"\nconfiguration and any variation from this is an experiment.\n"} Experiment (^{:go/end 38} (fn ^ExperimentFlags []
+      (let [(values flags err) (ParseGOEXPERIMENT GOOS GOARCH (envOr "GOEXPERIMENT" defaultGOEXPERIMENT))]
+        (when (!= err nil)
+          (set! Error err)
+          (return (lit ExperimentFlags)))
+
+        ^{:line 37} @flags))))
+
+
+
+
+(go/const ^{:val "" :doc "DefaultGOEXPERIMENT is the embedded default GOEXPERIMENT string.\nIt is not guaranteed to be canonical.\n"} DefaultGOEXPERIMENT defaultGOEXPERIMENT)
+
+
+
+
+
+
+
+
+(go/var ^{:doc "FramePointerEnabled enables the use of platform conventions for\nsaving frame pointers.\n\nThis used to be an experiment, but now it's always enabled on\nplatforms that support it.\n\nNote: must agree with runtime.framepointer_enabled.\n"} FramePointerEnabled (or (== GOARCH "amd64") (== GOARCH "arm64")))
+
+
+
+
+
+
+^{:go/end 155} (go/func ParseGOEXPERIMENT "ParseGOEXPERIMENT parses a (GOOS, GOARCH, GOEXPERIMENT)\nconfiguration tuple and returns the enabled and baseline experiment\nflag sets.\n\nTODO(mdempsky): Move to [internal/goexperiment].\n" [^string goos ^string goarch ^string goexp] :results [(* ExperimentFlags) error]
+  ;; regabiSupported is set to true on platforms where register ABI is
+  ;; supported and enabled by default.
+  ;; regabiAlwaysOn is set to true on platforms where register ABI is
+  ;; always on.
+  (let [(values ^bool regabiSupported ^bool regabiAlwaysOn) (zero bool)]
+    (switch goarch
+      (case ["amd64" "arm64" "loong64" "ppc64le" "ppc64" "riscv64" "s390x"]
+        (set! regabiAlwaysOn true)
+        (set! regabiSupported true)))
+
+
+    ;; Older versions (anything before V16) of dsymutil don't handle
+    ;; the .debug_rnglists section in DWARF5. See
+    ;; https://github.com/golang/go/issues/26379#issuecomment-2677068742
+    ;; for more context. This disables all DWARF5 on mac, which is not
+    ;; ideal (would be better to disable just for cases where we know
+    ;; the build will use external linking). In the GOOS=aix case, the
+    ;; XCOFF format (as far as can be determined) doesn't seem to
+    ;; support the necessary section subtypes for DWARF-specific
+    ;; things like .debug_addr (needed for DWARF 5).
+    (let [dwarf5Supported (and (!= goos "darwin") (!= goos "ios") (!= goos "aix"))
+
+        ^{:line 81} baseline ^{:go/breaks [2 4 6 8 10 12 14]} (lit goexperiment/Flags
+          :RegabiWrappers regabiSupported
+          :RegabiArgs regabiSupported
+          :Dwarf5 dwarf5Supported
+          :RandomizedHeapBase64 true
+          :GreenTeaGC true
+          :JSONv2 true
+          :SizeSpecializedMalloc true)
+
+        ^{:line 90} flags (addr ^{:go/breaks [2 4]} (lit ExperimentFlags
+            :Flags baseline
+            :baseline baseline))]
+
+
+      ;; Pick up any changes to the baseline configuration from the
+      ;; GOEXPERIMENT environment. This can be set at make.bash time
+      ;; and overridden at build time.
+      (when (!= goexp "")
+        ;; Create a map of known experiment names.
+        (let [names (make (map string (func [bool])))
+            ^{:line 101} rv (.Elem (reflect/ValueOf (addr (.-Flags flags))))
+            ^{:line 102} rt (.Type rv)]
+          (for [i 0] (< i (.NumField rt)) (inc! i)
+            (let [field (.Field rv i)]
+              (aset names (strings/ToLower (.-Name (.Field rt i))) (.-SetBool field))))
+
+
+          ;; "regabi" is an alias for all working regabi
+          ;; subexperiments, and not an experiment itself. Doing
+          ;; this as an alias make both "regabi" and "noregabi"
+          ;; do the right thing.
+          (aset names "regabi" ^{:go/end 115} (fn [^bool v]
+              (set! ^{:go/via [Flags]} (.-RegabiWrappers flags) v)
+              (set! ^{:go/via [Flags]} (.-RegabiArgs flags) v)))
+
+
+          ;; Parse names.
+          (range [f (strings/SplitSeq goexp ",")]
+            (when (== f "")
+              (continue))
+
+            (when (== f "none")
+              ;; GOEXPERIMENT=none disables all experiment flags.
+              ;; This is used by cmd/dist, which doesn't know how
+              ;; to build with any experiment flags.
+              (set! (.-Flags flags) (lit goexperiment/Flags))
+              (continue))
+
+            (let [val true]
+              (when (strings/HasPrefix f "no")
+                (set! (values f val) (values (subslice f 2) false)))
+
+              (let [(values set ok) (aget names f)]
+                (when (not ok)
+                  (return nil (fmt/Errorf "unknown GOEXPERIMENT %s" f)))
+
+                (set val))))))
+
+
+
+      (when regabiAlwaysOn
+        (set! ^{:go/via [Flags]} (.-RegabiWrappers flags) true)
+        (set! ^{:go/via [Flags]} (.-RegabiArgs flags) true))
+
+      ;; regabi is only supported on amd64, arm64, loong64, riscv64, s390x, ppc64 and ppc64le.
+      (when (not regabiSupported)
+        (set! ^{:go/via [Flags]} (.-RegabiWrappers flags) false)
+        (set! ^{:go/via [Flags]} (.-RegabiArgs flags) false))
+
+      ;; Check regabi dependencies.
+      (when (and ^{:go/via [Flags]} (.-RegabiArgs flags) (not ^{:go/via [Flags]} (.-RegabiWrappers flags)))
+        (return nil (fmt/Errorf "GOEXPERIMENT regabiargs requires regabiwrappers")))
+
+      (return flags nil))))
+
+
+
+
+^{:go/end 161} (go/method String "String returns the canonical GOEXPERIMENT string to enable this experiment\nconfiguration. (Experiments in the same state as in the baseline are elided.)\n" ^string [^{:tag (* ExperimentFlags)} exp]
+  (strings/Join (expList (addr (.-Flags exp)) (addr (.-baseline exp)) false) ","))
+
+
+
+
+
+
+^{:go/end 191} (go/func expList "expList returns the list of lower-cased experiment names for\nexperiments that differ from base. base may be nil to indicate no\nexperiments. If all is true, then include all experiment flags,\nregardless of base.\n" ^{:tag (slice string)} [^{:tag (* goexperiment/Flags)} exp ^{:tag (* goexperiment/Flags)} base ^bool all]
+  (let [^{:tag (slice string)} list (zero (slice string))
+      ^{:line 169} rv (.Elem (reflect/ValueOf exp))
+      ^{:line 170 :tag reflect/Value} rBase (zero reflect/Value)]
+    (when (!= base nil)
+      (set! rBase (.Elem (reflect/ValueOf base))))
+
+    (let [rt (.Type rv)]
+      (for [i 0] (< i (.NumField rt)) (inc! i)
+        (let [name (strings/ToLower (.-Name (.Field rt i)))
+            ^{:line 177} val (.Bool (.Field rv i))
+            ^{:line 178} baseVal false]
+          (when (!= base nil)
+            (set! baseVal (.Bool (.Field rBase i))))
+
+          (when (or all (!= val baseVal))
+            (if val
+              (set! list (append list name))
+
+              (set! list (append list (+ "no" name)))))))
+
+
+
+      ^{:line 190} list)))
+
+
+
+
+^{:go/end 197} (go/method Enabled "Enabled returns a list of enabled experiments, as\nlower-cased experiment names.\n" ^{:tag (slice string)} [^{:tag (* ExperimentFlags)} exp]
+  (expList (addr (.-Flags exp)) nil false))
+
+
+
+
+^{:go/end 203} (go/method All "All returns a list of all experiment settings.\nDisabled experiments appear in the list prefixed by \"no\".\n" ^{:tag (slice string)} [^{:tag (* ExperimentFlags)} exp]
+  (expList (addr (.-Flags exp)) nil true))

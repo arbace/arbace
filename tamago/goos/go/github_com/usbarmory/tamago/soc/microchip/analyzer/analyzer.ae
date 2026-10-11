@@ -1,0 +1,174 @@
+;; Microchip Analyzer (ANA)
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package analyzer implements a driver for the Microchip Analyzer block
+;; (Analyzer), responsible for ingress frame processing, adopting the following
+;; reference specifications:
+;;   - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=arm64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.microchip.analyzer) (go/file "analyzer.go" :doc "Package analyzer implements a driver for the Microchip Analyzer block\n(Analyzer), responsible for ingress frame processing, adopting the following\nreference specifications:\n  - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=arm64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 20} [errors "errors"]
+    ^{:line 21} [net "net"]
+    ^{:line 22} [sync "sync"]
+    ^{:line 23} [time "time"]
+
+    ^{:line 25} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 26} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "Group identifiers\n"
+
+  ^{:line 32} [^{:val 0 :doc "flood section forwarding offsets (address:ports+pgid)\n"} PGID_UNICAST 0]
+  ^{:line 33} [^{:val 1} PGID_MULTICAST 1]
+  ^{:line 34} [^{:val 2} PGID_BROADCAST 2]
+  ^{:line 35} [^{:val 3} PGID_HOST 3]
+
+
+  ^{:line 38} [^{:val 1 :doc "VLAN filtering identifier\n"} MAC_VID 1])
+
+
+
+(go/const "Port Group registers\n"
+  ^{:line 43} [^{:val 131072} PGID 0x20000]
+  ^{:line 44} [^{:val 0} PGID_CFG 0x00]
+  ^{:line 45} [^{:val 12} PGID_MISC_CFG 0x0c])
+
+
+
+(go/const "Learning block registers\n"
+  ^{:line 50} [^{:val 0} COMMON_ACCESS_CTRL 0x00]
+  ^{:line 51} [^{:val 1} CTRL_CPU_ACCESS_CMD 1]
+  ^{:line 52} [^{:val 0} CTRL_MAC_TABLE_ACCESS_SHOT 0]
+
+  ^{:line 54} [^{:val 0} CMD_LEARN 0]
+  ^{:line 55} [^{:val 1} CMD_FORGET 1]
+  ^{:line 56} [^{:val 2} CMD_LOOKUP 2]
+  ^{:line 57} [^{:val 3} CMD_READ_DIRECT 3]
+  ^{:line 58} [^{:val 4} CMD_WRITE_DIRECT 4]
+  ^{:line 59} [^{:val 5} CMD_SCAN 5]
+  ^{:line 60} [^{:val 6} CMD_FIND_SMALLEST 6]
+  ^{:line 61} [^{:val 7} CMD_CLEAR_ALL 7]
+
+  ^{:line 63} [^{:val 4} MAC_ACCESS_CFG_0 0x04]
+  ^{:line 64} [^{:val 16} CFG_0_MAC_ENTRY_FID 16]
+  ^{:line 65} [^{:val 0} CFG_0_MAC_ENTRY_MSB 0]
+
+  ^{:line 67} [^{:val 8} MAC_ACCESS_CFG_1 0x08]
+  ^{:line 68} [^{:val 0} CFG_1_MAC_ENTRY_LSB 0]
+
+  ^{:line 70} [^{:val 12} MAC_ACCESS_CFG_2 0x0c]
+  ^{:line 71} [^{:val 24} CFG_2_MAC_ENTRY_CPU_QU 24]
+  ^{:line 72} [^{:val 23} CFG_2_MAC_ENTRY_CPU_COPY 23]
+  ^{:line 73} [^{:val 16} CFG_2_MAC_ENTRY_LOCKED 16]
+  ^{:line 74} [^{:val 15} CFG_2_MAC_ENTRY_VLD 15]
+  ^{:line 75} [^{:val 12} CFG_2_MAC_ENTRY_ADDR_TYPE 12]
+  ^{:line 76} [^{:val 0} CFG_2_MAC_ENTRY_ADDR 0]
+
+  ^{:line 78} [^{:val 0} TYPE_UNICAST 0] ; UPSID_PN
+  ^{:line 79} [^{:val 1} TYPE_MANAGEMENT 1] ; GCPU_UPS
+  ^{:line 80} [^{:val 2} TYPE_UNICAST_GLAG 2] ; GLAG
+  ^{:line 81} [^{:val 3} TYPE_MULTICAST 3]) ; MC_IDX
+
+
+
+(go/const ^{:val 2000000000 :doc "Timeout is the default timeout for learn operations.\n"} Timeout (* 2 time/Second))
+
+
+(go/type ANA "ANA represents the Analyzer block.\n" (struct
+    ^{:line 89} sync/Mutex
+
+
+    ^{:line 92 :tag uint32 :doc "Access Control block base register\n"} AccessControl
+
+    ^{:line 94 :tag uint32 :doc "Learn Block base register\n"} Learn
+
+    ^{:line 96 :tag time/Duration :doc "Timeout for learn operations\n"} Timeout
+
+
+    ^{:line 99 :tag int :doc "Ports represents the number of physical switch ports\n"} Ports))
+
+
+
+^{:go/end 121} (go/method Init "Init initializes the analyzer instance.\n" [^{:tag (* ANA)} a] :results [^error err]
+  (when (or (== (.-AccessControl a) 0) (== (.-Learn a) 0))
+    (return (errors/New "invalid analyzer instance")))
+
+
+  (when (== (.-Timeout a) 0)
+    (set! (.-Timeout a) Timeout))
+
+
+  ;; forward broadcast frames to all ports
+  (let [pgid (+ (conv uint32 (.-Ports a)) PGID_BROADCAST)]
+    (reg/Write (+ (.-AccessControl a) PGID (* pgid 16) PGID_CFG) 0xffffffff)
+
+    ;; isolate host frames to CPU queue
+    (set! pgid (+ (conv uint32 (.-Ports a)) PGID_HOST))
+    (reg/Write (+ (.-AccessControl a) PGID (* pgid 16) PGID_CFG) 0x00000000)
+
+    (return)))
+
+
+
+^{:go/end 165} (go/method Learning "Learning issues a MAC table access command.\n" [^{:tag (* ANA)} a ^net/HardwareAddr mac ^uint32 addrType ^uint32 vid ^uint32 pgid ^uint32 cmd]
+  ^{:go/via [Mutex]} (.Lock a)
+  (defer ^{:go/via [Mutex]} (.Unlock a))
+
+  (when (== (.-AccessControl a) 0)
+    (return))
+
+
+  (when (!= (len mac) 6)
+    (return))
+
+
+  (let [msb (conv uint32 (aget mac 1))]
+    (set! msb bit-or (<< (conv uint32 (aget mac 0)) 8))
+
+    (let [lsb (conv uint32 (aget mac 5))]
+      (set! lsb bit-or (<< (conv uint32 (aget mac 4)) 8))
+      (set! lsb bit-or (<< (conv uint32 (aget mac 3)) 16))
+      (set! lsb bit-or (<< (conv uint32 (aget mac 2)) 24))
+
+      ;; set MAC address
+      (let [^uint32 cfg0 (zero uint32)]
+        (bits/SetN (addr cfg0) CFG_0_MAC_ENTRY_FID 0x1fff vid)
+        (bits/SetN (addr cfg0) CFG_0_MAC_ENTRY_MSB 0xffff msb)
+        (reg/Write (+ (.-Learn a) MAC_ACCESS_CFG_0) cfg0)
+        (reg/Write (+ (.-Learn a) MAC_ACCESS_CFG_1) lsb)
+
+        ;; set forwarding entry handling
+        (let [^uint32 cfg2 (zero uint32)]
+          (bits/SetN (addr cfg2) CFG_2_MAC_ENTRY_CPU_QU 2r111 0) ; queue number
+          (bits/Set (addr cfg2) CFG_2_MAC_ENTRY_CPU_COPY) ; copy forwarding entry to queue
+          (bits/Set (addr cfg2) CFG_2_MAC_ENTRY_LOCKED)
+          (bits/Set (addr cfg2) CFG_2_MAC_ENTRY_VLD)
+          (bits/SetN (addr cfg2) CFG_2_MAC_ENTRY_ADDR_TYPE 2r111 addrType)
+          (bits/SetN (addr cfg2) CFG_2_MAC_ENTRY_ADDR 0xfff pgid)
+          (reg/Write (+ (.-Learn a) MAC_ACCESS_CFG_2) cfg2)
+
+          ;; issue command
+          (reg/SetN (+ (.-Learn a) COMMON_ACCESS_CTRL) CTRL_CPU_ACCESS_CMD 0xf cmd)
+          (reg/Set (+ (.-Learn a) COMMON_ACCESS_CTRL) CTRL_MAC_TABLE_ACCESS_SHOT)
+          (reg/WaitFor (.-Timeout a) (+ (.-Learn a) COMMON_ACCESS_CTRL) CTRL_MAC_TABLE_ACCESS_SHOT 1 0))))))
+
+
+
+^{:go/end 170} (go/method Insert "Insert adds a new entry in the MAC table.\n" [^{:tag (* ANA)} a ^net/HardwareAddr mac ^uint32 vid ^uint32 pgid]
+  (.Learning a mac TYPE_MULTICAST vid pgid CMD_LEARN))
+
+
+
+^{:go/end 175} (go/method Delete "Delete removes an entry from the MAC table.\n" [^{:tag (* ANA)} a ^net/HardwareAddr mac ^uint32 vid ^uint32 pgid]
+  (.Learning a mac TYPE_MULTICAST vid pgid CMD_FORGET))

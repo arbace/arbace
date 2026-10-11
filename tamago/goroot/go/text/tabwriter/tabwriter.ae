@@ -1,0 +1,600 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package tabwriter implements a write filter (tabwriter.Writer) that
+;; translates tabbed columns in input into properly aligned text.
+;;
+;; The package is using the Elastic Tabstops algorithm described at
+;; http://nickgravgaard.com/elastictabstops/index.html.
+;;
+;; The text/tabwriter package is frozen and is not accepting new features.
+(in-ns 'go.text.tabwriter) (go/file "tabwriter.go" :doc "Package tabwriter implements a write filter (tabwriter.Writer) that\ntranslates tabbed columns in input into properly aligned text.\n\nThe package is using the Elastic Tabstops algorithm described at\nhttp://nickgravgaard.com/elastictabstops/index.html.\n\nThe text/tabwriter package is frozen and is not accepting new features.\n" :imports [
+
+
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [io "io"]
+    ^{:line 17} [utf8 "unicode/utf8"]])
+
+
+;; ----------------------------------------------------------------------------
+;; Filter implementation
+
+
+
+
+
+(go/type cell "A cell represents a segment of text terminated by tabs or line breaks.\nThe text itself is stored in a separate buffer; cell only describes the\nsegment's size in bytes, its width in runes, and whether it's an htab\n('\\t') terminated cell.\n" (struct
+    ^{:line 28 :tag int} size ; cell size in bytes
+    ^{:line 29 :tag int} width ; cell width in runes
+    ^{:line 30 :tag bool} htab)) ; true if the cell is terminated by an htab ('\t')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Writer "A Writer is a filter that inserts padding around tab-delimited\ncolumns in its input to align them in the output.\n\nThe Writer treats incoming bytes as UTF-8-encoded text consisting\nof cells terminated by horizontal ('\\t') or vertical ('\\v') tabs,\nand newline ('\\n') or formfeed ('\\f') characters; both newline and\nformfeed act as line breaks.\n\nTab-terminated cells in contiguous lines constitute a column. The\nWriter inserts padding as needed to make all cells in a column have\nthe same width, effectively aligning the columns. It assumes that\nall characters have the same width, except for tabs for which a\ntabwidth must be specified. Column cells must be tab-terminated, not\ntab-separated: non-tab terminated trailing text at the end of a line\nforms a cell but that cell is not part of an aligned column.\nFor instance, in this example (where | stands for a horizontal tab):\n\n\taaaa|bbb|d\n\taa  |b  |dd\n\ta   |\n\taa  |cccc|eee\n\nthe b and c are in distinct columns (the b column is not contiguous\nall the way). The d and e are not in a column at all (there's no\nterminating tab, nor would the column be contiguous).\n\nThe Writer assumes that all Unicode code points have the same width;\nthis may not be true in some fonts or if the string contains combining\ncharacters.\n\nIf [DiscardEmptyColumns] is set, empty columns that are terminated\nentirely by vertical (or \"soft\") tabs are discarded. Columns\nterminated by horizontal (or \"hard\") tabs are not affected by\nthis flag.\n\nIf a Writer is configured to filter HTML, HTML tags and entities\nare passed through. The widths of tags and entities are\nassumed to be zero (tags) and one (entities) for formatting purposes.\n\nA segment of text may be escaped by bracketing it with [Escape]\ncharacters. The tabwriter passes escaped text segments through\nunchanged. In particular, it does not interpret any tabs or line\nbreaks within the segment. If the [StripEscape] flag is set, the\nEscape characters are stripped from the output; otherwise they\nare passed through as well. For the purpose of formatting, the\nwidth of the escaped text is always computed excluding the Escape\ncharacters.\n\nThe formfeed character acts like a newline but it also terminates\nall columns in the current line (effectively calling [Writer.Flush]). Tab-\nterminated cells in the next line start new columns. Unless found\ninside an HTML tag or inside an escaped text segment, formfeed\ncharacters appear as newlines in the output.\n\nThe Writer must buffer input internally, because proper spacing\nof one line may depend on the cells in future lines. Clients must\ncall Flush when done calling [Writer.Write].\n" (struct
+
+    ^{:line 92 :tag io/Writer :doc "configuration\n"} output
+    ^{:line 93 :tag int} minwidth
+    ^{:line 94 :tag int} tabwidth
+    ^{:line 95 :tag int} padding
+    ^{:line 96 :tag (array 8 byte)} padbytes
+    ^{:line 97 :tag uint} flags
+
+
+    ^{:line 100 :tag (slice byte) :doc "current state\n"} buf ; collected text excluding tabs or line breaks
+    ^{:line 101 :tag int} pos ; buffer position up to which cell.width of incomplete cell has been computed
+    ^{:line 102 :tag cell} cell ; current incomplete cell; cell.width is up to buf[pos] excluding ignored sections
+    ^{:line 103 :tag byte} endChar ; terminating char of escaped sequence (Escape for escapes, '>', ';' for HTML tags/entities, or 0)
+    ^{:line 104 :tag (slice (slice cell))} lines ; list of lines; each line is a list of cells
+    ^{:line 105 :tag (slice int)} widths)) ; list of column widths in runes - re-used during formatting
+
+
+
+
+
+^{:go/end 133} (go/method addLine "addLine adds a new line.\nflushed is a hint indicating whether the underlying writer was just flushed.\nIf so, the previous line is not likely to be a good indicator of the new line's cells.\n" [^{:tag (* Writer)} b ^bool flushed]
+  ;; Grow slice instead of appending,
+  ;; as that gives us an opportunity
+  ;; to re-use an existing []cell.
+  (if [n (+ (len (.-lines b)) 1)] (<= n (cap (.-lines b))) (do
+      (set! (.-lines b) (subslice (.-lines b) _ n))
+      (aset (.-lines b) (- n 1) (subslice (aget (.-lines b) (- n 1)) _ 0)))
+
+    (set! (.-lines b) (append (.-lines b) nil)))
+
+
+  (when (not flushed)
+    ;; The previous line is probably a good indicator
+    ;; of how many cells the current line will have.
+    ;; If the current line's capacity is smaller than that,
+    ;; abandon it and make a new one.
+    (when [n (len (.-lines b))] (>= n 2)
+      (when [prev (len (aget (.-lines b) (- n 2)))] (> prev (cap (aget (.-lines b) (- n 1))))
+        (aset (.-lines b) (- n 1) (make (slice cell) 0 prev))))))
+
+
+
+
+
+
+^{:go/end 144} (go/method reset "Reset the current state.\n" [^{:tag (* Writer)} b]
+  (set! (.-buf b) (subslice (.-buf b) _ 0))
+  (set! (.-pos b) 0)
+  (set! (.-cell b) (lit cell))
+  (set! (.-endChar b) 0)
+  (set! (.-lines b) (subslice (.-lines b) 0 0))
+  (set! (.-widths b) (subslice (.-widths b) 0 0))
+  (.addLine b true))
+
+
+;; Internal representation (current state):
+;;
+;; - all text written is appended to buf; tabs and line breaks are stripped away
+;; - at any given time there is a (possibly empty) incomplete cell at the end
+;;   (the cell starts after a tab or line break)
+;; - cell.size is the number of bytes belonging to the cell so far
+;; - cell.width is text width in runes of that cell from the start of the cell to
+;;   position pos; html tags and entities are excluded from this width if html
+;;   filtering is enabled
+;; - the sizes and widths of processed text are kept in the lines list
+;;   which contains a list of cells for each line
+;; - the widths list is a temporary list with current widths used during
+;;   formatting; it is kept in Writer because it's re-used
+;;
+;;                    |<---------- size ---------->|
+;;                    |                            |
+;;                    |<- width ->|<- ignored ->|  |
+;;                    |           |             |  |
+;; [---processed---tab------------<tag>...</tag>...]
+;; ^                  ^                         ^
+;; |                  |                         |
+;; buf                start of incomplete cell  pos
+
+
+(go/const "Formatting can be controlled with these flags.\n"
+
+
+  ^{:line 173} [^{:tag uint :val 1 :doc "Ignore html tags and treat entities (starting with '&'\nand ending in ';') as single characters (width = 1).\n"} FilterHTML (<< 1 iota)]
+
+
+
+  ^{:line 177} [^{:val 2 :doc "Strip Escape characters bracketing escaped text segments\ninstead of passing them through unchanged with the text.\n"} StripEscape]
+
+
+
+  ^{:line 181} [^{:val 4 :doc "Force right-alignment of cell content.\nDefault is left-alignment.\n"} AlignRight]
+
+
+
+  ^{:line 185} [^{:val 8 :doc "Handle empty columns as if they were not present in\nthe input in the first place.\n"} DiscardEmptyColumns]
+
+
+
+  ^{:line 189} [^{:val 16 :doc "Always use tabs for indentation columns (i.e., padding of\nleading empty cells on the left) independent of padchar.\n"} TabIndent]
+
+
+
+  ^{:line 193} [^{:val 32 :doc "Print a vertical bar ('|') between columns (after formatting).\nDiscarded columns appear as zero-width columns (\"||\").\n"} Debug])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 229} (go/method Init "A [Writer] must be initialized with a call to Init. The first parameter (output)\nspecifies the filter output. The remaining parameters control the formatting:\n\n\tminwidth\tminimal cell width including any padding\n\ttabwidth\twidth of tab characters (equivalent number of spaces)\n\tpadding\t\tpadding added to a cell before computing its width\n\tpadchar\t\tASCII char used for padding\n\t\t\tif padchar == '\\t', the Writer will assume that the\n\t\t\twidth of a '\\t' in the formatted output is tabwidth,\n\t\t\tand cells are left-aligned independent of align_left\n\t\t\t(for correct-looking results, tabwidth must correspond\n\t\t\tto the tab width in the viewer displaying the result)\n\tflags\t\tformatting control\n" ^{:tag (* Writer)} [^{:tag (* Writer)} b ^io/Writer output ^int minwidth ^int tabwidth ^int padding ^byte padchar ^uint flags]
+  (when (or (< minwidth 0) (< tabwidth 0) (< padding 0))
+    (panic "negative minwidth, tabwidth, or padding"))
+
+  (set! (.-output b) output)
+  (set! (.-minwidth b) minwidth)
+  (set! (.-tabwidth b) tabwidth)
+  (set! (.-padding b) padding)
+  (range [i (.-padbytes b)]
+    (aset (.-padbytes b) i padchar))
+
+  (when (== padchar \tab)
+    ;; tab padding enforces left-alignment
+    (set! flags bit-and-not AlignRight))
+
+  (set! (.-flags b) flags)
+
+  (.reset b)
+
+  ^{:line 228} b)
+
+
+
+^{:go/end 243} (go/method dump "debugging support (keep code around)\n" [^{:tag (* Writer)} b]
+  (let [pos 0]
+    (range [i line (.-lines b)]
+      (print "(" i ") ")
+      (range [_ c line]
+        (print "[" (conv string (subslice (.-buf b) pos (+ pos (.-size c)))) "]")
+        (set! pos + (.-size c)))
+
+      (print "\n"))
+
+    (print "\n")))
+
+
+
+
+(go/type osError "local error wrapper so we can distinguish errors we want to return\nas errors from genuine panics (which we don't want to return as errors)\n" (struct
+    ^{:line 248 :tag error} err))
+
+
+^{:go/end 259} (go/method write0 [^{:tag (* Writer)} b ^{:tag (slice byte)} buf]
+  (let [(values n err) (.Write (.-output b) buf)]
+    (when (and (!= n (len buf)) (== err nil))
+      (set! err io/ErrShortWrite))
+
+    (when (!= err nil)
+      (panic (lit osError err)))))
+
+
+
+^{:go/end 267} (go/method writeN [^{:tag (* Writer)} b ^{:tag (slice byte)} src ^int n]
+  (while (> n (len src))
+    (.write0 b src)
+    (set! n - (len src)))
+
+  (.write0 b (subslice src 0 n)))
+
+
+(go/var
+  ^{:line 270} [newline (lit (slice byte) \newline)]
+  ^{:line 271} [tabs (conv (slice byte) "\t\t\t\t\t\t\t\t")])
+
+
+^{:go/end 292} (go/method writePadding [^{:tag (* Writer)} b ^int textw ^int cellw ^bool useTabs]
+  (when (or (== (aget (.-padbytes b) 0) \tab) useTabs)
+    ;; padding is done with tabs
+    (when (== (.-tabwidth b) 0)
+      (return)) ; tabs have no width - can't do any padding
+
+    ;; make cellw the smallest multiple of b.tabwidth
+    (set! cellw (* (/ (- (+ cellw (.-tabwidth b)) 1) (.-tabwidth b)) (.-tabwidth b)))
+    (let [n (- cellw textw)] ; amount of padding
+      (when (< n 0)
+        (panic "internal error"))
+
+      (.writeN b tabs (/ (- (+ n (.-tabwidth b)) 1) (.-tabwidth b)))
+      (return)))
+
+
+  ;; padding is done with non-tab characters
+  (.writeN b (subslice (.-padbytes b) 0) (- cellw textw)))
+
+
+(go/var vbar (lit (slice byte) \|))
+
+^{:go/end 345} (go/method writeLines [^{:tag (* Writer)} b ^int pos0 ^int line0 ^int line1] :results [^int pos]
+  (set! pos pos0)
+  (for [i line0] (< i line1) (inc! i)
+    (let [line (aget (.-lines b) i)
+
+        ;; if TabIndent is set, use tabs to pad leading empty cells
+        ^{:line 302} useTabs (!= (bit-and (.-flags b) TabIndent) 0)]
+
+      (range [j c line]
+        (when (and (> j 0) (!= (bit-and (.-flags b) Debug) 0))
+          ;; indicate column break
+          (.write0 b vbar))
+
+
+        (if (== (.-size c) 0)
+          ;; empty cell
+          (when (< j (len (.-widths b)))
+            (.writePadding b (.-width c) (aget (.-widths b) j) useTabs))
+
+          (do
+            ;; non-empty cell
+            (set! useTabs false)
+            (if (== (bit-and (.-flags b) AlignRight) 0) (do ; align left
+                (.write0 b (subslice (.-buf b) pos (+ pos (.-size c))))
+                (set! pos + (.-size c))
+                (when (< j (len (.-widths b)))
+                  (.writePadding b (.-width c) (aget (.-widths b) j) false)))
+
+              (do ; align right
+                (when (< j (len (.-widths b)))
+                  (.writePadding b (.-width c) (aget (.-widths b) j) false))
+
+                (.write0 b (subslice (.-buf b) pos (+ pos (.-size c))))
+                (set! pos + (.-size c)))))))
+
+
+
+
+      (if (== (+ i 1) (len (.-lines b))) (do
+          ;; last buffered line - we don't have a newline, so just write
+          ;; any outstanding buffered data
+          (.write0 b (subslice (.-buf b) pos (+ pos (.-size (.-cell b)))))
+          (set! pos + (.-size (.-cell b))))
+
+        ;; not the last line - write newline
+        (.write0 b newline))))
+
+
+  (return))
+
+
+
+
+
+
+^{:go/end 407} (go/method format "Format the text between line0 and line1 (excluding line1); pos\nis the buffer position corresponding to the beginning of line0.\nReturns the buffer position corresponding to the beginning of\nline1 and an error, if any.\n" [^{:tag (* Writer)} b ^int pos0 ^int line0 ^int line1] :results [^int pos]
+  (set! pos pos0)
+  (let [column (len (.-widths b))]
+    (for [this line0] (< this line1) (inc! this)
+      (let [line (aget (.-lines b) this)]
+
+        (when (>= column (- (len line) 1))
+          (continue))
+
+        ;; cell exists in this column => this line
+        ;; has more cells than the previous line
+        ;; (the last cell per line is ignored because cells are
+        ;; tab-terminated; the last cell per line describes the
+        ;; text before the newline/formfeed and does not belong
+        ;; to a column)
+
+        ;; print unprinted lines until beginning of block
+        (set! pos (.writeLines b pos line0 this))
+        (set! line0 this)
+
+        ;; column block begin
+        (let [width (.-minwidth b) ; minimal column width
+            ^{:line 373} discardable true] ; true if all cells in this column are empty and "soft"
+          (for [] (< this line1) (inc! this)
+            (set! line (aget (.-lines b) this))
+            (when (>= column (- (len line) 1))
+              (break))
+
+            ;; cell exists in this column
+            (let [c (aget line column)]
+              ;; update width
+              (when [w (+ (.-width c) (.-padding b))] (> w width)
+                (set! width w))
+
+              ;; update discardable
+              (when (or (> (.-width c) 0) (.-htab c))
+                (set! discardable false))))
+
+
+          ;; column block end
+
+          ;; discard empty columns if necessary
+          (when (and discardable (!= (bit-and (.-flags b) DiscardEmptyColumns) 0))
+            (set! width 0))
+
+
+          ;; format and print all columns to the right of this column
+          ;; (we know the widths of this column and all columns to the left)
+          (set! (.-widths b) (append (.-widths b) width)) ; push width
+          (set! pos (.format b pos line0 this))
+          (set! (.-widths b) (subslice (.-widths b) 0 (- (len (.-widths b)) 1))) ; pop width
+          (set! line0 this))))
+
+
+    ;; print unprinted lines until end
+    (.writeLines b pos line0 line1)))
+
+
+
+^{:go/end 413} (go/method append "Append text to current cell.\n" [^{:tag (* Writer)} b ^{:tag (slice byte)} text]
+  (set! (.-buf b) (append (.-buf b) (spread text)))
+  (set! (.-size (.-cell b)) + (len text)))
+
+
+
+^{:go/end 419} (go/method updateWidth "Update the cell width.\n" [^{:tag (* Writer)} b]
+  (set! (.-width (.-cell b)) + (utf8/RuneCount (subslice (.-buf b) (.-pos b))))
+  (set! (.-pos b) (len (.-buf b))))
+
+
+
+
+
+
+
+
+(go/const ^{:val \ÿ :doc "To escape a text segment, bracket it with Escape characters.\nFor instance, the tab in this string \"Ignore this tab: \\xff\\t\\xff\"\ndoes not terminate a cell and constitutes a single character of\nwidth one for formatting purposes.\n\nThe value 0xff was chosen because it cannot appear in a valid UTF-8 sequence.\n"} Escape \ÿ)
+
+
+^{:go/end 439} (go/method startEscape "Start escaped mode.\n" [^{:tag (* Writer)} b ^byte ch]
+  (switch ch
+    (case [Escape]
+      (set! (.-endChar b) Escape))
+    (case [\<]
+      (set! (.-endChar b) \>))
+    (case [\&]
+      (set! (.-endChar b) \;))))
+
+
+
+
+
+
+
+^{:go/end 458} (go/method endEscape "Terminate escaped mode. If the escaped text was an HTML tag, its width\nis assumed to be zero for formatting purposes; if it was an HTML entity,\nits width is assumed to be one. In all other cases, the width is the\nunicode width of the text.\n" [^{:tag (* Writer)} b]
+  (switch (.-endChar b)
+    (case [Escape]
+      (.updateWidth b)
+      (when (== (bit-and (.-flags b) StripEscape) 0)
+        (set! (.-width (.-cell b)) - 2))) ; don't count the Escape chars
+
+    (case [\>]) ; tag of zero width
+    (case [\;]
+      (inc! (.-width (.-cell b))))) ; entity, count as one rune
+
+  (set! (.-pos b) (len (.-buf b)))
+  (set! (.-endChar b) 0))
+
+
+
+
+^{:go/end 468} (go/method terminateCell "Terminate the current cell by adding it to the list of cells of the\ncurrent line. Returns the number of cells in that line.\n" ^int [^{:tag (* Writer)} b ^bool htab]
+  (set! (.-htab (.-cell b)) htab)
+  (let [line (addr (aget (.-lines b) (- (len (.-lines b)) 1)))]
+    (set! @line (append @line (.-cell b)))
+    (set! (.-cell b) (lit cell))
+    (len @line)))
+
+
+^{:go/end 482} (go/method handlePanic [^{:tag (* Writer)} b ^{:tag (* error)} err ^string op]
+  (when [e (recover)] (!= e nil)
+    (when (== op "Flush")
+      ;; If Flush ran into a panic, we still need to reset.
+      (.reset b))
+
+    (when [(values nerr ok) (assert osError e)] ok
+      (set! @err (.-err nerr))
+      (return))
+
+    (panic (fmt/Sprintf "tabwriter: panic during %s (%v)" op e))))
+
+
+
+
+
+
+
+^{:go/end 490} (go/method Flush "Flush should be called after the last call to [Writer.Write] to ensure\nthat any data buffered in the [Writer] is written to output. Any\nincomplete escape sequence at the end is considered\ncomplete for formatting purposes.\n" ^error [^{:tag (* Writer)} b]
+  (.flush b))
+
+
+
+
+^{:go/breaks [8] :go/end 498} (go/method flush "flush is the internal version of Flush, with a named return value which we\ndon't want to expose.\n" [^{:tag (* Writer)} b] :results [^error err]
+  (defer (.handlePanic b (addr err) "Flush"))
+  (.flushNoDefers b)
+  nil)
+
+
+
+
+
+^{:go/end 516} (go/method flushNoDefers "flushNoDefers is like flush, but without a deferred handlePanic call. This\ncan be called from other methods which already have their own deferred\nhandlePanic calls, such as Write, and avoid the extra defer work.\n" [^{:tag (* Writer)} b]
+  ;; add current cell if not empty
+  (when (> (.-size (.-cell b)) 0)
+    (when (!= (.-endChar b) 0)
+      ;; inside escape - terminate it even if incomplete
+      (.endEscape b))
+
+    (.terminateCell b false))
+
+
+  ;; format contents of buffer
+  (.format b 0 0 (len (.-lines b)))
+  (.reset b))
+
+
+(go/var hbar (conv (slice byte) "---\n"))
+
+
+
+
+^{:go/end 595} (go/method Write "Write writes buf to the writer b.\nThe only errors returned are ones encountered\nwhile writing to the underlying output stream.\n" [^{:tag (* Writer)} b ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  (defer (.handlePanic b (addr err) "Write"))
+
+  ;; split text into cells
+  (set! n 0)
+  (range [i ch buf]
+    (if (== (.-endChar b) 0)
+      ;; outside escape
+      (switch ch
+        (case [\tab \u000b \newline \formfeed]
+          ;; end of cell
+          (.append b (subslice buf n i))
+          (.updateWidth b)
+          (set! n (+ i 1)) ; ch consumed
+          (let [ncells (.terminateCell b (== ch \tab))]
+            (when (or (== ch \newline) (== ch \formfeed))
+              ;; terminate line
+              (.addLine b (== ch \formfeed))
+              (when (or (== ch \formfeed) (== ncells 1))
+                ;; A '\f' always forces a flush. Otherwise, if the previous
+                ;; line has only one cell which does not have an impact on
+                ;; the formatting of the following lines (the last cell per
+                ;; line is ignored by format()), thus we can flush the
+                ;; Writer contents.
+                (.flushNoDefers b)
+                (when (and (== ch \formfeed) (!= (bit-and (.-flags b) Debug) 0))
+                  ;; indicate section break
+                  (.write0 b hbar))))))
+
+
+
+
+        (case [Escape]
+          ;; start of escaped sequence
+          (.append b (subslice buf n i))
+          (.updateWidth b)
+          (set! n i)
+          (when (!= (bit-and (.-flags b) StripEscape) 0)
+            (inc! n)) ; strip Escape
+
+          (.startEscape b Escape))
+
+        (case [\< \&]
+          ;; possibly an html tag/entity
+          (when (!= (bit-and (.-flags b) FilterHTML) 0)
+            ;; begin of tag/entity
+            (.append b (subslice buf n i))
+            (.updateWidth b)
+            (set! n i)
+            (.startEscape b ch))))
+
+
+
+      (do
+        ;; inside escape
+        (when (== ch (.-endChar b))
+          ;; end of tag/entity
+          (let [j (+ i 1)]
+            (when (and (== ch Escape) (!= (bit-and (.-flags b) StripEscape) 0))
+              (set! j i)) ; strip Escape
+
+            (.append b (subslice buf n j))
+            (set! n (+ i 1)) ; ch consumed
+            (.endEscape b))))))
+
+
+
+
+  ;; append leftover text
+  (.append b (subslice buf n))
+  (set! n (len buf))
+  (return))
+
+
+
+
+^{:go/end 601} (go/func NewWriter "NewWriter allocates and initializes a new [Writer].\nThe parameters are the same as for the Init function.\n" ^{:tag (* Writer)} [^io/Writer output ^int minwidth ^int tabwidth ^int padding ^byte padchar ^uint flags]
+  (.Init (new Writer) output minwidth tabwidth padding padchar flags))

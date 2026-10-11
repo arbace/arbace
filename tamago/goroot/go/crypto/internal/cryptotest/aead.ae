@@ -1,0 +1,455 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.cryptotest) (go/file "aead.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [cipher "crypto/cipher"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [testing "testing"]])
+
+
+(go/var lengths (lit (slice int) 0 156 8192 8193 8208))
+
+
+
+
+
+(go/type MakeAEAD "MakeAEAD returns a cipher.AEAD instance.\n\nMultiple calls to MakeAEAD must return equivalent instances, so for example\nthe key must be fixed.\n" (func [] [cipher/AEAD error]))
+
+
+
+^{:go/end 410} (go/func TestAEAD "TestAEAD performs a set of tests on cipher.AEAD implementations, checking\nthe documented requirements of NonceSize, Overhead, Seal and Open.\n" [^{:tag (* testing/T)} t ^MakeAEAD mAEAD]
+  (let [(values aead err) (mAEAD)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+
+    (.Run t "Roundtrip" ^{:go/end 54} (fn [^{:tag (* testing/T)} t]
+
+        ;; Test all combinations of plaintext and additional data lengths.
+        (range [_ ptLen lengths]
+          (range [_ adLen lengths]
+            (.Run t (fmt/Sprintf "Plaintext-Length=%d,AddData-Length=%d" ptLen adLen) ^{:go/end 51} (fn [^{:tag (* testing/T)} t]
+                (let [rng (newRandReader t)
+
+                    ^{:line 38} nonce (make (slice byte) (.NonceSize aead))]
+                  (.Read rng nonce)
+
+                  (let [(values before addData) (values (make (slice byte) adLen) (make (slice byte) ptLen))]
+                    (.Read rng before)
+                    (.Read rng addData)
+
+                    (let [ciphertext (sealMsg t aead nil nonce before addData)
+                        ^{:line 46} after (openWithoutError t aead nil nonce ciphertext addData)]
+
+                      (when (not (bytes/Equal after before))
+                        ^{:go/via [common]} (.Errorf t "plaintext is different after a seal/open cycle; got %s, want %s" (truncateHex after) (truncateHex before))))))))))))
+
+
+
+
+
+
+    (.Run t "OutOfBounds" ^{:go/end 107} (fn [^{:tag (* testing/T)} t]
+        ;; v1.26.0 and earlier have a harmless ciphertext overread/write in
+        ;; short-tag (not FIPS 140 Approved) AES-GCM.
+        (MustMinimumFIPS140ModuleVersion t "v1.28.0")
+        ;; boundaryLengths covers every offset within an AES block, as well as the tail
+        ;; of a multi-block message, since that's where implementations handle partial
+        ;; blocks, and are most likely to access memory past the end of a buffer.
+        (let [^:var boundaryLengths ^{:go/breaks [2 18]} (lit (slice int)
+              0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+              16 17 18 127 128 129 130 131 156 8193)]
+
+          (range [_ ptLen boundaryLengths]
+            (.Run t (fmt/Sprintf "Plaintext-Length=%d" ptLen) ^{:go/end 105} (fn [^{:tag (* testing/T)} t]
+                (let [rng (newRandReader t)
+
+                    ^{:line 71} nonce (make (slice byte) (.NonceSize aead))]
+                  (.Read rng nonce)
+
+                  (let [(values plaintext addData) (values (make (slice byte) ptLen) (make (slice byte) 16))]
+                    (.Read rng plaintext)
+                    (.Read rng addData)
+
+                    ;; Run a seal/open cycle with every buffer placed against an
+                    ;; inaccessible page, so that any access past the end of a
+                    ;; buffer (Boundary=End) or before its start (Boundary=Start)
+                    ;; faults, rather than silently landing in adjacent memory.
+                    (range [_ boundary (lit (slice string) "Start" "End")]
+                      (.Run t (+ "Boundary=" boundary) ^{:go/end 103} (fn [^{:tag (* testing/T)} t]
+                          (let [guarded ^{:go/end 92} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} b]
+                                (let [(values start end) (BoundarySlices t (len b))]
+                                  (when (== boundary "Start")
+                                    (copy start b)
+                                    (return start))
+
+                                  (copy end b)
+                                  ^{:line 91} end))
+
+
+                              (values src ad) (values (guarded plaintext) (guarded addData))
+                              ^{:line 95} dst (guarded (make (slice byte) (+ ptLen (.Overhead aead))))
+
+                              ^{:line 97} ciphertext (sealMsg t aead (subslice dst _ 0) nonce src ad)
+
+                              ^{:line 99} after (openWithoutError t aead (subslice (guarded plaintext) _ 0) nonce ciphertext ad)]
+                            (when (not (bytes/Equal after plaintext))
+                              ^{:go/via [common]} (.Errorf t "plaintext is different after a seal/open cycle; got %s, want %s" (truncateHex after) (truncateHex plaintext)))))))))))))))
+
+
+
+
+
+
+
+    (.Run t "InputNotModified" ^{:go/end 158} (fn [^{:tag (* testing/T)} t]
+
+        ;; Test all combinations of plaintext and additional data lengths.
+        (range [_ ptLen lengths]
+          (range [_ adLen lengths]
+            (.Run t (fmt/Sprintf "Plaintext-Length=%d,AddData-Length=%d" ptLen adLen) ^{:go/end 155} (fn [^{:tag (* testing/T)} t]
+                (.Run t "Seal" ^{:go/end 132} (fn [^{:tag (* testing/T)} t]
+                    (let [rng (newRandReader t)
+
+                        ^{:line 118} nonce (make (slice byte) (.NonceSize aead))]
+                      (.Read rng nonce)
+
+                      (let [(values src before) (values (make (slice byte) ptLen) (make (slice byte) ptLen))]
+                        (.Read rng src)
+                        (copy before src)
+
+                        (let [addData (make (slice byte) adLen)]
+                          (.Read rng addData)
+
+                          (sealMsg t aead nil nonce src addData)
+                          (when (not (bytes/Equal src before))
+                            ^{:go/via [common]} (.Errorf t "Seal modified src; got %s, want %s" (truncateHex src) (truncateHex before))))))))
+
+
+
+                (.Run t "Open" ^{:go/end 154} (fn [^{:tag (* testing/T)} t]
+                    (let [rng (newRandReader t)
+
+                        ^{:line 137} nonce (make (slice byte) (.NonceSize aead))]
+                      (.Read rng nonce)
+
+                      (let [(values plaintext addData) (values (make (slice byte) ptLen) (make (slice byte) adLen))]
+                        (.Read rng plaintext)
+                        (.Read rng addData)
+
+                        ;; Record the ciphertext that shouldn't be modified as the input of
+                        ;; Open.
+                        (let [ciphertext (sealMsg t aead nil nonce plaintext addData)
+                            ^{:line 147} before (make (slice byte) (len ciphertext))]
+                          (copy before ciphertext)
+
+                          (openWithoutError t aead nil nonce ciphertext addData)
+                          (when (not (bytes/Equal ciphertext before))
+                            ^{:go/via [common]} (.Errorf t "Open modified src; got %s, want %s" (truncateHex ciphertext) (truncateHex before))))))))))))))
+
+
+
+
+
+
+
+    (.Run t "BufferOverlap" ^{:go/end 232} (fn [^{:tag (* testing/T)} t]
+
+        ;; Test all combinations of plaintext and additional data lengths.
+        (range [_ ptLen lengths]
+          (when (<= ptLen 1) ; We need enough room for an inexact overlap to occur.
+            (continue))
+
+          (range [_ adLen lengths]
+            (.Run t (fmt/Sprintf "Plaintext-Length=%d,AddData-Length=%d" ptLen adLen) ^{:go/end 229} (fn [^{:tag (* testing/T)} t]
+                (.Run t "Seal" ^{:go/end 193} (fn [^{:tag (* testing/T)} t]
+                    (let [rng (newRandReader t)
+
+                        ^{:line 172} nonce (make (slice byte) (.NonceSize aead))]
+                      (.Read rng nonce)
+
+                      ;; Make a buffer that can hold a plaintext and ciphertext as we
+                      ;; overlap their slices to check for panic on inexact overlaps.
+                      (let [ctLen (+ ptLen (.Overhead aead))
+                          ^{:line 178} buff (make (slice byte) (+ ptLen ctLen))]
+                        (.Read rng buff)
+
+                        (let [addData (make (slice byte) adLen)]
+                          (.Read rng addData)
+
+                          ;; Make plaintext and dst slices point to same array with inexact overlap.
+                          (let [plaintext (subslice buff _ ptLen)
+                              ^{:line 186} dst (subslice buff 1 1)] ; Shift dst to not start at start of plaintext.
+                            (mustPanic t "invalid buffer overlap" ^{:go/end 187} (fn [] (sealMsg t aead dst nonce plaintext addData)))
+
+                            ;; Only overlap on one byte
+                            (set! plaintext (subslice buff _ ptLen))
+                            (set! dst (subslice buff (- ptLen 1) (- ptLen 1)))
+                            (mustPanic t "invalid buffer overlap" ^{:go/end 192} (fn [] (sealMsg t aead dst nonce plaintext addData)))))))))
+
+
+                (.Run t "Open" ^{:go/end 228} (fn [^{:tag (* testing/T)} t]
+                    (let [rng (newRandReader t)
+
+                        ^{:line 198} nonce (make (slice byte) (.NonceSize aead))]
+                      (.Read rng nonce)
+
+                      ;; Create a valid ciphertext to test Open with.
+                      (let [plaintext (make (slice byte) ptLen)]
+                        (.Read rng plaintext)
+                        (let [addData (make (slice byte) adLen)]
+                          (.Read rng addData)
+                          (let [validCT (sealMsg t aead nil nonce plaintext addData)
+
+                              ;; Make a buffer that can hold a plaintext and ciphertext as we
+                              ;; overlap their slices to check for panic on inexact overlaps.
+                              ^{:line 210} buff (make (slice byte) (+ ptLen (len validCT)))
+
+                              ;; Make ciphertext and dst slices point to same array with inexact overlap.
+                              ^{:line 213} ciphertext (subslice buff _ (len validCT))]
+                            (copy ciphertext validCT)
+                            (let [dst (subslice buff 1 1)] ; Shift dst to not start at start of ciphertext.
+                              (mustPanic t "invalid buffer overlap" ^{:go/end 216} (fn [] (.Open aead dst nonce ciphertext addData)))
+
+                              ;; Only overlap on one byte.
+                              (set! ciphertext (subslice buff _ (len validCT)))
+                              (copy ciphertext validCT)
+                              ;; Make sure it is the actual ciphertext being overlapped and not
+                              ;; the hash digest which might be extracted/truncated in some
+                              ;; implementations: Go one byte past the hash digest/tag and into
+                              ;; the ciphertext.
+                              (let [beforeTag (- (len validCT) (.Overhead aead))]
+                                (set! dst (subslice buff (- beforeTag 1) (- beforeTag 1)))
+                                (mustPanic t "invalid buffer overlap" ^{:go/end 227} (fn [] (.Open aead dst nonce ciphertext addData)))))))))))))))))
+
+
+
+
+
+
+    (.Run t "AppendDst" ^{:go/end 309} (fn [^{:tag (* testing/T)} t]
+
+        ;; Test all combinations of plaintext and additional data lengths.
+        (range [_ ptLen lengths]
+          (range [_ adLen lengths]
+            (.Run t (fmt/Sprintf "Plaintext-Length=%d,AddData-Length=%d" ptLen adLen) ^{:go/end 306} (fn [^{:tag (* testing/T)} t]
+
+                (.Run t "Seal" ^{:go/end 272} (fn [^{:tag (* testing/T)} t]
+                    (let [rng (newRandReader t)
+
+                        ^{:line 244} nonce (make (slice byte) (.NonceSize aead))]
+                      (.Read rng nonce)
+
+                      (let [shortBuff (conv (slice byte) "a")
+                          ^{:line 248} longBuff (make (slice byte) 512)]
+                        (.Read rng longBuff)
+                        (let [prefixes (lit (slice (slice byte)) shortBuff longBuff)]
+
+                          ;; Check each prefix gets appended to by Seal without altering them.
+                          (range [_ prefix prefixes]
+                            (let [(values plaintext addData) (values (make (slice byte) ptLen) (make (slice byte) adLen))]
+                              (.Read rng plaintext)
+                              (.Read rng addData)
+                              (let [out (sealMsg t aead prefix nonce plaintext addData)]
+
+                                ;; Check that Seal didn't alter the prefix
+                                (when (not (bytes/Equal (subslice out _ (len prefix)) prefix))
+                                  ^{:go/via [common]} (.Errorf t "Seal alters dst instead of appending; got %s, want %s" (truncateHex (subslice out _ (len prefix))) (truncateHex prefix)))
+
+
+                                (when (isDeterministic aead)
+                                  (let [ciphertext (subslice out (len prefix))]
+                                    ;; Check that the appended ciphertext wasn't affected by the prefix
+                                    (when [expectedCT (sealMsg t aead nil nonce plaintext addData)] (not (bytes/Equal ciphertext expectedCT))
+                                      ^{:go/via [common]} (.Errorf t "Seal behavior affected by pre-existing data in dst; got %s, want %s" (truncateHex ciphertext) (truncateHex expectedCT)))))))))))))
+
+
+
+
+
+                (.Run t "Open" ^{:go/end 305} (fn [^{:tag (* testing/T)} t]
+                    (let [rng (newRandReader t)
+
+                        ^{:line 277} nonce (make (slice byte) (.NonceSize aead))]
+                      (.Read rng nonce)
+
+                      (let [shortBuff (conv (slice byte) "a")
+                          ^{:line 281} longBuff (make (slice byte) 512)]
+                        (.Read rng longBuff)
+                        (let [prefixes (lit (slice (slice byte)) shortBuff longBuff)]
+
+                          ;; Check each prefix gets appended to by Open without altering them.
+                          (range [_ prefix prefixes]
+                            (let [(values before addData) (values (make (slice byte) adLen) (make (slice byte) ptLen))]
+                              (.Read rng before)
+                              (.Read rng addData)
+                              (let [ciphertext (sealMsg t aead nil nonce before addData)
+
+                                  ^{:line 292} out (openWithoutError t aead prefix nonce ciphertext addData)]
+
+                                ;; Check that Open didn't alter the prefix
+                                (when (not (bytes/Equal (subslice out _ (len prefix)) prefix))
+                                  ^{:go/via [common]} (.Errorf t "Open alters dst instead of appending; got %s, want %s" (truncateHex (subslice out _ (len prefix))) (truncateHex prefix)))
+
+
+                                (let [after (subslice out (len prefix))]
+                                  ;; Check that the appended plaintext wasn't affected by the prefix
+                                  (when (not (bytes/Equal after before))
+                                    ^{:go/via [common]} (.Errorf t "Open behavior affected by pre-existing data in dst; got %s, want %s" (truncateHex after) (truncateHex before))))))))))))))))))
+
+
+
+
+
+
+
+
+    (.Run t "WrongNonce" ^{:go/end 342} (fn [^{:tag (* testing/T)} t]
+        (when (== (.NonceSize aead) 0)
+          ^{:go/via [common]} (.Skip t "AEAD does not use a nonce"))
+
+        ;; Test all combinations of plaintext and additional data lengths.
+        (range [_ ptLen lengths]
+          (range [_ adLen lengths]
+            (.Run t (fmt/Sprintf "Plaintext-Length=%d,AddData-Length=%d" ptLen adLen) ^{:go/end 339} (fn [^{:tag (* testing/T)} t]
+                (let [rng (newRandReader t)
+
+                    ^{:line 321} nonce (make (slice byte) (.NonceSize aead))]
+                  (.Read rng nonce)
+
+                  (let [(values plaintext addData) (values (make (slice byte) ptLen) (make (slice byte) adLen))]
+                    (.Read rng plaintext)
+                    (.Read rng addData)
+
+                    (let [ciphertext (sealMsg t aead nil nonce plaintext addData)
+
+                        ;; Perturb the nonce and check for an error when Opening
+                        ^{:line 331} alterNonce (make (slice byte) (.NonceSize aead))]
+                      (copy alterNonce nonce)
+                      (set! (aget alterNonce (- (len alterNonce) 1)) + 1)
+                      (let [(values _ err) (.Open aead nil alterNonce ciphertext addData)]
+
+                        (when (== err nil)
+                          ^{:go/via [common]} (.Errorf t "Open did not error when given different nonce than Sealed with"))))))))))))
+
+
+
+
+
+
+    (.Run t "WrongAddData" ^{:go/end 377} (fn [^{:tag (* testing/T)} t]
+
+        ;; Test all combinations of plaintext and additional data lengths.
+        (range [_ ptLen lengths]
+          (range [_ adLen lengths]
+            (when (== adLen 0)
+              (continue))
+
+
+            (.Run t (fmt/Sprintf "Plaintext-Length=%d,AddData-Length=%d" ptLen adLen) ^{:go/end 374} (fn [^{:tag (* testing/T)} t]
+                (let [rng (newRandReader t)
+
+                    ^{:line 356} nonce (make (slice byte) (.NonceSize aead))]
+                  (.Read rng nonce)
+
+                  (let [(values plaintext addData) (values (make (slice byte) ptLen) (make (slice byte) adLen))]
+                    (.Read rng plaintext)
+                    (.Read rng addData)
+
+                    (let [ciphertext (sealMsg t aead nil nonce plaintext addData)
+
+                        ;; Perturb the Additional Data and check for an error when Opening
+                        ^{:line 366} alterAD (make (slice byte) adLen)]
+                      (copy alterAD addData)
+                      (set! (aget alterAD (- (len alterAD) 1)) + 1)
+                      (let [(values _ err) (.Open aead nil nonce ciphertext alterAD)]
+
+                        (when (== err nil)
+                          ^{:go/via [common]} (.Errorf t "Open did not error when given different Additional Data than Sealed with"))))))))))))
+
+
+
+
+
+
+    (.Run t "WrongCiphertext" ^{:go/end 409} (fn [^{:tag (* testing/T)} t]
+
+        ;; Test all combinations of plaintext and additional data lengths.
+        (range [_ ptLen lengths]
+          (range [_ adLen lengths]
+
+            (.Run t (fmt/Sprintf "Plaintext-Length=%d,AddData-Length=%d" ptLen adLen) ^{:go/end 406} (fn [^{:tag (* testing/T)} t]
+                (let [rng (newRandReader t)
+
+                    ^{:line 388} nonce (make (slice byte) (.NonceSize aead))]
+                  (.Read rng nonce)
+
+                  (let [(values plaintext addData) (values (make (slice byte) ptLen) (make (slice byte) adLen))]
+                    (.Read rng plaintext)
+                    (.Read rng addData)
+
+                    (let [ciphertext (sealMsg t aead nil nonce plaintext addData)
+
+                        ;; Perturb the ciphertext and check for an error when Opening
+                        ^{:line 398} alterCT (make (slice byte) (len ciphertext))]
+                      (copy alterCT ciphertext)
+                      (set! (aget alterCT (- (len alterCT) 1)) + 1)
+                      (let [(values _ err) (.Open aead nil nonce alterCT addData)]
+
+                        (when (== err nil)
+                          ^{:go/via [common]} (.Errorf t "Open did not error when given different ciphertext than was produced by Seal"))))))))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 430} (go/func sealMsg "Helper function to Seal a plaintext with additional data. Checks that\nciphertext isn't bigger than the plaintext length plus Overhead()\n" ^{:tag (slice byte)} [^{:tag (* testing/T)} t ^cipher/AEAD aead ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} nonce ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} addData]
+  ^{:go/via [common]} (.Helper t)
+
+  (let [initialLen (len ciphertext)]
+
+    (set! ciphertext (.Seal aead ciphertext nonce plaintext addData))
+
+    (let [lenCT (- (len ciphertext) initialLen)]
+
+      ;; Appended ciphertext shouldn't ever be longer than the length of the
+      ;; plaintext plus Overhead
+      (when (> lenCT (+ (len plaintext) (.Overhead aead)))
+        ^{:go/via [common]} (.Errorf t "length of ciphertext from Seal exceeds length of plaintext by more than Overhead(); got %d, want <=%d" lenCT (+ (len plaintext) (.Overhead aead))))
+
+
+      ^{:line 429} ciphertext)))
+
+
+^{:go/end 442} (go/func isDeterministic ^bool [^cipher/AEAD aead]
+  ;; Check if the AEAD is deterministic by checking if the same plaintext
+  ;; encrypted with the same nonce and additional data produces the same
+  ;; ciphertext.
+  (let [nonce (make (slice byte) (.NonceSize aead))
+      ^{:line 437} addData (conv (slice byte) "additional data")
+      ^{:line 438} plaintext (conv (slice byte) "plaintext")
+      ^{:line 439} ciphertext1 (.Seal aead nil nonce plaintext addData)
+      ^{:line 440} ciphertext2 (.Seal aead nil nonce plaintext addData)]
+    (bytes/Equal ciphertext1 ciphertext2)))
+
+
+
+
+
+^{:go/end 456} (go/func openWithoutError "Helper function to Open and authenticate ciphertext. Checks that Open\ndoesn't error (assuming ciphertext was well-formed with corresponding nonce\nand additional data).\n" ^{:tag (slice byte)} [^{:tag (* testing/T)} t ^cipher/AEAD aead ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} nonce ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} addData]
+  ^{:go/via [common]} (.Helper t)
+
+  (let [(values ^:assign plaintext err) (.Open aead plaintext nonce ciphertext addData)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatalf t "Open returned error on properly formed ciphertext; got \"%s\", want \"nil\"" err))
+
+
+    ^{:line 455} plaintext))

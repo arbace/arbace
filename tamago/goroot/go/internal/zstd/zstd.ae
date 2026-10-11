@@ -1,0 +1,504 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package zstd provides a decompressor for zstd streams,
+;; described in RFC 8878. It does not support dictionaries.
+(in-ns 'go.internal.zstd) (go/file "zstd.go" :doc "Package zstd provides a decompressor for zstd streams,\ndescribed in RFC 8878. It does not support dictionaries.\n" :imports [
+
+
+    ^{:line 10} [binary "encoding/binary"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [io "io"]])
+
+
+
+
+(go/var ^{:doc "fuzzing is a fuzzer hook set to true when fuzzing.\nThis is used to reject cases where we don't match zstd.\n"} fuzzing false)
+
+
+(go/type Reader "Reader implements [io.Reader] to read a zstd compressed stream.\n" (struct
+
+    ^{:line 23 :tag io/Reader :doc "The underlying Reader.\n"} r
+
+
+
+
+    ^{:line 28 :tag bool :doc "Whether we have read the frame header.\nThis is of interest when buffer is empty.\nIf true we expect to see a new block.\n"} sawFrameHeader
+
+
+    ^{:line 31 :tag bool :doc "Whether the current frame expects a checksum.\n"} hasChecksum
+
+
+    ^{:line 34 :tag bool :doc "Whether we have read at least one frame.\n"} readOneFrame
+
+
+    ^{:line 37 :tag bool :doc "True if the frame size is not known.\n"} frameSizeUnknown
+
+
+
+    ^{:line 41 :tag uint64 :doc "The number of uncompressed bytes remaining in the current frame.\nIf frameSizeUnknown is true, this is not valid.\n"} remainingFrameSize
+
+
+
+    ^{:line 45 :tag int64 :doc "The number of bytes read from r up to the start of the current\nblock, for error reporting.\n"} blockOffset
+
+
+    ^{:line 48 :tag (slice byte) :doc "Buffered decompressed data.\n"} buffer
+
+    ^{:line 50 :tag int :doc "Current read offset in buffer.\n"} off
+
+
+    ^{:line 53 :tag uint32 :doc "The current repeated offsets.\n"} repeatedOffset1
+    ^{:line 54 :tag uint32} repeatedOffset2
+    ^{:line 55 :tag uint32} repeatedOffset3
+
+
+    ^{:line 58 :tag (slice uint16) :doc "The current Huffman tree used for compressing literals.\n"} huffmanTable
+    ^{:line 59 :tag int} huffmanTableBits
+
+
+    ^{:line 62 :tag window :doc "The window for back references.\n"} window
+
+
+    ^{:line 65 :tag (slice byte) :doc "A buffer available to hold a compressed block.\n"} compressedBuf
+
+
+    ^{:line 68 :tag (slice byte) :doc "A buffer for literals.\n"} literals
+
+
+    ^{:line 71 :tag (array 3 (slice fseBaselineEntry)) :doc "Sequence decode FSE tables.\n"} seqTables
+    ^{:line 72 :tag (array 3 uint8)} seqTableBits
+
+
+    ^{:line 75 :tag (array 3 (slice fseBaselineEntry)) :doc "Buffers for sequence decode FSE tables.\n"} seqTableBuffers
+
+
+    ^{:line 78 :tag (array 16 byte) :doc "Scratch space used for small reads, to avoid allocation.\n"} scratch
+
+
+    ^{:line 81 :tag (slice fseEntry) :doc "A scratch table for reading an FSE. Only temporarily valid.\n"} fseScratch
+
+
+    ^{:line 84 :tag xxhash64 :doc "For checksum computation.\n"} checksum))
+
+
+
+^{:go/end 92} (go/func NewReader "NewReader creates a new Reader that decompresses data from the given reader.\n" ^{:tag (* Reader)} [^io/Reader input]
+  (let [r (new Reader)]
+    (.Reset r input)
+    ^{:line 91} r))
+
+
+
+
+^{:go/end 122} (go/method Reset "Reset discards the current state and starts reading a new stream from r.\nThis permits reusing a Reader rather than allocating a new one.\n" [^{:tag (* Reader)} r ^io/Reader input]
+  (set! (.-r r) input)
+
+  ;; Several fields are preserved to avoid allocation.
+  ;; Others are always set before they are used.
+  (set! (.-sawFrameHeader r) false)
+  (set! (.-hasChecksum r) false)
+  (set! (.-readOneFrame r) false)
+  (set! (.-frameSizeUnknown r) false)
+  (set! (.-remainingFrameSize r) 0)
+  (set! (.-blockOffset r) 0)
+  (set! (.-buffer r) (subslice (.-buffer r) _ 0))
+  (set! (.-off r) 0))
+;; repeatedOffset1
+;; repeatedOffset2
+;; repeatedOffset3
+;; huffmanTable
+;; huffmanTableBits
+;; window
+;; compressedBuf
+;; literals
+;; seqTables
+;; seqTableBits
+;; seqTableBuffers
+;; scratch
+;; fseScratch
+
+
+
+^{:go/end 132} (go/method Read "Read implements [io.Reader].\n" [^{:tag (* Reader)} r ^{:tag (slice byte)} p] :results [int error]
+  (when [err (.refillIfNeeded r)] (!= err nil)
+    (return 0 err))
+
+  (let [n (copy p (subslice (.-buffer r) (.-off r)))]
+    (set! (.-off r) + n)
+    (return n nil)))
+
+
+
+^{:go/end 142} (go/method ReadByte "ReadByte implements [io.ByteReader].\n" [^{:tag (* Reader)} r] :results [byte error]
+  (when [err (.refillIfNeeded r)] (!= err nil)
+    (return 0 err))
+
+  (let [ret (aget (.-buffer r) (.-off r))]
+    (inc! (.-off r))
+    (return ret nil)))
+
+
+
+^{:go/breaks [[5 152]] :go/end 153} (go/method refillIfNeeded "refillIfNeeded reads the next block if necessary.\n" ^error [^{:tag (* Reader)} r]
+  (while (>= (.-off r) (len (.-buffer r)))
+    (when [err (.refill r)] (!= err nil)
+      (return err))
+
+    (set! (.-off r) 0))
+
+  nil)
+
+
+
+^{:go/end 163} (go/method refill "refill reads and decompresses the next block.\n" ^error [^{:tag (* Reader)} r]
+  (when (not (.-sawFrameHeader r))
+    (when [err (.readFrameHeader r)] (!= err nil)
+      (return err)))
+
+
+  (.readBlock r))
+
+
+
+^{:go/end 317} (go/method readFrameHeader "readFrameHeader reads the frame header and prepares to read a block.\n" ^error [^{:tag (* Reader)} r]
+  (let [
+      ^{:line 168 :go/label :retry} relativeOffset 0]
+
+    ;; Read magic number. RFC 3.1.1.
+    (when [(values _ err) (io/ReadFull (.-r r) (subslice (.-scratch r) _ 4))] (!= err nil)
+      ;; We require that the stream contains at least one frame.
+      (when (and (== err io/EOF) (not (.-readOneFrame r)))
+        (set! err io/ErrUnexpectedEOF))
+
+      (return (.wrapError r relativeOffset err)))
+
+
+    (when [magic (.Uint32 binary/LittleEndian (subslice (.-scratch r) _ 4))] (!= magic 0xfd2fb528)
+      (when (and (>= magic 0x184d2a50) (<= magic 0x184d2a5f))
+        ;; This is a skippable frame.
+        (set! (.-blockOffset r) + (+ (conv int64 relativeOffset) 4))
+        (when [err (.skipFrame r)] (!= err nil)
+          (return err))
+
+        (set! (.-readOneFrame r) true)
+        (goto :retry))
+
+
+      (return (.makeError r relativeOffset "invalid magic number")))
+
+
+    (set! relativeOffset + 4)
+
+    ;; Read Frame_Header_Descriptor. RFC 3.1.1.1.1.
+    (when [(values _ err) (io/ReadFull (.-r r) (subslice (.-scratch r) _ 1))] (!= err nil)
+      (return (.wrapNonEOFError r relativeOffset err)))
+
+    (let [descriptor (aget (.-scratch r) 0)
+
+        ^{:line 201} singleSegment (!= (bit-and descriptor (<< 1 5)) 0)
+
+        ^{:line 203} fcsFieldSize ^int (<< 1 (>> descriptor 6))]
+      (when (and (== fcsFieldSize 1) (not singleSegment))
+        (set! fcsFieldSize 0))
+
+
+      (let [^int windowDescriptorSize (zero int)]
+        (if singleSegment
+          (set! windowDescriptorSize 0)
+
+          (set! windowDescriptorSize 1))
+
+
+        (when (!= (bit-and descriptor (<< 1 3)) 0)
+          (return (.makeError r relativeOffset "reserved bit set in frame header descriptor")))
+
+
+        (set! (.-hasChecksum r) (!= (bit-and descriptor (<< 1 2)) 0))
+        (when (.-hasChecksum r)
+          (.reset (.-checksum r)))
+
+
+        ;; Dictionary_ID_Flag. RFC 3.1.1.1.1.6.
+        (let [dictionaryIdSize 0]
+          (when [dictIdFlag (bit-and descriptor 3)] (!= dictIdFlag 0)
+            (set! dictionaryIdSize ^int (<< 1 (- dictIdFlag 1))))
+
+
+          (inc! relativeOffset)
+
+          (let [headerSize (+ windowDescriptorSize dictionaryIdSize fcsFieldSize)]
+
+            (when [(values _ err) (io/ReadFull (.-r r) (subslice (.-scratch r) _ headerSize))] (!= err nil)
+              (return (.wrapNonEOFError r relativeOffset err)))
+
+
+            ;; Figure out the maximum amount of data we need to retain
+            ;; for backreferences.
+            (let [^uint64 windowSize (zero uint64)]
+              (when (not singleSegment)
+                ;; Window descriptor. RFC 3.1.1.1.2.
+                (let [windowDescriptor (aget (.-scratch r) 0)
+                    ^{:line 244} exponent (conv uint64 (>> windowDescriptor 3))
+                    ^{:line 245} mantissa (conv uint64 (bit-and windowDescriptor 7))
+                    ^{:line 246} windowLog (+ exponent 10)
+                    ^{:line 247} windowBase (<< (conv uint64 1) windowLog)
+                    ^{:line 248} windowAdd (* (/ windowBase 8) mantissa)]
+                  (set! windowSize (+ windowBase windowAdd))
+
+                  ;; Default zstd sets limits on the window size.
+                  (when (and fuzzing ^:go/paren (or (> windowLog 31) (> windowSize (<< 1 27))))
+                    (return (.makeError r relativeOffset "windowSize too large")))))
+
+
+
+              ;; Dictionary_ID. RFC 3.1.1.1.3.
+              (when (!= dictionaryIdSize 0)
+                (let [dictionaryId (subslice (.-scratch r) windowDescriptorSize (+ windowDescriptorSize dictionaryIdSize))]
+                  ;; Allow only zero Dictionary ID.
+                  (range [_ b dictionaryId]
+                    (when (!= b 0)
+                      (return (.makeError r relativeOffset "dictionaries are not supported"))))))
+
+
+
+
+              ;; Frame_Content_Size. RFC 3.1.1.1.4.
+              (set! (.-frameSizeUnknown r) false)
+              (set! (.-remainingFrameSize r) 0)
+              (let [fb (subslice (.-scratch r) (+ windowDescriptorSize dictionaryIdSize))]
+                (switch fcsFieldSize
+                  (case [0]
+                    (set! (.-frameSizeUnknown r) true))
+                  (case [1]
+                    (set! (.-remainingFrameSize r) (conv uint64 (aget fb 0))))
+                  (case [2]
+                    (set! (.-remainingFrameSize r) (+ 256 (conv uint64 (.Uint16 binary/LittleEndian fb)))))
+                  (case [4]
+                    (set! (.-remainingFrameSize r) (conv uint64 (.Uint32 binary/LittleEndian fb))))
+                  (case [8]
+                    (set! (.-remainingFrameSize r) (.Uint64 binary/LittleEndian fb)))
+                  (default
+                    (panic "unreachable")))
+
+
+                ;; RFC 3.1.1.1.2.
+                ;; When Single_Segment_Flag is set, Window_Descriptor is not present.
+                ;; In this case, Window_Size is Frame_Content_Size.
+                (when singleSegment
+                  (set! windowSize (.-remainingFrameSize r)))
+
+
+                ;; RFC 8878 3.1.1.1.1.2. permits us to set an 8M max on window size.
+                ^{:go/breaks [[15 316]]} (let [^:const ^{:val 8388608} maxWindowSize (<< 8 20)]
+                  (when (> windowSize maxWindowSize)
+                    (set! windowSize maxWindowSize))
+
+
+                  (set! relativeOffset + headerSize)
+
+                  (set! (.-sawFrameHeader r) true)
+                  (set! (.-readOneFrame r) true)
+                  (set! (.-blockOffset r) + (conv int64 relativeOffset))
+
+                  ;; Prepare to read blocks from the frame.
+                  (set! (.-repeatedOffset1 r) 1)
+                  (set! (.-repeatedOffset2 r) 4)
+                  (set! (.-repeatedOffset3 r) 8)
+                  (set! (.-huffmanTableBits r) 0)
+                  (.reset (.-window r) (conv int windowSize))
+                  (aset (.-seqTables r) 0 nil)
+                  (aset (.-seqTables r) 1 nil)
+                  (aset (.-seqTables r) 2 nil)
+
+                  nil)))))))))
+
+
+
+^{:go/end 368} (go/method skipFrame "skipFrame skips a skippable frame. RFC 3.1.2.\n" ^error [^{:tag (* Reader)} r]
+  (let [relativeOffset 0]
+
+    (when [(values _ err) (io/ReadFull (.-r r) (subslice (.-scratch r) _ 4))] (!= err nil)
+      (return (.wrapNonEOFError r relativeOffset err)))
+
+
+    (set! relativeOffset + 4)
+
+    (let [size (.Uint32 binary/LittleEndian (subslice (.-scratch r) _ 4))]
+      (when (== size 0)
+        (set! (.-blockOffset r) + (conv int64 relativeOffset))
+        (return nil))
+
+
+      (when [(values seeker ok) (assert io/Seeker (.-r r))] ok
+        (set! (.-blockOffset r) + (conv int64 relativeOffset))
+        ;; Implementations of Seeker do not always detect invalid offsets,
+        ;; so check that the new offset is valid by comparing to the end.
+        (let [(values prev err) (.Seek seeker 0 io/SeekCurrent)]
+          (when (!= err nil)
+            (return (.wrapError r 0 err)))
+
+          (let [(values end ^:assign err) (.Seek seeker 0 io/SeekEnd)]
+            (when (!= err nil)
+              (return (.wrapError r 0 err)))
+
+            (when (> prev (- end (conv int64 size)))
+              (set! (.-blockOffset r) + (- end prev))
+              (return (.makeEOFError r 0)))
+
+
+            ;; The new offset is valid, so seek to it.
+            (set! (values _ err) (.Seek seeker (+ prev (conv int64 size)) io/SeekStart))
+            (when (!= err nil)
+              (return (.wrapError r 0 err)))
+
+            (set! (.-blockOffset r) + (conv int64 size))
+            (return nil))))
+
+
+      ^{:go/breaks [5]} (let [(values n err) (io/CopyN io/Discard (.-r r) (conv int64 size))]
+        (set! relativeOffset + (conv int n))
+        (when (!= err nil)
+          (return (.wrapNonEOFError r relativeOffset err)))
+
+        (set! (.-blockOffset r) + (conv int64 relativeOffset))
+        nil))))
+
+
+
+^{:go/end 459} (go/method readBlock "readBlock reads the next block from a frame.\n" ^error [^{:tag (* Reader)} r]
+  (let [relativeOffset 0]
+
+    ;; Read Block_Header. RFC 3.1.1.2.
+    (when [(values _ err) (io/ReadFull (.-r r) (subslice (.-scratch r) _ 3))] (!= err nil)
+      (return (.wrapNonEOFError r relativeOffset err)))
+
+
+    (set! relativeOffset + 3)
+
+    ^{:go/breaks [[7 458]]} (let [header (bit-or (conv uint32 (aget (.-scratch r) 0)) (<< (conv uint32 (aget (.-scratch r) 1)) 8) (<< (conv uint32 (aget (.-scratch r) 2)) 16))
+
+        ^{:line 383} lastBlock (!= (bit-and header 1) 0)
+        ^{:line 384} blockType (bit-and (>> header 1) 3)
+        ^{:line 385} blockSize (conv int (>> header 3))]
+
+      ;; Maximum block size is smaller of window size and 128K.
+      ;; We don't record the window size for a single segment frame,
+      ;; so just use 128K. RFC 3.1.1.2.3, 3.1.1.2.4.
+      (when (or (> blockSize (<< 128 10)) ^:go/paren (and (> (.-size (.-window r)) 0) (> blockSize (.-size (.-window r)))))
+        (return (.makeError r relativeOffset "block size too large")))
+
+
+      ;; Handle different block types. RFC 3.1.1.2.2.
+      (switch blockType
+        (case [0]
+          (.setBufferSize r blockSize)
+          (when [(values _ err) (io/ReadFull (.-r r) (.-buffer r))] (!= err nil)
+            (return (.wrapNonEOFError r relativeOffset err)))
+
+          (set! relativeOffset + blockSize)
+          (set! (.-blockOffset r) + (conv int64 relativeOffset)))
+        (case [1]
+          (.setBufferSize r blockSize)
+          (when [(values _ err) (io/ReadFull (.-r r) (subslice (.-scratch r) _ 1))] (!= err nil)
+            (return (.wrapNonEOFError r relativeOffset err)))
+
+          (inc! relativeOffset)
+          (let [v (aget (.-scratch r) 0)]
+            (range [i (.-buffer r)]
+              (aset (.-buffer r) i v))
+
+            (set! (.-blockOffset r) + (conv int64 relativeOffset))))
+        (case [2]
+          (set! (.-blockOffset r) + (conv int64 relativeOffset))
+          (when [err (.compressedBlock r blockSize)] (!= err nil)
+            (return err))
+
+          (set! (.-blockOffset r) + (conv int64 blockSize)))
+        (case [3]
+          (return (.makeError r relativeOffset "invalid block type"))))
+
+
+      (when (not (.-frameSizeUnknown r))
+        (when (> (conv uint64 (len (.-buffer r))) (.-remainingFrameSize r))
+          (return (.makeError r relativeOffset "too many uncompressed bytes in frame")))
+
+        (set! (.-remainingFrameSize r) - (conv uint64 (len (.-buffer r)))))
+
+
+      (when (.-hasChecksum r)
+        (.update (.-checksum r) (.-buffer r)))
+
+
+      (if (not lastBlock)
+        (.save (.-window r) (.-buffer r))
+        (do
+          (when (and (not (.-frameSizeUnknown r)) (!= (.-remainingFrameSize r) 0))
+            (return (.makeError r relativeOffset "not enough uncompressed bytes for frame")))
+
+          ;; Check for checksum at end of frame. RFC 3.1.1.
+          (when (.-hasChecksum r)
+            (when [(values _ err) (io/ReadFull (.-r r) (subslice (.-scratch r) _ 4))] (!= err nil)
+              (return (.wrapNonEOFError r 0 err)))
+
+
+            (let [inputChecksum (.Uint32 binary/LittleEndian (subslice (.-scratch r) _ 4))
+                ^{:line 448} dataChecksum (conv uint32 (.digest (.-checksum r)))]
+              (when (!= inputChecksum dataChecksum)
+                (return (.wrapError r 0 (fmt/Errorf "invalid checksum: got %#x want %#x" dataChecksum inputChecksum))))
+
+
+              (set! (.-blockOffset r) + 4)))
+
+          (set! (.-sawFrameHeader r) false)))
+
+
+      nil)))
+
+
+
+
+^{:go/end 469} (go/method setBufferSize "setBufferSize sets the decompressed buffer size.\nWhen this is called the buffer is empty.\n" [^{:tag (* Reader)} r ^int size]
+  (when (< (cap (.-buffer r)) size)
+    (let [need (- size (cap (.-buffer r)))]
+      (set! (.-buffer r) (append (subslice (.-buffer r) _ (cap (.-buffer r))) (spread (make (slice byte) need))))))
+
+  (set! (.-buffer r) (subslice (.-buffer r) _ size)))
+
+
+
+(go/type zstdError "zstdError is an error while decompressing.\n" (struct
+    ^{:line 473 :tag int64} offset
+    ^{:line 474 :tag error} err))
+
+
+^{:go/end 479} (go/method Error ^string [^{:tag (* zstdError)} ze]
+  (fmt/Sprintf "zstd decompression error at %d: %v" (.-offset ze) (.-err ze)))
+
+
+^{:go/end 483} (go/method Unwrap ^error [^{:tag (* zstdError)} ze]
+  (.-err ze))
+
+
+^{:go/end 487} (go/method makeEOFError ^error [^{:tag (* Reader)} r ^int off]
+  (.wrapError r off io/ErrUnexpectedEOF))
+
+
+^{:go/end 494} (go/method wrapNonEOFError ^error [^{:tag (* Reader)} r ^int off ^error err]
+  (when (== err io/EOF)
+    (set! err io/ErrUnexpectedEOF))
+
+  (.wrapError r off err))
+
+
+^{:go/end 498} (go/method makeError ^error [^{:tag (* Reader)} r ^int off ^string msg]
+  (.wrapError r off (errors/New msg)))
+
+
+^{:go/end 505} (go/method wrapError ^error [^{:tag (* Reader)} r ^int off ^error err]
+  (when (== err io/EOF)
+    (return err))
+
+  (addr (lit zstdError (+ (.-blockOffset r) (conv int64 off)) err)))

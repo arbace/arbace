@@ -1,0 +1,327 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.archive.tar) (go/file "strconv.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [strconv "strconv"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [time "time"]])
+
+
+
+^{:go/end 18} (go/func hasNUL "hasNUL reports whether the NUL character exists within s.\n" ^bool [^string s]
+  (strings/Contains s "\u0000"))
+
+
+
+^{:go/breaks [[5 27]] :go/end 28} (go/func isASCII "isASCII reports whether the input is an ASCII C-style string.\n" ^bool [^string s]
+  (range [_ c s]
+    (when (or (>= c 0x80) (== c 0x00))
+      (return false)))
+
+
+  true)
+
+
+
+
+^{:go/end 43} (go/func toASCII "toASCII converts the input to an ASCII C-style string.\nThis is a best effort conversion, so invalid characters are dropped.\n" ^string [^string s]
+  (when (isASCII s)
+    (return s))
+
+  (let [b (make (slice byte) 0 (len s))]
+    (range [_ c s]
+      (when (and (< c 0x80) (!= c 0x00))
+        (set! b (append b (conv byte c)))))
+
+
+    (conv string b)))
+
+
+(go/type parser (struct
+    ^{:line 46 :tag error} err)) ; Last error seen
+
+
+(go/type formatter (struct
+    ^{:line 50 :tag error} err)) ; Last error seen
+
+
+
+
+^{:go/end 60} (go/method parseString "parseString parses bytes as a NUL-terminated C-style string.\nIf a NUL byte is not found then the whole slice is returned as a string.\n" ^string [(* parser) ^{:tag (slice byte)} b]
+  (when [i (bytes/IndexByte b 0)] (>= i 0)
+    (return (conv string (subslice b _ i))))
+
+  (conv string b))
+
+
+
+^{:go/end 79} (go/method formatString "formatString copies s into b, NUL-terminating if possible.\n" [^{:tag (* formatter)} f ^{:tag (slice byte)} b ^string s]
+  (when (> (len s) (len b))
+    (set! (.-err f) ErrFieldTooLong))
+
+  (copy b s)
+  (when (< (len s) (len b))
+    (aset b (len s) 0))
+
+
+  ;; Some buggy readers treat regular files with a trailing slash
+  ;; in the V7 path field as a directory even though the full path
+  ;; recorded elsewhere (e.g., via PAX record) contains no trailing slash.
+  (when (and (> (len s) (len b)) (== (aget b (- (len b) 1)) \/))
+    (let [n (len (strings/TrimRight (subslice s _ (- (len b) 1)) "/"))]
+      (aset b n 0)))) ; Replace trailing slash with NUL terminator
+
+
+
+
+
+
+
+
+
+
+^{:go/end 91} (go/func fitsInBase256 "fitsInBase256 reports whether x can be encoded into n bytes using base-256\nencoding. Unlike octal encoding, base-256 encoding does not require that the\nstring ends with a NUL character. Thus, all n bytes are available for output.\n\nIf operating in binary mode, this assumes strict GNU binary mode; which means\nthat the first byte can only be either 0x80 or 0xff. Thus, the first byte is\nequivalent to the sign bit in two's complement form.\n" ^bool [^int n ^int64 x]
+  (let [binBits (* (conv uint (- n 1)) 8)]
+    (or (>= n 9) ^:go/paren (and (>= x ^int64 (<< -1 binBits)) (< x ^int64 (<< 1 binBits))))))
+
+
+
+
+
+^{:go/end 135} (go/method parseNumeric "parseNumeric parses the input as being encoded in either base-256 or octal.\nThis function may return negative numbers.\nIf parsing fails or an integer overflow occurs, err will be set.\n" ^int64 [^{:tag (* parser)} p ^{:tag (slice byte)} b]
+  ;; Check for base-256 (binary) format first.
+  ;; If the first bit is set, then all following bits constitute a two's
+  ;; complement encoded number in big-endian byte order.
+  (when (and (> (len b) 0) (!= (bit-and (aget b 0) 0x80) 0))
+    ;; Handling negative numbers relies on the following identity:
+    ;;	-a-1 == ^a
+    ;;
+    ;; If the number is negative, we use an inversion mask to invert the
+    ;; data bytes and treat the value as an unsigned number.
+    (let [^byte inv (zero byte)] ; 0x00 if positive or zero, 0xff if negative
+      (when (!= (bit-and (aget b 0) 0x40) 0)
+        (set! inv 0xff))
+
+
+      (let [^uint64 x (zero uint64)]
+        (range [i c b]
+          (set! c bit-xor inv) ; Inverts c only if inv is 0xff, otherwise does nothing
+          (when (== i 0)
+            (set! c bit-and 0x7f)) ; Ignore signal bit in first byte
+
+          (when (> (>> x 56) 0)
+            (set! (.-err p) ErrHeader) ; Integer overflow
+            (return 0))
+
+          (set! x (bit-or (<< x 8) (conv uint64 c))))
+
+        (when (> (>> x 63) 0)
+          (set! (.-err p) ErrHeader) ; Integer overflow
+          (return 0))
+
+        (when (== inv 0xff)
+          (return (bit-not (conv int64 x))))
+
+        (return (conv int64 x)))))
+
+
+  ;; Normal case is base-8 (octal) format.
+  (.parseOctal p b))
+
+
+
+
+^{:go/end 156} (go/method formatNumeric "formatNumeric encodes x into b using base-8 (octal) encoding if possible.\nOtherwise it will attempt to use base-256 (binary) encoding.\n" [^{:tag (* formatter)} f ^{:tag (slice byte)} b ^int64 x]
+  (when (fitsInOctal (len b) x)
+    (.formatOctal f b x)
+    (return))
+
+
+  (when (fitsInBase256 (len b) x)
+    (for [i (- (len b) 1)] (>= i 0) (dec! i)
+      (aset b i (conv byte x))
+      (set! x >> 8))
+
+    (set! (aget b 0) bit-or 0x80) ; Highest bit indicates binary format
+    (return))
+
+
+  (.formatOctal f b 0) ; Last resort, just write zero
+  (set! (.-err f) ErrFieldTooLong))
+
+
+^{:go/end 174} (go/method parseOctal ^int64 [^{:tag (* parser)} p ^{:tag (slice byte)} b]
+  ;; Because unused fields are filled with NULs, we need
+  ;; to skip leading NULs. Fields may also be padded with
+  ;; spaces or NULs.
+  ;; So we remove leading and trailing NULs and spaces to
+  ;; be sure.
+  (set! b (bytes/Trim b " \u0000"))
+
+  (when (== (len b) 0)
+    (return 0))
+
+  (let [(values x perr) (strconv/ParseUint (.parseString p b) 8 64)]
+    (when (!= perr nil)
+      (set! (.-err p) ErrHeader))
+
+    (conv int64 x)))
+
+
+^{:go/end 188} (go/method formatOctal [^{:tag (* formatter)} f ^{:tag (slice byte)} b ^int64 x]
+  (when (not (fitsInOctal (len b) x))
+    (set! x 0) ; Last resort, just write zero
+    (set! (.-err f) ErrFieldTooLong))
+
+
+  (let [s (strconv/FormatInt x 8)]
+    ;; Add leading zeros, but leave room for a NUL.
+    (when [n (- (len b) (len s) 1)] (> n 0)
+      (set! s (+ (strings/Repeat "0" n) s)))
+
+    (.formatString f b s)))
+
+
+
+
+^{:go/end 195} (go/func fitsInOctal "fitsInOctal reports whether the integer x fits in a field n-bytes long\nusing octal encoding with the appropriate NUL terminator.\n" ^bool [^int n ^int64 x]
+  (let [octBits (* (conv uint (- n 1)) 3)]
+    (and (>= x 0) ^:go/paren (or (>= n 22) (< x ^int64 (<< 1 octBits))))))
+
+
+
+
+
+^{:go/end 231} (go/func parsePAXTime "parsePAXTime takes a string of the form %d.%d as described in the PAX\nspecification. Note that this implementation allows for negative timestamps,\nwhich is allowed for by the PAX specification, but not always portable.\n" [^string s] :results [time/Time error]
+  (let [^:const ^{:val 9} maxNanoSecondDigits 9
+
+      ;; Split string into seconds and sub-seconds parts.
+      (values ss sn _) (strings/Cut s ".")
+
+      ;; Parse the seconds.
+      (values secs err) (strconv/ParseInt ss 10 64)]
+    (when (!= err nil)
+      (return (lit time/Time) ErrHeader))
+
+    (when (== (len sn) 0)
+      (return (time/Unix secs 0) nil)) ; No sub-second values
+
+
+    ;; Parse the nanoseconds.
+    ;; Initialize an array with '0's to handle right padding automatically.
+    (let [nanoDigits (lit (array maxNanoSecondDigits byte) \0 \0 \0 \0 \0 \0 \0 \0 \0)]
+      (range [i (len sn)]
+        (switch [c (aget sn i)]
+          (case [(or (< c \0) (> c \9))]
+            (return (lit time/Time) ErrHeader))
+          (case [(< i (len nanoDigits))]
+            (aset nanoDigits i c))))
+
+
+      (let [(values nsecs _) (strconv/ParseInt (conv string (subslice nanoDigits)) 10 64)] ; Must succeed after validation
+        (when (and (> (len ss) 0) (== (aget ss 0) \-))
+          (return (time/Unix secs (* -1 nsecs)) nil)) ; Negative correction
+
+        (return (time/Unix secs nsecs) nil)))))
+
+
+
+
+^{:go/end 249} (go/func formatPAXTime "formatPAXTime converts ts into a time of the form %d.%d as described in the\nPAX specification. This function is capable of negative timestamps.\n" [^time/Time ts] :results [^string s]
+  (let [(values secs nsecs) (values (.Unix ts) (.Nanosecond ts))]
+    (when (== nsecs 0)
+      (return (strconv/FormatInt secs 10)))
+
+
+    ;; If seconds is negative, then perform correction.
+    (let [sign ""]
+      (when (< secs 0)
+        (set! sign "-") ; Remember sign
+        (set! secs (- (+ secs 1))) ; Add a second to secs
+        (set! nsecs (- (- nsecs 1.0E9)))) ; Take that second away from nsecs
+
+      (strings/TrimRight (fmt/Sprintf "%s%d.%09d" sign secs nsecs) "0"))))
+
+
+
+
+
+^{:go/end 287} (go/func parsePAXRecord "parsePAXRecord parses the input PAX record string into a key-value pair.\nIf parsing is successful, it will slice off the currently read record and\nreturn the remainder as r.\n" [^string s] :results [^string k ^string v ^string r ^error err]
+  ;; The size field ends at the first space.
+  (let [(values nStr rest ok) (strings/Cut s " ")]
+    (when (not ok)
+      (return "" "" s ErrHeader))
+
+
+    ;; Parse the first token as a decimal integer.
+    (let [(values n perr) (strconv/ParseInt nStr 10 0)] ; Intentionally parse as native int
+      (when (or (!= perr nil) (< n 5) (> n (conv int64 (len s))))
+        (return "" "" s ErrHeader))
+
+      (set! n - (conv int64 (+ (len nStr) 1))) ; convert from index in s to index in rest
+      (when (<= n 0)
+        (return "" "" s ErrHeader))
+
+
+      ;; Extract everything between the space and the final newline.
+      (let [(values rec nl rem) (values (subslice rest _ (- n 1)) (subslice rest (- n 1) n) (subslice rest n))]
+        (when (!= nl "\n")
+          (return "" "" s ErrHeader))
+
+
+        ;; The first equals separates the key from the value.
+        (set! (values k v ok) (strings/Cut rec "="))
+        (when (not ok)
+          (return "" "" s ErrHeader))
+
+
+        (when (not (validPAXRecord k v))
+          (return "" "" s ErrHeader))
+
+        (return k v rem nil)))))
+
+
+
+
+^{:go/end 307} (go/func formatPAXRecord "formatPAXRecord formats a single PAX record, prefixing it with the\nappropriate length.\n" [^string k ^string v] :results [string error]
+  (when (not (validPAXRecord k v))
+    (return "" ErrHeader))
+
+
+  (let [^:const ^{:val 3} padding 3 ; Extra padding for ' ', '=', and '\n'
+      ^{:line 297} size (+ (len k) (len v) padding)]
+    (set! size + (len (strconv/Itoa size)))
+    (let [record (+ (strconv/Itoa size) " " k "=" v "\n")]
+
+      ;; Final adjustment if adding size field increased the record size.
+      (when (!= (len record) size)
+        (set! size (len record))
+        (set! record (+ (strconv/Itoa size) " " k "=" v "\n")))
+
+      (return record nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 329} (go/func validPAXRecord "validPAXRecord reports whether the key-value pair is valid where each\nrecord is formatted as:\n\n\t\"%d %s=%s\\n\" % (size, key, value)\n\nKeys and values should be UTF-8, but the number of bad writers out there\nforces us to be more liberal.\nThus, we only reject all keys with NUL, and only reject NULs in values\nfor the PAX version of the USTAR string fields.\nThe key must not contain an '=' character.\n" ^bool [^string k ^string v]
+  (when (or (== k "") (strings/Contains k "="))
+    (return false))
+
+  (switch k
+    (case [paxPath paxLinkpath paxUname paxGname]
+      (return (not (hasNUL v))))
+    (default
+      (return (not (hasNUL k))))))

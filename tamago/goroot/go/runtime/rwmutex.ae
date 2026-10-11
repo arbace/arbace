@@ -1,0 +1,163 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "rwmutex.go" :imports [
+
+
+    ^{:line 8} [atomic "internal/runtime/atomic"]])
+
+
+;; This is a copy of sync/rwmutex.go rewritten to work in the runtime.
+
+
+
+
+
+
+(go/type rwmutex "A rwmutex is a reader/writer mutual exclusion lock.\nThe lock can be held by an arbitrary number of readers or a single writer.\nThis is a variant of sync.RWMutex, for the runtime package.\nLike mutex, rwmutex blocks the calling M.\nIt does not interact with the goroutine scheduler.\n" (struct
+    ^{:line 19 :tag mutex} rLock ; protects readers, readerPass, writer
+    ^{:line 20 :tag muintptr} readers ; list of pending readers
+    ^{:line 21 :tag uint32} readerPass ; number of pending readers to skip readers list
+
+    ^{:line 23 :tag mutex} wLock ; serializes writers
+    ^{:line 24 :tag muintptr} writer ; pending writer waiting for completing readers
+
+    ^{:line 26 :tag atomic/Int32} readerCount ; number of pending readers
+    ^{:line 27 :tag atomic/Int32} readerWait ; number of departing readers
+
+    ^{:line 29 :tag lockRank} readRank)) ; semantic lock rank for read locking
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 65} (go/method init "Lock ranking an rwmutex has two aspects:\n\nSemantic ranking: this rwmutex represents some higher level lock that\nprotects some resource (e.g., allocmLock protects creation of new Ms). The\nread and write locks of that resource need to be represented in the lock\nrank.\n\nInternal ranking: as an implementation detail, rwmutex uses two mutexes:\nrLock and wLock. These have lock order requirements: wLock must be locked\nbefore rLock. This also needs to be represented in the lock rank.\n\nSemantic ranking is represented by acquiring readRank during read lock and\nwriteRank during write lock.\n\nwLock is held for the duration of a write lock, so it uses writeRank\ndirectly, both for semantic and internal ranking. rLock is only held\ntemporarily inside the rlock/lock methods, so it uses readRankInternal to\nrepresent internal ranking. Semantic ranking is represented by a separate\nacquire of readRank for the duration of a read lock.\n\nThe lock ranking must document this ordering:\n  - readRankInternal is a leaf lock.\n  - readRank is taken before readRankInternal.\n  - writeRank is taken before readRankInternal.\n  - readRank is placed in the lock order wherever a read lock of this rwmutex\n    belongs.\n  - writeRank is placed in the lock order wherever a write lock of this\n    rwmutex belongs.\n" [^{:tag (* rwmutex)} rw ^lockRank readRank ^lockRank readRankInternal ^lockRank writeRank]
+  (set! (.-readRank rw) readRank)
+
+  (lockInit (addr (.-rLock rw)) readRankInternal)
+  (lockInit (addr (.-wLock rw)) writeRank))
+
+
+(go/const ^{:val 1073741824} rwmutexMaxReaders (<< 1 30))
+
+
+^{:go/end 98} (go/method rlock "rlock locks rw for reading.\n" [^{:tag (* rwmutex)} rw]
+  ;; The reader must not be allowed to lose its P or else other
+  ;; things blocking on the lock may consume all of the Ps and
+  ;; deadlock (issue #20903). Alternatively, we could drop the P
+  ;; while sleeping.
+  (acquireLockRankAndM (.-readRank rw))
+  (lockWithRankMayAcquire (addr (.-rLock rw)) (getLockRank (addr (.-rLock rw))))
+
+  (when (< (.Add (.-readerCount rw) 1) 0)
+    ;; A writer is pending. Park on the reader queue.
+    (systemstack ^{:go/end 96} (fn []
+        (lock (addr (.-rLock rw)))
+        (if (> (.-readerPass rw) 0) (do
+            ;; Writer finished.
+            (set! (.-readerPass rw) - 1)
+            (unlock (addr (.-rLock rw))))
+
+          ;; Queue this reader to be woken by
+          ;; the writer.
+          (let [m (.-m (getg))]
+            (set! (.-schedlink m) (.-readers rw))
+            (.set (.-readers rw) m)
+            (unlock (addr (.-rLock rw)))
+            (notesleep (addr (.-park m)))
+            (noteclear (addr (.-park m)))))))))
+
+
+
+
+
+
+^{:go/end 118} (go/method runlock "runlock undoes a single rlock call on rw.\n" [^{:tag (* rwmutex)} rw]
+  (when [r (.Add (.-readerCount rw) -1)] (< r 0)
+    (when (or (== (+ r 1) 0) (== (+ r 1) (- rwmutexMaxReaders)))
+      (throw "runlock of unlocked rwmutex"))
+
+    ;; A writer is pending.
+    (when (== (.Add (.-readerWait rw) -1) 0)
+      ;; The last reader unblocks the writer.
+      (lock (addr (.-rLock rw)))
+      (let [w (.ptr (.-writer rw))]
+        (when (!= w nil)
+          (notewakeup (addr (.-park w))))
+
+        (unlock (addr (.-rLock rw))))))
+
+
+  (releaseLockRankAndM (.-readRank rw)))
+
+
+
+^{:go/end 140} (go/method lock "lock locks rw for writing.\n" [^{:tag (* rwmutex)} rw]
+  ;; Resolve competition with other writers and stick to our P.
+  (lock (addr (.-wLock rw)))
+  (let [m (.-m (getg))
+      ;; Announce that there is a pending writer.
+      ^{:line 126} r (+ (.Add (.-readerCount rw) (- rwmutexMaxReaders)) rwmutexMaxReaders)]
+    ;; Wait for any active readers to complete.
+    (lock (addr (.-rLock rw)))
+    (if (and (!= r 0) (!= (.Add (.-readerWait rw) r) 0))
+      ;; Wait for reader to wake us up.
+      (systemstack ^{:go/end 136} (fn []
+          (.set (.-writer rw) m)
+          (unlock (addr (.-rLock rw)))
+          (notesleep (addr (.-park m)))
+          (noteclear (addr (.-park m)))))
+
+
+      (unlock (addr (.-rLock rw))))))
+
+
+
+
+^{:go/end 164} (go/method unlock "unlock unlocks rw for writing.\n" [^{:tag (* rwmutex)} rw]
+  ;; Announce to readers that there is no active writer.
+  (let [r (.Add (.-readerCount rw) rwmutexMaxReaders)]
+    (when (>= r rwmutexMaxReaders)
+      (throw "unlock of unlocked rwmutex"))
+
+    ;; Unblock blocked readers.
+    (lock (addr (.-rLock rw)))
+    (while (!= (.ptr (.-readers rw)) nil)
+      (let [reader (.ptr (.-readers rw))]
+        (set! (.-readers rw) (.-schedlink reader))
+        (.set (.-schedlink reader) nil)
+        (notewakeup (addr (.-park reader)))
+        (set! r - 1)))
+
+    ;; If r > 0, there are pending readers that aren't on the
+    ;; queue. Tell them to skip waiting.
+    (set! (.-readerPass rw) + (conv uint32 r))
+    (unlock (addr (.-rLock rw)))
+    ;; Allow other writers to proceed.
+    (unlock (addr (.-wLock rw)))))

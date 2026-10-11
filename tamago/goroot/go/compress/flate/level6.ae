@@ -1,0 +1,295 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.flate) (go/file "level6.go" :imports [])
+
+
+
+(go/type fastEncL6 "Level 6 extends level 5, but does \"repeat offset\" check,\nas well as adding more hash entries to the tables.\n" (struct
+    ^{:line 10} fastGen
+    ^{:line 11 :tag (array tableSize tableEntry)} table
+    ^{:line 12 :tag (array tableSize tableEntryPrev)} bTable))
+
+
+^{:go/end 297} (go/method encode [^{:tag (* fastEncL6)} e ^{:tag (* tokens)} dst ^{:tag (slice byte)} src]
+  (let [
+      ^:const ^{:line 17 :val 11} inputMargin (- 12 1)
+      ^:const ^:go/grouped ^{:line 18 :val 13} minNonLiteralBlockSize (+ 1 1 inputMargin)
+      ^:const ^:go/grouped ^{:line 19 :val 4} hashShortBytes 4]
+
+
+    ;; Protect against e.cur wraparound.
+    (while (>= ^{:go/via [fastGen]} (.-cur e) bufferReset)
+      (when (== (len ^{:go/via [fastGen]} (.-hist e)) 0)
+        (clear (subslice (.-table e)))
+        (clear (subslice (.-bTable e)))
+        (set! ^{:go/via [fastGen]} (.-cur e) maxMatchOffset)
+        (break))
+
+      ;; Shift down everything in the table that isn't already too far away.
+      (let [minOff (- (+ ^{:go/via [fastGen]} (.-cur e) (conv int32 (len ^{:go/via [fastGen]} (.-hist e)))) maxMatchOffset)]
+        (range [i (subslice (.-table e))]
+          (let [v (.-offset (aget (.-table e) i))]
+            (if (<= v minOff)
+              (set! v 0)
+
+              (set! v (+ (- v ^{:go/via [fastGen]} (.-cur e)) maxMatchOffset)))
+
+            (set! (.-offset (aget (.-table e) i)) v)))
+
+        (range [i (subslice (.-bTable e))]
+          (let [v (aget (.-bTable e) i)]
+            (if (<= (.-offset (.-cur v)) minOff) (do
+                (set! (.-offset (.-cur v)) 0)
+                (set! (.-offset (.-prev v)) 0))
+              (do
+                (set! (.-offset (.-cur v)) (+ (- (.-offset (.-cur v)) ^{:go/via [fastGen]} (.-cur e)) maxMatchOffset))
+                (if (<= (.-offset (.-prev v)) minOff)
+                  (set! (.-offset (.-prev v)) 0)
+
+                  (set! (.-offset (.-prev v)) (+ (- (.-offset (.-prev v)) ^{:go/via [fastGen]} (.-cur e)) maxMatchOffset)))))
+
+
+            (aset (.-bTable e) i v)))
+
+        (set! ^{:go/via [fastGen]} (.-cur e) maxMatchOffset)))
+
+
+    (let [s ^{:go/via [fastGen]} (.addBlock e src)]
+
+      (when (< (len src) minNonLiteralBlockSize)
+        ;; We do not fill the token table.
+        ;; This will be picked up by caller.
+        (set! (.-n dst) (conv uint16 (len src)))
+        (return))
+
+
+      ;; Override src
+      (set! src ^{:go/via [fastGen]} (.-hist e))
+
+      ;; nextEmit is where in src the next emitLiterals should start from.
+      (let [nextEmit s
+
+          ;; sLimit is when to stop looking for offset/length copies. The inputMargin
+          ;; lets us use a fast path for emitLiterals in the main loop, while we are
+          ;; looking for copies.
+          ^{:line 77} sLimit (conv int32 (- (len src) inputMargin))
+
+          ^{:line 79} cv (^{:inst [int32]} loadLE64 src s)
+          ;; Repeat MUST be > 1 and within range
+          ^{:line 81} repeat (conv int32 1)]
+        (while true
+          (let [^:const ^{:val 7} skipLog 7
+              ^:const ^{:line 84 :val 1} doEvery 1
+
+              ^{:line 86} nextS s
+              ^{:line 87 :tag int32} l (zero int32)
+              ^{:line 88 :tag int32} t (zero int32)]
+            (while true
+              (let [nextHashS (hashLen cv tableBits hashShortBytes)
+                  ^{:line 91} nextHashL (hashLen cv tableBits hashLongBytes)]
+                (set! s nextS)
+                (set! nextS (+ s doEvery (>> (- s nextEmit) skipLog)))
+                (when (> nextS sLimit)
+                  (goto :emitRemainder))
+
+                ;; Fetch a short+long candidate
+                (let [sCandidate (aget (.-table e) nextHashS)
+                    ^{:line 99} lCandidate (aget (.-bTable e) nextHashL)
+                    ^{:line 100} next (^{:inst [int32]} loadLE64 src nextS)
+                    ^{:line 101} entry (lit tableEntry :offset (+ s ^{:go/via [fastGen]} (.-cur e)))]
+                  (aset (.-table e) nextHashS entry)
+                  (let [eLong (addr (aget (.-bTable e) nextHashL))]
+                    (set! (values (.-cur eLong) (.-prev eLong)) (values entry (.-cur eLong)))
+
+                    ;; Calculate hashes of 'next'
+                    (set! nextHashS (hashLen next tableBits hashShortBytes))
+                    (set! nextHashL (hashLen next tableBits hashLongBytes))
+
+                    (set! t (- (.-offset (.-cur lCandidate)) ^{:go/via [fastGen]} (.-cur e)))
+                    (when (< (- s t) maxMatchOffset)
+                      (when (== (conv uint32 cv) (^{:inst [int32]} loadLE32 src t))
+                        ;; Long candidate matches at least 4 bytes.
+
+                        ;; Store the next match
+                        (aset (.-table e) nextHashS (lit tableEntry :offset (+ nextS ^{:go/via [fastGen]} (.-cur e))))
+                        (let [eLong (addr (aget (.-bTable e) nextHashL))]
+                          (set! (values (.-cur eLong) (.-prev eLong)) (values (lit tableEntry :offset (+ nextS ^{:go/via [fastGen]} (.-cur e))) (.-cur eLong)))
+
+                          ;; Check the previous long candidate as well.
+                          (let [t2 (- (.-offset (.-prev lCandidate)) ^{:go/via [fastGen]} (.-cur e))]
+                            (when (and (< (- s t2) maxMatchOffset) (== (conv uint32 cv) (^{:inst [int32]} loadLE32 src t2)))
+                              (set! l (+ ^{:go/via [fastGen]} (.matchLenLimited e (conv int (+ s 4)) (conv int (+ t 4)) src) 4))
+                              (let [ml1 (+ ^{:go/via [fastGen]} (.matchLenLimited e (conv int (+ s 4)) (conv int (+ t2 4)) src) 4)]
+                                (when (> ml1 l)
+                                  (set! t t2)
+                                  (set! l ml1)
+                                  (break))))
+
+
+                            (break))))
+
+                      ;; Current value did not match, but check if previous long value does.
+                      (set! t (- (.-offset (.-prev lCandidate)) ^{:go/via [fastGen]} (.-cur e)))
+                      (when (and (< (- s t) maxMatchOffset) (== (conv uint32 cv) (^{:inst [int32]} loadLE32 src t)))
+                        ;; Store the next match
+                        (aset (.-table e) nextHashS (lit tableEntry :offset (+ nextS ^{:go/via [fastGen]} (.-cur e))))
+                        (let [eLong (addr (aget (.-bTable e) nextHashL))]
+                          (set! (values (.-cur eLong) (.-prev eLong)) (values (lit tableEntry :offset (+ nextS ^{:go/via [fastGen]} (.-cur e))) (.-cur eLong)))
+                          (break))))
+
+
+
+                    (set! t (- (.-offset sCandidate) ^{:go/via [fastGen]} (.-cur e)))
+                    (when (and (< (- s t) maxMatchOffset) (== (conv uint32 cv) (^{:inst [int32]} loadLE32 src t)))
+                      ;; Found a 4 match...
+                      (set! l (+ ^{:go/via [fastGen]} (.matchLenLimited e (conv int (+ s 4)) (conv int (+ t 4)) src) 4))
+
+                      ;; Look up next long candidate (at nextS)
+                      (set! lCandidate (aget (.-bTable e) nextHashL))
+
+                      ;; Store the next match
+                      (aset (.-table e) nextHashS (lit tableEntry :offset (+ nextS ^{:go/via [fastGen]} (.-cur e))))
+                      (let [eLong (addr (aget (.-bTable e) nextHashL))]
+                        (set! (values (.-cur eLong) (.-prev eLong)) (values (lit tableEntry :offset (+ nextS ^{:go/via [fastGen]} (.-cur e))) (.-cur eLong)))
+
+                        ;; Check repeat at s + repOff
+                        (let [^:const ^{:val 1} repOff 1
+                            ^{:line 159} t2 (+ (- s repeat) repOff)]
+                          (when (== (^{:inst [int32]} loadLE32 src t2) (conv uint32 (>> cv (* 8 repOff))))
+                            (let [ml (+ ^{:go/via [fastGen]} (.matchLenLimited e (conv int (+ s 4 repOff)) (conv int (+ t2 4)) src) 4)]
+                              (when (> ml l)
+                                (set! t t2)
+                                (set! l ml)
+                                (set! s + repOff)
+                                ;; Not worth checking more.
+                                (break))))
+
+
+
+                          ;; If the next long is a candidate, use that...
+                          (set! t2 (- (.-offset (.-cur lCandidate)) ^{:go/via [fastGen]} (.-cur e)))
+                          (when (< (- nextS t2) maxMatchOffset)
+                            (when (== (^{:inst [int32]} loadLE32 src t2) (conv uint32 next))
+                              (let [ml (+ ^{:go/via [fastGen]} (.matchLenLimited e (conv int (+ nextS 4)) (conv int (+ t2 4)) src) 4)]
+                                (when (> ml l)
+                                  (set! t t2)
+                                  (set! s nextS)
+                                  (set! l ml))))
+                            ;; This is ok, but check previous as well.
+
+
+                            ;; If the previous long is a candidate, use that...
+                            (set! t2 (- (.-offset (.-prev lCandidate)) ^{:go/via [fastGen]} (.-cur e)))
+                            (when (and (< (- nextS t2) maxMatchOffset) (== (^{:inst [int32]} loadLE32 src t2) (conv uint32 next)))
+                              (let [ml (+ ^{:go/via [fastGen]} (.matchLenLimited e (conv int (+ nextS 4)) (conv int (+ t2 4)) src) 4)]
+                                (when (> ml l)
+                                  (set! t t2)
+                                  (set! s nextS)
+                                  (set! l ml)
+                                  (break)))))
+
+
+
+                          (break))))
+
+                    (set! cv next)))))
+
+
+            ;; Extend the 4-byte match as long as possible.
+            (cond (== l 0)
+              (set! l (+ ^{:go/via [fastGen]} (.matchLenLong e (conv int (+ s 4)) (conv int (+ t 4)) src) 4))
+              (== l maxMatchLength)
+              (set! l + ^{:go/via [fastGen]} (.matchLenLong e (conv int (+ s l)) (conv int (+ t l)) src)))
+
+
+            ;; Try to locate a better match by checking the end-of-match...
+            (when [sAt (+ s l)] (< sAt sLimit)
+              ;; Allow some bytes at the beginning to mismatch.
+              ;; Sweet spot is 2/3 bytes depending on input.
+              ;; 3 is only a little better when it is but sometimes a lot worse.
+              ;; The skipped bytes are tested in extend backwards,
+              ;; and still picked up as part of the match if they do.
+              (let [^:const ^{:val 2} skipBeginning 2
+                  ^{:line 215} eLong (addr (aget (.-bTable e) (hashLen (^{:inst [int32]} loadLE64 src sAt) tableBits hashLongBytes)))
+                  ;; Test current
+                  ^{:line 217} t2 (+ (- (.-offset (.-cur eLong)) ^{:go/via [fastGen]} (.-cur e) l) skipBeginning)
+                  ^{:line 218} s2 (+ s skipBeginning)
+                  ^{:line 219} off (- s2 t2)]
+                (when (< off maxMatchOffset)
+                  (when (and (> off 0) (>= t2 0))
+                    (when [l2 ^{:go/via [fastGen]} (.matchLenLong e (conv int s2) (conv int t2) src)] (> l2 l)
+                      (set! t t2)
+                      (set! l l2)
+                      (set! s s2)))
+
+
+                  ;; Test previous entry:
+                  (set! t2 (+ (- (.-offset (.-prev eLong)) ^{:go/via [fastGen]} (.-cur e) l) skipBeginning))
+                  (let [off (- s2 t2)]
+                    (when (and (> off 0) (< off maxMatchOffset) (>= t2 0))
+                      (when [l2 ^{:go/via [fastGen]} (.matchLenLong e (conv int s2) (conv int t2) src)] (> l2 l)
+                        (set! t t2)
+                        (set! l l2)
+                        (set! s s2)))))))
+
+
+
+
+
+            ;; Extend backwards
+            (while (and (> t 0) (> s nextEmit) (== (aget src (- t 1)) (aget src (- s 1))))
+              (dec! s)
+              (dec! t)
+              (inc! l))
+
+            (when (< nextEmit s)
+              (range [_ v (subslice src nextEmit s)]
+                (aset (.-tokens dst) (.-n dst) (conv token v))
+                (inc! (aget (.-litHist dst) v))
+                (inc! (.-n dst))))
+
+
+
+            (.AddMatchLong dst l (conv uint32 (- s t baseMatchOffset)))
+            (set! repeat (- s t))
+            (set! s + l)
+            (set! nextEmit s)
+            (when (>= nextS s)
+              (set! s (+ nextS 1)))
+
+
+            (when (>= s sLimit)
+              ;; Index after match end.
+              (for [i (+ nextS 1)] (< i (- (conv int32 (len src)) 8)) (set! i + 2)
+                (let [cv (^{:inst [int32]} loadLE64 src i)]
+                  (aset (.-table e) (hashLen cv tableBits hashShortBytes) (lit tableEntry :offset (+ i ^{:go/via [fastGen]} (.-cur e))))
+                  (let [eLong (addr (aget (.-bTable e) (hashLen cv tableBits hashLongBytes)))]
+                    (set! (values (.-cur eLong) (.-prev eLong)) (values (lit tableEntry :offset (+ i ^{:go/via [fastGen]} (.-cur e))) (.-cur eLong))))))
+
+              (goto :emitRemainder))
+
+
+            ;; Store every long hash in-between and every second short.
+            (for [i (+ nextS 1)] (< i (- s 1)) (set! i + 2)
+              (let [cv (^{:inst [int32]} loadLE64 src i)
+                  ^{:line 277} t (lit tableEntry :offset (+ i ^{:go/via [fastGen]} (.-cur e)))
+                  ^{:line 278} t2 (lit tableEntry :offset (+ (.-offset t) 1))
+                  ^{:line 279} eLong (addr (aget (.-bTable e) (hashLen cv tableBits hashLongBytes)))
+                  ^{:line 280} eLong2 (addr (aget (.-bTable e) (hashLen (>> cv 8) tableBits hashLongBytes)))]
+                (aset (.-table e) (hashLen cv tableBits hashShortBytes) t)
+                (set! (values (.-cur eLong) (.-prev eLong)) (values t (.-cur eLong)))
+                (set! (values (.-cur eLong2) (.-prev eLong2)) (values t2 (.-cur eLong2)))))
+
+            (set! cv (^{:inst [int32]} loadLE64 src s))))
+
+
+        (label :emitRemainder
+          (when (< (conv int nextEmit) (len src))
+            ;; If nothing was added, don't encode literals.
+            (when (== (.-n dst) 0)
+              (return))
+
+
+            (emitLiterals dst (subslice src nextEmit))))))))

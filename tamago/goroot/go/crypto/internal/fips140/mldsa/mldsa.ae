@@ -1,0 +1,787 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.mldsa) (go/file "mldsa.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fips140 "crypto/internal/fips140"]
+    ^{:line 10} [drbg "crypto/internal/fips140/drbg"]
+    ^{:line 11} [sha3 "crypto/internal/fips140/sha3"]
+    ^{:line 12} [subtle "crypto/internal/fips140/subtle"]
+    ^{:line 13} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 14} [errors "errors"]])
+
+
+(go/type parameters (struct
+    ^{:line 18 :tag int} k ^int l ; dimensions of A
+    ^{:line 19 :tag int} η ; bound for secret coefficients
+    ^{:line 20 :tag int} γ1 ; log₂(γ₁), where [-γ₁+1, γ₁] is the bound of y
+    ^{:line 21 :tag int} γ2 ; denominator of γ₂ = (q - 1) / γ2
+    ^{:line 22 :tag int} λ ; collison strength
+    ^{:line 23 :tag int} τ ; number of non-zero coefficients in challenge
+    ^{:line 24 :tag int} ω)) ; max number of hints in MakeHint
+
+
+(go/var
+  ^{:line 28} [params44 (lit parameters :k 4 :l 4 :η 2 :γ1 17 :γ2 88 :λ 128 :τ 39 :ω 80)]
+  ^{:line 29} [params65 (lit parameters :k 6 :l 5 :η 4 :γ1 19 :γ2 32 :λ 192 :τ 49 :ω 55)]
+  ^{:line 30} [params87 (lit parameters :k 8 :l 7 :η 2 :γ1 19 :γ2 32 :λ 256 :τ 60 :ω 75)])
+
+
+^{:go/end 36} (go/func pubKeySize ^int [^parameters p]
+  ;; ρ + k × n × 10-bit coefficients of t₁
+  (+ 32 (/ (* (.-k p) n 10) 8)))
+
+
+^{:go/end 41} (go/func sigSize ^int [^parameters p]
+  ;; challenge + l × n × (γ₁+1)-bit coefficients of z + hint
+  (+ (/ (.-λ p) 4) (/ (* (.-l p) n (+ (.-γ1 p) 1)) 8) (.-ω p) (.-k p)))
+
+
+(go/const
+  ^{:line 44} [^{:val 32} PrivateKeySize 32]
+
+  ^{:line 46} [^{:val 1312} PublicKeySize44 (+ 32 (/ (* 4 n 10) 8))]
+  ^{:line 47} [^{:val 1952} PublicKeySize65 (+ 32 (/ (* 6 n 10) 8))]
+  ^{:line 48} [^{:val 2592} PublicKeySize87 (+ 32 (/ (* 8 n 10) 8))]
+
+  ^{:line 50} [^{:val 2420} SignatureSize44 (+ (/ 128 4) (/ (* 4 n (+ 17 1)) 8) 80 4)]
+  ^{:line 51} [^{:val 3309} SignatureSize65 (+ (/ 192 4) (/ (* 5 n (+ 19 1)) 8) 55 6)]
+  ^{:line 52} [^{:val 4627} SignatureSize87 (+ (/ 256 4) (/ (* 7 n (+ 19 1)) 8) 75 8)])
+
+
+(go/const (values ^{:val 8} maxK ^{:val 7} maxL ^{:val 256} maxλ ^{:val 19} maxγ1) (values 8 7 256 19))
+(go/const ^{:val 2592} maxPubKeySize PublicKeySize87)
+
+(go/type PrivateKey (struct
+    ^{:line 59 :tag (array 32 byte)} seed
+    ^{:line 60 :tag PublicKey} pub
+    ^{:line 61 :tag (array (* maxK maxL) nttElement)} a
+    ^{:line 62 :tag (array maxK nttElement)} t1 ; NTT(t₁ ⋅ 2ᵈ)
+    ^{:line 63 :tag (array maxL nttElement)} s1
+    ^{:line 64 :tag (array maxK nttElement)} s2
+    ^{:line 65 :tag (array maxK nttElement)} t0
+    ^{:line 66 :tag (array 32 byte)} k))
+
+
+^{:go/end 71} (go/method Equal ^bool [^{:tag (* PrivateKey)} priv ^{:tag (* PrivateKey)} x]
+  (and (== (.-p (.-pub priv)) (.-p (.-pub x))) (== (subtle/ConstantTimeCompare (subslice (.-seed priv)) (subslice (.-seed x))) 1)))
+
+
+^{:go/end 76} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* PrivateKey)} priv]
+  (let [seed (.-seed priv)]
+    (subslice seed)))
+
+
+^{:go/end 82} (go/method PublicKey ^{:tag (* PublicKey)} [^{:tag (* PrivateKey)} priv]
+  ;; Note that this is likely to keep the entire PrivateKey reachable for
+  ;; the lifetime of the PublicKey, which may be undesirable.
+  (addr (.-pub priv)))
+
+
+(go/type PublicKey (struct
+    ^{:line 85 :tag (array maxPubKeySize byte)} raw
+    ^{:line 86 :tag parameters} p
+    ^{:line 87 :tag (array 64 byte)} tr)) ; public key hash
+
+
+^{:go/end 93} (go/method Equal ^bool [^{:tag (* PublicKey)} pub ^{:tag (* PublicKey)} x]
+  (let [size (pubKeySize (.-p pub))]
+    (and (== (.-p pub) (.-p x)) (== (subtle/ConstantTimeCompare (subslice (.-raw pub) _ size) (subslice (.-raw x) _ size)) 1))))
+
+
+^{:go/end 98} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* PublicKey)} pub]
+  (let [size (pubKeySize (.-p pub))]
+    (bytes/Clone (subslice (.-raw pub) _ size))))
+
+
+^{:go/end 111} (go/method Parameters ^string [^{:tag (* PublicKey)} pub]
+  (switch (.-p pub)
+    (case [params44]
+      (return "ML-DSA-44"))
+    (case [params65]
+      (return "ML-DSA-65"))
+    (case [params87]
+      (return "ML-DSA-87"))
+    (default
+      (panic "mldsa: internal error: unknown parameters"))))
+
+
+
+^{:go/end 121} (go/func GenerateKey44 ^{:tag (* PrivateKey)} []
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (let [^{:tag (array 32 byte)} seed (zero (array 32 byte))]
+    (drbg/Read (subslice seed))
+    (let [priv (newPrivateKey (addr seed) params44)]
+      (fipsPCT priv)
+      ^{:line 120} priv)))
+
+
+^{:go/end 131} (go/func GenerateKey65 ^{:tag (* PrivateKey)} []
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (let [^{:tag (array 32 byte)} seed (zero (array 32 byte))]
+    (drbg/Read (subslice seed))
+    (let [priv (newPrivateKey (addr seed) params65)]
+      (fipsPCT priv)
+      ^{:line 130} priv)))
+
+
+^{:go/end 141} (go/func GenerateKey87 ^{:tag (* PrivateKey)} []
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (let [^{:tag (array 32 byte)} seed (zero (array 32 byte))]
+    (drbg/Read (subslice seed))
+    (let [priv (newPrivateKey (addr seed) params87)]
+      (fipsPCT priv)
+      ^{:line 140} priv)))
+
+
+(go/var errInvalidSeedLength (errors/New "mldsa: invalid seed length"))
+
+^{:go/end 152} (go/func NewPrivateKey44 [^{:tag (slice byte)} seed] :results [(* PrivateKey) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (when (!= (len seed) 32)
+    (return nil errInvalidSeedLength))
+
+  (return (newPrivateKey (conv (* (array 32 byte)) seed) params44) nil))
+
+
+^{:go/end 161} (go/func NewPrivateKey65 [^{:tag (slice byte)} seed] :results [(* PrivateKey) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (when (!= (len seed) 32)
+    (return nil errInvalidSeedLength))
+
+  (return (newPrivateKey (conv (* (array 32 byte)) seed) params65) nil))
+
+
+^{:go/end 170} (go/func NewPrivateKey87 [^{:tag (slice byte)} seed] :results [(* PrivateKey) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (when (!= (len seed) 32)
+    (return nil errInvalidSeedLength))
+
+  (return (newPrivateKey (conv (* (array 32 byte)) seed) params87) nil))
+
+
+^{:go/end 227} (go/func newPrivateKey ^{:tag (* PrivateKey)} [^{:tag (* (array 32 byte))} seed ^parameters p]
+  (let [(values k l) (values (.-k p) (.-l p))
+
+      ^{:line 175} priv (addr (lit PrivateKey :pub (lit PublicKey :p p)))]
+    (set! (.-seed priv) @seed)
+
+    (let [ξ (sha3/NewShake256)]
+      (.Write ξ (subslice seed))
+      (.Write ξ (lit (slice byte) (conv byte k) (conv byte l)))
+      (let [(values ρ ρs) (values (make (slice byte) 32) (make (slice byte) 64))]
+        (.Read ξ ρ)
+        (.Read ξ ρs)
+        (.Read ξ (subslice (.-k priv)))
+
+        (let [A (subslice (.-a priv) _ (* k l))]
+          (computeMatrixA A ρ p)
+
+          (let [s1 (subslice (.-s1 priv) _ l)]
+            (range [r l]
+              (aset s1 r (ntt (sampleBoundedPoly ρs (conv byte r) p))))
+
+            (let [s2 (subslice (.-s2 priv) _ k)]
+              (range [r k]
+                (aset s2 r (ntt (sampleBoundedPoly ρs (conv byte (+ l r)) p))))
+
+
+              ;; ˆt = Â ∘ ŝ₁ + ŝ₂
+              (let [tHat (make (slice nttElement) k maxK)]
+                (range [i tHat]
+                  (aset tHat i (aget s2 i))
+                  (range [j s1]
+                    (aset tHat i (^{:inst [nttElement]} polyAdd (aget tHat i) (nttMul (aget A (+ (* i l) j)) (aget s1 j))))))
+
+
+                ;; t = NTT⁻¹(ˆt)
+                (let [t (make (slice ringElement) k maxK)]
+                  (range [i tHat]
+                    (aset t i (inverseNTT (aget tHat i))))
+
+                  ;; (t₁, _) = Power2Round(t)
+                  ;; (_, ˆt₀) = NTT(Power2Round(t))
+                  (let [(values t1 t0) (values (make (slice (array n uint16)) k maxK) (subslice (.-t0 priv) _ k))]
+                    (range [i t]
+                      (let [^ringElement w (zero ringElement)]
+                        (range [j (aget t i)]
+                          (set! (values (aget (aget t1 i) j) (aget w j)) (power2Round (aget (aget t i) j))))
+
+                        (aset t0 i (ntt w))))
+
+
+                    (let [pk (pkEncode (subslice (.-raw (.-pub priv)) _ 0) ρ t1 p)]
+                      (set! (.-tr (.-pub priv)) (computePublicKeyHash pk))
+                      (computeT1Hat (subslice (.-t1 priv) _ k) t1) ; NTT(t₁ ⋅ 2ᵈ)
+
+                      ^{:line 226} priv)))))))))))
+
+
+^{:go/end 236} (go/func computeMatrixA [^{:tag (slice nttElement)} A ^{:tag (slice byte)} ρ ^parameters p]
+  (let [(values k l) (values (.-k p) (.-l p))]
+    (range [r k]
+      (range [s l]
+        (aset A (+ (* r l) s) (sampleNTT ρ (conv byte s) (conv byte r)))))))
+
+
+
+
+^{:go/end 244} (go/func computePublicKeyHash ^{:tag (array 64 byte)} [^{:tag (slice byte)} pk]
+  (let [H (sha3/NewShake256)]
+    (.Write H pk)
+    (let [^{:tag (array 64 byte)} tr (zero (array 64 byte))]
+      (.Read H (subslice tr))
+      ^{:line 243} tr)))
+
+
+^{:go/end 257} (go/func computeT1Hat [^{:tag (slice nttElement)} t1Hat ^{:tag (slice (array n uint16))} t1]
+  (range [i t1]
+    (let [^ringElement w (zero ringElement)]
+      (range [j (aget t1 i)]
+        ;; t₁ <= 2¹⁰ - 1
+        ;; t₁ ⋅ 2ᵈ <= 2ᵈ(2¹⁰ - 1) = 2²³ - 2¹³ < q = 2²³ - 2¹³ + 1
+        (let [(values z _) (fieldToMontgomery (<< (conv uint32 (aget (aget t1 i) j)) 13))]
+          (aset w j z)))
+
+      (aset t1Hat i (ntt w)))))
+
+
+
+^{:go/end 277} (go/func pkEncode ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^{:tag (slice byte)} ρ ^{:tag (slice (array n uint16))} t1 ^parameters p]
+  (let [pk (append buf (spread ρ))]
+    (range [_ w (subslice t1 _ (.-k p))]
+      ;; Encode four at a time into 4 * 10 bits = 5 bytes.
+      (for [i 0] (< i n) (set! i + 4)
+        (let [c0 (aget w i)
+            ^{:line 265} c1 (aget w (+ i 1))
+            ^{:line 266} c2 (aget w (+ i 2))
+            ^{:line 267} c3 (aget w (+ i 3))
+            ^{:line 268} b0 (conv byte (>> c0 0))
+            ^{:line 269} b1 (conv byte (bit-or (>> c0 8) (<< c1 2)))
+            ^{:line 270} b2 (conv byte (bit-or (>> c1 6) (<< c2 4)))
+            ^{:line 271} b3 (conv byte (bit-or (>> c2 4) (<< c3 6)))
+            ^{:line 272} b4 (conv byte (>> c3 2))]
+          (set! pk (append pk b0 b1 b2 b3 b4)))))
+
+
+    ^{:line 276} pk))
+
+
+^{:go/end 296} (go/func pkDecode [^{:tag (slice byte)} pk ^{:tag (slice (array n uint16))} t1 ^parameters p] :results [^{:tag (slice byte)} ρ ^error err]
+  (when (!= (len pk) (pubKeySize p))
+    (return nil errInvalidPublicKeyLength))
+
+  (set! (values ρ pk) (values (subslice pk _ 32) (subslice pk 32)))
+  (range [r t1]
+    ;; Decode four at a time from 4 * 10 bits = 5 bytes.
+    (for [i 0] (< i n) (set! i + 4)
+      (let [(values b0 b1 b2 b3 b4) (values (aget pk 0) (aget pk 1) (aget pk 2) (aget pk 3) (aget pk 4))]
+        (aset (aget t1 r) (+ i 0) (bit-or (conv uint16 (>> b0 0)) (<< (conv uint16 (bit-and b1 2r00000011)) 8)))
+        (aset (aget t1 r) (+ i 1) (bit-or (conv uint16 (>> b1 2)) (<< (conv uint16 (bit-and b2 2r00001111)) 6)))
+        (aset (aget t1 r) (+ i 2) (bit-or (conv uint16 (>> b2 4)) (<< (conv uint16 (bit-and b3 2r00111111)) 4)))
+        (aset (aget t1 r) (+ i 3) (bit-or (conv uint16 (>> b3 6)) (<< (conv uint16 (bit-and b4 2r11111111)) 2)))
+        (set! pk (subslice pk 5)))))
+
+
+  (return ρ nil))
+
+
+(go/var errInvalidPublicKeyLength (errors/New "mldsa: invalid public key length"))
+
+^{:go/end 302} (go/func NewPublicKey44 [^{:tag (slice byte)} pk] :results [(* PublicKey) error]
+  (newPublicKey (addr (lit PublicKey)) pk params44))
+
+
+^{:go/end 306} (go/func NewPublicKey65 [^{:tag (slice byte)} pk] :results [(* PublicKey) error]
+  (newPublicKey (addr (lit PublicKey)) pk params65))
+
+
+^{:go/end 310} (go/func NewPublicKey87 [^{:tag (slice byte)} pk] :results [(* PublicKey) error]
+  (newPublicKey (addr (lit PublicKey)) pk params87))
+
+
+^{:go/end 329} (go/func newPublicKey [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} pk ^parameters p] :results [(* PublicKey) error]
+  (when (!= (len pk) (pubKeySize p))
+    (return nil errInvalidPublicKeyLength))
+
+
+  ;; We don't precompute A and t1Hat here, because they would make the
+  ;; PublicKey over 68KB. Unlike private keys, public keys are often used to
+  ;; verify a signature only once, so precomputation doesn't help as often,
+  ;; but they can stay around in memory, for example as part of a TLS
+  ;; connection's PeerCertificates, so their size is more of a concern.
+  ;; Instead, we compute A and t1Hat on demand in Verify.
+
+  (set! (.-p pub) p)
+  (copy (subslice (.-raw pub)) pk)
+  (set! (.-tr pub) (computePublicKeyHash pk))
+
+  (return pub nil))
+
+
+(go/var
+  ^{:line 332} [errContextTooLong (errors/New "mldsa: context too long")]
+  ^{:line 333} [errMessageHashLength (errors/New "mldsa: invalid message hash length")]
+  ^{:line 334} [errRandomLength (errors/New "mldsa: invalid random length")])
+
+
+^{:go/end 347} (go/func Sign [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} msg ^string context] :results [(slice byte) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (let [^{:tag (array 32 byte)} random (zero (array 32 byte))]
+    (drbg/Read (subslice random))
+    (let [(values μ err) (computeMessageHash (subslice (.-tr (.-pub priv))) msg context)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (signInternal priv (addr μ) (addr random)) nil))))
+
+
+^{:go/end 358} (go/func SignDeterministic [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} msg ^string context] :results [(slice byte) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (let [^{:tag (array 32 byte)} random (zero (array 32 byte))
+      (values μ err) (computeMessageHash (subslice (.-tr (.-pub priv))) msg context)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (signInternal priv (addr μ) (addr random)) nil)))
+
+
+^{:go/end 371} (go/func TestingOnlySignWithRandom [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} msg ^string context ^{:tag (slice byte)} random] :results [(slice byte) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (let [(values μ err) (computeMessageHash (subslice (.-tr (.-pub priv))) msg context)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (!= (len random) 32)
+      (return nil errRandomLength))
+
+    (return (signInternal priv (addr μ) (conv (* (array 32 byte)) random)) nil)))
+
+
+^{:go/end 382} (go/func SignExternalMu [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} μ] :results [(slice byte) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (let [^{:tag (array 32 byte)} random (zero (array 32 byte))]
+    (drbg/Read (subslice random))
+    (when (!= (len μ) 64)
+      (return nil errMessageHashLength))
+
+    (return (signInternal priv (conv (* (array 64 byte)) μ) (addr random)) nil)))
+
+
+^{:go/end 392} (go/func SignExternalMuDeterministic [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} μ] :results [(slice byte) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (let [^{:tag (array 32 byte)} random (zero (array 32 byte))]
+    (when (!= (len μ) 64)
+      (return nil errMessageHashLength))
+
+    (return (signInternal priv (conv (* (array 64 byte)) μ) (addr random)) nil)))
+
+
+^{:go/end 404} (go/func TestingOnlySignExternalMuWithRandom [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} μ ^{:tag (slice byte)} random] :results [(slice byte) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (when (!= (len μ) 64)
+    (return nil errMessageHashLength))
+
+  (when (!= (len random) 32)
+    (return nil errRandomLength))
+
+  (return (signInternal priv (conv (* (array 64 byte)) μ) (conv (* (array 32 byte)) random)) nil))
+
+
+^{:go/end 419} (go/func computeMessageHash [^{:tag (slice byte)} tr ^{:tag (slice byte)} msg ^string context] :results [(array 64 byte) error]
+  (when (> (len context) 255)
+    (return (lit (array 64 byte)) errContextTooLong))
+
+  (let [H (sha3/NewShake256)]
+    (.Write H tr)
+    (.Write H (lit (slice byte) 0)) ; ML-DSA / HashML-DSA domain separator
+    (.Write H (lit (slice byte) (conv byte (len context))))
+    (.Write H (conv (slice byte) context))
+    (.Write H msg)
+    (let [^{:tag (array 64 byte)} μ (zero (array 64 byte))]
+      (.Read H (subslice μ))
+      (return μ nil))))
+
+
+^{:go/end 553} (go/func signInternal ^{:tag (slice byte)} [^{:tag (* PrivateKey)} priv ^{:tag (* (array 64 byte))} μ ^{:tag (* (array 32 byte))} random]
+  (let [(values p k l) (values (.-p (.-pub priv)) (.-k (.-p (.-pub priv))) (.-l (.-p (.-pub priv))))
+      (values A s1 s2 t0) (values (subslice (.-a priv) _ (* k l)) (subslice (.-s1 priv) _ l) (subslice (.-s2 priv) _ k) (subslice (.-t0 priv) _ k))
+
+      ^{:line 425} β (* (.-τ p) (.-η p))
+      ^{:line 426} γ1 (conv uint32 ^uint32 (<< 1 (.-γ1 p)))
+      ^{:line 427} γ1β (- γ1 (conv uint32 β))
+      ^{:line 428} γ2 (/ (- q 1) (conv uint32 (.-γ2 p)))
+      ^{:line 429} γ2β (- γ2 (conv uint32 β))
+
+      ^{:line 431} H (sha3/NewShake256)]
+    (.Write H (subslice (.-k priv)))
+    (.Write H (subslice random))
+    (.Write H (subslice μ))
+    (let [nonce (make (slice byte) 64)]
+      (.Read H nonce)
+
+      (let [κ 0]
+        (label :sign
+          (while true
+            ;; Main rejection sampling loop. Note that leaking rejected signatures
+            ;; leaks information about the private key. However, as explained in
+            ;; https://pq-crystals.org/dilithium/data/dilithium-specification-round3.pdf
+            ;; Section 5.5, we are free to leak rejected ch values, as well as which
+            ;; check causes the rejection and which coefficient failed the check
+            ;; (but not the value or sign of the coefficient).
+
+            (let [y (make (slice ringElement) l maxL)]
+              (range [r y]
+                (let [counter (make (slice byte) 2)]
+                  (byteorder/LEPutUint16 counter (conv uint16 κ))
+                  (inc! κ)
+
+                  (.Reset H)
+                  (.Write H nonce)
+                  (.Write H counter)
+                  (let [v (make (slice byte) (/ (* (+ (.-γ1 p) 1) n) 8) (/ (* (+ maxγ1 1) n) 8))]
+                    (.Read H v)
+
+                    (aset y r (bitUnpack v p)))))
+
+
+              ;; w = NTT⁻¹(Â ∘ NTT(y))
+              (let [yHat (make (slice nttElement) l maxL)]
+                (range [i y]
+                  (aset yHat i (ntt (aget y i))))
+
+                (let [w (make (slice ringElement) k maxK)]
+                  (range [i w]
+                    (let [^nttElement wHat (zero nttElement)]
+                      (range [j l]
+                        (set! wHat (^{:inst [nttElement]} polyAdd wHat (nttMul (aget A (+ (* i l) j)) (aget yHat j)))))
+
+                      (aset w i (inverseNTT wHat))))
+
+
+                  (.Reset H)
+                  (.Write H (subslice μ))
+                  (range [i w]
+                    (w1Encode H (highBits (aget w i) p) p))
+
+                  (let [ch (make (slice byte) (/ (.-λ p) 4) (/ maxλ 4))]
+                    (.Read H ch)
+
+                    ;; sampleInBall is not constant time, but see comment above about
+                    ;; leaking rejected ch values being acceptable.
+                    (let [c (ntt (sampleInBall ch p))
+
+                        ^{:line 489} cs1 (make (slice ringElement) l maxL)]
+                      (range [i cs1]
+                        (aset cs1 i (inverseNTT (nttMul c (aget s1 i)))))
+
+                      (let [cs2 (make (slice ringElement) k maxK)]
+                        (range [i cs2]
+                          (aset cs2 i (inverseNTT (nttMul c (aget s2 i)))))
+
+
+                        (let [z (make (slice ringElement) l maxL)]
+                          (range [i y]
+                            (aset z i (^{:inst [ringElement]} polyAdd (aget y i) (aget cs1 i)))
+
+                            ;; Reject if ||z||∞ ≥ γ1 − β
+                            (when (coefficientsExceedBound (aget z i) γ1β)
+                              (when (!= testingOnlyRejectionReason nil)
+                                (testingOnlyRejectionReason "z"))
+
+                              (continue :sign)))
+
+
+
+                          (range [i w]
+                            (let [r0 (^{:inst [ringElement]} polySub (aget w i) (aget cs2 i))]
+
+                              ;; Reject if ||LowBits(r0)||∞ ≥ γ2 − β
+                              (when (lowBitsExceedBound r0 γ2β p)
+                                (when (!= testingOnlyRejectionReason nil)
+                                  (testingOnlyRejectionReason "r0"))
+
+                                (continue :sign))))
+
+
+
+                          (let [ct0 (make (slice ringElement) k maxK)]
+                            (range [i ct0]
+                              (aset ct0 i (inverseNTT (nttMul c (aget t0 i))))
+
+                              ;; Reject if ||ct0||∞ ≥ γ2
+                              (when (coefficientsExceedBound (aget ct0 i) γ2)
+                                (when (!= testingOnlyRejectionReason nil)
+                                  (testingOnlyRejectionReason "ct0"))
+
+                                (continue :sign)))
+
+
+
+                            (let [count1s 0
+                                ^{:line 537} h (make (slice (array n byte)) k maxK)]
+                              (range [i w]
+                                (let [^int count (zero int)]
+                                  (set! (values (aget h i) count) (makeHint (aget ct0 i) (aget w i) (aget cs2 i) p))
+                                  (set! count1s + count)))
+
+                              ;; Reject if number of hints > ω
+                              (when (> count1s (.-ω p))
+                                (when (!= testingOnlyRejectionReason nil)
+                                  (testingOnlyRejectionReason "h"))
+
+                                (continue :sign))
+
+
+                              (return (sigEncode ch z h p)))))))))))))))))
+
+
+
+
+
+
+(go/var ^{:tag (func [^string reason]) :doc "testingOnlyRejectionReason is set in tests, to ensure that all rejection\npaths are covered. If not nil, it is called with a string describing the\nreason for rejection: \"z\", \"r0\", \"ct0\", or \"h\".\n"} testingOnlyRejectionReason)
+
+
+^{:go/end 588} (go/func w1Encode "w1Encode implements w1Encode from FIPS 204, writing directly into H.\n" [^{:tag (* sha3/SHAKE)} H ^{:tag (array n byte)} w ^parameters p]
+  (switch (.-γ2 p)
+    (case [32]
+      ;; Coefficients are <= (q − 1)/(2γ2) − 1 = 15, four bits each.
+      (let [buf (make (slice byte) (/ (* 4 n) 8))]
+        (for [i 0] (< i n) (set! i + 2)
+          (let [b0 (aget w i)
+              ^{:line 568} b1 (aget w (+ i 1))]
+            (aset buf (/ i 2) (bit-or b0 (<< b1 4)))))
+
+        (.Write H buf)))
+    (case [88]
+      ;; Coefficients are <= (q − 1)/(2γ2) − 1 = 43, six bits each.
+      (let [buf (make (slice byte) (/ (* 6 n) 8))]
+        (for [i 0] (< i n) (set! i + 4)
+          (let [b0 (aget w i)
+              ^{:line 577} b1 (aget w (+ i 1))
+              ^{:line 578} b2 (aget w (+ i 2))
+              ^{:line 579} b3 (aget w (+ i 3))]
+            (aset buf (+ (/ (* 3 i) 4) 0) (bit-or (>> b0 0) (<< b1 6)))
+            (aset buf (+ (/ (* 3 i) 4) 1) (bit-or (>> b1 2) (<< b2 4)))
+            (aset buf (+ (/ (* 3 i) 4) 2) (bit-or (>> b2 4) (<< b3 2)))))
+
+        (.Write H buf)))
+    (default
+      (panic "mldsa: internal error: unsupported γ2"))))
+
+
+
+^{:go/breaks [[4 599]] :go/end 600} (go/func coefficientsExceedBound ^bool [^ringElement w ^uint32 bound]
+  ;; If this function appears in profiles, it might be possible to deduplicate
+  ;; the work of fieldFromMontgomery inside fieldInfinityNorm with the
+  ;; subsequent encoding of w.
+  (range [i w]
+    (when (>= (fieldInfinityNorm (aget w i)) bound)
+      (return true)))
+
+
+  false)
+
+
+^{:go/breaks [[4 621]] :go/end 622} (go/func lowBitsExceedBound ^bool [^ringElement w ^uint32 bound ^parameters p]
+  (switch (.-γ2 p)
+    (case [32]
+      (range [i w]
+        (let [(values _ r0) (decompose32 (aget w i))]
+          (when (>= (constantTimeAbs r0) bound)
+            (return true)))))
+
+
+    (case [88]
+      (range [i w]
+        (let [(values _ r0) (decompose88 (aget w i))]
+          (when (>= (constantTimeAbs r0) bound)
+            (return true)))))
+
+
+    (default
+      (panic "mldsa: internal error: unsupported γ2")))
+
+  false)
+
+
+(go/var
+  ^{:line 625} [errInvalidSignatureLength (errors/New "mldsa: invalid signature length")]
+  ^{:line 626} [errInvalidSignatureCoeffBounds (errors/New "mldsa: invalid signature")]
+  ^{:line 627} [errInvalidSignatureChallenge (errors/New "mldsa: invalid signature")]
+  ^{:line 628} [errInvalidSignatureHintLimits (errors/New "mldsa: invalid signature encoding")]
+  ^{:line 629} [errInvalidSignatureHintIndexOrder (errors/New "mldsa: invalid signature encoding")]
+  ^{:line 630} [errInvalidSignatureHintExtraIndices (errors/New "mldsa: invalid signature encoding")])
+
+
+^{:go/end 641} (go/func Verify ^error [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} msg ^{:tag (slice byte)} sig ^string context]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (let [(values μ err) (computeMessageHash (subslice (.-tr pub)) msg context)]
+    (when (!= err nil)
+      (return err))
+
+    (verifyInternal pub (addr μ) sig)))
+
+
+^{:go/end 650} (go/func VerifyExternalMu ^error [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} μ ^{:tag (slice byte)} sig]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (when (!= (len μ) 64)
+    (return errMessageHashLength))
+
+  (verifyInternal pub (conv (* (array 64 byte)) μ) sig))
+
+
+^{:go/end 718} (go/func verifyInternal ^error [^{:tag (* PublicKey)} pub ^{:tag (* (array 64 byte))} μ ^{:tag (slice byte)} sig]
+  (let [(values p k l) (values (.-p pub) (.-k (.-p pub)) (.-l (.-p pub)))
+
+      ^{:line 655} β (* (.-τ p) (.-η p))
+      ^{:line 656} γ1 (conv uint32 ^uint32 (<< 1 (.-γ1 p)))
+      ^{:line 657} γ1β (- γ1 (conv uint32 β))
+
+      ^{:line 659} t1 (make (slice (array n uint16)) k maxK)
+      (values ρ err) (pkDecode (subslice (.-raw pub) _ (pubKeySize (.-p pub))) t1 p)]
+    (when (!= err nil)
+      (return err))
+
+    (let [A (make (slice nttElement) (* k l) (* maxK maxL))]
+      (computeMatrixA A ρ p)
+      (let [t1Hat (make (slice nttElement) k maxK)]
+        (computeT1Hat t1Hat t1) ; NTT(t₁ ⋅ 2ᵈ)
+
+        (let [z (make (slice ringElement) l maxL)
+            ^{:line 670} h (make (slice (array n byte)) k maxK)
+            (values ch ^:assign err) (sigDecode sig z h p)]
+          (when (!= err nil)
+            (return err))
+
+
+          (let [c (ntt (sampleInBall ch p))
+
+              ;; w = Â ∘ NTT(z) − NTT(c) ∘ NTT(t₁ ⋅ 2ᵈ)
+              ^{:line 679} zHat (make (slice nttElement) l maxL)]
+            (range [i zHat]
+              (aset zHat i (ntt (aget z i))))
+
+            (let [w (make (slice ringElement) k maxK)]
+              (range [i w]
+                (let [^nttElement wHat (zero nttElement)]
+                  (range [j l]
+                    (set! wHat (^{:inst [nttElement]} polyAdd wHat (nttMul (aget A (+ (* i l) j)) (aget zHat j)))))
+
+                  (set! wHat (^{:inst [nttElement]} polySub wHat (nttMul c (aget t1Hat i))))
+                  (aset w i (inverseNTT wHat))))
+
+
+              ;; Use hints h to compute w₁ from w(approx).
+              (let [w1 (make (slice (array n byte)) k maxK)]
+                (range [i w]
+                  (aset w1 i (useHint (aget w i) (aget h i) p)))
+
+
+                (let [H (sha3/NewShake256)]
+                  (.Write H (subslice μ))
+                  (range [i w]
+                    (w1Encode H (aget w1 i) p))
+
+                  ^{:go/breaks [[5 717]]} (let [computedCH (make (slice byte) (/ (.-λ p) 4) (/ maxλ 4))]
+                    (.Read H computedCH)
+
+                    (range [i z]
+                      (when (coefficientsExceedBound (aget z i) γ1β)
+                        (return errInvalidSignatureCoeffBounds)))
+
+
+
+                    (when (not (bytes/Equal ch computedCH))
+                      (return errInvalidSignatureChallenge))
+
+
+                    nil))))))))))
+
+
+^{:go/end 728} (go/func sigEncode ^{:tag (slice byte)} [^{:tag (slice byte)} ch ^{:tag (slice ringElement)} z ^{:tag (slice (array n byte))} h ^parameters p]
+  (let [sig (make (slice byte) 0 (sigSize p))]
+    (set! sig (append sig (spread ch)))
+    (range [i z]
+      (set! sig (bitPack sig (aget z i) p)))
+
+    (set! sig (hintEncode sig h p))
+    ^{:line 727} sig))
+
+
+^{:go/end 744} (go/func sigDecode [^{:tag (slice byte)} sig ^{:tag (slice ringElement)} z ^{:tag (slice (array n byte))} h ^parameters p] :results [^{:tag (slice byte)} ch ^error err]
+  (when (!= (len sig) (sigSize p))
+    (return nil errInvalidSignatureLength))
+
+  (set! (values ch sig) (values (subslice sig _ (/ (.-λ p) 4)) (subslice sig (/ (.-λ p) 4))))
+  (range [i z]
+    (let [length (/ (* (+ (.-γ1 p) 1) n) 8)]
+      (aset z i (bitUnpack (subslice sig _ length) p))
+      (set! sig (subslice sig length))))
+
+  (when [err (hintDecode sig h p)] (!= err nil)
+    (return nil err))
+
+  (return ch nil))
+
+
+^{:go/end 760} (go/func hintEncode ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^{:tag (slice (array n byte))} h ^parameters p]
+  (let [(values ω k) (values (.-ω p) (.-k p))
+      (values out y) (sliceForAppend buf (+ ω k))
+      ^{:line 749 :tag byte} idx (zero byte)]
+    (range [i k]
+      (range [j n]
+        (when (!= (aget (aget h i) j) 0)
+          (aset y idx (conv byte j))
+          (inc! idx)))
+
+
+      (aset y (+ ω i) idx))
+
+    ^{:line 759} out))
+
+
+^{:go/end 788} (go/func hintDecode ^error [^{:tag (slice byte)} y ^{:tag (slice (array n byte))} h ^parameters p]
+  (let [(values ω k) (values (.-ω p) (.-k p))]
+    (when (!= (len y) (+ ω k))
+      (return (errors/New "mldsa: internal error: invalid signature hint length")))
+
+    ^{:go/breaks [[4 787]]} (let [^byte idx (zero byte)]
+      (range [i k]
+        (let [limit (aget y (+ ω i))]
+          (when (or (< limit idx) (> limit (conv byte ω)))
+            (return errInvalidSignatureHintLimits))
+
+          (let [first idx]
+            (while (< idx limit)
+              (when (and (> idx first) (>= (aget y (- idx 1)) (aget y idx)))
+                (return errInvalidSignatureHintIndexOrder))
+
+              (aset (aget h i) (aget y idx) 1)
+              (inc! idx)))))
+
+
+      (for [i idx] (< i (conv byte ω)) (inc! i)
+        (when (!= (aget y i) 0)
+          (return errInvalidSignatureHintExtraIndices)))
+
+
+      nil)))

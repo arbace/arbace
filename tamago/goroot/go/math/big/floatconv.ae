@@ -1,0 +1,301 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements string-to-Float conversion functions.
+
+(in-ns 'go.math.big) (go/file "floatconv.go" :imports [
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [strings "strings"]])
+
+
+(go/var ^Float floatZero)
+
+
+
+
+
+
+^{:go/end 27} (go/method SetString "SetString sets z to the value of s and returns z and a boolean indicating\nsuccess. s must be a floating-point number of the same format as accepted\nby [Float.Parse], with base argument 0. The entire string (not just a prefix) must\nbe valid for success. If the operation failed, the value of z is undefined\nbut the returned value is nil.\n" [^{:tag (* Float)} z ^string s] :results [(* Float) bool]
+  (when [(values f _ err) (.Parse z s 0)] (== err nil)
+    (return f true))
+
+  (return nil false))
+
+
+
+
+
+
+^{:go/end 149} (go/method scan "scan is like Parse but reads the longest possible prefix representing a valid\nfloating point number from an io.ByteScanner rather than a string. It serves\nas the implementation of Parse. It does not recognize ±Inf and does not expect\nEOF at the end.\n" [^{:tag (* Float)} z ^io/ByteScanner r ^int base] :results [^{:tag (* Float)} f ^int b ^error err]
+  (let [prec (.-prec z)]
+    (when (== prec 0)
+      (set! prec 64))
+
+
+    ;; A reasonable value in case of an error.
+    (set! (.-form z) zero)
+
+    ;; sign
+    (set! (values (.-neg z) err) (scanSign r))
+    (when (!= err nil)
+      (return))
+
+
+    ;; mantissa
+    (let [^int fcount (zero int)] ; fractional digit count; valid if <= 0
+      (set! (values (.-mant z) b fcount err) (.scan (.-mant z) r base true))
+      (when (!= err nil)
+        (return))
+
+
+      ;; exponent
+      (let [^int64 exp (zero int64)
+          ^{:line 57 :tag int} ebase (zero int)]
+        (set! (values exp ebase err) (scanExponent r true (== base 0)))
+        (when (!= err nil)
+          (return))
+
+
+        ;; special-case 0
+        (when (== (len (.-mant z)) 0)
+          (set! (.-prec z) prec)
+          (set! (.-acc z) Exact)
+          (set! (.-form z) zero)
+          (set! f z)
+          (return))
+
+        ;; len(z.mant) > 0
+
+        ;; The mantissa may have a radix point (fcount <= 0) and there
+        ;; may be a nonzero exponent exp. The radix point amounts to a
+        ;; division by b**(-fcount). An exponent means multiplication by
+        ;; ebase**exp. Finally, mantissa normalization (shift left) requires
+        ;; a correcting multiplication by 2**(-shiftcount). Multiplications
+        ;; are commutative, so we can apply them in any order as long as there
+        ;; is no loss of precision. We only have powers of 2 and 10, and
+        ;; we split powers of 10 into the product of the same powers of
+        ;; 2 and 5. This reduces the size of the multiplication factor
+        ;; needed for base-10 exponents.
+
+        ;; normalize mantissa and determine initial exponent contributions
+        (let [exp2 (- (* (conv int64 (len (.-mant z))) _W) (fnorm (.-mant z)))
+            ^{:line 86} exp5 (conv int64 0)]
+
+          ;; determine binary or decimal exponent contribution of radix point
+          (when (< fcount 0)
+            ;; The mantissa has a radix point ddd.dddd; and
+            ;; -fcount is the number of digits to the right
+            ;; of '.'. Adjust relevant exponent accordingly.
+            (let [d (conv int64 fcount)]
+              (switch b
+                (case [10]
+                  (set! exp5 d)
+                  (fallthrough)) ; 10**e == 5**e * 2**e
+                (case [2]
+                  (set! exp2 + d))
+                (case [8]
+                  (set! exp2 + (* d 3))) ; octal digits are 3 bits each
+                (case [16]
+                  (set! exp2 + (* d 4))) ; hexadecimal digits are 4 bits each
+                (default
+                  (panic "unexpected mantissa base")))))
+
+          ;; fcount consumed - not needed anymore
+
+
+          ;; take actual exponent into account
+          (switch ebase
+            (case [10]
+              (set! exp5 + exp)
+              (fallthrough)) ; see fallthrough above
+            (case [2]
+              (set! exp2 + exp))
+            (default
+              (panic "unexpected exponent base")))
+
+          ;; exp consumed - not needed anymore
+
+          ;; apply 2**exp2
+          (if (and (<= MinExp exp2) (<= exp2 MaxExp)) (do
+              (set! (.-prec z) prec)
+              (set! (.-form z) finite)
+              (set! (.-exp z) (conv int32 exp2))
+              (set! f z))
+            (do
+              (set! err (fmt/Errorf "exponent overflow"))
+              (return)))
+
+
+          (when (== exp5 0)
+            ;; no decimal exponent contribution
+            (.round z 0)
+            (return))
+
+          ;; exp5 != 0
+
+          ;; apply 5**exp5
+          (let [p (.SetPrec (new Float) (+ (.Prec z) 64))] ; use more bits for p -- TODO(gri) what is the right number?
+            (if (< exp5 0)
+              (.Quo z z (.pow5 p (conv uint64 (- exp5))))
+
+              (.Mul z z (.pow5 p (conv uint64 exp5))))
+
+
+            (return)))))))
+
+
+
+
+
+
+
+(go/var ^{:doc "These powers of 5 fit into a uint64.\n\n\tfor p, q := uint64(0), uint64(1); p < q; p, q = q, q*5 {\n\t\tfmt.Println(q)\n\t}\n"} pow5tab ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29]} (lit (array ... uint64)
+    1
+    5
+    25
+    125
+    625
+    3125
+    15625
+    78125
+    390625
+    1953125
+    9765625
+    48828125
+    244140625
+    1220703125
+    6103515625
+    30517578125
+    152587890625
+    762939453125
+    3814697265625
+    19073486328125
+    95367431640625
+    476837158203125
+    2384185791015625
+    11920928955078125
+    59604644775390625
+    298023223876953125
+    1490116119384765625
+    7450580596923828125))
+
+
+
+
+^{:go/end 212} (go/method pow5 "pow5 sets z to 5**n and returns z.\nn must not be negative.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^uint64 n]
+  (let [^:const ^{:val 27} m (conv uint64 (- (len pow5tab) 1))]
+    (when (<= n m)
+      (return (.SetUint64 z (aget pow5tab n))))
+
+    ;; n > m
+
+    (.SetUint64 z (aget pow5tab m))
+    (set! n - m)
+
+    ;; use more bits for f than for z
+    ;; TODO(gri) what is the right number?
+    (let [f (.SetUint64 (.SetPrec (new Float) (+ (.Prec z) 64)) 5)]
+
+      (while (> n 0)
+        (when (!= (bit-and n 1) 0)
+          (.Mul z z f))
+
+        (.Mul f f f)
+        (set! n >> 1))
+
+
+      ^{:line 211} z)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 283} (go/method Parse "Parse parses s which must contain a text representation of a floating-\npoint number with a mantissa in the given conversion base (the exponent\nis always a decimal number), or a string representing an infinite value.\n\nFor base 0, an underscore character “_” may appear between a base\nprefix and an adjacent digit, and between successive digits; such\nunderscores do not change the value of the number, or the returned\ndigit count. Incorrect placement of underscores is reported as an\nerror if there are no other errors. If base != 0, underscores are\nnot recognized and thus terminate scanning like any other character\nthat is not a valid radix point or digit.\n\nIt sets z to the (possibly rounded) value of the corresponding floating-\npoint value, and returns z, the actual base b, and an error err, if any.\nThe entire string (not just a prefix) must be consumed for success.\nIf z's precision is 0, it is changed to 64 before rounding takes effect.\nThe number must be of the form:\n\n\tnumber    = [ sign ] ( float | \"inf\" | \"Inf\" ) .\n\tsign      = \"+\" | \"-\" .\n\tfloat     = ( mantissa | prefix pmantissa ) [ exponent ] .\n\tprefix    = \"0\" [ \"b\" | \"B\" | \"o\" | \"O\" | \"x\" | \"X\" ] .\n\tmantissa  = digits \".\" [ digits ] | digits | \".\" digits .\n\tpmantissa = [ \"_\" ] digits \".\" [ digits ] | [ \"_\" ] digits | \".\" digits .\n\texponent  = ( \"e\" | \"E\" | \"p\" | \"P\" ) [ sign ] digits .\n\tdigits    = digit { [ \"_\" ] digit } .\n\tdigit     = \"0\" ... \"9\" | \"a\" ... \"z\" | \"A\" ... \"Z\" .\n\nThe base argument must be 0, 2, 8, 10, or 16. Providing an invalid base\nargument will lead to a run-time panic.\n\nFor base 0, the number prefix determines the actual base: A prefix of\n“0b” or “0B” selects base 2, “0o” or “0O” selects base 8, and\n“0x” or “0X” selects base 16. Otherwise, the actual base is 10 and\nno prefix is accepted. The octal prefix \"0\" is not supported (a leading\n\"0\" is simply considered a \"0\").\n\nA \"p\" or \"P\" exponent indicates a base 2 (rather than base 10) exponent;\nfor instance, \"0x1.fffffffffffffp1023\" (using base 0) represents the\nmaximum float64 value. For hexadecimal mantissae, the exponent character\nmust be one of 'p' or 'P', if present (an \"e\" or \"E\" exponent indicator\ncannot be distinguished from a mantissa digit).\n\nThe returned *Float f is nil and the value of z is valid but not\ndefined if an error is reported.\n" [^{:tag (* Float)} z ^string s ^int base] :results [^{:tag (* Float)} f ^int b ^error err]
+  ;; scan doesn't handle ±Inf
+  (when (and (== (len s) 3) ^:go/paren (or (== s "Inf") (== s "inf")))
+    (set! f (.SetInf z false))
+    (return))
+
+  (when (and (== (len s) 4) ^:go/paren (or (== (aget s 0) \+) (== (aget s 0) \-)) ^:go/paren (or (== (subslice s 1) "Inf") (== (subslice s 1) "inf")))
+    (set! f (.SetInf z (== (aget s 0) \-)))
+    (return))
+
+
+  (let [r (strings/NewReader s)]
+    (when [(set! (values f b err) (.scan z r base))] (!= err nil)
+      (return))
+
+
+    ;; entire string must have been consumed
+    (if [(values ch err2) (.ReadByte r)] (== err2 nil)
+      (set! err (fmt/Errorf "expected end of string, found %q" ch))
+      (when (!= err2 io/EOF)
+        (set! err err2)))
+
+
+    (return)))
+
+
+
+
+^{:go/end 289} (go/func ParseFloat "ParseFloat is like f.Parse(s, base) with f set to the given precision\nand rounding mode.\n" [^string s ^int base ^uint prec ^RoundingMode mode] :results [^{:tag (* Float)} f ^int b ^error err]
+  (.Parse (.SetMode (.SetPrec (new Float) prec) mode) s base))
+
+
+(go/var ^fmt/Scanner _ (conv (* Float) nil)) ; *Float must implement fmt.Scanner
+
+
+
+
+
+
+^{:go/end 302} (go/method Scan "Scan is a support routine for [fmt.Scanner]; it sets z to the value of\nthe scanned number. It accepts formats whose verbs are supported by\n[fmt.Scan] for floating point values, which are:\n'b' (binary), 'e', 'E', 'f', 'F', 'g' and 'G'.\nScan doesn't handle ±Inf.\n" ^error [^{:tag (* Float)} z ^fmt/ScanState s ^rune ch]
+  (.SkipSpace s)
+  (let [(values _ _ err) (.scan z (lit byteReader s) 0)]
+    ^{:line 301} err))

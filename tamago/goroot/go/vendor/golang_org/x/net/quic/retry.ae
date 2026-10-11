@@ -1,0 +1,239 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "retry.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [aes "crypto/aes"]
+    ^{:line 10} [cipher "crypto/cipher"]
+    ^{:line 11} [rand "crypto/rand"]
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [netip "net/netip"]
+    ^{:line 14} [time "time"]
+
+    ^{:line 16} [chacha20poly1305 "golang.org/x/crypto/chacha20poly1305"]
+    ^{:line 17} [quicwire "golang.org/x/net/internal/quic/quicwire"]])
+
+
+
+
+(go/var "AEAD and nonce used to compute the Retry Integrity Tag.\nhttps://www.rfc-editor.org/rfc/rfc9001#section-5.8\n"
+  ^{:line 23} [retrySecret (lit (slice byte) 0xbe 0x0c 0x69 0x0b 0x9f 0x66 0x57 0x5a 0x1d 0x76 0x6b 0x54 0xe3 0x68 0xc8 0x4e)]
+  ^{:line 24} [retryNonce (lit (slice byte) 0x46 0x15 0x99 0xd3 0x5d 0x63 0x2b 0xf2 0x23 0x98 0x25 0xbb)]
+  ^{:line 25} [retryAEAD (^{:go/end 35} (fn ^cipher/AEAD []
+        (let [(values c err) (aes/NewCipher retrySecret)]
+          (when (!= err nil)
+            (panic err))
+
+          (let [(values aead ^:assign err) (cipher/NewGCM c)]
+            (when (!= err nil)
+              (panic err))
+
+            ^{:line 34} aead))))])
+
+
+
+
+(go/const ^{:val 5000000000 :doc "retryTokenValidityPeriod is how long we accept a Retry packet token after sending it.\n"} retryTokenValidityPeriod (* 5 time/Second))
+
+
+(go/type retryState "retryState generates and validates an endpoint's retry tokens.\n" (struct
+    ^{:line 43 :tag cipher/AEAD} aead))
+
+
+^{:go/end 59} (go/method init ^error [^{:tag (* retryState)} rs]
+  ;; Retry tokens are authenticated using a per-server key chosen at start time.
+  ;; TODO: Provide a way for the user to set this key.
+  (let [secret (make (slice byte) chacha20poly1305/KeySize)]
+    (when [(values _ err) (rand/Read secret)] (!= err nil)
+      (return err))
+
+    ^{:go/breaks [4]} (let [(values aead err) (chacha20poly1305/NewX secret)]
+      (when (!= err nil)
+        (panic err))
+
+      (set! (.-aead rs) aead)
+      nil)))
+
+
+;; Retry tokens are encrypted with an AEAD.
+;; The plaintext contains the time the token was created and
+;; the original destination connection ID.
+;; The additional data contains the sender's source address and original source connection ID.
+;; The token nonce is randomly generated.
+;; We use the nonce as the Source Connection ID of the Retry packet.
+;; Since the 24-byte XChaCha20-Poly1305 nonce is too large to fit in a 20-byte connection ID,
+;; we include the remaining 4 bytes of nonce in the token.
+;;
+;; Token {
+;;   Last 4 Bytes of Nonce (32),
+;;   Ciphertext (..),
+;; }
+;;
+;; Plaintext {
+;;   Timestamp (64),
+;;   Original Destination Connection ID,
+;; }
+;;
+;;
+;; Additional Data {
+;;   Original Source Connection ID Length (8),
+;;   Original Source Connection ID (..),
+;;   IP Address (32..128),
+;;   Port (16),
+;; }
+;;
+;; TODO: Consider using AES-256-GCM-SIV once crypto/tls supports it.
+
+^{:go/end 103} (go/method makeToken [^{:tag (* retryState)} rs ^time/Time now ^{:tag (slice byte)} srcConnID ^{:tag (slice byte)} origDstConnID ^netip/AddrPort addr] :results [^{:tag (slice byte)} token ^{:tag (slice byte)} newDstConnID ^error err]
+  (let [nonce (make (slice byte) (.NonceSize (.-aead rs)))]
+    (when [(values _ err) (rand/Read nonce)] (!= err nil)
+      (return nil nil err))
+
+
+    (let [^{:tag (slice byte)} plaintext (zero (slice byte))]
+      (set! plaintext (.AppendUint64 binary/BigEndian plaintext (conv uint64 (.Unix now))))
+      (set! plaintext (append plaintext (spread origDstConnID)))
+
+      (set! token (append token (spread (subslice nonce maxConnIDLen))))
+      (set! token (.Seal (.-aead rs) token nonce plaintext (.additionalData rs srcConnID addr)))
+      (return token (subslice nonce _ maxConnIDLen) nil))))
+
+
+^{:go/end 134} (go/method validateToken [^{:tag (* retryState)} rs ^time/Time now ^{:tag (slice byte)} token ^{:tag (slice byte)} srcConnID ^{:tag (slice byte)} dstConnID ^netip/AddrPort addr] :results [^{:tag (slice byte)} origDstConnID ^bool ok]
+  (let [tokenNonceLen (- (.NonceSize (.-aead rs)) maxConnIDLen)]
+    (when (< (len token) tokenNonceLen)
+      (return nil false))
+
+    (let [nonce (append (lit (slice byte)) (spread dstConnID))]
+      (set! nonce (append nonce (spread (subslice token _ tokenNonceLen))))
+      (let [ciphertext (subslice token tokenNonceLen)]
+        (when (!= (len nonce) (.NonceSize (.-aead rs)))
+          (return nil false))
+
+
+        (let [(values plaintext err) (.Open (.-aead rs) nil nonce ciphertext (.additionalData rs srcConnID addr))]
+          (when (!= err nil)
+            (return nil false))
+
+          (when (< (len plaintext) 8)
+            (return nil false))
+
+          (let [when (time/Unix (conv int64 (.Uint64 binary/BigEndian plaintext)) 0)]
+            (set! origDstConnID (subslice plaintext 8))
+
+            ;; We allow for tokens created in the future (up to the validity period),
+            ;; which likely indicates that the system clock was adjusted backwards.
+            (when [d (^{:inst [time/Duration]} abs (.Sub now when))] (> d retryTokenValidityPeriod)
+              (return nil false))
+
+
+            (return origDstConnID true)))))))
+
+
+^{:go/end 142} (go/method additionalData ^{:tag (slice byte)} [^{:tag (* retryState)} rs ^{:tag (slice byte)} srcConnID ^netip/AddrPort addr]
+  (let [^{:tag (slice byte)} additional (zero (slice byte))]
+    (set! additional (quicwire/AppendUint8Bytes additional srcConnID))
+    (set! additional (append additional (spread (.AsSlice (.Addr addr)))))
+    (set! additional (.AppendUint16 binary/BigEndian additional (.Port addr)))
+    ^{:line 141} additional))
+
+
+^{:go/end 168} (go/method validateInitialAddress [^{:tag (* Endpoint)} e ^time/Time now ^genericLongPacket p ^netip/AddrPort peerAddr] :results [^{:tag (slice byte)} origDstConnID ^bool ok]
+  ;; The retry token is at the start of an Initial packet's data.
+  (let [(values token n) (quicwire/ConsumeUint8Bytes (.-data p))]
+    (when (< n 0)
+      ;; We've already validated that the packet is at least 1200 bytes long,
+      ;; so there's no way for even a maximum size token to not fit.
+      ;; Check anyway.
+      (return nil false))
+
+    (when (== (len token) 0)
+      ;; The sender has not provided a token.
+      ;; Send a Retry packet to them with one.
+      (.sendRetry e now p peerAddr)
+      (return nil false))
+
+    (set! (values origDstConnID ok) (.validateToken (.-retry e) now token (.-srcConnID p) (.-dstConnID p) peerAddr))
+    (when (not ok)
+      ;; This does not seem to be a valid token.
+      ;; Close the connection with an INVALID_TOKEN error.
+      ;; https://www.rfc-editor.org/rfc/rfc9000#section-8.1.2-5
+      (.sendConnectionClose e p peerAddr errInvalidToken)
+      (return nil false))
+
+    (return origDstConnID true)))
+
+
+^{:go/end 184} (go/method sendRetry [^{:tag (* Endpoint)} e ^time/Time now ^genericLongPacket p ^netip/AddrPort peerAddr]
+  (let [(values token srcConnID err) (.makeToken (.-retry e) now (.-srcConnID p) (.-dstConnID p) peerAddr)]
+    (when (!= err nil)
+      (return))
+
+    (let [b (encodeRetryPacket (.-dstConnID p) ^{:go/breaks [2 4 6]} (lit retryPacket
+            :dstConnID (.-srcConnID p)
+            :srcConnID srcConnID
+            :token token))]
+
+      (.sendDatagram e ^{:go/breaks [2 4]} (lit datagram
+          :b b
+          :peerAddr peerAddr)))))
+
+
+
+(go/type retryPacket (struct
+    ^{:line 187 :tag (slice byte)} dstConnID
+    ^{:line 188 :tag (slice byte)} srcConnID
+    ^{:line 189 :tag (slice byte)} token))
+
+
+^{:go/end 210} (go/func encodeRetryPacket ^{:tag (slice byte)} [^{:tag (slice byte)} originalDstConnID ^retryPacket p]
+  ;; Retry packets include an integrity tag, computed by AEAD_AES_128_GCM over
+  ;; the original destination connection ID followed by the Retry packet
+  ;; (less the integrity tag itself).
+  ;; https://www.rfc-editor.org/rfc/rfc9001#section-5.8
+  ;;
+  ;; Create the pseudo-packet (including the original DCID), append the tag,
+  ;; and return the Retry packet.
+  (let [^{:tag (slice byte)} b (zero (slice byte))]
+    (set! b (quicwire/AppendUint8Bytes b originalDstConnID)) ; Original Destination Connection ID
+    (let [start (len b)] ; start of the Retry packet
+      (set! b (append b (bit-or headerFormLong fixedBit longPacketTypeRetry)))
+      (set! b (.AppendUint32 binary/BigEndian b quicVersion1)) ; Version
+      (set! b (quicwire/AppendUint8Bytes b (.-dstConnID p))) ; Destination Connection ID
+      (set! b (quicwire/AppendUint8Bytes b (.-srcConnID p))) ; Source Connection ID
+      (set! b (append b (spread (.-token p)))) ; Token
+      (set! b (.Seal retryAEAD b retryNonce nil b)) ; Retry Integrity Tag
+      (subslice b start))))
+
+
+^{:go/end 240} (go/func parseRetryPacket [^{:tag (slice byte)} b ^{:tag (slice byte)} origDstConnID] :results [^retryPacket p ^bool ok]
+  (let [^:const ^{:val 16} retryIntegrityTagLength (/ 128 8)
+
+      (values lp ^:assign ok) (parseGenericLongHeaderPacket b)]
+    (when (not ok)
+      (return (lit retryPacket) false))
+
+    (when (< (len (.-data lp)) retryIntegrityTagLength)
+      (return (lit retryPacket) false))
+
+    (let [gotTag (subslice (.-data lp) (- (len (.-data lp)) retryIntegrityTagLength))
+
+        ;; Create the pseudo-packet consisting of the original destination connection ID
+        ;; followed by the Retry packet (less the integrity tag).
+        ;; Use this to validate the packet integrity tag.
+        ^{:line 227} pseudo (quicwire/AppendUint8Bytes nil origDstConnID)]
+      (set! pseudo (append pseudo (spread (subslice b _ (- (len b) retryIntegrityTagLength)))))
+      (let [wantTag (.Seal retryAEAD nil retryNonce nil pseudo)]
+        (when (not (bytes/Equal gotTag wantTag))
+          (return (lit retryPacket) false))
+
+
+        (let [token (subslice (.-data lp) _ (- (len (.-data lp)) retryIntegrityTagLength))]
+          ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6]} (lit retryPacket
+              :dstConnID (.-dstConnID lp)
+              :srcConnID (.-srcConnID lp)
+              :token token)
+            true))))))

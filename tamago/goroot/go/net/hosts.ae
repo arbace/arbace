@@ -1,0 +1,164 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "hosts.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [bytealg "internal/bytealg"]
+    ^{:line 10} [fs "io/fs"]
+    ^{:line 11} [netip "net/netip"]
+    ^{:line 12} [sync "sync"]
+    ^{:line 13} [time "time"]])
+
+
+(go/const ^{:val 5000000000} cacheMaxAge (* 5 time/Second))
+
+^{:go/end 24} (go/func parseLiteralIP ^string [^string addr]
+  (let [(values ip err) (netip/ParseAddr addr)]
+    (when (!= err nil)
+      (return ""))
+
+    (.String ip)))
+
+
+(go/type byName (struct
+    ^{:line 27 :tag (slice string)} addrs
+    ^{:line 28 :tag string} canonicalName))
+
+
+
+(go/var ^{:tag (struct sync/Mutex ^{:tag (map string byName) :doc "Key for the list of literal IP addresses must be a host\nname. It would be part of DNS labels, a FQDN or an absolute\nFQDN.\nFor now the key is converted to lower case for convenience.\n"} byName ^{:tag (map string (slice string)) :doc "Key for the list of host names must be a literal IP address\nincluding IPv6 address with zone identifier.\nWe don't support old-classful IP address notation.\n"} byAddr ^time/Time expire ^string path ^time/Time mtime ^int64 size) :doc "hosts contains known host entries.\n"} hosts)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 126} (go/func readHosts []
+  (let [now (time/Now)
+      ^{:line 54} hp hostsFilePath]
+
+    (when (and (.Before now (.-expire hosts)) (== (.-path hosts) hp) (> (len (.-byName hosts)) 0))
+      (return))
+
+    (let [(values mtime size err) (stat hp)]
+      (when (and (== err nil) (== (.-path hosts) hp) (.Equal (.-mtime hosts) mtime) (== (.-size hosts) size))
+        (set! (.-expire hosts) (.Add now cacheMaxAge))
+        (return))
+
+
+      (let [hs (make (map string byName))
+          ^{:line 66} is (make (map string (slice string)))
+
+          (values file ^:assign err) (open hp)]
+        (when (!= err nil)
+          (when (and (not (errors/Is err fs/ErrNotExist)) (not (errors/Is err fs/ErrPermission)))
+            (return)))
+
+
+
+        (when (!= file nil)
+          (defer (.close file))
+          (for [(values line ok) (.readLine file)] ok (set! (values line ok) (.readLine file))
+            (when [i (bytealg/IndexByteString line \#)] (>= i 0)
+              ;; Discard comments.
+              (set! line (subslice line 0 i)))
+
+            (let [f (getFields line)]
+              (when (< (len f) 2)
+                (continue))
+
+              (let [addr (parseLiteralIP (aget f 0))]
+                (when (== addr "")
+                  (continue))
+
+
+                (let [^string canonical (zero string)]
+                  (for [i 1] (< i (len f)) (inc! i)
+                    (let [name (absDomainName (aget f i))
+                        ^{:line 94} h (conv (slice byte) (aget f i))]
+                      (lowerASCIIBytes h)
+                      (let [key (absDomainName (conv string h))]
+
+                        (when (== i 1)
+                          (set! canonical key))
+
+
+                        (aset is addr (append (aget is addr) name))
+
+                        (when [(values v ok) (aget hs key)] ok
+                          (aset hs key ^{:go/breaks [2 4]} (lit byName
+                              :addrs (append (.-addrs v) addr)
+                              :canonicalName (.-canonicalName v)))
+
+                          (continue))
+
+
+                        (aset hs key ^{:go/breaks [2 4]} (lit byName
+                            :addrs (lit (slice string) addr)
+                            :canonicalName canonical))))))))))
+
+
+
+
+        ;; Update the data cache.
+        (set! (.-expire hosts) (.Add now cacheMaxAge))
+        (set! (.-path hosts) hp)
+        (set! (.-byName hosts) hs)
+        (set! (.-byAddr hosts) is)
+        (set! (.-mtime hosts) mtime)
+        (set! (.-size hosts) size)))))
+
+
+
+^{:go/end 146} (go/func lookupStaticHost "lookupStaticHost looks up the addresses and the canonical name for the given host from /etc/hosts.\n" [^string host] :results [(slice string) string]
+  ^{:go/via [Mutex]} (.Lock hosts)
+  (defer ^{:go/via [Mutex]} (.Unlock hosts))
+  (readHosts)
+  (when (!= (len (.-byName hosts)) 0)
+    (when (hasUpperCase host)
+      (let [lowerHost (conv (slice byte) host)]
+        (lowerASCIIBytes lowerHost)
+        (set! host (conv string lowerHost))))
+
+    (when [(values byName ok) (aget (.-byName hosts) (absDomainName host))] ok
+      (let [ipsCp (make (slice string) (len (.-addrs byName)))]
+        (copy ipsCp (.-addrs byName))
+        (return ipsCp (.-canonicalName byName)))))
+
+
+  (return nil ""))
+
+
+
+^{:go/breaks [[10 164]] :go/end 165} (go/func lookupStaticAddr "lookupStaticAddr looks up the hosts for the given address from /etc/hosts.\n" ^{:tag (slice string)} [^string addr]
+  ^{:go/via [Mutex]} (.Lock hosts)
+  (defer ^{:go/via [Mutex]} (.Unlock hosts))
+  (readHosts)
+  (set! addr (parseLiteralIP addr))
+  (when (== addr "")
+    (return nil))
+
+  (when (!= (len (.-byAddr hosts)) 0)
+    (when [(values hosts ok) (aget (.-byAddr hosts) addr)] ok
+      (let [hostsCp (make (slice string) (len hosts))]
+        (copy hostsCp hosts)
+        (return hostsCp))))
+
+
+  nil)

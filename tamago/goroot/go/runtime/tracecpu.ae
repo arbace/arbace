@@ -1,0 +1,280 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; CPU profile -> trace
+
+(in-ns 'go.runtime) (go/file "tracecpu.go" :imports [
+
+    ^{:line 9} [tracev2 "internal/trace/tracev2"]])
+
+
+
+
+^{:go/end 31} (go/func traceInitReadCPU "traceInitReadCPU initializes CPU profile -> tracer state for tracing.\n\nReturns a profBuf for reading from.\n" []
+  (when (traceEnabled)
+    (throw "traceInitReadCPU called with trace enabled"))
+
+  ;; Create new profBuf for CPU samples that will be emitted as events.
+  ;; Format: after the timestamp, header is [pp.id, gp.goid, mp.procid].
+  (aset (.-cpuLogRead trace) 0 (newProfBuf 3 profBufWordCount profBufTagCount))
+  (aset (.-cpuLogRead trace) 1 (newProfBuf 3 profBufWordCount profBufTagCount))
+  ;; We must not acquire trace.signalLock outside of a signal handler: a
+  ;; profiling signal may arrive at any time and try to acquire it, leading to
+  ;; deadlock. Because we can't use that lock to protect updates to
+  ;; trace.cpuLogWrite (only use of the structure it references), reads and
+  ;; writes of the pointer must be atomic. (And although this field is never
+  ;; the sole pointer to the profBuf value, it's best to allow a write barrier
+  ;; here.)
+  (.Store (aget (.-cpuLogWrite trace) 0) (aget (.-cpuLogRead trace) 0))
+  (.Store (aget (.-cpuLogWrite trace) 1) (aget (.-cpuLogRead trace) 1)))
+
+
+
+
+
+
+^{:go/end 72} (go/func traceStartReadCPU "traceStartReadCPU creates a goroutine to start reading CPU profile\ndata into an active trace.\n\ntraceAdvanceSema must be held.\n" []
+  (when (not (traceEnabled))
+    (throw "traceStartReadCPU called with trace disabled"))
+
+  ;; Spin up the logger goroutine.
+  (set! (.-cpuSleep trace) (newWakeableSleep))
+  (let [done (make (chan (struct)) 1)]
+    (go (^{:go/end 70} (fn []
+          (while (traceEnabled)
+            ;; Sleep here because traceReadCPU is non-blocking. This mirrors
+            ;; how the runtime/pprof package obtains CPU profile data.
+            ;;
+            ;; We can't do a blocking read here because Darwin can't do a
+            ;; wakeup from a signal handler, so all CPU profiling is just
+            ;; non-blocking. See #61768 for more details.
+            ;;
+            ;; Like the runtime/pprof package, even if that bug didn't exist
+            ;; we would still want to do a goroutine-level sleep in between
+            ;; reads to avoid frequent wakeups.
+            (.sleep (.-cpuSleep trace) 100000000)
+
+            (let [tl (traceAcquire)]
+              (when (not (.ok tl))
+                ;; Tracing disabled.
+                (break))
+
+              (let [keepGoing (traceReadCPU (.-gen tl))]
+                (traceRelease tl)
+                (when (not keepGoing)
+                  (break)))))
+
+
+          (>! done (lit (struct))))))
+
+    (set! (.-cpuLogDone trace) done)))
+
+
+
+
+
+^{:go/end 103} (go/func traceStopReadCPU "traceStopReadCPU blocks until the trace CPU reading goroutine exits.\n\ntraceAdvanceSema must be held, and tracing must be disabled.\n" []
+  (when (traceEnabled)
+    (throw "traceStopReadCPU called with trace enabled"))
+
+
+  ;; Once we close the profbuf, we'll be in one of two situations:
+  ;; - The logger goroutine has already exited because it observed
+  ;;   that the trace is disabled.
+  ;; - The logger goroutine is asleep.
+  ;;
+  ;; Wake the goroutine so it can observe that their the buffer is
+  ;; closed an exit.
+  (.Store (aget (.-cpuLogWrite trace) 0) nil)
+  (.Store (aget (.-cpuLogWrite trace) 1) nil)
+  (.close (aget (.-cpuLogRead trace) 0))
+  (.close (aget (.-cpuLogRead trace) 1))
+  (.wake (.-cpuSleep trace))
+
+  ;; Wait until the logger goroutine exits.
+  (<! (.-cpuLogDone trace))
+
+  ;; Clear state for the next trace.
+  (set! (.-cpuLogDone trace) nil)
+  (aset (.-cpuLogRead trace) 0 nil)
+  (aset (.-cpuLogRead trace) 1 nil)
+  (.close (.-cpuSleep trace)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 194} (go/func traceReadCPU "traceReadCPU attempts to read from the provided profBuf[gen%2] and write\ninto the trace. Returns true if there might be more to read or false\nif the profBuf is closed or the caller should otherwise stop reading.\n\nThe caller is responsible for ensuring that gen does not change. Either\nthe caller must be in a traceAcquire/traceRelease block, or must be calling\nwith traceAdvanceSema held.\n\nNo more than one goroutine may be in traceReadCPU for the same\nprofBuf at a time.\n\nMust not run on the system stack because profBuf.read performs race\noperations.\n" ^bool [^uintptr gen]
+  (let [^{:tag (array tracev2/MaxFramesPerStack uintptr)} pcBuf (zero (array tracev2/MaxFramesPerStack uintptr))
+
+      (values data tags eof) (.read (aget (.-cpuLogRead trace) (% gen 2)) profBufNonBlocking)]
+    (while (> (len data) 0)
+      (when (or (< (len data) 4) (> (aget data 0) (conv uint64 (len data))))
+        (break)) ; truncated profile
+
+      (when (or (< (aget data 0) 4) (and (!= tags nil) (< (len tags) 1)))
+        (break)) ; malformed profile
+
+      (when (< (len tags) 1)
+        (break)) ; mismatched profile records and tags
+
+
+      ;; Deserialize the data in the profile buffer.
+      (let [recordLen (aget data 0)
+          ^{:line 135} timestamp (aget data 1)
+          ^{:line 136} ppid (>> (aget data 2) 1)]
+        (when [hasP (!= (bit-and (aget data 2) 2r1) 0)] (not hasP)
+          (set! ppid (bit-not (conv uint64 0))))
+
+        (let [goid (aget data 3)
+            ^{:line 141} mpid (aget data 4)
+            ^{:line 142} stk (subslice data 5 recordLen)
+
+            ;; Overflow records always have their headers contain
+            ;; all zeroes.
+            ^{:line 146} isOverflowRecord (and (== (len stk) 1) (== (aget data 2) 0) (== (aget data 3) 0) (== (aget data 4) 0))]
+
+          ;; Move the data iterator forward.
+          (set! data (subslice data recordLen))
+          ;; No support here for reporting goroutine tags at the moment; if
+          ;; that information is to be part of the execution trace, we'd
+          ;; probably want to see when the tags are applied and when they
+          ;; change, instead of only seeing them when we get a CPU sample.
+          (set! tags (subslice tags 1))
+
+          (when isOverflowRecord
+            ;; Looks like an overflow record from the profBuf. Not much to
+            ;; do here, we only want to report full records.
+            (continue))
+
+
+          ;; Construct the stack for insertion to the stack table.
+          (let [nstk 1]
+            (aset pcBuf 0 logicalStackSentinel)
+            (for [] (and (< nstk (len pcBuf)) (< (- nstk 1) (len stk))) (inc! nstk)
+              (aset pcBuf nstk (conv uintptr (aget stk (- nstk 1)))))
+
+
+            ;; Write out a trace event.
+            (let [w (unsafeTraceWriter gen (aget (.-cpuBuf trace) (% gen 2)))
+
+                ;; Ensure we have a place to write to.
+                ^{:line 173 :tag bool} flushed (zero bool)]
+              (set! (values w flushed) (.ensure w (+ 2 (* 5 traceBytesPerNumber)))) ; /* tracev2.EvCPUSamples + tracev2.EvCPUSample + timestamp + g + m + p + stack ID */
+              (when flushed
+                ;; Annotate the batch as containing strings.
+                ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvCPUSamples)))
+
+
+              ;; Add the stack to the table.
+              (let [stackID (.put (aget (.-stackTab trace) (% gen 2)) (subslice pcBuf _ nstk))]
+
+                ;; Write out the CPU sample.
+                ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvCPUSample))
+                ^{:go/via [traceBuf]} (.varint w timestamp)
+                ^{:go/via [traceBuf]} (.varint w mpid)
+                ^{:go/via [traceBuf]} (.varint w ppid)
+                ^{:go/via [traceBuf]} (.varint w goid)
+                ^{:go/via [traceBuf]} (.varint w stackID)
+
+                (aset (.-cpuBuf trace) (% gen 2) (.-traceBuf w))))))))
+
+    (not eof)))
+
+
+
+
+^{:go/end 208} (go/func traceCPUFlush "traceCPUFlush flushes trace.cpuBuf[gen%2]. The caller must be certain that gen\nhas completed and that there are no more writers to it.\n" [^uintptr gen]
+  ;; Flush any remaining trace buffers containing CPU samples.
+  (when [buf (aget (.-cpuBuf trace) (% gen 2))] (!= buf nil)
+    (systemstack ^{:go/end 206} (fn []
+        (lock (addr (.-lock trace)))
+        (traceBufFlush buf gen)
+        (unlock (addr (.-lock trace)))
+        (aset (.-cpuBuf trace) (% gen 2) nil)))))
+
+
+
+
+
+
+
+^{:go/end 282} (go/func traceCPUSample "traceCPUSample writes a CPU profile sample stack to the execution tracer's\nprofiling buffer. It is called from a signal handler, so is limited in what\nit can do. mp must be the thread that is currently stopped in a signal.\n" [^{:tag (* g)} gp ^{:tag (* m)} mp ^{:tag (* p)} pp ^{:tag (slice uintptr)} stk]
+  (when (not (traceEnabled))
+    ;; Tracing is usually turned off; don't spend time acquiring the signal
+    ;; lock unless it's active.
+    (return))
+
+  (when (== mp nil)
+    ;; Drop samples that don't have an identifiable thread. We can't render
+    ;; this in any useful way anyway.
+    (return))
+
+
+  ;; We're going to conditionally write to one of two buffers based on the
+  ;; generation. To make sure we write to the correct one, we need to make
+  ;; sure this thread's trace write flag is set. If it already is, then we're
+  ;; in the tracer and we can just take advantage of that. If it isn't, then
+  ;; we need to acquire it and read the generation.
+  (let [locked false]
+    (when (not (.Load (.-writing (.-trace mp))))
+      (.Store (.-writing (.-trace mp)) true)
+      (set! locked true))
+
+    (let [gen (.Load (.-gen trace))]
+      (when (== gen 0)
+        ;; Tracing is disabled, as it turns out. Clear the write flag if necessary
+        ;; and exit.
+        (when locked
+          (.Store (.-writing (.-trace mp)) false))
+
+        (return))
+
+
+      (let [now (traceClockNow)
+          ;; The "header" here is the ID of the M that was running the profiled code,
+          ;; followed by the IDs of the P and goroutine. (For normal CPU profiling, it's
+          ;; usually the number of samples with the given stack.) Near syscalls, pp
+          ;; may be nil. Reporting goid of 0 is fine for either g0 or a nil gp.
+          ^{:line 250 :tag (array 3 uint64)} hdr (zero (array 3 uint64))]
+        (if (!= pp nil)
+          ;; Overflow records in profBuf have all header values set to zero. Make
+          ;; sure that real headers have at least one bit set.
+          (aset hdr 0 (bit-or (<< (conv uint64 (.-id pp)) 1) 2r1))
+
+          (aset hdr 0 2r10))
+
+        (when (!= gp nil)
+          (aset hdr 1 (.-goid gp)))
+
+        (aset hdr 2 (.-procid mp))
+
+        ;; Allow only one writer at a time
+        (while (not (.CompareAndSwap (.-signalLock trace) 0 1))
+          ;; TODO: Is it safe to osyield here? https://go.dev/issue/52672
+          (osyield))
+
+
+        (when [log (.Load (aget (.-cpuLogWrite trace) (% gen 2)))] (!= log nil)
+          ;; Note: we don't pass a tag pointer here (how should profiling tags
+          ;; interact with the execution tracer?), but if we did we'd need to be
+          ;; careful about write barriers. See the long comment in profBuf.write.
+          (.write log nil (conv int64 now) (subslice hdr) stk))
+
+
+        (.Store (.-signalLock trace) 0)
+
+        ;; Clear the write flag if we set it earlier.
+        (when locked
+          (.Store (.-writing (.-trace mp)) false))))))

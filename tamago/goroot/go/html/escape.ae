@@ -1,0 +1,213 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package html provides functions for escaping and unescaping HTML text.
+(in-ns 'go.html) (go/file "escape.go" :doc "Package html provides functions for escaping and unescaping HTML text.\n" :imports [
+
+
+    ^{:line 9} [strings "strings"]
+    ^{:line 10} [utf8 "unicode/utf8"]])
+
+
+
+
+
+(go/var ^{:doc "These replacements permit compatibility with old numeric entities that\nassumed Windows-1252 encoding.\nhttps://html.spec.whatwg.org/multipage/parsing.html#numeric-character-reference-end-state\n"} replacementTable ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33]} (lit (array ... rune)
+    \€ ; First entry is what 0x80 should be replaced with.
+    \u0081
+    \‚
+    \ƒ
+    \„
+    \…
+    \†
+    \‡
+    \ˆ
+    \‰
+    \Š
+    \‹
+    \Œ
+    \u008d
+    \Ž
+    \u008f
+    \u0090
+    \‘
+    \’
+    \“
+    \”
+    \•
+    \–
+    \—
+    \˜
+    \™
+    \š
+    \›
+    \œ
+    \u009d
+    \ž
+    \Ÿ)) ; Last entry is 0x9F.
+;; 0x00->'\uFFFD' is handled programmatically.
+;; 0x0D->'\u000D' is a no-op.
+
+
+
+
+
+^{:go/end 164} (go/func unescapeEntity "unescapeEntity reads an entity like \"&lt;\" from b[src:] and writes the\ncorresponding \"<\" to b[dst:], returning the incremented dst and src cursors.\nPrecondition: b[src] == '&' && dst <= src.\n" [^{:tag (slice byte)} b ^int dst ^int src ^{:tag (map string rune)} entity ^{:tag (map string (array 2 rune))} entity2] :results [^int dst1 ^int src1]
+  (let [^:const ^{:val false} attribute false
+
+      ;; http://www.whatwg.org/specs/web-apps/current-work/multipage/tokenization.html#consume-a-character-reference
+
+      ;; i starts at 1 because we already know that s[0] == '&'.
+      (values i s) (values 1 (subslice b src))]
+
+    (when (<= (len s) 1)
+      (aset b dst (aget b src))
+      (return (+ dst 1) (+ src 1)))
+
+
+    (when (== (aget s i) \#)
+      (when (<= (len s) 3) ; We need to have at least "&#.".
+        (aset b dst (aget b src))
+        (return (+ dst 1) (+ src 1)))
+
+      (inc! i)
+      (let [c (aget s i)
+          ^{:line 76} hex false]
+        (when (or (== c \x) (== c \X))
+          (set! hex true)
+          (inc! i))
+
+
+        (let [x \u0000]
+          (while (< i (len s))
+            (set! c (aget s i))
+            (inc! i)
+            (cond hex
+              (cond (and (<= \0 c) (<= c \9)) (do
+                  (set! x (- (+ (* 16 x) (conv rune c)) \0))
+                  (continue))
+                (and (<= \a c) (<= c \f)) (do
+                  (set! x (+ (- (+ (* 16 x) (conv rune c)) \a) 10))
+                  (continue))
+                (and (<= \A c) (<= c \F)) (do
+                  (set! x (+ (- (+ (* 16 x) (conv rune c)) \A) 10))
+                  (continue)))
+
+              (and (<= \0 c) (<= c \9)) (do
+                (set! x (- (+ (* 10 x) (conv rune c)) \0))
+                (continue)))
+
+            (when (!= c \;)
+              (dec! i))
+
+            (break))
+
+
+          (when (<= i 3) ; No characters matched.
+            (aset b dst (aget b src))
+            (return (+ dst 1) (+ src 1)))
+
+
+          (cond (and (<= 0x80 x) (<= x 0x9F))
+            ;; Replace characters from Windows-1252 with UTF-8 equivalents.
+            (set! x (aget replacementTable (- x 0x80)))
+            (or (== x 0) ^:go/paren (and (<= 0xD800 x) (<= x 0xDFFF)) (> x 0x10FFFF))
+            ;; Replace invalid characters with the replacement character.
+            (set! x \ufffd))
+
+
+          (return (+ dst (utf8/EncodeRune (subslice b dst) x)) (+ src i)))))
+
+
+    ;; Consume the maximum number of characters possible, with the
+    ;; consumed characters matching one of the named references.
+
+    (while (< i (len s))
+      (let [c (aget s i)]
+        (inc! i)
+        ;; Lower-cased characters are more common in entities, so we check for them first.
+        (when (or (and (<= \a c) (<= c \z)) (and (<= \A c) (<= c \Z)) (and (<= \0 c) (<= c \9)))
+          (continue))
+
+        (when (!= c \;)
+          (dec! i))
+
+        (break)))
+
+
+    (let [entityName (subslice s 1 i)]
+      (if (== (len entityName) 0) (do)
+        ;; No-op.
+        (if (and attribute (!= (aget entityName (- (len entityName) 1)) \;) (> (len s) i) (== (aget s i) \=)) (do)
+          ;; No-op.
+          (if [x (aget entity (conv string entityName))] (!= x 0)
+            (return (+ dst (utf8/EncodeRune (subslice b dst) x)) (+ src i))
+            (if [x (aget entity2 (conv string entityName))] (!= (aget x 0) 0)
+              (let [dst1 (+ dst (utf8/EncodeRune (subslice b dst) (aget x 0)))]
+                (return (+ dst1 (utf8/EncodeRune (subslice b dst1) (aget x 1))) (+ src i)))
+              (when (not attribute)
+                (let [maxLen (- (len entityName) 1)]
+                  (when (> maxLen longestEntityWithoutSemicolon)
+                    (set! maxLen longestEntityWithoutSemicolon))
+
+                  (for [j maxLen] (> j 1) (dec! j)
+                    (when [x (aget entity (conv string (subslice entityName _ j)))] (!= x 0)
+                      (return (+ dst (utf8/EncodeRune (subslice b dst) x)) (+ src j 1))))))))))
+
+
+
+
+      (set! (values dst1 src1) (values (+ dst i) (+ src i)))
+      (copy (subslice b dst dst1) (subslice b src src1))
+      (return dst1 src1))))
+
+
+(go/var htmlEscaper ^{:go/breaks [1 3 5 7 9]} (strings/NewReplacer
+    "&" "&amp;"
+    "'" "&#39;" ; "&#39;" is shorter than "&apos;" and apos was not in HTML until HTML5.
+    "<" "&lt;"
+    ">" "&gt;"
+    "\"" "&#34;")) ; "&#34;" is shorter than "&quot;".
+
+
+
+
+
+
+^{:go/end 180} (go/func EscapeString "EscapeString escapes special characters like \"<\" to become \"&lt;\". It\nescapes only five such characters: <, >, &, ' and \".\n[UnescapeString](EscapeString(s)) == s always holds, but the converse isn't\nalways true.\n" ^string [^string s]
+  (.Replace htmlEscaper s))
+
+
+
+
+
+
+
+^{:go/end 214} (go/func UnescapeString "UnescapeString unescapes entities like \"&lt;\" to become \"<\". It unescapes a\nlarger range of entities than [EscapeString] escapes. For example, \"&aacute;\"\nunescapes to \"á\", as does \"&#225;\" and \"&#xE1;\".\nUnescapeString([EscapeString](s)) == s always holds, but the converse isn't\nalways true.\n" ^string [^string s]
+  (let [i (strings/IndexByte s \&)]
+
+    (when (< i 0)
+      (return s))
+
+
+    (let [b (conv (slice byte) s)
+        (values entity entity2) (entityMaps)
+        (values dst src) (unescapeEntity b i i entity entity2)]
+      (while (> (len (subslice s src)) 0)
+        (if (== (aget s src) \&)
+          (set! i 0)
+
+          (set! i (strings/IndexByte (subslice s src) \&)))
+
+        (when (< i 0)
+          (set! dst + (copy (subslice b dst) (subslice s src)))
+          (break))
+
+
+        (when (> i 0)
+          (copy (subslice b dst) (subslice s src (+ src i))))
+
+        (set! (values dst src) (unescapeEntity b (+ dst i) (+ src i) entity entity2)))
+
+      (conv string (subslice b _ dst)))))

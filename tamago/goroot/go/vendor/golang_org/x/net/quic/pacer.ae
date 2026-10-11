@@ -1,0 +1,128 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "pacer.go" :imports [
+
+
+    ^{:line 8} [time "time"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type pacerState "A pacerState controls the rate at which packets are sent using a leaky-bucket rate limiter.\n\nThe pacer limits the maximum size of a burst of packets.\nWhen a burst exceeds this limit, it spreads subsequent packets\nover time.\n\nThe bucket is initialized to the maximum burst size (ten packets by default),\nand fills at the rate:\n\n\t1.25 * congestion_window / smoothed_rtt\n\nA sender can send one congestion window of packets per RTT,\nsince the congestion window consumed by each packet is returned\none round-trip later by the responding ack.\nThe pacer permits sending at slightly faster than this rate to\navoid underutilizing the congestion window.\n\nThe pacer permits the bucket to become negative, and permits\nsending when non-negative. This biases slightly in favor of\nsending packets over limiting them, and permits bursts one\npacket greater than the configured maximum, but permits the pacer\nto be ignorant of the maximum packet size.\n\nhttps://www.rfc-editor.org/rfc/rfc9002.html#section-7.7\n" (struct
+    ^{:line 36 :tag int} bucket ; measured in bytes
+    ^{:line 37 :tag int} maxBucket
+    ^{:line 38 :tag time/Duration} timerGranularity
+    ^{:line 39 :tag time/Time} lastUpdate
+    ^{:line 40 :tag time/Time} nextSend))
+
+
+^{:go/end 51} (go/method init [^{:tag (* pacerState)} p ^time/Time now ^int maxBurst ^time/Duration timerGranularity]
+  ;; Bucket is limited to maximum burst size, which is the initial congestion window.
+  ;; https://www.rfc-editor.org/rfc/rfc9002#section-7.7-2
+  (set! (.-maxBucket p) maxBurst)
+  (set! (.-bucket p) (.-maxBucket p))
+  (set! (.-timerGranularity p) timerGranularity)
+  (set! (.-lastUpdate p) now)
+  (set! (.-nextSend p) now))
+
+
+
+
+
+
+
+
+^{:go/end 63} (go/func pacerBytesForInterval "pacerBytesForInterval returns the number of bytes permitted over an interval.\n\n\trate  = 1.25 * congestion_window / smoothed_rtt\n\tbytes = interval * rate\n\nhttps://www.rfc-editor.org/rfc/rfc9002#section-7.7-6\n" ^int [^time/Duration interval ^int congestionWindow ^time/Duration rtt]
+  (let [bytes (/ (* (conv int64 interval) (conv int64 congestionWindow)) (conv int64 rtt))]
+    (set! bytes (/ (* bytes 5) 4)) ; bytes *= 1.25
+    (conv int bytes)))
+
+
+
+
+
+
+
+
+^{:go/end 75} (go/func pacerIntervalForBytes "pacerIntervalForBytes returns the amount of time required for a number of bytes.\n\n\ttime_per_byte = (smoothed_rtt / congestion_window) / 1.25\n\tinterval      = time_per_byte * bytes\n\nhttps://www.rfc-editor.org/rfc/rfc9002#section-7.7-8\n" ^time/Duration [^int bytes ^int congestionWindow ^time/Duration rtt]
+  (let [interval (/ (* (conv int64 rtt) (conv int64 bytes)) (conv int64 congestionWindow))]
+    (set! interval (/ (* interval 4) 5)) ; interval /= 1.25
+    (conv time/Duration interval)))
+
+
+
+^{:go/end 97} (go/method advance "advance is called when time passes.\n" [^{:tag (* pacerState)} p ^time/Time now ^int congestionWindow ^time/Duration rtt]
+  (let [elapsed (.Sub now (.-lastUpdate p))]
+    (when (< elapsed 0)
+      ;; Time has gone backward?
+      (set! elapsed 0)
+      (set! (.-nextSend p) now) ; allow a packet through to get back on track
+      (when (< (.-bucket p) 0)
+        (set! (.-bucket p) 0)))
+
+
+    (set! (.-lastUpdate p) now)
+    (when (== rtt 0)
+      ;; Avoid divide by zero in the implausible case that we measure no RTT.
+      (set! (.-bucket p) (.-maxBucket p))
+      (return))
+
+    ;; Refill the bucket.
+    (let [delta (pacerBytesForInterval elapsed congestionWindow rtt)]
+      (set! (.-bucket p) (min (+ (.-bucket p) delta) (.-maxBucket p))))))
+
+
+
+^{:go/end 119} (go/method packetSent "packetSent is called to record transmission of a packet.\n" [^{:tag (* pacerState)} p ^time/Time now ^int size ^int congestionWindow ^time/Duration rtt]
+  (set! (.-bucket p) - size)
+  (when (< (.-bucket p) (- congestionWindow))
+    ;; Never allow the bucket to fall more than one congestion window in arrears.
+    ;; We can only fall this far behind if the sender is sending unpaced packets,
+    ;; the congestion window has been exceeded, or the RTT is less than the
+    ;; timer granularity.
+    ;;
+    ;; Limiting the minimum bucket size limits the maximum pacer delay
+    ;; to RTT/1.25.
+    (set! (.-bucket p) (- congestionWindow)))
+
+  (when (>= (.-bucket p) 0)
+    (set! (.-nextSend p) now)
+    (return))
+
+  ;; Next send occurs when the bucket has refilled to 0.
+  (let [delay (pacerIntervalForBytes (- (.-bucket p)) congestionWindow rtt)]
+    (set! (.-nextSend p) (.Add now delay))))
+
+
+
+
+^{:go/end 129} (go/method canSend "canSend reports whether a packet can be sent now.\nIf it returns false, next is the time when the next packet can be sent.\n" [^{:tag (* pacerState)} p ^time/Time now] :results [^bool canSend ^time/Time next]
+  ;; If the next send time is within the timer granularity, send immediately.
+  (when (.After (.-nextSend p) (.Add now (.-timerGranularity p)))
+    (return false (.-nextSend p)))
+
+  (return true (lit time/Time)))

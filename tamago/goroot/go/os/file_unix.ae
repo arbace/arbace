@@ -1,0 +1,489 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.os) (go/file "file_unix.go" :build ["//go:build unix || (js && wasm) || wasip1 || tamago"] :imports [
+
+
+    ^{:line 10} [poll "internal/poll"]
+    ^{:line 11} [unix "internal/syscall/unix"]
+    ^{:line 12} [fs "io/fs"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [atomic "sync/atomic"]
+    ^{:line 15} [syscall "syscall"]
+    ^{:line 16} [_ "unsafe"]]) ; for go:linkname
+
+
+(go/const ^{:val -2} _UTIME_OMIT unix/UTIME_OMIT)
+
+
+^{:go/end 24} (go/func fixLongPath "fixLongPath is a noop on non-Windows platforms.\n" ^string [^string path]
+  ^{:line 23} path)
+
+
+^{:go/end 53} (go/func rename ^error [^string oldname ^string newname]
+  ^{:go/breaks [[5 52]]} (let [(values fi err) (Lstat newname)]
+    (when (and (== err nil) (.IsDir fi))
+      ;; There are two independent errors this function can return:
+      ;; one for a bad oldname, and one for a bad newname.
+      ;; At this point we've determined the newname is bad.
+      ;; But just in case oldname is also bad, prioritize returning
+      ;; the oldname error because that's what we did historically.
+      ;; However, if the old name and new name are not the same, yet
+      ;; they refer to the same file, it implies a case-only
+      ;; rename on a case-insensitive filesystem, which is ok.
+      (if [(values ofi err) (Lstat oldname)] (!= err nil) (do
+          (when [(values pe ok) (assert (* PathError) err)] ok
+            (set! err (.-Err pe)))
+
+          (return (addr (lit LinkError "rename" oldname newname err))))
+        (when (or (== newname oldname) (not (SameFile fi ofi)))
+          (return (addr (lit LinkError "rename" oldname newname syscall/EEXIST))))))
+
+
+    (set! err (ignoringEINTR ^{:go/end 48} (fn ^error []
+          (syscall/Rename oldname newname))))
+
+    (when (!= err nil)
+      (return (addr (lit LinkError "rename" oldname newname err))))
+
+    nil))
+
+
+
+
+
+
+(go/type file "file is the real representation of *File.\nThe extra level of indirection ensures that no clients of os\ncan overwrite this data, which could cause the finalizer\nto close the wrong file descriptor.\n" (struct
+    ^{:line 60 :tag poll/FD} pfd
+    ^{:line 61 :tag string} name
+    ^{:line 62 :tag (atomic/Pointer dirInfo)} dirinfo ; nil unless directory being read
+    ^{:line 63 :tag bool} nonblock ; whether we set nonblocking mode
+    ^{:line 64 :tag bool} stdoutOrErr ; whether this is stdout or stderr
+    ^{:line 65 :tag bool} appendMode ; whether file is opened for appending
+    ^{:line 66 :tag bool} inRoot)) ; whether file is opened in a Root
+
+
+
+^{:go/end 85} (go/method fd "fd is the Unix implementation of Fd.\n" ^uintptr [^{:tag (* File)} f]
+  (when (== f nil)
+    (return (bit-not (conv uintptr 0))))
+
+
+  ;; If we put the file descriptor into nonblocking mode,
+  ;; then set it to blocking mode before we return it,
+  ;; because historically we have always returned a descriptor
+  ;; opened in blocking mode. The File will continue to work,
+  ;; but any blocking operation will tie up a thread.
+  (when ^{:go/via [file]} (.-nonblock f)
+    (.SetBlocking ^{:go/via [file]} (.-pfd f)))
+
+
+  (conv uintptr (.-Sysfd ^{:go/via [file]} (.-pfd f))))
+
+
+
+^{:go/end 101} (go/func newFileFromNewFile "newFileFromNewFile is called by [NewFile].\n" ^{:tag (* File)} [^uintptr fd ^string name]
+  (let [fdi (conv int fd)]
+    (when (< fdi 0)
+      (return nil))
+
+
+    (let [(values flags err) (unix/Fcntl fdi syscall/F_GETFL 0)]
+      (when (!= err nil)
+        (set! flags 0))
+
+      (let [f (newFile fdi name kindNewFile (unix/HasNonblockFlag flags))]
+        (set! ^{:go/via [file]} (.-appendMode f) (!= (bit-and flags syscall/O_APPEND) 0))
+        ^{:line 100} f))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 119} (go/func ^{:go/linkname "net_newUnixFile net.newUnixFile"} net_newUnixFile "net_newUnixFile is a hidden entry point called by net.conn.File.\nThis is used so that a nonblocking network connection will become\nblocking if code calls the Fd method. We don't want that for direct\ncalls to NewFile: passing a nonblocking descriptor to NewFile should\nremain nonblocking if you get it back using Fd. But for net.conn.File\nthe call to NewFile is hidden from the user. Historically in that case\nthe Fd method has returned a blocking descriptor, and we want to\nretain that behavior because existing code expects it and depends on it.\n" ^{:tag (* File)} [^int fd ^string name]
+  (when (< fd 0)
+    (panic "invalid FD"))
+
+
+  (newFile fd name kindSock true))
+
+
+
+(go/type newFileKind "newFileKind describes the kind of file to newFile.\n" int)
+
+(go/const
+
+  ^{:line 126} [^{:tag newFileKind :val 0 :doc "kindNewFile means that the descriptor was passed to us via NewFile.\n"} kindNewFile iota]
+
+
+  ^{:line 129} [^{:val 1 :doc "kindOpenFile means that the descriptor was opened using\nOpen, Create, or OpenFile.\n"} kindOpenFile]
+
+  ^{:line 131} [^{:val 2 :doc "kindPipe means that the descriptor was opened using Pipe.\n"} kindPipe]
+
+
+  ^{:line 134} [^{:val 3 :doc "kindSock means that the descriptor is a network file descriptor\nthat was created from net package and was opened using net_newUnixFile.\n"} kindSock]
+
+
+
+  ^{:line 138} [^{:val 4 :doc "kindNoPoll means that we should not put the descriptor into\nnon-blocking mode, because we know it is not a pipe or FIFO.\nUsed by openDirAt and openDirNolog for directories.\n"} kindNoPoll])
+
+
+
+
+
+^{:go/end 227} (go/func newFile "newFile is like NewFile, but if called from OpenFile or Pipe\n(as passed in the kind parameter) it tries to add the file to\nthe runtime poller.\n" ^{:tag (* File)} [^int fd ^string name ^newFileKind kind ^bool nonBlocking]
+  (let [f (addr (lit File (addr ^{:go/breaks [2 [4 151] 6]} (lit file
+              :pfd ^{:go/breaks [2 4 6]} (lit poll/FD
+                :Sysfd fd
+                :IsStream true
+                :ZeroReadIsEOF true)
+
+              :name name
+              :stdoutOrErr (or (== fd 1) (== fd 2))))))
+
+
+      ^{:line 155} pollable (or (== kind kindOpenFile) (== kind kindPipe) (== kind kindSock) nonBlocking)]
+
+    ;; Things like regular files and FIFOs in kqueue on *BSD/Darwin
+    ;; may not work properly (or accurately according to its manual).
+    ;; As a result, we should avoid adding those to the kqueue-based
+    ;; netpoller. Check out #19093, #24164, and #66239 for more contexts.
+    ;;
+    ;; If the fd was passed to us via any path other than OpenFile,
+    ;; we assume those callers know what they were doing, so we won't
+    ;; perform this check and allow it to be added to the kqueue.
+    (when (== kind kindOpenFile)
+      (switch runtime/GOOS
+        (case ["darwin" "ios" "dragonfly" "freebsd" "netbsd" "openbsd"]
+          (let [^syscall/Stat_t st (zero syscall/Stat_t)
+              ^{:line 169} err (ignoringEINTR ^{:go/end 171} (fn ^error []
+                  (syscall/Fstat fd (addr st))))
+
+              ^{:line 172} typ (bit-and (.-Mode st) syscall/S_IFMT)]
+            ;; Don't try to use kqueue with regular files on *BSDs.
+            ;; On FreeBSD a regular file is always
+            ;; reported as ready for writing.
+            ;; On Dragonfly, NetBSD and OpenBSD the fd is signaled
+            ;; only once as ready (both read and write).
+            ;; Issue 19093.
+            ;; Also don't add directories to the netpoller.
+            (when (and (== err nil) ^:go/paren (or (== typ syscall/S_IFREG) (== typ syscall/S_IFDIR)))
+              (set! pollable false))
+
+
+            ;; In addition to the behavior described above for regular files,
+            ;; on Darwin, kqueue does not work properly with fifos:
+            ;; closing the last writer does not cause a kqueue event
+            ;; for any readers. See issue #24164.
+            (when (and ^:go/paren (or (== runtime/GOOS "darwin") (== runtime/GOOS "ios")) (== typ syscall/S_IFIFO))
+              (set! pollable false))))))
+
+
+
+
+    (let [clearNonBlock false]
+      (when pollable
+        ;; The descriptor is already in non-blocking mode.
+        ;; We only set f.nonblock if we put the file into
+        ;; non-blocking mode.
+        (if nonBlocking
+          ;; See the comments on net_newUnixFile.
+          (when (== kind kindSock)
+            (set! ^{:go/via [file]} (.-nonblock f) true)) ; tell Fd to return blocking descriptor
+
+          (if [err (syscall/SetNonblock fd true)] (== err nil) (do
+              (set! ^{:go/via [file]} (.-nonblock f) true)
+              (set! clearNonBlock true))
+
+            (set! pollable false))))
+
+
+
+      ;; An error here indicates a failure to register
+      ;; with the netpoll system. That can happen for
+      ;; a file descriptor that is not supported by
+      ;; epoll/kqueue; for example, disk files on
+      ;; Linux systems. We assume that any real error
+      ;; will show up in later I/O.
+      ;; We do restore the blocking behavior if it was set by us.
+      (when [pollErr (.Init ^{:go/via [file]} (.-pfd f) "file" pollable)] (and (!= pollErr nil) clearNonBlock)
+        (when [err (syscall/SetNonblock fd false)] (== err nil)
+          (set! ^{:go/via [file]} (.-nonblock f) false)))
+
+
+
+      (runtime/SetFinalizer (.-file f) (method-expr (* file) close))
+      ^{:line 226} f)))
+
+
+(go/func ^:extern sigpipe []) ; implemented in package runtime
+
+
+
+
+^{:go/end 238} (go/func epipecheck "epipecheck raises SIGPIPE if we get an EPIPE error on standard\noutput or standard error. See the SIGPIPE docs in os/signal, and\nissue 11845.\n" [^{:tag (* File)} file ^error e]
+  (when (and (== e syscall/EPIPE) ^{:go/via [file]} (.-stdoutOrErr file))
+    (sigpipe)))
+
+
+
+
+
+(go/const ^{:val "/dev/null" :doc "DevNull is the name of the operating system's “null device.”\nOn Unix-like systems, it is \"/dev/null\"; on Windows, \"NUL\".\n"} DevNull "/dev/null")
+
+
+
+^{:go/end 282} (go/func openFileNolog "openFileNolog is the Unix implementation of OpenFile.\nChanges here should be reflected in openDirAt and openDirNolog, if relevant.\n" [^string name ^int flag ^FileMode perm] :results [(* File) error]
+  (let [setSticky false]
+    (when (and (not supportsCreateWithStickyBit) (!= (bit-and flag O_CREATE) 0) (!= (bit-and perm ModeSticky) 0))
+      (when [(values _ err) (Stat name)] (IsNotExist err)
+        (set! setSticky true)))
+
+
+
+    (let [
+        ^{:line 255 :tag int} r (zero int)
+        ^{:line 256 :tag poll/SysFile} s (zero poll/SysFile)
+        ^{:line 257 :tag error} e (zero error)]
+
+      ;; We have to check EINTR here, per issues 11180 and 39237.
+      (ignoringEINTR ^{:go/end 263} (fn ^error []
+          (set! (values r s e) (open name (bit-or flag syscall/O_CLOEXEC) (syscallMode perm)))
+          ^{:line 262} e))
+
+      (when (!= e nil)
+        (return nil (addr (lit PathError :Op "open" :Path name :Err e))))
+
+
+      ;; open(2) itself won't handle the sticky bit on *BSD and Solaris
+      (when setSticky
+        (setStickyBit name))
+
+
+      ;; There's a race here with fork/exec, which we are
+      ;; content to live with. See ../syscall/exec_unix.go.
+      (when (not supportsCloseOnExec)
+        (syscall/CloseOnExec r))
+
+
+      (let [f (newFile r name kindOpenFile (unix/HasNonblockFlag flag))]
+        (set! (.-SysFile ^{:go/via [file]} (.-pfd f)) s)
+        (return f nil)))))
+
+
+^{:go/end 305} (go/func openDirNolog [^string name] :results [(* File) error]
+  (let [
+      ^{:line 286 :tag int} r (zero int)
+      ^{:line 287 :tag poll/SysFile} s (zero poll/SysFile)
+      ^{:line 288 :tag error} e (zero error)]
+
+    (ignoringEINTR ^{:go/end 293} (fn ^error []
+        (set! (values r s e) (open name (bit-or O_RDONLY syscall/O_CLOEXEC syscall/O_DIRECTORY) 0))
+        ^{:line 292} e))
+
+    (when (!= e nil)
+      (return nil (addr (lit PathError :Op "open" :Path name :Err e))))
+
+
+    (when (not supportsCloseOnExec)
+      (syscall/CloseOnExec r))
+
+
+    (let [f (newFile r name kindNoPoll false)]
+      (set! (.-SysFile ^{:go/via [file]} (.-pfd f)) s)
+      (return f nil))))
+
+
+^{:go/end 325} (go/method close ^error [^{:tag (* file)} file]
+  (when (== file nil)
+    (return syscall/EINVAL))
+
+  (when [info (.Swap (.-dirinfo file) nil)] (!= info nil)
+    (.close info))
+
+  (let [^error err (zero error)]
+    (when [e (.Close (.-pfd file))] (!= e nil)
+      (when (== e poll/ErrFileClosing)
+        (set! e ErrClosed))
+
+      (set! err (addr (lit PathError :Op "close" :Path (.-name file) :Err e))))
+
+
+    ;; no need for a finalizer anymore
+    (runtime/SetFinalizer file nil)
+    ^{:line 324} err))
+
+
+
+
+
+
+^{:go/end 340} (go/method seek "seek sets the offset for the next Read or Write on file to offset, interpreted\naccording to whence: 0 means relative to the origin of the file, 1 means\nrelative to the current offset, and 2 means relative to the end.\nIt returns the new offset and an error, if any.\n" [^{:tag (* File)} f ^int64 offset ^int whence] :results [^int64 ret ^error err]
+  (when [info (.Swap ^{:go/via [file]} (.-dirinfo f) nil)] (!= info nil)
+    ;; Free cached dirinfo, so we allocate a new one if we
+    ;; access this file as a directory again. See #35767 and #37161.
+    (.close info))
+
+  (set! (values ret err) (.Seek ^{:go/via [file]} (.-pfd f) offset whence))
+  (runtime/KeepAlive f)
+  (return ret err))
+
+
+
+
+
+^{:go/end 353} (go/func Truncate "Truncate changes the size of the named file.\nIf the file is a symbolic link, it changes the size of the link's target.\nIf there is an error, it will be of type [*PathError].\n" ^error [^string name ^int64 size]
+  ^{:go/breaks [[3 352]]} (let [e (ignoringEINTR ^{:go/end 348} (fn ^error []
+          (syscall/Truncate name size)))]
+
+    (when (!= e nil)
+      (return (addr (lit PathError :Op "truncate" :Path name :Err e))))
+
+    nil))
+
+
+
+
+^{:go/end 388} (go/func Remove "Remove removes the named file or (empty) directory.\nIf there is an error, it will be of type [*PathError].\n" ^error [^string name]
+  ;; System call interface forces us to know
+  ;; whether name is a file or directory.
+  ;; Try both: it is cheaper on average than
+  ;; doing a Stat plus the right one.
+  (let [e (ignoringEINTR ^{:go/end 364} (fn ^error []
+          (syscall/Unlink name)))]
+
+    (when (== e nil)
+      (return nil))
+
+    (let [e1 (ignoringEINTR ^{:go/end 370} (fn ^error []
+            (syscall/Rmdir name)))]
+
+      (when (== e1 nil)
+        (return nil))
+
+
+      ;; Both failed: figure out which error to return.
+      ;; OS X and Linux differ on whether unlink(dir)
+      ;; returns EISDIR, so can't use that. However,
+      ;; both agree that rmdir(file) returns ENOTDIR,
+      ;; so we can use that to decide which error is real.
+      ;; Rmdir might also return ENOTDIR if given a bad
+      ;; file path, like /etc/passwd/foo, but in that case,
+      ;; both errors will be ENOTDIR, so it's okay to
+      ;; use the error from unlink.
+      (when (!= e1 syscall/ENOTDIR)
+        (set! e e1))
+
+      (addr (lit PathError :Op "remove" :Path name :Err e)))))
+
+
+^{:go/end 400} (go/func tempDir ^string []
+  (let [dir (Getenv "TMPDIR")]
+    (when (== dir "")
+      (if (== runtime/GOOS "android")
+        (set! dir "/data/local/tmp")
+
+        (set! dir "/tmp")))
+
+
+    ^{:line 399} dir))
+
+
+
+
+^{:go/end 412} (go/func Link "Link creates newname as a hard link to the oldname file.\nIf there is an error, it will be of type *LinkError.\n" ^error [^string oldname ^string newname]
+  ^{:go/breaks [[3 411]]} (let [e (ignoringEINTR ^{:go/end 407} (fn ^error []
+          (syscall/Link oldname newname)))]
+
+    (when (!= e nil)
+      (return (addr (lit LinkError "link" oldname newname e))))
+
+    nil))
+
+
+
+
+
+
+^{:go/end 426} (go/func Symlink "Symlink creates newname as a symbolic link to oldname.\nOn Windows, a symlink to a non-existent oldname creates a file symlink;\nif oldname is later created as a directory the symlink will not work.\nIf there is an error, it will be of type *LinkError.\n" ^error [^string oldname ^string newname]
+  ^{:go/breaks [[3 425]]} (let [e (ignoringEINTR ^{:go/end 421} (fn ^error []
+          (syscall/Symlink oldname newname)))]
+
+    (when (!= e nil)
+      (return (addr (lit LinkError "symlink" oldname newname e))))
+
+    nil))
+
+
+^{:go/end 445} (go/func readlink [^string name] :results [string error]
+  (for [len 128] _ (set! len * 2)
+    (let [b (make (slice byte) len)
+        (values n err) (^{:inst [int]} ignoringEINTR2 ^{:go/end 433} (fn [] :results [int error]
+            (fixCount (syscall/Readlink name b))))]
+
+      ;; buffer too small
+      (when (and ^:go/paren (or (== runtime/GOOS "aix") (== runtime/GOOS "wasip1")) (== err syscall/ERANGE))
+        (continue))
+
+      (when (!= err nil)
+        (return "" (addr (lit PathError :Op "readlink" :Path name :Err err))))
+
+      (when (< n len)
+        (return (conv string (subslice b 0 n)) nil)))))
+
+
+
+
+(go/type unixDirent (struct
+    ^{:line 448 :tag string} parent
+    ^{:line 449 :tag string} name
+    ^{:line 450 :tag FileMode} typ
+    ^{:line 451 :tag FileInfo} info))
+
+
+^{:go/end 454} (go/method Name ^string [^{:tag (* unixDirent)} d] (.-name d))
+^{:go/end 455} (go/method IsDir ^bool [^{:tag (* unixDirent)} d] (.IsDir (.-typ d)))
+^{:go/end 456} (go/method Type ^FileMode [^{:tag (* unixDirent)} d] (.-typ d))
+
+^{:go/end 463} (go/method Info [^{:tag (* unixDirent)} d] :results [FileInfo error]
+  (when (!= (.-info d) nil)
+    (return (.-info d) nil))
+
+  (Lstat (+ (.-parent d) "/" (.-name d))))
+
+
+^{:go/end 467} (go/method String ^string [^{:tag (* unixDirent)} d]
+  (fs/FormatDirEntry d))
+
+
+^{:go/end 490} (go/func newUnixDirent [^{:tag (* File)} parent ^string name ^FileMode typ] :results [DirEntry error]
+  (let [ude (addr ^{:go/breaks [2 4 6]} (lit unixDirent
+          :parent ^{:go/via [file]} (.-name parent)
+          :name name
+          :typ typ))]
+
+    ;; When the parent file was opened in a Root,
+    ;; we cannot use a lazy lstat to load the FileInfo.
+    ;; Use lstatat here.
+    (when (and (!= typ (bit-not (conv FileMode 0))) (not ^{:go/via [file]} (.-inRoot parent)))
+      (return ude nil))
+
+
+    (let [(values info err) (.lstatat parent name)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (set! (.-typ ude) (.Type (.Mode info)))
+      (set! (.-info ude) info)
+      (return ude nil))))

@@ -1,0 +1,252 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file contains the exported entry points for invoking the parser.
+
+(in-ns 'go.go.parser) (go/file "interface.go" :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [ast "go/ast"]
+    ^{:line 13} [token "go/token"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [fs "io/fs"]
+    ^{:line 16} [os "os"]
+    ^{:line 17} [filepath "path/filepath"]
+    ^{:line 18} [strings "strings"]])
+
+
+
+
+
+^{:go/end 42} (go/func readSource "If src != nil, readSource converts src to a []byte if possible;\notherwise it returns an error. If src == nil, readSource returns\nthe result of reading the file specified by filename.\n" [^string filename ^any src] :results [(slice byte) error]
+  (when (!= src nil)
+    (type-switch [s src]
+      (case [string]
+        (return (conv (slice byte) s) nil))
+      (case [(slice byte)]
+        (return s nil))
+      (case [(* bytes/Buffer)]
+        ;; is io.Reader, but src is already available in []byte form
+        (when (!= s nil)
+          (return (.Bytes s) nil)))
+
+      (case [io/Reader]
+        (return (io/ReadAll s))))
+
+    (return nil (errors/New "invalid source")))
+
+  (os/ReadFile filename))
+
+
+
+
+
+(go/type Mode "A Mode value is a set of flags (or 0).\nThey control the amount of source code parsed and other optional\nparser functionality.\n" uint)
+
+(go/const
+  ^{:line 50} [^{:tag Mode :val 1} PackageClauseOnly (<< 1 iota)] ; stop parsing after package clause
+  ^{:line 51} [^{:val 2} ImportsOnly] ; stop parsing after import declarations
+  ^{:line 52} [^{:val 4} ParseComments] ; parse comments and add them to AST
+  ^{:line 53} [^{:val 8} Trace] ; print a trace of parsed productions
+  ^{:line 54} [^{:val 16} DeclarationErrors] ; report declaration errors
+  ^{:line 55} [^{:val 32} SpuriousErrors] ; same as AllErrors, for backward-compatibility
+  ^{:line 56} [^{:val 64} SkipObjectResolution] ; skip deprecated identifier resolution; see ParseFile
+  ^{:line 57} [^{:val 32} AllErrors SpuriousErrors]) ; report all errors (not just the first 10 on different lines)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 134} (go/func ParseFile "ParseFile parses the source code of a single Go source file and returns\nthe corresponding [ast.File] node. The source code may be provided via\nthe filename of the source file, or via the src parameter.\n\nIf src != nil, ParseFile parses the source from src and the filename is\nonly used when recording position information. The type of the argument\nfor the src parameter must be string, []byte, or [io.Reader].\nIf src == nil, ParseFile parses the file specified by filename.\n\nThe mode parameter controls the amount of source text parsed and\nother optional parser functionality. If the [SkipObjectResolution]\nmode bit is set (recommended), the object resolution phase of\nparsing will be skipped, causing File.Scope, File.Unresolved, and\nall Ident.Obj fields to be nil. Those fields are deprecated; see\n[ast.Object] for details.\n\nPosition information is recorded in the file set fset, which must not be\nnil.\n\nIf the source couldn't be read, the returned AST is nil and the error\nindicates the specific failure. If the source was read but syntax\nerrors were found, the result is a partial AST (with [ast.Bad]* nodes\nrepresenting the fragments of erroneous source code). Multiple errors\nare returned via a scanner.ErrorList which is sorted by source position.\n" [^{:tag (* token/FileSet)} fset ^string filename ^any src ^Mode mode] :results [^{:tag (* ast/File)} f ^error err]
+  (when (== fset nil)
+    (panic "parser.ParseFile: no token.FileSet provided (fset == nil)"))
+
+
+  ;; get source
+  (let [(values text ^:assign err) (readSource filename src)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [file (.AddFile fset filename -1 (len text))
+
+        ^{:line 97 :tag parser} p (zero parser)]
+      (defer (^{:go/end 127} (fn []
+            (when [e (recover)] (!= e nil)
+              ;; resume same panic if it's not a bailout
+              (let [(values bail ok) (assert bailout e)]
+                (cond (not ok)
+                  (panic e)
+                  (!= (.-msg bail) "")
+                  (.Add (.-errors p) (.Position (.-file p) (.-pos bail)) (.-msg bail)))))
+
+
+
+            ;; set result values
+            (when (== f nil)
+              ;; source is not a valid Go source file - satisfy
+              ;; ParseFile API and return a valid (but) empty
+              ;; *ast.File
+              (set! f (addr ^{:go/breaks [2 4]} (lit ast/File
+                    :Name (new ast/Ident)
+                    :Scope (ast/NewScope nil)))))
+
+
+
+            ;; Ensure the start/end are consistent,
+            ;; whether parsing succeeded or not.
+            (set! (.-FileStart f) (conv token/Pos (.Base file)))
+            (set! (.-FileEnd f) (.End file))
+
+            (.Sort (.-errors p))
+            (set! err (.Err (.-errors p))))))
+
+
+      ;; parse source
+      (.init p file text mode)
+      (set! f (.parseFile p))
+
+      (return))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 191} (go/func ParseDir "ParseDir calls [ParseFile] for all files with names ending in \".go\" in the\ndirectory specified by path and returns a map of package name -> package\nAST with all the packages found.\n\nIf filter != nil, only the files with [fs.FileInfo] entries passing through\nthe filter (and ending in \".go\") are considered. The mode bits are passed\nto [ParseFile] unchanged. Position information is recorded in fset, which\nmust not be nil.\n\nIf the directory couldn't be read, a nil map and the respective error are\nreturned. If a parse error occurred, a non-nil but incomplete map and the\nfirst error encountered are returned.\n\nDeprecated: ParseDir does not consider build tags when associating\nfiles with packages. For precise information about the relationship\nbetween packages and files, use golang.org/x/tools/go/packages,\nwhich can also optionally parse and type-check the files too.\n" [^{:tag (* token/FileSet)} fset ^string path ^{:tag (func [fs/FileInfo] [bool])} filter ^Mode mode] :results [^{:tag (map string (* ast/Package))} pkgs ^error first]
+  (let [(values list err) (os/ReadDir path)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (set! pkgs (make (map string (* ast/Package))))
+    (range [_ d list]
+      (when (or (.IsDir d) (not (strings/HasSuffix (.Name d) ".go")))
+        (continue))
+
+      (when (!= filter nil)
+        (let [(values info err) (.Info d)]
+          (when (!= err nil)
+            (return nil err))
+
+          (when (not (filter info))
+            (continue))))
+
+
+      (let [filename (filepath/Join path (.Name d))]
+        (if [(values src err) (ParseFile fset filename nil mode)] (== err nil)
+          (let [name (.-Name (.-Name src))
+              (values pkg found) (aget pkgs name)]
+            (when (not found)
+              (set! pkg (addr ^{:go/breaks [2 4]} (lit ast/Package
+                    :Name name
+                    :Files (make (map string (* ast/File))))))
+
+              (aset pkgs name pkg))
+
+            (aset (.-Files pkg) filename src))
+          (when (== first nil)
+            (set! first err)))))
+
+
+
+    (return)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 242} (go/func ParseExprFrom "ParseExprFrom is a convenience function for parsing an expression.\nThe arguments have the same meaning as for [ParseFile], but the source must\nbe a valid Go (type or value) expression. Specifically, fset must not\nbe nil.\n\nIf the source couldn't be read, the returned AST is nil and the error\nindicates the specific failure. If the source was read but syntax\nerrors were found, the result is a partial AST (with [ast.Bad]* nodes\nrepresenting the fragments of erroneous source code). Multiple errors\nare returned via a scanner.ErrorList which is sorted by source position.\n" [^{:tag (* token/FileSet)} fset ^string filename ^any src ^Mode mode] :results [^ast/Expr expr ^error err]
+  (when (== fset nil)
+    (panic "parser.ParseExprFrom: no token.FileSet provided (fset == nil)"))
+
+
+  ;; get source
+  (let [(values text ^:assign err) (readSource filename src)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [^parser p (zero parser)]
+      (defer (^{:go/end 227} (fn []
+            (when [e (recover)] (!= e nil)
+              ;; resume same panic if it's not a bailout
+              (let [(values bail ok) (assert bailout e)]
+                (cond (not ok)
+                  (panic e)
+                  (!= (.-msg bail) "")
+                  (.Add (.-errors p) (.Position (.-file p) (.-pos bail)) (.-msg bail)))))
+
+
+            (.Sort (.-errors p))
+            (set! err (.Err (.-errors p))))))
+
+
+      ;; parse expr
+      (let [file (.AddFile fset filename -1 (len text))]
+        (.init p file text mode)
+        (set! expr (.parseRhs p))
+
+        ;; If a semicolon was inserted, consume it;
+        ;; report an error if there's more tokens.
+        (when (and (== (.-tok p) token/SEMICOLON) (== (.-lit p) "\n"))
+          (.next p))
+
+        (.expect p token/EOF)
+
+        (return)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 253} (go/func ParseExpr "ParseExpr is a convenience function for obtaining the AST of an expression x.\nThe position information recorded in the AST is undefined. The filename used\nin error messages is the empty string.\n\nIf syntax errors were found, the result is a partial AST (with [ast.Bad]* nodes\nrepresenting the fragments of erroneous source code). Multiple errors are\nreturned via a scanner.ErrorList which is sorted by source position.\n" [^string x] :results [ast/Expr error]
+  (ParseExprFrom (token/NewFileSet) "" (conv (slice byte) x) 0))

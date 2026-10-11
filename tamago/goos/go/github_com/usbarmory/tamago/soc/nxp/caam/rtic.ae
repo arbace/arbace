@@ -1,0 +1,147 @@
+;; NXP Cryptographic Acceleration and Assurance Module (CAAM) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.caam) (go/file "rtic.go" :imports [
+
+
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]
+
+    ^{:line 15} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 16} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/var "CAAM RTIC tuning\n"
+
+  ^{:line 22} [^{:tag uint32 :doc "RTICThrottle defines the clock cycles between RTIC hash operations\n"} RTICThrottle 0x000000ff]
+
+  ^{:line 24} [^{:tag uint64 :doc "RTICWatchdog defines the starting value for the RTIC Watchdog Timer\n"} RTICWatchdog 0x0000ffffffffffff])
+
+
+
+(go/const "CAAM RTIC registers\n"
+  ^{:line 29} [^{:val 24580} CAAM_RSTA 0x6004]
+  ^{:line 30} [^{:val 25} RSTA_CS 25]
+  ^{:line 31} [^{:val 8} RSTA_AE 8]
+  ^{:line 32} [^{:val 4} RSTA_MIS 4]
+  ^{:line 33} [^{:val 3} RSTA_HE 3]
+  ^{:line 34} [^{:val 2} RSTA_SV 2]
+  ^{:line 35} [^{:val 1} RSTA_HD 1]
+  ^{:line 36} [^{:val 0} RSTA_BSY 0]
+
+  ^{:line 38} [^{:val 24588} CAAM_RCMD 0x600c]
+  ^{:line 39} [^{:val 2} RCMD_RTC 2]
+  ^{:line 40} [^{:val 1} RCMD_HO 1]
+
+  ^{:line 42} [^{:val 24596} CAAM_RCTL 0x6014]
+  ^{:line 43} [^{:val 8} RCTL_RTME 8]
+  ^{:line 44} [^{:val 4} RCTL_HOME 4]
+  ^{:line 45} [^{:val 1} RCTL_RREQS 1]
+
+  ^{:line 47} [^{:val 24604} CAAM_RTHR 0x601c]
+  ^{:line 48} [^{:val 24616} CAAM_RWDOG 0x6028]
+
+
+  ^{:line 51} [^{:val 24832 :doc "RTIC Memory Block Address\n"} CAAM_RMaAb 0x6100]
+
+  ^{:line 53} [^{:val 24844 :doc "RTIC Memory Block Length\n"} CAAM_RMaLb 0x610c])
+
+
+
+(go/const "CAAM RTIC states\n"
+  ^{:line 58} [^{:val 0} CS_IDLE iota]
+  ^{:line 59} [^{:val 1} CS_SINGLE]
+  ^{:line 60} [^{:val 2} CS_RUN]
+  ^{:line 61} [^{:val 3} CS_ERR])
+
+
+
+(go/type MemoryBlock "MemoryBlock represents a memory region for RTIC monitoring.\n" (struct
+    ^{:line 66 :tag uint32} Address
+    ^{:line 67 :tag uint32} Length))
+
+
+
+^{:go/end 90} (go/method RSTA "RSTA returns the Run Time Integrity Checker (RTIC) Status.\n" [^{:tag (* CAAM)} hw] :results [^uint32 cs ^error err]
+  (let [rsta (reg/Read (+ (.-Base hw) CAAM_RSTA))]
+
+    (switch
+      (case [(!= (bits/GetN (addr rsta) RSTA_AE 0xf) 0)]
+        (set! err (errors/New "illegal address")))
+      (case [(!= (bits/GetN (addr rsta) RSTA_MIS 0xf) 0)]
+        (set! err (errors/New "memory block corruption")))
+      (case [(!= (bits/GetN (addr rsta) RSTA_HE 1) 0)]
+        (set! err (errors/New "hashing error")))
+      (case [(!= (bits/GetN (addr rsta) RSTA_SV 1) 0)]
+        (set! err (errors/New "security violation")))
+      (case [(!= (bits/GetN (addr rsta) RSTA_BSY 1) 0)]
+        (set! err (errors/New "RTIC busy"))))
+
+
+    (set! cs (bits/GetN (addr rsta) RSTA_CS 2r11))
+
+    (return)))
+
+
+^{:go/breaks [[5 102]] :go/end 103} (go/method initRTIC ^error [^{:tag (* CAAM)} hw ^{:tag (slice MemoryBlock)} blocks]
+  (when (or (== (len blocks) 0) (> (len blocks) 4))
+    (return (errors/New "invalid memory block count")))
+
+
+  (range [i b blocks]
+    (reg/Write (+ (.-Base hw) CAAM_RMaAb (* (conv uint32 i) 0x20) 0x4) (.-Address b))
+    (reg/Write (+ (.-Base hw) CAAM_RMaLb (* (conv uint32 i) 0x20)) (.-Length b)))
+
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 148} (go/method EnableRTIC "EnableRTIC enables the CAAM Run Time Integrity Checker (RTIC) for up to 4\nmemory blocks.\n\nOnce enabled, the RTIC performs periodic (see RTICThrottle) hardware backed\nSHA256 hashing and raising a security violation (see RSTA()) in case of\nmismatch with the first computed hash.\n\nAny security violation (which also affects the SNVS SSM) or memory block\nreconfiguration require a hardware reset.\n" [^{:tag (* CAAM)} hw ^{:tag (slice MemoryBlock)} blocks] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (or (== (.-Base hw) 0) (== (.-CCGR hw) 0))
+    (return (errors/New "invalid CAAM instance")))
+
+
+  (when [(set! err (.initRTIC hw blocks))] (!= err nil)
+    (return))
+
+
+  (when [(values cs err) (.RSTA hw)] (or (!= err nil) (!= cs CS_IDLE))
+    (return (fmt/Errorf "invalid state (cs:%d, err:%v)" cs err)))
+
+
+  ;; hash maximum number of blocks at each iteration
+  (reg/SetN (+ (.-Base hw) CAAM_RCTL) RCTL_RREQS 2r111 2r111)
+
+  ;; apply run-time tuning settings
+  (reg/Write (+ (.-Base hw) CAAM_RTHR) RTICThrottle)
+  (reg/Write (+ (.-Base hw) CAAM_RWDOG) (conv uint32 (>> RTICWatchdog 32)))
+  (reg/Write (+ (.-Base hw) CAAM_RWDOG 0x4) (conv uint32 RTICWatchdog))
+
+  ;; set memory blocks for hash once and run-time check operations
+  (range [i blocks]
+    (reg/Set (+ (.-Base hw) CAAM_RCTL) (+ RCTL_HOME i))
+    (reg/Set (+ (.-Base hw) CAAM_RCTL) (+ RCTL_RTME i)))
+
+
+  ;; generate reference hash value and start run-time verification
+  (reg/SetN (+ (.-Base hw) CAAM_RCMD) RCMD_HO 2r11 2r11)
+
+  (return))

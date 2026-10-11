@@ -1,0 +1,268 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "hexdump.go" :imports [
+
+
+    ^{:line 8} [goarch "internal/goarch"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+
+
+
+^{:go/end 37} (go/func hexdumpWords "hexdumpWords prints a word-oriented hex dump of [p, p+len).\n\nIf mark != nil, it will be passed to hexdumper.mark.\n" [^uintptr p ^uintptr len ^{:tag (func [uintptr hexdumpMarker])} mark]
+  (printlock)
+
+  ;; Provide a default annotation
+  (let [symMark ^{:go/end 31} (fn [^uintptr u ^hexdumpMarker hm]
+        (when (!= mark nil)
+          (mark u hm))
+
+
+        ;; Can we symbolize this value?
+        (let [val @(conv (* uintptr) (conv unsafe/Pointer u))
+            ^{:line 26} fn (findfunc val)]
+          (when (.valid fn)
+            (.start hm)
+            (print "<" (funcname fn) "+" (conv hex (- val (.entry fn))) ">\n"))))
+
+
+
+      ^{:line 33} h (lit hexdumper :addr p :mark symMark)]
+    (.write h (unsafe/Slice (conv (* byte) (conv unsafe/Pointer p)) len))
+    (.close h)
+    (printunlock)))
+
+
+
+
+
+
+(go/type hexdumper "hexdumper is a Swiss-army knife hex dumper.\n\nTo use, optionally set addr and wordBytes, then call write repeatedly,\nfollowed by close.\n" (struct
+
+    ^{:line 45 :tag uintptr :doc "addr is the address to print for the first byte of data.\n"} addr
+
+
+
+    ^{:line 49 :tag uint8 :doc "addrBytes is the number of bytes of addr to print. If this is 0, it\ndefaults to goarch.PtrSize.\n"} addrBytes
+
+
+
+
+
+    ^{:line 55 :tag uint8 :doc "wordBytes is the number of bytes in a word. If wordBytes is 1, this\nprints a byte-oriented dump. If it's > 1, this interprets the data as a\nsequence of words of the given size. If it's 0, it's treated as\ngoarch.PtrSize.\n"} wordBytes
+
+
+
+
+
+
+
+
+    ^{:line 64 :tag (func [^uintptr addr ^hexdumpMarker m]) :doc "mark is an optional function that can annotate values in the hex dump.\n\nIf non-nil, it is called with the address of every complete, aligned word\nin the hex dump.\n\nIf it decides to print an annotation, it must first call m.start(), then\nprint the annotation, followed by a new line.\n"} mark
+
+    ;; Below here is state
+
+    ^{:line 68 :tag int8} ready ; 0=need to init state; 1=need to print header; 2=ready
+
+
+
+    ^{:line 72 :tag (array 16 byte) :doc "dataBuf accumulates a line at a time of data, in case it's split across\nbuffers.\n"} dataBuf
+    ^{:line 73 :tag uint8} dataPos
+    ^{:line 74 :tag uint8} dataSkip ; Skip first n bytes of buf on first line
+
+
+    ^{:line 77 :tag (array 16 byte) :doc "toPos maps from byte offset in data to a visual offset in the printed line.\n"} toPos))
+
+
+(go/type hexdumpMarker (struct
+    ^{:line 81 :tag int} chars))
+
+
+^{:go/end 109} (go/method write [^{:tag (* hexdumper)} h ^{:tag (slice byte)} data]
+  (when (== (.-ready h) 0)
+    (.init h))
+
+
+  ;; Handle leading data
+  (when (> (.-dataPos h) 0)
+    (let [n (copy (subslice (.-dataBuf h) (.-dataPos h)) data)]
+      (set! (.-dataPos h) + (conv uint8 n))
+      (set! data (subslice data n))
+      (when (< (.-dataPos h) (conv uint8 (len (.-dataBuf h))))
+        (return))
+
+      (.flushLine h (subslice (.-dataBuf h)))
+      (set! (.-dataPos h) 0)))
+
+
+  ;; Handle full lines in data
+  (while (>= (len data) (len (.-dataBuf h)))
+    (.flushLine h (subslice data _ (len (.-dataBuf h))))
+    (set! data (subslice data (len (.-dataBuf h)))))
+
+
+  ;; Handle trailing data
+  (set! (.-dataPos h) (conv uint8 (copy (subslice (.-dataBuf h)) data))))
+
+
+^{:go/end 115} (go/method close [^{:tag (* hexdumper)} h]
+  (when (> (.-dataPos h) 0)
+    (.flushLine h (subslice (.-dataBuf h) _ (.-dataPos h)))))
+
+
+
+^{:go/end 158} (go/method init [^{:tag (* hexdumper)} h]
+  (let [^:const ^{:val 16} bytesPerLine (len (.-dataBuf h))]
+
+    (cond (== (.-addrBytes h) 0)
+      (set! (.-addrBytes h) goarch/PtrSize)
+      (or (< (.-addrBytes h) 0) (> (.-addrBytes h) goarch/PtrSize))
+      (throw "invalid addrBytes"))
+
+
+    (when (== (.-wordBytes h) 0)
+      (set! (.-wordBytes h) goarch/PtrSize))
+
+    (let [wb (conv int (.-wordBytes h))]
+      (when (or (< wb 0) (>= wb bytesPerLine) (!= (bit-and wb (- wb 1)) 0))
+        (throw "invalid wordBytes"))
+
+
+      ;; Construct position mapping.
+      (range [i (.-toPos h)]
+        ;; First, calculate the "field" within the line, applying byte swizzling.
+        (let [field 0]
+          (if goarch/BigEndian
+            (set! field i)
+
+            (set! field (bit-xor i (conv int (- wb 1)))))
+
+          ;; Translate this field into a visual offset.
+          ;; "00112233 44556677  8899AABB CCDDEEFF"
+          (aset (.-toPos h) i (conv byte (+ (* field 2) (/ field 4) (/ field 8))))))
+
+
+      ;; The first line may need to skip some fields to get to alignment.
+      ;; Round down the starting address.
+      (let [nAddr (bit-and-not (.-addr h) (conv uintptr (- bytesPerLine 1)))]
+        ;; Skip bytes to get to alignment.
+        (set! (.-dataPos h) (conv uint8 (- (.-addr h) nAddr)))
+        (set! (.-dataSkip h) (conv uint8 (- (.-addr h) nAddr)))
+        (set! (.-addr h) nAddr)
+
+        ;; We're ready to print the header.
+        (set! (.-ready h) 1)))))
+
+
+^{:go/end 241} (go/method flushLine [^{:tag (* hexdumper)} h ^{:tag (slice byte)} data]
+  (let [^:const ^{:val 16} bytesPerLine (len (.-dataBuf h))
+
+      ^:const ^{:line 163 :val 16} maxAddrChars (* 2 goarch/PtrSize)
+      ^:const ^{:line 164 :val ": "} addrSep ": "
+      ^{:line 165} dataStart (+ (conv int (* 2 (.-addrBytes h))) (len addrSep))
+      ;; dataChars uses the same formula to toPos above. We calculate it with the
+      ;; "last field", then add the size of the last field.
+      ^:const ^{:line 168 :val 36} dataChars (+ (* (- bytesPerLine 1) 2) (/ (- bytesPerLine 1) 4) (/ (- bytesPerLine 1) 8) 2)
+      ^:const ^{:line 169 :val "  "} asciiSep "  "
+      ^{:line 170} asciiStart (+ dataStart dataChars (len asciiSep))
+      ^:const ^{:line 171 :val 16} asciiChars bytesPerLine
+      ^{:line 172} nlPos (+ asciiStart asciiChars)
+
+      ^{:line 174 :tag (array (+ maxAddrChars (len addrSep) dataChars (len asciiSep) asciiChars 1) byte)} lineBuf (zero (array (+ maxAddrChars (len addrSep) dataChars (len asciiSep) asciiChars 1) byte))
+      ^{:line 175} clear ^{:go/end 179} (fn []
+        (range [i lineBuf]
+          (aset lineBuf i \space)))]
+
+
+    (go/call clear)
+
+    (when (== (.-ready h) 1)
+      ;; Print column offsets header.
+      (range [offset pos (.-toPos h)]
+        (.fmtHex h (subslice (subslice lineBuf (+ dataStart (conv int (+ pos 1)))) _ 1) (conv uint64 offset)))
+
+      ;; Print ASCII offsets.
+      (range [offset asciiChars]
+        (.fmtHex h (subslice (subslice lineBuf (+ asciiStart offset)) _ 1) (conv uint64 offset)))
+
+      (aset lineBuf nlPos \newline)
+      (gwrite (subslice lineBuf _ (+ nlPos 1)))
+      (go/call clear)
+      (set! (.-ready h) 2))
+
+
+    ;; Format address.
+    (.fmtHex h (subslice lineBuf _ (* 2 (.-addrBytes h))) (conv uint64 (.-addr h)))
+    (copy (subslice lineBuf (* 2 (.-addrBytes h))) addrSep)
+    ;; Format data in hex and ASCII.
+    (range [offset b data]
+      (when (< offset (conv int (.-dataSkip h)))
+        (continue))
+
+
+      (let [pos (aget (.-toPos h) offset)]
+        (.fmtHex h (subslice (subslice lineBuf (+ dataStart (conv int pos))) _ 2) (conv uint64 b))
+
+        (copy (subslice lineBuf (+ dataStart dataChars)) asciiSep)
+        (let [ascii (conv uint8 \.)]
+          (when (and (>= b \space) (<= b \~))
+            (set! ascii b))
+
+          (aset lineBuf (+ asciiStart offset) ascii))))
+
+    ;; Trim buffer.
+    (let [end (+ asciiStart (len data))]
+      (aset lineBuf end \newline)
+      (let [buf (subslice lineBuf _ (+ end 1))]
+
+        ;; Print.
+        (gwrite buf)
+
+        ;; Print marks.
+        (when (!= (.-mark h) nil)
+          (go/call clear)
+          (for [offset 0] (<= (+ offset (conv int (.-wordBytes h))) (len data)) (set! offset + (conv int (.-wordBytes h)))
+            (when (< offset (conv int (.-dataSkip h)))
+              (continue))
+
+            (let [addr (+ (.-addr h) (conv uintptr offset))
+                ;; Find the position of the left edge of this word
+                ^{:line 233} caret (+ dataStart (conv int (min (aget (.-toPos h) offset) (aget (.-toPos h) (- (+ offset (conv int (.-wordBytes h))) 1)))))]
+              ((.-mark h) addr (lit hexdumpMarker caret)))))
+
+
+
+        (set! (.-addr h) + (conv uintptr bytesPerLine))
+        (set! (.-dataPos h) 0)
+        (set! (.-dataSkip h) 0)))))
+
+
+
+
+^{:go/end 256} (go/method fmtHex "fmtHex formats v in base 16 into buf. It fills all of buf. If buf is too\nsmall to represent v, it the output will start with '*'.\n" [^{:tag (* hexdumper)} h ^{:tag (slice byte)} buf ^uint64 v]
+  (let [^:const ^{:val "0123456789abcdef"} dig "0123456789abcdef"
+      ^{:line 247} i (- (len buf) 1)]
+    (for [] (>= i 0) (dec! i)
+      (aset buf i (aget dig (% v 16)))
+      (set! v / 16))
+
+    (when (!= v 0)
+      ;; Indicate that we couldn't fit the whole number.
+      (aset buf 0 \*))))
+
+
+
+^{:go/end 269} (go/method start [^hexdumpMarker m]
+  (let [^{:tag (array 64 byte)} spaces (zero (array 64 byte))]
+    (range [i spaces]
+      (aset spaces i \space))
+
+    (while (> (.-chars m) (len spaces))
+      (gwrite (subslice spaces))
+      (set! (.-chars m) - (len spaces)))
+
+    (gwrite (subslice spaces _ (.-chars m)))
+    (print "^ ")))

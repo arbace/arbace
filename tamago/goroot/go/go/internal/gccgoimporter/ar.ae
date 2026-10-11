@@ -1,0 +1,170 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.internal.gccgoimporter) (go/file "ar.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [elf "debug/elf"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [xcoff "internal/xcoff"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]])
+
+
+
+(go/const "Magic strings for different archive file formats.\n"
+  ^{:line 20} [^{:val "!<arch>\n"} armag "!<arch>\n"]
+  ^{:line 21} [^{:val "!<thin>\n"} armagt "!<thin>\n"]
+  ^{:line 22} [^{:val "<bigaf>\n"} armagb "<bigaf>\n"])
+
+
+
+(go/const "Offsets and sizes for fields in a standard archive header.\n"
+  ^{:line 27} [^{:val 0} arNameOff 0]
+  ^{:line 28} [^{:val 16} arNameSize 16]
+  ^{:line 29} [^{:val 16} arDateOff (+ arNameOff arNameSize)]
+  ^{:line 30} [^{:val 12} arDateSize 12]
+  ^{:line 31} [^{:val 28} arUIDOff (+ arDateOff arDateSize)]
+  ^{:line 32} [^{:val 6} arUIDSize 6]
+  ^{:line 33} [^{:val 34} arGIDOff (+ arUIDOff arUIDSize)]
+  ^{:line 34} [^{:val 6} arGIDSize 6]
+  ^{:line 35} [^{:val 40} arModeOff (+ arGIDOff arGIDSize)]
+  ^{:line 36} [^{:val 8} arModeSize 8]
+  ^{:line 37} [^{:val 48} arSizeOff (+ arModeOff arModeSize)]
+  ^{:line 38} [^{:val 10} arSizeSize 10]
+  ^{:line 39} [^{:val 58} arFmagOff (+ arSizeOff arSizeSize)]
+  ^{:line 40} [^{:val 2} arFmagSize 2]
+
+  ^{:line 42} [^{:val 60} arHdrSize (+ arFmagOff arFmagSize)])
+
+
+
+(go/const ^{:val "`\n" :doc "The contents of the fmag field of a standard archive header.\n"} arfmag "`\n")
+
+
+
+
+
+
+^{:go/end 73} (go/func arExportData "arExportData takes an archive file and returns a ReadSeeker for the\nexport data in that file. This assumes that there is only one\nobject in the archive containing export data, which is not quite\nwhat gccgo does; gccgo concatenates together all the export data\nfor all the objects in the file.  In practice that case does not arise.\n" [^io/ReadSeeker archive] :results [io/ReadSeeker error]
+  (when [(values _ err) (.Seek archive 0 io/SeekStart)] (!= err nil)
+    (return nil err))
+
+
+  (let [^{:tag (array (len armag) byte)} buf (zero (array (len armag) byte))]
+    (when [(values _ err) (.Read archive (subslice buf))] (!= err nil)
+      (return nil err))
+
+
+    (switch (conv string (subslice buf))
+      (case [armag]
+        (return (standardArExportData archive)))
+      (case [armagt]
+        (return nil (errors/New "unsupported thin archive")))
+      (case [armagb]
+        (return (aixBigArExportData archive)))
+      (default
+        (return nil (fmt/Errorf "unrecognized archive file format %q" (subslice buf)))))))
+
+
+
+
+^{:go/end 114} (go/func standardArExportData "standardArExportData returns export data from a standard archive.\n" [^io/ReadSeeker archive] :results [io/ReadSeeker error]
+  (let [off (conv int64 (len armag))]
+    (while true
+      (let [^{:tag (array arHdrSize byte)} hdrBuf (zero (array arHdrSize byte))]
+        (when [(values _ err) (.Read archive (subslice hdrBuf))] (!= err nil)
+          (return nil err))
+
+        (set! off + arHdrSize)
+
+        (when (not (bytes/Equal (subslice hdrBuf arFmagOff (+ arFmagOff arFmagSize)) (conv (slice byte) arfmag)))
+          (return nil (fmt/Errorf "archive header format header (%q)" (subslice hdrBuf))))
+
+
+        (let [(values size err) (strconv/ParseInt (strings/TrimSpace (conv string (subslice hdrBuf arSizeOff (+ arSizeOff arSizeSize)))) 10 64)]
+          (when (!= err nil)
+            (return nil (fmt/Errorf "error parsing size in archive header (%q): %v" (subslice hdrBuf) err)))
+
+
+          (let [fn (subslice hdrBuf arNameOff (+ arNameOff arNameSize))]
+            (if (and (== (aget fn 0) \/) ^:go/paren (or (== (aget fn 1) \space) (== (aget fn 1) \/) (== (conv string (subslice fn _ 8)) "/SYM64/ "))) (do)
+              ;; Archive symbol table or extended name table,
+              ;; which we don't care about.
+
+              (let [archiveAt (readerAtFromSeeker archive)
+                  (values ret err) (elfFromAr (io/NewSectionReader archiveAt off size))]
+                (when (or (!= ret nil) (!= err nil))
+                  (return ret err))))
+
+
+
+            (when (!= (bit-and size 1) 0)
+              (inc! size))
+
+            (set! off + size)
+            (when [(values _ err) (.Seek archive off io/SeekStart)] (!= err nil)
+              (return nil err))))))))
+
+
+
+
+
+
+^{:go/end 128} (go/func elfFromAr "elfFromAr tries to get export data from an archive member as an ELF file.\nIf there is no export data, this returns nil, nil.\n" [^{:tag (* io/SectionReader)} member] :results [io/ReadSeeker error]
+  (let [(values ef err) (elf/NewFile member)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [sec (.Section ef ".go_export")]
+      (when (== sec nil)
+        (return nil nil))
+
+      (return (.Open sec) nil))))
+
+
+
+^{:go/end 150} (go/func aixBigArExportData "aixBigArExportData returns export data from an AIX big archive.\n" [^io/ReadSeeker archive] :results [io/ReadSeeker error]
+  (let [archiveAt (readerAtFromSeeker archive)
+      (values arch err) (xcoff/NewArchive archiveAt)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (range [_ mem (.-Members arch)]
+      (let [(values f err) (.GetFile arch ^{:go/via [MemberHeader]} (.-Name mem))]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [sdat (.CSect f ".go_export")]
+          (when (!= sdat nil)
+            (return (bytes/NewReader sdat) nil)))))
+
+
+
+    (return nil (fmt/Errorf ".go_export not found in this archive"))))
+
+
+
+
+
+^{:go/end 160} (go/func readerAtFromSeeker "readerAtFromSeeker turns an io.ReadSeeker into an io.ReaderAt.\nThis is only safe because there won't be any concurrent seeks\nwhile this code is executing.\n" ^io/ReaderAt [^io/ReadSeeker rs]
+  (when [(values ret ok) (assert io/ReaderAt rs)] ok
+    (return ret))
+
+  (lit seekerReadAt rs))
+
+
+(go/type seekerReadAt (struct
+    ^{:line 163 :tag io/ReadSeeker} seeker))
+
+
+^{:go/end 171} (go/method ReadAt [^seekerReadAt sra ^{:tag (slice byte)} p ^int64 off] :results [int error]
+  (when [(values _ err) (.Seek (.-seeker sra) off io/SeekStart)] (!= err nil)
+    (return 0 err))
+
+  (.Read (.-seeker sra) p))

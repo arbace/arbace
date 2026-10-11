@@ -1,0 +1,214 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.coverage.encodemeta) (go/file "encode.go" :imports [
+
+    ;; This package contains APIs and helpers for encoding the meta-data
+    ;; "blob" for a single Go package, created when coverage
+    ;; instrumentation is turned on.
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [hash "hash"]
+    ^{:line 16} [fnv "hash/fnv"]
+    ^{:line 17} [coverage "internal/coverage"]
+    ^{:line 18} [stringtab "internal/coverage/stringtab"]
+    ^{:line 19} [uleb128 "internal/coverage/uleb128"]
+    ^{:line 20} [io "io"]
+    ^{:line 21} [os "os"]])
+
+
+(go/type CoverageMetaDataBuilder (struct
+    ^{:line 25 :tag stringtab/Writer} stab
+    ^{:line 26 :tag (slice funcDesc)} funcs
+    ^{:line 27 :tag (slice byte)} tmp ; temp work slice
+    ^{:line 28 :tag hash/Hash} h
+    ^{:line 29 :tag uint32} pkgpath
+    ^{:line 30 :tag uint32} pkgname
+    ^{:line 31 :tag uint32} modpath
+    ^{:line 32 :tag bool} debug
+    ^{:line 33 :tag error} werr))
+
+
+^{:go/end 53} (go/func NewCoverageMetaDataBuilder [^string pkgpath ^string pkgname ^string modulepath] :results [(* CoverageMetaDataBuilder) error]
+  (when (== pkgpath "")
+    (return nil (fmt/Errorf "invalid empty package path")))
+
+  (let [x (addr ^{:go/breaks [2 4]} (lit CoverageMetaDataBuilder
+          :tmp (make (slice byte) 0 256)
+          :h (fnv/New128a)))]
+
+    (.InitWriter (.-stab x))
+    (.Lookup (.-stab x) "")
+    (set! (.-pkgpath x) (.Lookup (.-stab x) pkgpath))
+    (set! (.-pkgname x) (.Lookup (.-stab x) pkgname))
+    (set! (.-modpath x) (.Lookup (.-stab x) modulepath))
+    (io/WriteString (.-h x) pkgpath)
+    (io/WriteString (.-h x) pkgname)
+    (io/WriteString (.-h x) modulepath)
+    (return x nil)))
+
+
+^{:go/end 60} (go/func h32 [^uint32 x ^hash/Hash h ^{:tag (slice byte)} tmp]
+  (set! tmp (subslice tmp _ 0))
+  (set! tmp (append tmp 0 0 0 0))
+  (.PutUint32 binary/LittleEndian tmp x)
+  (.Write h tmp))
+
+
+(go/type funcDesc (struct
+    ^{:line 63 :tag (slice byte)} encoded))
+
+
+
+^{:go/end 90} (go/method AddFunc "AddFunc registers a new function with the meta data builder.\n" ^uint [^{:tag (* CoverageMetaDataBuilder)} b ^coverage/FuncDesc f]
+  (hashFuncDesc (.-h b) (addr f) (.-tmp b))
+  (let [fd (lit funcDesc)]
+    (set! (.-tmp b) (subslice (.-tmp b) _ 0))
+    (set! (.-tmp b) (uleb128/AppendUleb128 (.-tmp b) (conv uint (len (.-Units f)))))
+    (set! (.-tmp b) (uleb128/AppendUleb128 (.-tmp b) (conv uint (.Lookup (.-stab b) (.-Funcname f)))))
+    (set! (.-tmp b) (uleb128/AppendUleb128 (.-tmp b) (conv uint (.Lookup (.-stab b) (.-Srcfile f)))))
+    (range [_ u (.-Units f)]
+      (set! (.-tmp b) (uleb128/AppendUleb128 (.-tmp b) (conv uint (.-StLine u))))
+      (set! (.-tmp b) (uleb128/AppendUleb128 (.-tmp b) (conv uint (.-StCol u))))
+      (set! (.-tmp b) (uleb128/AppendUleb128 (.-tmp b) (conv uint (.-EnLine u))))
+      (set! (.-tmp b) (uleb128/AppendUleb128 (.-tmp b) (conv uint (.-EnCol u))))
+      (set! (.-tmp b) (uleb128/AppendUleb128 (.-tmp b) (conv uint (.-NxStmts u)))))
+
+    (let [lit (conv uint 0)]
+      (when (.-Lit f)
+        (set! lit 1))
+
+      (set! (.-tmp b) (uleb128/AppendUleb128 (.-tmp b) lit))
+      (set! (.-encoded fd) (bytes/Clone (.-tmp b)))
+      (let [rv (conv uint (len (.-funcs b)))]
+        (set! (.-funcs b) (append (.-funcs b) fd))
+        ^{:line 89} rv))))
+
+
+^{:go/end 100} (go/method emitFuncOffsets ^int64 [^{:tag (* CoverageMetaDataBuilder)} b ^io/WriteSeeker w ^int64 off]
+  (let [nFuncs (len (.-funcs b))
+      ^{:line 94 :tag int64} foff (+ coverage/CovMetaHeaderSize (conv int64 (.Size (.-stab b))) (* (conv int64 nFuncs) 4))]
+    (for [idx 0] (< idx nFuncs) (inc! idx)
+      (.wrUint32 b w (conv uint32 foff))
+      (set! foff + (conv int64 (len (.-encoded (aget (.-funcs b) idx))))))
+
+    (+ off (* (conv int64 (len (.-funcs b))) 4))))
+
+
+^{:go/end 110} (go/method emitFunc [^{:tag (* CoverageMetaDataBuilder)} b ^io/WriteSeeker w ^int64 off ^funcDesc f] :results [int64 error]
+  (let [ew (len (.-encoded f))]
+    (if [(values nw err) (.Write w (.-encoded f))] (!= err nil)
+      (return 0 err)
+      (when (!= ew nw)
+        (return 0 (fmt/Errorf "short write emitting coverage meta-data"))))
+
+    (return (+ off (conv int64 ew)) nil)))
+
+
+^{:go/end 116} (go/method reportWriteError [^{:tag (* CoverageMetaDataBuilder)} b ^error err]
+  (when (== (.-werr b) nil)
+    (set! (.-werr b) err)))
+
+
+
+^{:go/end 127} (go/method wrUint32 [^{:tag (* CoverageMetaDataBuilder)} b ^io/WriteSeeker w ^uint32 v]
+  (set! (.-tmp b) (subslice (.-tmp b) _ 0))
+  (set! (.-tmp b) (append (.-tmp b) 0 0 0 0))
+  (.PutUint32 binary/LittleEndian (.-tmp b) v)
+  (if [(values nw err) (.Write w (.-tmp b))] (!= err nil)
+    (.reportWriteError b err)
+    (when (!= nw 4)
+      (.reportWriteError b (fmt/Errorf "short write")))))
+
+
+
+
+
+^{:go/end 186} (go/method Emit "Emit writes the meta-data accumulated so far in this builder to 'w'.\nReturns a hash of the meta-data payload and an error.\n" [^{:tag (* CoverageMetaDataBuilder)} b ^io/WriteSeeker w] :results [(array 16 byte) error]
+  ;; Emit header.  Length will initially be zero, we'll
+  ;; back-patch it later.
+  (let [^{:tag (array 16 byte)} digest (zero (array 16 byte))]
+    (copy (subslice digest) (.Sum (.-h b) nil))
+    (let [mh ^{:go/breaks [[2 138] 4 6 8 10 12]} (lit coverage/MetaSymbolHeader
+          ;; hash and length initially zero, will be back-patched
+          :PkgPath (conv uint32 (.-pkgpath b))
+          :PkgName (conv uint32 (.-pkgname b))
+          :ModulePath (conv uint32 (.-modpath b))
+          :NumFiles (conv uint32 (.Nentries (.-stab b)))
+          :NumFuncs (conv uint32 (len (.-funcs b)))
+          :MetaHash digest)]
+
+      (when (.-debug b)
+        (fmt/Fprintf os/Stderr "=-= writing header: %+v\n" mh))
+
+      (when [err (binary/Write w binary/LittleEndian mh)] (!= err nil)
+        (return digest (fmt/Errorf "error writing meta-file header: %v" err)))
+
+      (let [off (conv int64 coverage/CovMetaHeaderSize)]
+
+        ;; Write function offsets section
+        (set! off (.emitFuncOffsets b w off))
+
+        ;; Check for any errors up to this point.
+        (when (!= (.-werr b) nil)
+          (return digest (.-werr b)))
+
+
+        ;; Write string table.
+        (when [err (.Write (.-stab b) w)] (!= err nil)
+          (return digest err))
+
+        (set! off + (conv int64 (.Size (.-stab b))))
+
+        ;; Write functions
+        (range [_ f (.-funcs b)]
+          (let [^error err (zero error)]
+            (set! (values off err) (.emitFunc b w off f))
+            (when (!= err nil)
+              (return digest err))))
+
+
+
+        ;; Back-patch the length.
+        (let [totalLength (conv uint32 off)]
+          (when [(values _ err) (.Seek w 0 io/SeekStart)] (!= err nil)
+            (return digest err))
+
+          (.wrUint32 b w totalLength)
+          (when (!= (.-werr b) nil)
+            (return digest (.-werr b)))
+
+          (return digest nil))))))
+
+
+
+
+^{:go/end 197} (go/func HashFuncDesc "HashFuncDesc computes an md5 sum of a coverage.FuncDesc and returns\na digest for it.\n" ^{:tag (array 16 byte)} [^{:tag (* coverage/FuncDesc)} f]
+  (let [h (fnv/New128a)
+      ^{:line 192} tmp (make (slice byte) 0 32)]
+    (hashFuncDesc h f tmp)
+    (let [^{:tag (array 16 byte)} r (zero (array 16 byte))]
+      (copy (subslice r) (.Sum h nil))
+      ^{:line 196} r)))
+
+
+
+^{:go/end 215} (go/func hashFuncDesc "hashFuncDesc incorporates a given function 'f' into the hash 'h'.\n" [^hash/Hash h ^{:tag (* coverage/FuncDesc)} f ^{:tag (slice byte)} tmp]
+  (io/WriteString h (.-Funcname f))
+  (io/WriteString h (.-Srcfile f))
+  (range [_ u (.-Units f)]
+    (h32 (.-StLine u) h tmp)
+    (h32 (.-StCol u) h tmp)
+    (h32 (.-EnLine u) h tmp)
+    (h32 (.-EnCol u) h tmp)
+    (h32 (.-NxStmts u) h tmp))
+
+  (let [lit (conv uint32 0)]
+    (when (.-Lit f)
+      (set! lit 1))
+
+    (h32 lit h tmp)))

@@ -1,0 +1,150 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.cookiejar) (go/file "punycode.go" :imports [
+
+    ;; This file implements the Punycode algorithm from RFC 3492.
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [ascii "net/http/internal/ascii"]
+    ^{:line 12} [strings "strings"]
+    ^{:line 13} [utf8 "unicode/utf8"]])
+
+
+
+
+
+
+(go/const "These parameter values are specified in section 5.\n\nAll computation is done with int32s, so that overflow behavior is identical\nregardless of whether int is 32-bit or 64-bit.\n"
+  ^{:line 21} [^{:tag int32 :val 36} base 36]
+  ^{:line 22} [^{:tag int32 :val 700} damp 700]
+  ^{:line 23} [^{:tag int32 :val 72} initialBias 72]
+  ^{:line 24} [^{:tag int32 :val 128} initialN 128]
+  ^{:line 25} [^{:tag int32 :val 38} skew 38]
+  ^{:line 26} [^{:tag int32 :val 26} tmax 26]
+  ^{:line 27} [^{:tag int32 :val 1} tmin 1])
+
+
+
+
+
+
+
+^{:go/end 99} (go/func encode "encode encodes a string as specified in section 6.3 and prepends prefix to\nthe result.\n\nThe \"while h < length(input)\" line in the specification becomes \"for\nremaining != 0\" in the Go code, because len(s) in Go is in bytes, not runes.\n" [^string prefix ^string s] :results [string error]
+  (let [output (make (slice byte) (len prefix) (+ (len prefix) 1 (* 2 (len s))))]
+    (copy output prefix)
+    (let [(values delta n bias) (values (conv int32 0) initialN initialBias)
+        (values b remaining) (values (conv int32 0) (conv int32 0))]
+      (range [_ r s]
+        (if (< r utf8/RuneSelf) (do
+            (inc! b)
+            (set! output (append output (conv byte r))))
+
+          (inc! remaining)))
+
+
+      (let [h b]
+        (when (> b 0)
+          (set! output (append output \-)))
+
+        (while (!= remaining 0)
+          (let [m (conv int32 0x7fffffff)]
+            (range [_ r s]
+              (when (and (> m r) (>= r n))
+                (set! m r)))
+
+
+            (set! delta + (* (- m n) (+ h 1)))
+            (when (< delta 0)
+              (return "" (fmt/Errorf "cookiejar: invalid label %q" s)))
+
+            (set! n m)
+            (range [_ r s]
+              (when (< r n)
+                (inc! delta)
+                (when (< delta 0)
+                  (return "" (fmt/Errorf "cookiejar: invalid label %q" s)))
+
+                (continue))
+
+              (when (> r n)
+                (continue))
+
+              (let [q delta]
+                (for [k base] _ (set! k + base)
+                  (let [t (- k bias)]
+                    (cond (< t tmin)
+                      (set! t tmin)
+                      (> t tmax)
+                      (set! t tmax))
+
+                    (when (< q t)
+                      (break))
+
+                    (set! output (append output (encodeDigit (+ t (% (- q t) (- base t))))))
+                    (set! q (/ (- q t) (- base t)))))
+
+                (set! output (append output (encodeDigit q)))
+                (set! bias (adapt delta (+ h 1) (== h b)))
+                (set! delta 0)
+                (inc! h)
+                (dec! remaining)))
+
+            (inc! delta)
+            (inc! n)))
+
+        (return (conv string output) nil)))))
+
+
+^{:go/end 109} (go/func encodeDigit ^byte [^int32 digit]
+  (switch
+    (case [(and (<= 0 digit) (< digit 26))]
+      (return (conv byte (+ digit \a))))
+    (case [(and (<= 26 digit) (< digit 36))]
+      (return (conv byte (+ digit (- \0 26))))))
+
+  (panic "cookiejar: internal error in punycode encoding"))
+
+
+
+^{:go/end 125} (go/func adapt "adapt is the bias adaptation function specified in section 6.1.\n" ^int32 [^int32 delta ^int32 numPoints ^bool firstTime]
+  (if firstTime
+    (set! delta / damp)
+
+    (set! delta / 2))
+
+  (set! delta + (/ delta numPoints))
+  (let [k (conv int32 0)]
+    (while (> delta (/ (* (- base tmin) tmax) 2))
+      (set! delta / (- base tmin))
+      (set! k + base))
+
+    (+ k (/ (* (+ (- base tmin) 1) delta) (+ delta skew)))))
+
+
+;; Strictly speaking, the remaining code below deals with IDNA (RFC 5890 and
+;; friends) and not Punycode (RFC 3492) per se.
+
+
+(go/const ^{:val "xn--" :doc "acePrefix is the ASCII Compatible Encoding prefix.\n"} acePrefix "xn--")
+
+
+
+
+^{:go/end 151} (go/func toASCII "toASCII converts a domain or domain label to its ASCII form. For example,\ntoASCII(\"bücher.example.com\") is \"xn--bcher-kva.example.com\", and\ntoASCII(\"golang\") is \"golang\".\n" [^string s] :results [string error]
+  (when (ascii/Is s)
+    (return s nil))
+
+  (let [labels (strings/Split s ".")]
+    (range [i label labels]
+      (when (not (ascii/Is label))
+        (let [(values a err) (encode acePrefix label)]
+          (when (!= err nil)
+            (return "" err))
+
+          (aset labels i a))))
+
+
+    (return (strings/Join labels ".") nil)))

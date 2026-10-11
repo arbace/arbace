@@ -1,0 +1,169 @@
+;; Microchip MII Management Controller (MIIM)
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package miim implements a driver for Microchip MII Management Controllers
+;; (MIIM) adopting the following reference specifications:
+;;   - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=arm64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.microchip.miim) (go/file "miim.go" :doc "Package miim implements a driver for Microchip MII Management Controllers\n(MIIM) adopting the following reference specifications:\n  - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=arm64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 19} [errors "errors"]
+    ^{:line 20} [fmt "fmt"]
+    ^{:line 21} [sync "sync"]
+    ^{:line 22} [time "time"]
+
+    ^{:line 24} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 25} [mdio "github.com/usbarmory/tamago/internal/mdio"]
+    ^{:line 26} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "MIIM registers\n"
+  ^{:line 31} [^{:val 0} MII_STATUS 0x00]
+  ^{:line 32} [^{:val 3} STATUS_BUSY 3]
+  ^{:line 33} [^{:val 2} STATUS_PENDING_OP 2]
+  ^{:line 34} [^{:val 1} STATUS_PENDING_RD 1]
+  ^{:line 35} [^{:val 0} STATUS_PENDING_WR 0]
+
+  ^{:line 37} [^{:val 8} MII_CMD 0x08]
+  ^{:line 38} [^{:val 31} CMD_VLD 31]
+  ^{:line 39} [^{:val 25} CMD_PHYAD 25]
+  ^{:line 40} [^{:val 20} CMD_REGAD 20]
+  ^{:line 41} [^{:val 4} CMD_WRDATA 4]
+  ^{:line 42} [^{:val 1} CMD_OPR 1]
+
+  ^{:line 44} [^{:val 12} MII_DATA 0x0c]
+  ^{:line 45} [^{:val 16} DATA_SUCCESS 16]
+  ^{:line 46} [^{:val 0} DATA_RDDATA 0]
+
+  ^{:line 48} [^{:val 16} MII_CFG 0x10]
+  ^{:line 49} [^{:val 9} CFG_ST_CFG_FIELD 9]
+  ^{:line 50} [^{:val 1} ST_CLAUSE_22 2r01]
+  ^{:line 51} [^{:val 0} ST_CLAUSE_45 2r00])
+
+
+
+(go/const ^{:val 1000000000 :doc "Timeout is the default timeout for MIIM operations.\n"} Timeout (* 1 time/Second))
+
+
+(go/type MIIM "MIIM represents a MII Management Controller instance.\n" (struct
+    ^{:line 59} sync/Mutex
+
+
+    ^{:line 62 :tag int :doc "Controller index\n"} Index
+
+    ^{:line 64 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 66 :tag time/Duration :doc "Timeout for MIIM operations\n"} Timeout))
+
+
+
+^{:go/breaks [[10 82]] :go/end 83} (go/method Init "Init initializes and enables an MIIM controller instance.\n" [^{:tag (* MIIM)} hw] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (== (.-Base hw) 0)
+    (return (errors/New "invalid MIIM controller instance")))
+
+
+  (when (== (.-Timeout hw) 0)
+    (set! (.-Timeout hw) Timeout))
+
+
+  nil)
+
+
+^{:go/end 117} (go/method mdio [^{:tag (* MIIM)} hw ^uint32 phyad ^uint32 regad ^uint32 wrdata ^uint32 op ^bool read] :results [^uint16 rddata ^error err]
+  (when (not (reg/WaitFor (.-Timeout hw) (+ (.-Base hw) MII_STATUS) STATUS_PENDING_OP 1 0))
+    (return 0 (errors/New "command FIFO timeout")))
+
+
+  (let [^uint32 cmd (zero uint32)]
+    (bits/Set (addr cmd) CMD_VLD)
+    (bits/SetN (addr cmd) CMD_PHYAD 0x1f phyad)
+    (bits/SetN (addr cmd) CMD_REGAD 0x1f regad)
+    (bits/SetN (addr cmd) CMD_WRDATA 0xffff wrdata)
+    (bits/SetN (addr cmd) CMD_OPR 2r11 op)
+    (reg/Write (+ (.-Base hw) MII_CMD) cmd)
+
+    (when (not read)
+      (when (not (reg/WaitFor (.-Timeout hw) (+ (.-Base hw) MII_STATUS) STATUS_PENDING_WR 1 0))
+        (return 0 (errors/New "write timeout")))
+
+
+      (return))
+
+
+    (when (not (reg/WaitFor (.-Timeout hw) (+ (.-Base hw) MII_STATUS) STATUS_BUSY 1 0))
+      (return 0 (errors/New "read timeout")))
+
+
+    (let [data (reg/Read (+ (.-Base hw) MII_DATA))]
+
+      (when (!= (bit-and (>> data DATA_SUCCESS) 2r11) 0)
+        (return 0 (errors/New "PHY access failed")))
+
+
+      (return (conv uint16 (>> data DATA_RDDATA)) nil))))
+
+
+
+
+^{:go/end 137} (go/method MDIO22 "MDIO22 transmits an MII frame (IEEE 802.3-2008 Clause 22) to a connected\nEthernet PHY and returns read data when applicable.\n" [^{:tag (* MIIM)} hw ^int op ^int pa ^int ra ^uint16 data] :results [^uint16 rddata ^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (== (.-Base hw) 0)
+    (return 0 (errors/New "invalid MIIM controller instance")))
+
+
+  (reg/SetN (+ (.-Base hw) MII_CFG) CFG_ST_CFG_FIELD 2r11 ST_CLAUSE_22)
+  (let [read (== op mdio/OP_READ)]
+
+    (when [(set! (values rddata err) (.mdio hw (conv uint32 pa) (conv uint32 ra) (conv uint32 data) (conv uint32 op) read))] (!= err nil)
+      (return 0 (fmt/Errorf "clause 22 PHY %d register %d: %w" pa ra err)))
+
+
+    (return)))
+
+
+
+
+^{:go/end 157} (go/method MDIO45 "MDIO45 transmits an MII frame (IEEE 802.3-2008 Clause 45) to a connected\nEthernet PHY and returns read data when applicable.\n" [^{:tag (* MIIM)} hw ^int op ^int prtad ^int devad ^uint16 data] :results [^uint16 rddata ^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (== (.-Base hw) 0)
+    (return 0 (errors/New "invalid MIIM controller instance")))
+
+
+  (reg/SetN (+ (.-Base hw) MII_CFG) CFG_ST_CFG_FIELD 2r11 ST_CLAUSE_45)
+  (let [read (or (== op mdio/OP_READ_INC) (== op mdio/OP_READ_45))]
+
+    (when [(set! (values rddata err) (.mdio hw (conv uint32 prtad) (conv uint32 devad) (conv uint32 data) (conv uint32 op) read))] (!= err nil)
+      (return 0 (fmt/Errorf "clause 45 port %d device %d: %w" prtad devad err)))
+
+
+    (return)))
+
+
+
+
+^{:go/end 163} (go/method ReadPHYRegister "ReadPHYRegister reads a standard management register of a connected Ethernet\nPHY (IEEE 802.3-2008 Clause 22).\n" [^{:tag (* MIIM)} hw ^int pa ^int ra] :results [^uint16 data ^error err]
+  (.MDIO22 hw mdio/OP_READ pa ra 0))
+
+
+
+
+^{:go/end 170} (go/method WritePHYRegister "WritePHYRegister writes a standard management register of a connected\nEthernet PHY (IEEE 802.3-2008 Clause 22).\n" [^{:tag (* MIIM)} hw ^int pa ^int ra ^uint16 data] :results [^error err]
+  (set! (values _ err) (.MDIO22 hw mdio/OP_WRITE pa ra data))
+  (return))

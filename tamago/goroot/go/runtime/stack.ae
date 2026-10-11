@@ -1,0 +1,1459 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "stack.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [cpu "internal/cpu"]
+    ^{:line 10} [goarch "internal/goarch"]
+    ^{:line 11} [goexperiment "internal/goexperiment"]
+    ^{:line 12} [goos "internal/goos"]
+    ^{:line 13} [atomic "internal/runtime/atomic"]
+    ^{:line 14} [gc "internal/runtime/gc"]
+    ^:alias ^{:line 15} [goos_overlay "runtime/goos"]
+    ^{:line 16} [sys "internal/runtime/sys"]
+    ^{:line 17} [bits "math/bits"]
+    ^{:line 18} [unsafe "unsafe"]])
+
+
+;; /*
+;; Stack layout parameters.
+;; Included both by runtime (compiled via 6c) and linkers (compiled via gcc).
+;; 
+;; The per-goroutine g->stackguard is set to point StackGuard bytes
+;; above the bottom of the stack.  Each function compares its stack
+;; pointer against g->stackguard to check for overflow.  To cut one
+;; instruction from the check sequence for functions with tiny frames,
+;; the stack is allowed to protrude StackSmall bytes below the stack
+;; guard.  Functions with large frames don't bother with the check and
+;; always call morestack.  The sequences are (for amd64, others are
+;; similar):
+;; 
+;; guard = g->stackguard
+;; frame = function's stack frame size
+;; argsize = size of function arguments (call + return)
+;; 
+;; stack frame size <= StackSmall:
+;; CMPQ guard, SP
+;; JHI 3(PC)
+;; MOVQ m->morearg, $(argsize << 32)
+;; CALL morestack(SB)
+;; 
+;; stack frame size > StackSmall but < StackBig
+;; LEAQ (frame-StackSmall)(SP), R0
+;; CMPQ guard, R0
+;; JHI 3(PC)
+;; MOVQ m->morearg, $(argsize << 32)
+;; CALL morestack(SB)
+;; 
+;; stack frame size >= StackBig:
+;; MOVQ m->morearg, $((argsize << 32) | frame)
+;; CALL morestack(SB)
+;; 
+;; The bottom StackGuard - StackSmall bytes are important: there has
+;; to be enough room to execute functions that refuse to check for
+;; stack overflow, either because they need to be adjacent to the
+;; actual caller's frame (deferproc) or because they handle the imminent
+;; stack overflow (morestack).
+;; 
+;; For example, deferproc might call malloc, which does one of the
+;; above checks (without allocating a full frame), which might trigger
+;; a call to morestack.  This sequence needs to fit in the bottom
+;; section of the stack.  On amd64, morestack's frame is 40 bytes, and
+;; deferproc's frame is 56 bytes.  That fits well within the
+;; StackGuard - StackSmall bytes at the bottom.
+;; The linkers explore all possible call traces involving non-splitting
+;; functions to make sure that this limit cannot be violated.
+;; */
+
+(go/const
+
+
+
+
+  ^{:line 76} [^{:val 0 :doc "stackSystem is a number of additional bytes to add\nto each stack below the usual guard area for OS-specific\npurposes like signal handling. Used on Windows, Plan 9,\nand iOS because they do not use a separate stack.\n"} stackSystem (+ (* goos/IsWindows 4096) (* goos/IsPlan9 512) (* goos/IsIos goarch/IsArm64 1024) (* goos/IsTamago goos_overlay/StackSystem))]
+
+
+  ^{:line 79} [^{:val 2048 :doc "The minimum size of stack used by Go code\n"} stackMin 2048]
+
+
+
+  ^{:line 83} [^{:val 2048 :doc "The minimum stack size to allocate.\nThe hackery here rounds fixedStack0 up to a power of 2.\n"} fixedStack0 (+ stackMin stackSystem)]
+  ^{:line 84} [^{:val 2047} fixedStack1 (- fixedStack0 1)]
+  ^{:line 85} [^{:val 2047} fixedStack2 (bit-or fixedStack1 (>> fixedStack1 1))]
+  ^{:line 86} [^{:val 2047} fixedStack3 (bit-or fixedStack2 (>> fixedStack2 2))]
+  ^{:line 87} [^{:val 2047} fixedStack4 (bit-or fixedStack3 (>> fixedStack3 4))]
+  ^{:line 88} [^{:val 2047} fixedStack5 (bit-or fixedStack4 (>> fixedStack4 8))]
+  ^{:line 89} [^{:val 2047} fixedStack6 (bit-or fixedStack5 (>> fixedStack5 16))]
+  ^{:line 90} [^{:val 2048} fixedStack (+ fixedStack6 1)]
+
+
+
+
+  ^{:line 95} [^{:val 800 :doc "stackNosplit is the maximum number of bytes that a chain of NOSPLIT\nfunctions can use.\nThis arithmetic must match that in cmd/internal/objabi/stack.go:StackNosplit.\n"} stackNosplit (* abi/StackNosplitBase sys/StackGuardMultiplier)]
+
+
+
+
+
+
+
+  ^{:line 103} [^{:val 928 :doc "The stack guard is a pointer this many bytes above the\nbottom of the stack.\n\nThe guard leaves enough room for a stackNosplit chain of NOSPLIT calls\nplus one stackSmall frame plus stackSystem bytes for the OS.\nThis arithmetic must match that in cmd/internal/objabi/stack.go:StackLimit.\n"} stackGuard (+ stackNosplit stackSystem abi/StackSmall)])
+
+
+(go/const
+
+
+
+
+
+  ^{:line 112} [^{:val 0 :doc "stackDebug == 0: no logging\n           == 1: logging of per-stack operations\n           == 2: logging of per-frame operations\n           == 3: logging of per-word updates\n           == 4: logging of per-word reads\n"} stackDebug 0]
+  ^{:line 113} [^{:val 0} stackFromSystem 0] ; allocate stacks from system memory instead of the heap
+  ^{:line 114} [^{:val 0} stackFaultOnFree 0] ; old stacks are mapped noaccess to detect use after free
+  ^{:line 115} [^{:val 0} stackNoCache 0] ; disable per-P small stack caches
+
+
+  ^{:line 118} [^{:val false :doc "check the BP links during traceback.\n"} debugCheckBP false])
+
+
+(go/var
+  ^{:line 122} [stackPoisonCopy 0]) ; fill stack that should not be accessed with garbage, to detect bad dereferences during copy
+
+
+(go/const
+  ^{:line 126} [^{:val 18446744073709551615N} uintptrMask (- (<< 1 (* 8 goarch/PtrSize)) 1)]
+
+  ;; The values below can be stored to g.stackguard0 to force
+  ;; the next stack check to fail.
+  ;; These are all larger than any real SP.
+
+
+
+  ^{:line 134} [^{:val 18446744073709550302N :doc "Goroutine preemption request.\n0xfffffade in hex.\n"} stackPreempt (bit-and uintptrMask -1314)]
+
+
+
+  ^{:line 138} [^{:val 18446744073709550382N :doc "Thread is forking. Causes a split stack check failure.\n0xfffffb2e in hex.\n"} stackFork (bit-and uintptrMask -1234)]
+
+
+
+  ^{:line 142} [^{:val 18446744073709551341N :doc "Force a stack movement. Used for debugging.\n0xfffffeed in hex.\n"} stackForceMove (bit-and uintptrMask -275)]
+
+
+  ^{:line 145} [^{:val 18446744073709547520N :doc "stackPoisonMin is the lowest allowed stack poison value.\n"} stackPoisonMin (bit-and uintptrMask -4096)])
+
+
+
+
+
+
+
+
+(go/var ^{:tag (array _NumStackOrders (struct ^stackpoolItem item ^{:tag (array (% (- cpu/CacheLinePadSize (% (unsafe/Sizeof (lit stackpoolItem)) cpu/CacheLinePadSize)) cpu/CacheLinePadSize) byte)} _)) :doc "Global pool of spans that have free stacks.\nStacks are assigned an order according to size.\n\n\torder = log_2(size/FixedStack)\n\nThere is a free list for each order.\n"} stackpool)
+
+
+
+
+(go/type stackpoolItem (struct
+    ^{:line 160 :tag sys/NotInHeap} _
+    ^{:line 161 :tag mutex} mu
+    ^{:line 162 :tag mSpanList} span))
+
+
+
+(go/var ^{:tag (struct ^mutex lock ^{:tag (array (- heapAddrBits gc/PageShift) mSpanList)} free) :doc "Global pool of large stack spans.\n"} stackLarge)
+
+;; free lists by log_2(s.npages)
+
+
+^{:go/end 183} (go/func stackinit []
+  (when (!= (bit-and _StackCacheSize pageMask) 0)
+    (throw "cache size must be a multiple of page size"))
+
+  (range [i stackpool]
+    (.init (.-span (.-item (aget stackpool i))))
+    (lockInit (addr (.-mu (.-item (aget stackpool i)))) lockRankStackpool))
+
+  (range [i (.-free stackLarge)]
+    (.init (aget (.-free stackLarge) i))
+    (lockInit (addr (.-lock stackLarge)) lockRankStackLarge)))
+
+
+
+
+^{:go/end 191} (go/func stacklog2 "stacklog2 returns ⌊log_2(n)⌋.\n" ^int [^uintptr n]
+  (when (== n 0)
+    (return 0))
+
+  (bits/Len64 (conv uint64 n)))
+
+
+
+
+^{:go/end 238} (go/func stackpoolalloc "Allocates a stack from the free pool. Must be called with\nstackpool[order].item.mu held.\n" ^gclinkptr [^uint8 order]
+  (let [list (addr (.-span (.-item (aget stackpool order))))
+      ^{:line 197} s (.-first list)]
+    (lockWithRankMayAcquire (addr (.-lock mheap_)) lockRankMheap)
+    (when (== s nil)
+      ;; no free stacks. Allocate another span worth.
+      (set! s (.allocManual mheap_ (>> _StackCacheSize gc/PageShift) spanAllocStack))
+      (when (== s nil)
+        (throw "out of memory"))
+
+      (when (!= (.-allocCount s) 0)
+        (throw "bad allocCount"))
+
+      (when (!= (.ptr (.-manualFreeList s)) nil)
+        (throw "bad manualFreeList"))
+
+      (osStackAlloc s)
+      (set! (.-elemsize s) ^uintptr (<< fixedStack order))
+      (for [i (conv uintptr 0)] (< i _StackCacheSize) (set! i + (.-elemsize s))
+        (let [x (conv gclinkptr (+ (.base s) i))]
+          (when valgrindenabled
+            ;; The address of x.ptr() becomes the base of stacks. We need to
+            ;; mark it allocated here and in stackfree and stackpoolfree, and free'd in
+            ;; stackalloc in order to avoid overlapping allocations and
+            ;; uninitialized memory errors in valgrind.
+            (valgrindMalloc (conv unsafe/Pointer (.ptr x)) (unsafe/Sizeof (.ptr x))))
+
+          (set! (.-next (.ptr x)) (.-manualFreeList s))
+          (set! (.-manualFreeList s) x)))
+
+      (.insert list s))
+
+    (let [x (.-manualFreeList s)]
+      (when (== (.ptr x) nil)
+        (throw "span has no free stacks"))
+
+      (set! (.-manualFreeList s) (.-next (.ptr x)))
+      (inc! (.-allocCount s))
+      (when (== (.ptr (.-manualFreeList s)) nil)
+        ;; all stacks in s are allocated.
+        (.remove list s))
+
+      ^{:line 237} x)))
+
+
+
+^{:go/end 274} (go/func stackpoolfree "Adds stack x to the free pool. Must be called with stackpool[order].item.mu held.\n" [^gclinkptr x ^uint8 order]
+  (let [s (spanOfUnchecked (conv uintptr x))]
+    (when (!= (.get (.-state s)) mSpanManual)
+      (throw "freeing stack not in a stack span"))
+
+    (when (== (.ptr (.-manualFreeList s)) nil)
+      ;; s will now have a free stack
+      (.insert (.-span (.-item (aget stackpool order))) s))
+
+    (set! (.-next (.ptr x)) (.-manualFreeList s))
+    (set! (.-manualFreeList s) x)
+    (dec! (.-allocCount s))
+    (when (and (== gcphase _GCoff) (== (.-allocCount s) 0))
+      ;; Span is completely free. Return it to the heap
+      ;; immediately if we're sweeping.
+      ;;
+      ;; If GC is active, we delay the free until the end of
+      ;; GC to avoid the following type of situation:
+      ;;
+      ;; 1) GC starts, scans a SudoG but does not yet mark the SudoG.elem pointer
+      ;; 2) The stack that pointer points to is copied
+      ;; 3) The old stack is freed
+      ;; 4) The containing span is marked free
+      ;; 5) GC attempts to mark the SudoG.elem pointer. The
+      ;;    marking fails because the pointer looks like a
+      ;;    pointer into a free span.
+      ;;
+      ;; By not freeing, we prevent step #4 until GC is done.
+      (.remove (.-span (.-item (aget stackpool order))) s)
+      (set! (.-manualFreeList s) 0)
+      (osStackFree s)
+      (.freeManual mheap_ s spanAllocStack))))
+
+
+
+
+
+
+
+^{:go/end 299} (go/func ^:go/systemstack stackcacherefill "stackcacherefill/stackcacherelease implement a global pool of stack segments.\nThe pool is required to prevent unlimited growth of per-thread caches.\n" [^{:tag (* mcache)} c ^uint8 order]
+  (when (>= stackDebug 1)
+    (print "stackcacherefill order=" order "\n"))
+
+
+  ;; Grab some stacks from the global cache.
+  ;; Grab half of the allowed capacity (to prevent thrashing).
+  (let [^gclinkptr list (zero gclinkptr)
+      ^{:line 288 :tag uintptr} size (zero uintptr)]
+    (lock (addr (.-mu (.-item (aget stackpool order)))))
+    (while (< size (/ _StackCacheSize 2))
+      (let [x (stackpoolalloc order)]
+        (set! (.-next (.ptr x)) list)
+        (set! list x)
+        (set! size + ^uintptr (<< fixedStack order))))
+
+    (unlock (addr (.-mu (.-item (aget stackpool order)))))
+    (set! (.-list (aget (.-stackcache c) order)) list)
+    (set! (.-size (aget (.-stackcache c) order)) size)))
+
+
+
+^{:go/end 318} (go/func ^:go/systemstack stackcacherelease [^{:tag (* mcache)} c ^uint8 order]
+  (when (>= stackDebug 1)
+    (print "stackcacherelease order=" order "\n"))
+
+  (let [x (.-list (aget (.-stackcache c) order))
+      ^{:line 307} size (.-size (aget (.-stackcache c) order))]
+    (lock (addr (.-mu (.-item (aget stackpool order)))))
+    (while (> size (/ _StackCacheSize 2))
+      (let [y (.-next (.ptr x))]
+        (stackpoolfree x order)
+        (set! x y)
+        (set! size - ^uintptr (<< fixedStack order))))
+
+    (unlock (addr (.-mu (.-item (aget stackpool order)))))
+    (set! (.-list (aget (.-stackcache c) order)) x)
+    (set! (.-size (aget (.-stackcache c) order)) size)))
+
+
+
+^{:go/end 337} (go/func ^:go/systemstack stackcache_clear [^{:tag (* mcache)} c]
+  (when (>= stackDebug 1)
+    (print "stackcache clear\n"))
+
+  (for [order (conv uint8 0)] (< order _NumStackOrders) (inc! order)
+    (lock (addr (.-mu (.-item (aget stackpool order)))))
+    (let [x (.-list (aget (.-stackcache c) order))]
+      (while (!= (.ptr x) nil)
+        (let [y (.-next (.ptr x))]
+          (stackpoolfree x order)
+          (set! x y)))
+
+      (set! (.-list (aget (.-stackcache c) order)) 0)
+      (set! (.-size (aget (.-stackcache c) order)) 0)
+      (unlock (addr (.-mu (.-item (aget stackpool order))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 456} (go/func ^:go/systemstack stackalloc "stackalloc allocates an n byte stack.\n\nstackalloc must run on the system stack because it uses per-P\nresources and must not split the stack.\n" ^stack [^uint32 n]
+  ;; Stackalloc must be called on scheduler stack, so that we
+  ;; never try to grow the stack during the code that stackalloc runs.
+  ;; Doing so would cause a deadlock (issue 1547).
+  (let [thisg (getg)]
+    (when (!= thisg (.-g0 (.-m thisg)))
+      (throw "stackalloc not on scheduler stack"))
+
+    (when (!= (bit-and n (- n 1)) 0)
+      (throw "stack size not a power of 2"))
+
+    (when (>= stackDebug 1)
+      (print "stackalloc " n "\n"))
+
+
+    (when (or (!= (.-efence debug) 0) (!= stackFromSystem 0))
+      (set! n (conv uint32 (alignUp (conv uintptr n) physPageSize)))
+      (let [v (sysAlloc (conv uintptr n) (addr (.-stacks_sys memstats)) "goroutine stack (system)")]
+        (when (== v nil)
+          (throw "out of memory (stackalloc)"))
+
+        (return (lit stack (conv uintptr v) (+ (conv uintptr v) (conv uintptr n))))))
+
+
+    ;; Small stacks are allocated with a fixed-size free-list allocator.
+    ;; If we need a stack of a bigger size, we fall back on allocating
+    ;; a dedicated span.
+    (let [^unsafe/Pointer v (zero unsafe/Pointer)]
+      (if (and (< n (<< fixedStack _NumStackOrders)) (< n _StackCacheSize))
+        (let [order (conv uint8 0)
+            ^{:line 375} n2 n]
+          (while (> n2 fixedStack)
+            (inc! order)
+            (set! n2 >> 1))
+
+          (let [^gclinkptr x (zero gclinkptr)]
+            (if (or (!= stackNoCache 0) (== (.-p (.-m thisg)) 0) (!= (.-preemptoff (.-m thisg)) "")) (do
+                ;; thisg.m.p == 0 can happen in the guts of exitsyscall
+                ;; or procresize. Just get a stack from the global pool.
+                ;; Also don't touch stackcache during gc
+                ;; as it's flushed concurrently.
+                (lock (addr (.-mu (.-item (aget stackpool order)))))
+                (set! x (stackpoolalloc order))
+                (unlock (addr (.-mu (.-item (aget stackpool order))))))
+
+              (let [c (.-mcache (.ptr (.-p (.-m thisg))))]
+                (set! x (.-list (aget (.-stackcache c) order)))
+                (when (== (.ptr x) nil)
+                  (stackcacherefill c order)
+                  (set! x (.-list (aget (.-stackcache c) order))))
+
+                (set! (.-list (aget (.-stackcache c) order)) (.-next (.ptr x)))
+                (set! (.-size (aget (.-stackcache c) order)) - (conv uintptr n))))
+
+            (when valgrindenabled
+              ;; We're about to allocate the stack region starting at x.ptr().
+              ;; To prevent valgrind from complaining about overlapping allocations,
+              ;; we need to mark the (previously allocated) memory as free'd.
+              (valgrindFree (conv unsafe/Pointer (.ptr x))))
+
+            (set! v (conv unsafe/Pointer x))))
+
+        (let [^{:tag (* mspan)} s (zero (* mspan))
+            ^{:line 408} npage (>> (conv uintptr n) gc/PageShift)
+            ^{:line 409} log2npage (stacklog2 npage)]
+
+          ;; Try to get a stack from the large stack cache.
+          (lock (addr (.-lock stackLarge)))
+          (when (not (.isEmpty (aget (.-free stackLarge) log2npage)))
+            (set! s (.-first (aget (.-free stackLarge) log2npage)))
+            (.remove (aget (.-free stackLarge) log2npage) s))
+
+          (unlock (addr (.-lock stackLarge)))
+
+          (lockWithRankMayAcquire (addr (.-lock mheap_)) lockRankMheap)
+
+          (when (== s nil)
+            ;; Allocate a new stack from the heap.
+            (set! s (.allocManual mheap_ npage spanAllocStack))
+            (when (== s nil)
+              (throw "out of memory"))
+
+            (osStackAlloc s)
+            (set! (.-elemsize s) (conv uintptr n)))
+
+          (set! v (conv unsafe/Pointer (.base s)))))
+
+
+      (when (traceAllocFreeEnabled)
+        (let [trace (traceAcquire)]
+          (when (.ok trace)
+            (.GoroutineStackAlloc trace (conv uintptr v) (conv uintptr n))
+            (traceRelease trace))))
+
+
+      (when raceenabled
+        (racemalloc v (conv uintptr n)))
+
+      (when msanenabled
+        (msanmalloc v (conv uintptr n)))
+
+      (when asanenabled
+        (asanunpoison v (conv uintptr n)))
+
+      (when valgrindenabled
+        (valgrindMalloc v (conv uintptr n)))
+
+      (when (>= stackDebug 1)
+        (print "  allocated " v "\n"))
+
+      (lit stack (conv uintptr v) (+ (conv uintptr v) (conv uintptr n))))))
+
+
+
+
+
+
+
+
+^{:go/end 557} (go/func ^:go/systemstack stackfree "stackfree frees an n byte stack allocation at stk.\n\nstackfree must run on the system stack because it uses per-P\nresources and must not split the stack.\n" [^stack stk]
+  (let [gp (getg)
+      ^{:line 466} v (conv unsafe/Pointer (.-lo stk))
+      ^{:line 467} n (- (.-hi stk) (.-lo stk))]
+    (when (!= (bit-and n (- n 1)) 0)
+      (throw "stack not a power of 2"))
+
+    (when (< (+ (.-lo stk) n) (.-hi stk))
+      (throw "bad stack size"))
+
+    (when (>= stackDebug 1)
+      (println "stackfree" v n)
+      (memclrNoHeapPointers v n)) ; for testing, clobber stack data
+
+    (when (or (!= (.-efence debug) 0) (!= stackFromSystem 0))
+      (if (or (!= (.-efence debug) 0) (!= stackFaultOnFree 0))
+        (sysFault v n)
+
+        (sysFree v n (addr (.-stacks_sys memstats))))
+
+      (return))
+
+    (when (traceAllocFreeEnabled)
+      (let [trace (traceAcquire)]
+        (when (.ok trace)
+          (.GoroutineStackFree trace (conv uintptr v))
+          (traceRelease trace))))
+
+
+    (when msanenabled
+      (msanfree v n))
+
+    (when asanenabled
+      (asanpoison v n))
+
+    (when valgrindenabled
+      (valgrindFree v))
+
+    (if (and (< n (<< fixedStack _NumStackOrders)) (< n _StackCacheSize))
+      (let [order (conv uint8 0)
+          ^{:line 504} n2 n]
+        (while (> n2 fixedStack)
+          (inc! order)
+          (set! n2 >> 1))
+
+        (let [x (conv gclinkptr v)]
+          (if (or (!= stackNoCache 0) (== (.-p (.-m gp)) 0) (!= (.-preemptoff (.-m gp)) "")) (do
+              (lock (addr (.-mu (.-item (aget stackpool order)))))
+              (when valgrindenabled
+                ;; x.ptr() is the head of the list of free stacks, and will be used
+                ;; when allocating a new stack, so it has to be marked allocated.
+                (valgrindMalloc (conv unsafe/Pointer (.ptr x)) (unsafe/Sizeof (.ptr x))))
+
+              (stackpoolfree x order)
+              (unlock (addr (.-mu (.-item (aget stackpool order))))))
+
+            (let [c (.-mcache (.ptr (.-p (.-m gp))))]
+              (when (>= (.-size (aget (.-stackcache c) order)) _StackCacheSize)
+                (stackcacherelease c order))
+
+              (when valgrindenabled
+                ;; x.ptr() is the head of the list of free stacks, and will
+                ;; be used when allocating a new stack, so it has to be
+                ;; marked allocated.
+                (valgrindMalloc (conv unsafe/Pointer (.ptr x)) (unsafe/Sizeof (.ptr x))))
+
+              (set! (.-next (.ptr x)) (.-list (aget (.-stackcache c) order)))
+              (set! (.-list (aget (.-stackcache c) order)) x)
+              (set! (.-size (aget (.-stackcache c) order)) + n)))))
+
+
+      (let [s (spanOfUnchecked (conv uintptr v))]
+        (when (!= (.get (.-state s)) mSpanManual)
+          (println (conv hex (.base s)) v)
+          (throw "bad span state"))
+
+        (if (== gcphase _GCoff) (do
+            ;; Free the stack immediately if we're
+            ;; sweeping.
+            (osStackFree s)
+            (.freeManual mheap_ s spanAllocStack))
+
+          ;; If the GC is running, we can't return a
+          ;; stack span to the heap because it could be
+          ;; reused as a heap span, and this state
+          ;; change would race with GC. Add it to the
+          ;; large stack cache instead.
+          (let [log2npage (stacklog2 (.-npages s))]
+            (lock (addr (.-lock stackLarge)))
+            (.insert (aget (.-free stackLarge) log2npage) s)
+            (unlock (addr (.-lock stackLarge)))))))))
+
+
+
+
+(go/var ^uintptr maxstacksize (<< 1 20)) ; enough until runtime.main sets it for real
+
+(go/var maxstackceiling maxstacksize)
+
+(go/var ptrnames (lit (slice string)
+    ^{:line 564} [0 "scalar"]
+    ^{:line 565} [1 "ptr"]))
+
+
+;; Stack frame layout
+;;
+;; (x86)
+;; +------------------+
+;; | args from caller |
+;; +------------------+ <- frame->argp
+;; |  return address  |
+;; +------------------+
+;; |  caller's BP (*) | (*) if framepointer_enabled && varp > sp
+;; +------------------+ <- frame->varp
+;; |     locals       |
+;; +------------------+
+;; |  args to callee  |
+;; +------------------+ <- frame->sp
+;;
+;; (arm)
+;; +------------------+
+;; | args from caller |
+;; +------------------+ <- frame->argp
+;; | caller's retaddr |
+;; +------------------+
+;; |  caller's FP (*) | (*) on ARM64, if framepointer_enabled && varp > sp
+;; +------------------+ <- frame->varp
+;; |     locals       |
+;; +------------------+
+;; |  args to callee  |
+;; +------------------+
+;; |  return address  |
+;; +------------------+ <- frame->sp
+;;
+;; varp > sp means that the function has a frame;
+;; varp == sp means frameless function.
+
+(go/type adjustinfo (struct
+    ^{:line 602 :tag stack} old
+    ^{:line 603 :tag uintptr} delta ; ptr distance from old to new stack (newbase - oldbase)
+
+
+    ^{:line 606 :tag uintptr :doc "sghi is the highest sudog.elem on the stack.\n"} sghi))
+
+
+
+
+^{:go/end 633} (go/func adjustpointer "adjustpointer checks whether *vpp is in the old stack described by adjinfo.\nIf so, it rewrites *vpp to point into the new stack.\n" [^{:tag (* adjustinfo)} adjinfo ^unsafe/Pointer vpp]
+  (let [pp (conv (* uintptr) vpp)
+      ^{:line 613} p @pp]
+    (when (>= stackDebug 4)
+      (print "        " pp ":" (conv hex p) "\n"))
+
+    (when valgrindenabled
+      ;; p is a pointer on a stack, it is inherently initialized, as
+      ;; everything on the stack is, but valgrind for _some unknown reason_
+      ;; sometimes thinks it's uninitialized, and flags operations on p below
+      ;; as uninitialized. We just initialize it if valgrind thinks its
+      ;; uninitialized.
+      ;;
+      ;; See go.dev/issues/73801.
+      (valgrindMakeMemDefined (conv unsafe/Pointer (addr p)) (unsafe/Sizeof (addr p))))
+
+    (when (and (<= (.-lo (.-old adjinfo)) p) (< p (.-hi (.-old adjinfo))))
+      (set! @pp (+ p (.-delta adjinfo)))
+      (when (>= stackDebug 3)
+        (print "        adjust ptr " pp ":" (conv hex p) " -> " (conv hex @pp) "\n")))))
+
+
+
+
+
+
+(go/type bitvector "Information from the compiler about the layout of stack frames.\nNote: this type must agree with reflect.bitVector.\n" (struct
+    ^{:line 638 :tag int32} n ; # of bits
+    ^{:line 639 :tag (* uint8)} bytedata))
+
+
+
+
+
+
+^{:go/end 649} (go/method ptrbit "ptrbit returns the i'th bit in bv.\nptrbit is less efficient than iterating directly over bitvector bits,\nand should only be used in non-performance-critical code.\nSee adjustpointers for an example of a high-efficiency walk of a bitvector.\n" ^uint8 [^{:tag (* bitvector)} bv ^uintptr i]
+  (let [b @(addb (.-bytedata bv) (/ i 8))]
+    (bit-and (>> b (% i 8)) 1)))
+
+
+
+
+^{:go/end 699} (go/func adjustpointers "bv describes the memory starting at address scanp.\nAdjust any pointers contained therein.\n" [^unsafe/Pointer scanp ^{:tag (* bitvector)} bv ^{:tag (* adjustinfo)} adjinfo ^funcInfo f]
+  (let [minp (.-lo (.-old adjinfo))
+      ^{:line 655} maxp (.-hi (.-old adjinfo))
+      ^{:line 656} delta (.-delta adjinfo)
+      ^{:line 657} num (conv uintptr (.-n bv))
+      ;; If this frame might contain channel receive slots, use CAS
+      ;; to adjust pointers. If the slot hasn't been received into
+      ;; yet, it may contain stack pointers and a concurrent send
+      ;; could race with adjusting those pointers. (The sent value
+      ;; itself can never contain stack pointers.)
+      ^{:line 663} useCAS (< (conv uintptr scanp) (.-sghi adjinfo))]
+    (for [i (conv uintptr 0)] (< i num) (set! i + 8)
+      (when (>= stackDebug 4)
+        (for [j (conv uintptr 0)] (< j 8) (inc! j)
+          (print "        " (add scanp (* (+ i j) goarch/PtrSize)) ":" (aget ptrnames (.ptrbit bv (+ i j))) ":" (conv hex @(conv (* uintptr) (add scanp (* (+ i j) goarch/PtrSize)))) " # " i " " @(addb (.-bytedata bv) (/ i 8)) "\n")))
+
+
+      (let [b @(addb (.-bytedata bv) (/ i 8))]
+        (while (!= b 0)
+          (let [j (conv uintptr (sys/TrailingZeros8 b))]
+            (set! b bit-and (- b 1))
+            (let [pp (conv (* uintptr) (add scanp (* (+ i j) goarch/PtrSize)))]
+              (let [
+                  ^{:line 676 :go/label :retry} p @pp]
+                (when (and (.valid f) (< 0 p) (< p minLegalPointer) (!= (.-invalidptr debug) 0))
+                  ;; Looks like a junk value in a pointer slot.
+                  ;; Live analysis wrong?
+                  (set! (.-traceback (.-m (getg))) 2)
+                  (print "runtime: bad pointer in frame " (funcname f) " at " pp ": " (conv hex p) "\n")
+                  (throw "invalid pointer found on stack"))
+
+                (when (and (<= minp p) (< p maxp))
+                  (when (>= stackDebug 3)
+                    (print "adjust ptr " (conv hex p) " " (funcname f) "\n"))
+
+                  (if useCAS
+                    (let [ppu (conv (* unsafe/Pointer) (conv unsafe/Pointer pp))]
+                      (when (not (atomic/Casp1 ppu (conv unsafe/Pointer p) (conv unsafe/Pointer (+ p delta))))
+                        (goto :retry)))
+
+
+                    (set! @pp (+ p delta))))))))))))
+
+
+
+
+
+
+
+^{:go/end 804} (go/func adjustframe "Note: the argument/return area is adjusted by the callee.\n" [^{:tag (* stkframe)} frame ^{:tag (* adjustinfo)} adjinfo]
+  ;; Adjust saved frame pointer if there is one.
+  (when (and ^:go/paren (or (== goarch/ArchFamily goarch/AMD64) (== goarch/ArchFamily goarch/ARM64)) (== (- (.-argp frame) (.-varp frame)) (* 2 goarch/PtrSize)))
+    (when (>= stackDebug 3)
+      (print "      saved bp\n"))
+
+    (when debugCheckBP
+      ;; Frame pointers should always point to the next higher frame on
+      ;; the Go stack (or be nil, for the top frame on the stack).
+      (let [bp @(conv (* uintptr) (conv unsafe/Pointer (.-varp frame)))]
+        (when (and (!= bp 0) ^:go/paren (or (< bp (.-lo (.-old adjinfo))) (>= bp (.-hi (.-old adjinfo)))))
+          (println "runtime: found invalid frame pointer")
+          (print "bp=" (conv hex bp) " min=" (conv hex (.-lo (.-old adjinfo))) " max=" (conv hex (.-hi (.-old adjinfo))) "\n")
+          (throw "bad frame pointer"))))
+
+
+    ;; On AMD64, this is the caller's frame pointer saved in the current
+    ;; frame.
+    ;; On ARM64, this is the frame pointer of the caller's caller saved
+    ;; by the caller in its frame (one word below its SP).
+    (adjustpointer adjinfo (conv unsafe/Pointer (.-varp frame))))
+
+  (when (and (== goarch/ArchFamily goarch/ARM64) (isInjectedCall ^{:go/via [_func]} (.-funcID (.-fn frame))))
+    ;; If this is an injected call on arm64, then we need to adjust
+    ;; the frame pointer saved by the original function into which
+    ;; the call was injected. Normally this would be handled when
+    ;; adjusting the callee's frame or in adjustctxt. But when a
+    ;; call is injected, the frame is placed 16 bytes below the
+    ;; original stack pointer to make room to save the link
+    ;; register, and the frame pointer saved by the original
+    ;; function isn't inside any call frame. We can adjust that
+    ;; saved frame pointer here by looking just above frame.fp.
+    ;;
+    ;; ^  original call    ^
+    ;; |  frame above...   |
+    ;; +-------------------+ <- stack pointer at the time of injection
+    ;; :  FP saved by      :
+    ;; :  original func    :
+    ;; :···················: <- frame pointer register from original function
+    ;; :  LR saved during  :
+    ;; :  injection        :
+    ;; +-------------------+ <- frame.fp (injection decrements SP by 16 bytes)
+    ;; |  FP saved         |
+    ;; |  during injection |
+    ;; +-------------------+
+    ;; |  injected call    |
+    ;; V  frame below...   V
+    (adjustpointer adjinfo (conv unsafe/Pointer (+ (.-fp frame) goarch/PtrSize))))
+
+
+  (when (== (.-continpc frame) 0)
+    ;; Frame is dead. The program might still see the frame pointer
+    ;; saved in the frame, adjusted above, but we don't need to
+    ;; adjust the rest of the frame.
+    (return))
+
+  (let [f (.-fn frame)]
+    (when (>= stackDebug 2)
+      (print "    adjusting " (funcname f) " frame=[" (conv hex (.-sp frame)) "," (conv hex (.-fp frame)) "] pc=" (conv hex (.-pc frame)) " continpc=" (conv hex (.-continpc frame)) "\n"))
+
+
+    (let [(values locals args objs) (.getStackMap frame true)]
+
+      ;; Adjust local variables if stack frame has been allocated.
+      (when (> (.-n locals) 0)
+        (let [size (* (conv uintptr (.-n locals)) goarch/PtrSize)]
+          (adjustpointers (conv unsafe/Pointer (- (.-varp frame) size)) (addr locals) adjinfo f)))
+
+
+      ;; Adjust arguments.
+      (when (> (.-n args) 0)
+        (when (>= stackDebug 3)
+          (print "      args\n"))
+
+        (adjustpointers (conv unsafe/Pointer (.-argp frame)) (addr args) adjinfo (lit funcInfo)))
+
+
+      ;; Adjust pointers in all stack objects (whether they are live or not).
+      ;; See comments in mgcmark.go:scanframeworker.
+      (when (!= (.-varp frame) 0)
+        (range [i objs]
+          (let [obj (addr (aget objs i))
+              ^{:line 784} off (.-off obj)
+              ^{:line 785} base (.-varp frame)] ; locals base pointer
+            (when (>= off 0)
+              (set! base (.-argp frame))) ; arguments and return values base pointer
+
+            (let [p (+ base (conv uintptr off))]
+              (when (< p (.-sp frame))
+                ;; Object hasn't been allocated in the frame yet.
+                ;; (Happens when the stack bounds check fails and
+                ;; we call into morestack.)
+                (continue))
+
+              (let [(values ptrBytes gcData) (.gcdata obj)]
+                (for [i (conv uintptr 0)] (< i ptrBytes) (set! i + goarch/PtrSize)
+                  (when (!= (bit-and (>> @(addb gcData (/ i (* 8 goarch/PtrSize))) (bit-and (/ i goarch/PtrSize) 7)) 1) 0)
+                    (adjustpointer adjinfo (conv unsafe/Pointer (+ p i)))))))))))))
+
+
+
+
+
+
+^{:go/end 830} (go/func adjustctxt [^{:tag (* g)} gp ^{:tag (* adjustinfo)} adjinfo]
+  (adjustpointer adjinfo (conv unsafe/Pointer (addr (.-ctxt (.-sched gp)))))
+  (when (not framepointer_enabled)
+    (return))
+
+  (when debugCheckBP
+    (let [bp (.-bp (.-sched gp))]
+      (when (and (!= bp 0) ^:go/paren (or (< bp (.-lo (.-old adjinfo))) (>= bp (.-hi (.-old adjinfo)))))
+        (println "runtime: found invalid top frame pointer")
+        (print "bp=" (conv hex bp) " min=" (conv hex (.-lo (.-old adjinfo))) " max=" (conv hex (.-hi (.-old adjinfo))) "\n")
+        (throw "bad top frame pointer"))))
+
+
+  (let [oldfp (.-bp (.-sched gp))]
+    (adjustpointer adjinfo (conv unsafe/Pointer (addr (.-bp (.-sched gp)))))
+    (when (== GOARCH "arm64")
+      ;; On ARM64, the frame pointer is saved one word *below* the SP,
+      ;; which is not copied or adjusted in any frame. Do it explicitly
+      ;; here.
+      (when (== oldfp (- (.-sp (.-sched gp)) goarch/PtrSize))
+        (memmove (conv unsafe/Pointer (.-bp (.-sched gp))) (conv unsafe/Pointer oldfp) goarch/PtrSize)
+        (adjustpointer adjinfo (conv unsafe/Pointer (.-bp (.-sched gp))))))))
+
+
+
+
+^{:go/end 842} (go/func adjustdefers [^{:tag (* g)} gp ^{:tag (* adjustinfo)} adjinfo]
+  ;; Adjust pointers in the Defer structs.
+  ;; We need to do this first because we need to adjust the
+  ;; defer.link fields so we always work on the new stack.
+  (adjustpointer adjinfo (conv unsafe/Pointer (addr (.-_defer gp))))
+  (for [d (.-_defer gp)] (!= d nil) (set! d (.-link d))
+    (adjustpointer adjinfo (conv unsafe/Pointer (addr (.-fn d))))
+    (adjustpointer adjinfo (conv unsafe/Pointer (addr (.-sp d))))
+    (adjustpointer adjinfo (conv unsafe/Pointer (addr (.-link d))))))
+
+
+
+^{:go/end 848} (go/func adjustpanics [^{:tag (* g)} gp ^{:tag (* adjustinfo)} adjinfo]
+  ;; Panics are on stack and already adjusted.
+  ;; Update pointer to head of list in G.
+  (adjustpointer adjinfo (conv unsafe/Pointer (addr (.-_panic gp)))))
+
+
+^{:go/end 857} (go/func adjustsudogs [^{:tag (* g)} gp ^{:tag (* adjustinfo)} adjinfo]
+  ;; the data elements pointed to by a SudoG structure
+  ;; might be in the stack.
+  (for [s (.-waiting gp)] (!= s nil) (set! s (.-waitlink s))
+    (adjustpointer adjinfo (conv unsafe/Pointer (addr (.-vu (.-elem s)))))
+    (adjustpointer adjinfo (conv unsafe/Pointer (addr (.-vp (.-elem s)))))))
+
+
+
+^{:go/end 863} (go/func fillstack [^stack stk ^byte b]
+  (for [p (.-lo stk)] (< p (.-hi stk)) (inc! p)
+    (set! @(conv (* byte) (conv unsafe/Pointer p)) b)))
+
+
+
+^{:go/end 874} (go/func findsghi ^uintptr [^{:tag (* g)} gp ^stack stk]
+  (let [^uintptr sghi (zero uintptr)]
+    (for [sg (.-waiting gp)] (!= sg nil) (set! sg (.-waitlink sg))
+      (let [p (+ (.uintptr (.-elem sg)) (conv uintptr (.-elemsize (.get (.-c sg)))))]
+        (when (and (<= (.-lo stk) p) (< p (.-hi stk)) (> p sghi))
+          (set! sghi p))))
+
+
+    ^{:line 873} sghi))
+
+
+
+
+
+^{:go/end 926} (go/func syncadjustsudogs "syncadjustsudogs adjusts gp's sudogs and copies the part of gp's\nstack they refer to while synchronizing with concurrent channel\noperations. It returns the number of bytes of stack copied.\n" ^uintptr [^{:tag (* g)} gp ^uintptr used ^{:tag (* adjustinfo)} adjinfo]
+  (when (== (.-waiting gp) nil)
+    (return 0))
+
+
+  ;; Lock channels to prevent concurrent send/receive.
+  (let [^{:tag (* hchan)} lastc (zero (* hchan))]
+    (for [sg (.-waiting gp)] (!= sg nil) (set! sg (.-waitlink sg))
+      (when (!= (.get (.-c sg)) lastc)
+        ;; There is a ranking cycle here between gscan bit and
+        ;; hchan locks. Normally, we only allow acquiring hchan
+        ;; locks and then getting a gscan bit. In this case, we
+        ;; already have the gscan bit. We allow acquiring hchan
+        ;; locks here as a special case, since a deadlock can't
+        ;; happen because the G involved must already be
+        ;; suspended. So, we get a special hchan lock rank here
+        ;; that is lower than gscan, but doesn't allow acquiring
+        ;; any other locks other than hchan.
+        (lockWithRank (addr (.-lock (.get (.-c sg)))) lockRankHchanLeaf))
+
+      (set! lastc (.get (.-c sg))))
+
+
+    ;; Adjust sudogs.
+    (adjustsudogs gp adjinfo)
+
+    ;; Copy the part of the stack the sudogs point in to
+    ;; while holding the lock to prevent races on
+    ;; send/receive slots.
+    (let [^uintptr sgsize (zero uintptr)]
+      (when (!= (.-sghi adjinfo) 0)
+        (let [oldBot (- (.-hi (.-old adjinfo)) used)
+            ^{:line 911} newBot (+ oldBot (.-delta adjinfo))]
+          (set! sgsize (- (.-sghi adjinfo) oldBot))
+          (memmove (conv unsafe/Pointer newBot) (conv unsafe/Pointer oldBot) sgsize)))
+
+
+      ;; Unlock channels.
+      (set! lastc nil)
+      (for [sg (.-waiting gp)] (!= sg nil) (set! sg (.-waitlink sg))
+        (when (!= (.get (.-c sg)) lastc)
+          (unlock (addr (.-lock (.get (.-c sg))))))
+
+        (set! lastc (.get (.-c sg))))
+
+
+      ^{:line 925} sgsize)))
+
+
+
+
+^{:go/end 1033} (go/func copystack "Copies gp's stack to a new stack of a different size.\nCaller must have changed gp status to Gcopystack.\n" [^{:tag (* g)} gp ^uintptr newsize]
+  (when (!= (.-syscallsp gp) 0)
+    (throw "stack growth not allowed in system call"))
+
+  (let [old (.-stack gp)]
+    (when (== (.-lo old) 0)
+      (throw "nil stackbase"))
+
+    (let [used (- (.-hi old) (.-sp (.-sched gp)))]
+      ;; Add just the difference to gcController.addScannableStack.
+      ;; g0 stacks never move, so this will never account for them.
+      ;; It's also fine if we have no P, addScannableStack can deal with
+      ;; that case.
+      (.addScannableStack gcController (.ptr (.-p (.-m (getg)))) (- (conv int64 newsize) (conv int64 (- (.-hi old) (.-lo old)))))
+
+      ;; allocate new stack
+      (let [new (stackalloc (conv uint32 newsize))]
+        (when (!= stackPoisonCopy 0)
+          (fillstack new 0xfd))
+
+        (when (>= stackDebug 1)
+          (print "copystack gp=" gp " [" (conv hex (.-lo old)) " " (conv hex (- (.-hi old) used)) " " (conv hex (.-hi old)) "]" " -> [" (conv hex (.-lo new)) " " (conv hex (- (.-hi new) used)) " " (conv hex (.-hi new)) "]/" newsize "\n"))
+
+
+        ;; Compute adjustment.
+        (let [^adjustinfo adjinfo (zero adjustinfo)]
+          (set! (.-old adjinfo) old)
+          (set! (.-delta adjinfo) (- (.-hi new) (.-hi old)))
+
+          ;; Adjust sudogs, synchronizing with channel ops if necessary.
+          (let [ncopy used]
+            (if (not (.-activeStackChans gp)) (do
+                (when (and (< newsize (- (.-hi old) (.-lo old))) (.Load (.-parkingOnChan gp)))
+                  ;; It's not safe for someone to shrink this stack while we're actively
+                  ;; parking on a channel, but it is safe to grow since we do that
+                  ;; ourselves and explicitly don't want to synchronize with channels
+                  ;; since we could self-deadlock.
+                  (throw "racy sudog adjustment due to parking on channel"))
+
+                (adjustsudogs gp (addr adjinfo)))
+              (do
+                ;; sudogs may be pointing in to the stack and gp has
+                ;; released channel locks, so other goroutines could
+                ;; be writing to gp's stack. Find the highest such
+                ;; pointer so we can handle everything there and below
+                ;; carefully. (This shouldn't be far from the bottom
+                ;; of the stack, so there's little cost in handling
+                ;; everything below it carefully.)
+                (set! (.-sghi adjinfo) (findsghi gp old))
+
+                ;; Synchronize with channel ops and copy the part of
+                ;; the stack they may interact with.
+                (set! ncopy - (syncadjustsudogs gp used (addr adjinfo)))))
+
+
+            ;; Copy the stack (or the rest of it) to the new location
+            (memmove (conv unsafe/Pointer (- (.-hi new) ncopy)) (conv unsafe/Pointer (- (.-hi old) ncopy)) ncopy)
+
+            ;; Adjust remaining structures that have pointers into stacks.
+            ;; We have to do most of these before we traceback the new
+            ;; stack because gentraceback uses them.
+            (adjustctxt gp (addr adjinfo))
+            (adjustdefers gp (addr adjinfo))
+            (adjustpanics gp (addr adjinfo))
+            (when (!= (.-sghi adjinfo) 0)
+              (set! (.-sghi adjinfo) + (.-delta adjinfo)))
+
+
+            ;; Swap out old stack for new one
+            (set! (.-stack gp) new)
+            (set! (.-stackguard0 gp) (+ (.-lo new) stackGuard)) ; NOTE: might clobber a preempt request
+            (set! (.-sp (.-sched gp)) (- (.-hi new) used))
+            (set! (.-stktopsp gp) + (.-delta adjinfo))
+
+            ;; Adjust pointers in the new stack.
+            (let [^unwinder u (zero unwinder)]
+              (for [(.init u gp 0)] (.valid u) (.next u)
+                (adjustframe (addr (.-frame u)) (addr adjinfo)))
+
+
+              (when valgrindenabled
+                (if (== (.-valgrindStackID gp) 0)
+                  (set! (.-valgrindStackID gp) (valgrindRegisterStack (conv unsafe/Pointer (.-lo new)) (conv unsafe/Pointer (.-hi new))))
+
+                  (valgrindChangeStack (.-valgrindStackID gp) (conv unsafe/Pointer (.-lo new)) (conv unsafe/Pointer (.-hi new)))))
+
+
+
+              ;; free old stack
+              (when (and goexperiment/RuntimeSecret (> (.-secret gp) 0))
+                ;; Some portion of the old stack has secret stuff on it.
+                ;; We don't really know where we entered secret mode,
+                ;; so just clear the whole thing.
+                ;; TODO(dmo): traceback until we hit secret.Do? clearing
+                ;; is fast and optimized, might not be worth it.
+                (memclrNoHeapPointers (conv unsafe/Pointer (.-lo old)) (- (.-hi old) (.-lo old)))
+                ;; The memmove call above might put secrets from the stack into registers.
+                (secretEraseRegisters))
+
+              (when (!= stackPoisonCopy 0)
+                (fillstack old 0xfc))
+
+              (stackfree old))))))))
+
+
+
+^{:go/end 1042} (go/func round2 "round x up to a power of 2.\n" ^int32 [^int32 x]
+  (let [s (conv uint 0)]
+    (while (< ^int32 (<< 1 s) x)
+      (inc! s))
+
+    ^int32 (<< 1 s)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1223} (go/func ^:go/nowritebarrierrec newstack "Called from runtime·morestack when more stack is needed.\nAllocate larger stack and relocate to new stack.\nStack growth is multiplicative, for constant amortized cost.\n\ng->atomicstatus will be Grunning or Gscanrunning upon entry.\nIf the scheduler is trying to stop this g, then it will set preemptStop.\n\nThis must be nowritebarrierrec because it can be called as part of\nstack growth from other nowritebarrierrec functions, but the\ncompiler doesn't check this.\n" []
+  (let [thisg (getg)]
+    ;; TODO: double check all gp. shouldn't be getg().
+    (when (== (.-stackguard0 (.ptr (.-g (.-morebuf (.-m thisg))))) stackFork)
+      (throw "stack growth after fork"))
+
+    (when (!= (.ptr (.-g (.-morebuf (.-m thisg)))) (.-curg (.-m thisg)))
+      (print "runtime: newstack called from g=" (conv hex (.-g (.-morebuf (.-m thisg)))) (+ "\n" "\tm=") (.-m thisg) " m->curg=" (.-curg (.-m thisg)) " m->g0=" (.-g0 (.-m thisg)) " m->gsignal=" (.-gsignal (.-m thisg)) "\n")
+      (let [morebuf (.-morebuf (.-m thisg))]
+        (traceback (.-pc morebuf) (.-sp morebuf) (.-lr morebuf) (.ptr (.-g morebuf)))
+        (throw "runtime: wrong goroutine in newstack")))
+
+
+    (let [gp (.-curg (.-m thisg))]
+      (when (and goexperiment/RuntimeSecret (> (.-secret gp) 0))
+        ;; If we're entering here from a secret context, clear
+        ;; all the registers. This is important because we
+        ;; might context switch to a different goroutine which
+        ;; is not in secret mode, and it will not be careful
+        ;; about clearing its registers.
+        (secretEraseRegisters))
+
+
+      (when (.-throwsplit (.-curg (.-m thisg)))
+        ;; Update syscallsp, syscallpc in case traceback uses them.
+        (let [morebuf (.-morebuf (.-m thisg))]
+          (set! (.-syscallsp gp) (.-sp morebuf))
+          (set! (.-syscallpc gp) (.-pc morebuf))
+          (let [(values pcname pcoff) (values "(unknown)" (conv uintptr 0))
+              ^{:line 1085} f (findfunc (.-pc (.-sched gp)))]
+            (when (.valid f)
+              (set! pcname (funcname f))
+              (set! pcoff (- (.-pc (.-sched gp)) (.entry f))))
+
+            ^{:go/breaks [5 12 19]} (print "runtime: newstack at " pcname "+" (conv hex pcoff)
+              " sp=" (conv hex (.-sp (.-sched gp))) " stack=[" (conv hex (.-lo (.-stack gp))) ", " (conv hex (.-hi (.-stack gp))) "]\n"
+              "\tmorebuf={pc:" (conv hex (.-pc morebuf)) " sp:" (conv hex (.-sp morebuf)) " lr:" (conv hex (.-lr morebuf)) "}\n"
+              "\tsched={pc:" (conv hex (.-pc (.-sched gp))) " sp:" (conv hex (.-sp (.-sched gp))) " lr:" (conv hex (.-lr (.-sched gp))) " ctxt:" (.-ctxt (.-sched gp)) "}\n")
+
+            (set! (.-traceback (.-m thisg)) 2) ; Include runtime frames
+            (traceback (.-pc morebuf) (.-sp morebuf) (.-lr morebuf) gp)
+            (throw "runtime: stack split at bad time"))))
+
+
+      (let [morebuf (.-morebuf (.-m thisg))]
+        (set! (.-pc (.-morebuf (.-m thisg))) 0)
+        (set! (.-lr (.-morebuf (.-m thisg))) 0)
+        (set! (.-sp (.-morebuf (.-m thisg))) 0)
+        (set! (.-g (.-morebuf (.-m thisg))) 0)
+
+        ;; NOTE: stackguard0 may change underfoot, if another thread
+        ;; is about to try to preempt gp. Read it just once and use that same
+        ;; value now and below.
+        (let [stackguard0 (atomic/Loaduintptr (addr (.-stackguard0 gp)))
+
+            ;; Be conservative about where we preempt.
+            ;; We are interested in preempting user Go code, not runtime code.
+            ;; If we're holding locks, mallocing, or preemption is disabled, don't
+            ;; preempt.
+            ;; This check is very early in newstack so that even the status change
+            ;; from Grunning to Gwaiting and back doesn't happen in this case.
+            ;; That status change by itself can be viewed as a small preemption,
+            ;; because the GC might change Gwaiting to Gscanwaiting, and then
+            ;; this goroutine has to wait for the GC to finish before continuing.
+            ;; If the GC is in some way dependent on this goroutine (for example,
+            ;; it needs a lock held by the goroutine), that small preemption turns
+            ;; into a real deadlock.
+            ^{:line 1123} preempt (== stackguard0 stackPreempt)]
+          (when preempt
+            (when (not (canPreemptM (.-m thisg)))
+              ;; Let the goroutine keep running for now.
+              ;; gp->preempt is set, so it will be preempted next time.
+              (set! (.-stackguard0 gp) (+ (.-lo (.-stack gp)) stackGuard))
+              (gogo (addr (.-sched gp))))) ; never return
+
+
+
+          (when (== (.-lo (.-stack gp)) 0)
+            (throw "missing stack in newstack"))
+
+          (let [sp (.-sp (.-sched gp))]
+            (when (or (== goarch/ArchFamily goarch/AMD64) (== goarch/ArchFamily goarch/I386) (== goarch/ArchFamily goarch/WASM))
+              ;; The call to morestack cost a word.
+              (set! sp - goarch/PtrSize))
+
+            (when (or (>= stackDebug 1) (< sp (.-lo (.-stack gp))))
+              ^{:go/breaks [8 15]} (print "runtime: newstack sp=" (conv hex sp) " stack=[" (conv hex (.-lo (.-stack gp))) ", " (conv hex (.-hi (.-stack gp))) "]\n"
+                "\tmorebuf={pc:" (conv hex (.-pc morebuf)) " sp:" (conv hex (.-sp morebuf)) " lr:" (conv hex (.-lr morebuf)) "}\n"
+                "\tsched={pc:" (conv hex (.-pc (.-sched gp))) " sp:" (conv hex (.-sp (.-sched gp))) " lr:" (conv hex (.-lr (.-sched gp))) " ctxt:" (.-ctxt (.-sched gp)) "}\n"))
+
+            (when (< sp (.-lo (.-stack gp)))
+              (print "runtime: gp=" gp ", goid=" (.-goid gp) ", gp->status=" (conv hex (readgstatus gp)) "\n ")
+              (print "runtime: split stack overflow: " (conv hex sp) " < " (conv hex (.-lo (.-stack gp))) "\n")
+              (throw "runtime: split stack overflow"))
+
+
+            (when preempt
+              (when (== gp (.-g0 (.-m thisg)))
+                (throw "runtime: preempt g0"))
+
+              (when (and (== (.-p (.-m thisg)) 0) (== (.-locks (.-m thisg)) 0))
+                (throw "runtime: g is running but p is not"))
+
+
+              (when (.-preemptShrink gp)
+                ;; We're at a synchronous safe point now, so
+                ;; do the pending stack shrink.
+                (set! (.-preemptShrink gp) false)
+                (shrinkstack gp))
+
+
+              ;; Set a flag indicated that we've been synchronously preempted.
+              (set! (.-syncSafePoint gp) true)
+
+              (when (.-preemptStop gp)
+                (preemptPark gp)) ; never returns
+
+
+              ;; Act like goroutine called runtime.Gosched.
+              (gopreempt_m gp)) ; never return
+
+
+            ;; Allocate a bigger segment and move the stack.
+            (let [oldsize (- (.-hi (.-stack gp)) (.-lo (.-stack gp)))
+                ^{:line 1180} newsize (* oldsize 2)]
+
+              ;; Make sure we grow at least as much as needed to fit the new frame.
+              ;; (This is just an optimization - the caller of morestack will
+              ;; recheck the bounds on return.)
+              (when [f (findfunc (.-pc (.-sched gp)))] (.valid f)
+                (let [max (conv uintptr (funcMaxSPDelta f))
+                    ^{:line 1187} needed (+ max stackGuard)
+                    ^{:line 1188} used (- (.-hi (.-stack gp)) (.-sp (.-sched gp)))]
+                  (while (< (- newsize used) needed)
+                    (set! newsize * 2))))
+
+
+
+              (when (== stackguard0 stackForceMove)
+                ;; Forced stack movement used for debugging.
+                ;; Don't double the stack (or we may quickly run out
+                ;; if this is done repeatedly).
+                (set! newsize oldsize))
+
+
+              (when (or (> newsize maxstacksize) (> newsize maxstackceiling))
+                (if (< maxstacksize maxstackceiling)
+                  (print "runtime: goroutine stack exceeds " maxstacksize "-byte limit\n")
+
+                  (print "runtime: goroutine stack exceeds " maxstackceiling "-byte limit\n"))
+
+                (print "runtime: sp=" (conv hex sp) " stack=[" (conv hex (.-lo (.-stack gp))) ", " (conv hex (.-hi (.-stack gp))) "]\n")
+                (throw "stack overflow"))
+
+
+              ;; The goroutine must be executing in order to call newstack,
+              ;; so it must be Grunning (or Gscanrunning).
+              (casgstatus gp _Grunning _Gcopystack)
+
+              ;; The concurrent GC will not scan the stack while we are doing the copy since
+              ;; the gp is in a Gcopystack status.
+              (copystack gp newsize)
+              (when (>= stackDebug 1)
+                (print "stack grow done\n"))
+
+              (casgstatus gp _Gcopystack _Grunning)
+              (gogo (addr (.-sched gp))))))))))
+
+
+
+^{:go/end 1228} (go/func ^:go/nosplit nilfunc []
+  (set! @(conv (* uint8) nil) 0))
+
+
+
+
+^{:go/end 1240} (go/func gostartcallfn "adjust Gobuf as if it executed a call to fn\nand then stopped before the first instruction in fn.\n" [^{:tag (* gobuf)} gobuf ^{:tag (* funcval)} fv]
+  (let [^unsafe/Pointer fn (zero unsafe/Pointer)]
+    (if (!= fv nil)
+      (set! fn (conv unsafe/Pointer (.-fn fv)))
+
+      (set! fn (conv unsafe/Pointer (abi/FuncPCABIInternal nilfunc))))
+
+    (gostartcall gobuf fn (conv unsafe/Pointer fv))))
+
+
+
+
+
+
+^{:go/breaks [[8 1280]] :go/end 1281} (go/func isShrinkStackSafe "isShrinkStackSafe returns whether it's safe to attempt to shrink\ngp's stack. Shrinking the stack is only safe when we have precise\npointer maps for all frames on the stack. The caller must hold the\n_Gscan bit for gp or must be running gp itself.\n" ^bool [^{:tag (* g)} gp]
+  ;; We can't copy the stack if we're in a syscall.
+  ;; The syscall might have pointers into the stack and
+  ;; often we don't have precise pointer maps for the innermost
+  ;; frames.
+  (when (!= (.-syscallsp gp) 0)
+    (return false))
+
+  ;; We also can't copy the stack if we're at an asynchronous
+  ;; safe-point because we don't have precise pointer maps for
+  ;; all frames.
+  (when (.-asyncSafePoint gp)
+    (return false))
+
+  ;; We also can't *shrink* the stack in the window between the
+  ;; goroutine calling gopark to park on a channel and
+  ;; gp.activeStackChans being set.
+  (when (.Load (.-parkingOnChan gp))
+    (return false))
+
+  ;; We also can't copy the stack while a gp is in _Gwaiting solely
+  ;; to make itself available to suspendG.
+  ;;
+  ;; In these cases, the G is actually executing on the system
+  ;; stack, and the execution tracer, mutex profiler, etc. may want
+  ;; to take a stack trace of the G's stack.
+  ;;
+  ;; Note: it's safe to access gp.waitreason here.
+  ;; We're only calling isShrinkStackSafe if we took ownership of the
+  ;; G with the _Gscan bit. This prevents the goroutine from transitioning,
+  ;; which prevents gp.waitreason from changing.
+  (when (and (== (bit-and-not (readgstatus gp) _Gscan) _Gwaiting) (.isWaitingForSuspendG (.-waitreason gp)))
+    (return false))
+
+  true)
+
+
+
+
+
+
+^{:go/end 1336} (go/func shrinkstack "Maybe shrink the stack being used by gp.\n\ngp must be stopped and we must own its stack. It may be in\n_Grunning, but only if this is our own user G.\n" [^{:tag (* g)} gp]
+  (when (== (.-lo (.-stack gp)) 0)
+    (throw "missing stack in shrinkstack"))
+
+  (when [s (readgstatus gp)] (== (bit-and s _Gscan) 0)
+    ;; We don't own the stack via _Gscan. We could still
+    ;; own it if this is our own user G and we're on the
+    ;; system stack.
+    (when (not (and (== gp (.-curg (.-m (getg)))) (!= (getg) (.-curg (.-m (getg)))) (== s _Grunning)))
+      ;; We don't own the stack.
+      (throw "bad status in shrinkstack")))
+
+
+  (when (not (isShrinkStackSafe gp))
+    (throw "shrinkstack at bad time"))
+
+  ;; Check for self-shrinks while in a libcall. These may have
+  ;; pointers into the stack disguised as uintptrs, but these
+  ;; code paths should all be nosplit.
+  (when (and (== gp (.-curg (.-m (getg)))) (!= (.-libcallsp (.-m gp)) 0))
+    (throw "shrinking stack in libcall"))
+
+
+  (when (> (.-gcshrinkstackoff debug) 0)
+    (return))
+
+
+  (let [oldsize (- (.-hi (.-stack gp)) (.-lo (.-stack gp)))
+      ^{:line 1315} newsize (/ oldsize 2)]
+    ;; Don't shrink the allocation below the minimum-sized stack
+    ;; allocation.
+    (when (< newsize fixedStack)
+      (return))
+
+    ;; Compute how much of the stack is currently in use and only
+    ;; shrink the stack if gp is using less than a quarter of its
+    ;; current stack. The currently used stack includes everything
+    ;; down to the SP plus the stack guard space that ensures
+    ;; there's room for nosplit functions.
+    (let [avail (- (.-hi (.-stack gp)) (.-lo (.-stack gp)))]
+      (when [used (+ (- (.-hi (.-stack gp)) (.-sp (.-sched gp))) stackNosplit)] (>= used (/ avail 4))
+        (return))
+
+
+      (when (> stackDebug 0)
+        (print "shrinking stack " oldsize "->" newsize "\n"))
+
+
+      (copystack gp newsize))))
+
+
+
+^{:go/end 1369} (go/func freeStackSpans "freeStackSpans frees unused stack spans at the end of GC.\n" []
+  ;; Scan stack pools for empty stack spans.
+  (range [order stackpool]
+    (lock (addr (.-mu (.-item (aget stackpool order)))))
+    (let [list (addr (.-span (.-item (aget stackpool order))))]
+      (for [s (.-first list)] (!= s nil) _
+        (let [next (.-next s)]
+          (when (== (.-allocCount s) 0)
+            (.remove list s)
+            (set! (.-manualFreeList s) 0)
+            (osStackFree s)
+            (.freeManual mheap_ s spanAllocStack))
+
+          (set! s next)))
+
+      (unlock (addr (.-mu (.-item (aget stackpool order)))))))
+
+
+  ;; Free large stack spans.
+  (lock (addr (.-lock stackLarge)))
+  (range [i (.-free stackLarge)]
+    (for [s (.-first (aget (.-free stackLarge) i))] (!= s nil) _
+      (let [next (.-next s)]
+        (.remove (aget (.-free stackLarge) i) s)
+        (osStackFree s)
+        (.freeManual mheap_ s spanAllocStack)
+        (set! s next))))
+
+
+  (unlock (addr (.-lock stackLarge))))
+
+
+
+
+(go/type stackObjectRecord "A stackObjectRecord is generated by the compiler for each stack object in a stack frame.\nThis record must match the generator code in cmd/compile/internal/liveness/plive.go:emitStackObjects.\n" (struct
+
+
+
+    ^{:line 1377 :tag int32 :doc "offset in frame\nif negative, offset from varp\nif non-negative, offset from argp\n"} off
+    ^{:line 1378 :tag int32} size
+    ^{:line 1379 :tag int32} ptrBytes
+    ^{:line 1380 :tag uint32} gcdataoff)) ; offset to gcdata from moduledata.rodata
+
+
+
+
+
+^{:go/end 1406} (go/method gcdata "gcdata returns the number of bytes that contain pointers, and\na ptr/nonptr bitmask covering those bytes.\nNote that this bitmask might be larger than internal/abi.MaxPtrmaskBytes.\n" [^{:tag (* stackObjectRecord)} r] :results [uintptr (* byte)]
+  (let [ptr (conv uintptr (conv unsafe/Pointer r))
+      ^{:line 1388 :tag (* moduledata)} mod (zero (* moduledata))]
+    (for [datap (addr firstmoduledata)] (!= datap nil) (set! datap (.-next datap))
+      ;; The normal case: stackObjectRecord is in funcdata.
+      (when (and (<= (.-gofunc datap) ptr) (< ptr (.-epclntab datap)))
+        (set! mod datap)
+        (break))
+
+      ;; A special case: methodValueCallFrameObjs.
+      (when (and (<= (.-noptrbss datap) ptr) (< ptr (.-enoptrbss datap)))
+        (set! mod datap)
+        (break)))
+
+
+    ;; If you get a panic here due to a nil mod,
+    ;; you may have made a copy of a stackObjectRecord.
+    ;; You must use the original pointer.
+    (let [res (+ (.-rodata mod) (conv uintptr (.-gcdataoff r)))]
+      (return (conv uintptr (.-ptrBytes r)) (conv (* byte) (conv unsafe/Pointer res))))))
+
+
+
+
+
+
+^{:go/end 1414} (go/func ^:go/nosplit ^{:go/linkname "morestackc"} morestackc "This is exported as ABI0 via linkname so obj can call it.\n" []
+  (throw "attempt to execute system stack code on user stack"))
+
+
+
+
+
+
+(go/var ^{:tag uint32 :doc "startingStackSize is the amount of stack that new goroutines start with.\nIt is a power of 2, and between fixedStack and maxstacksize, inclusive.\nstartingStackSize is updated every GC by tracking the average size of\nstacks scanned during the GC.\n"} startingStackSize fixedStack)
+
+^{:go/end 1460} (go/func gcComputeStartingStackSize []
+  (when (== (.-adaptivestackstart debug) 0)
+    (return))
+
+  ;; For details, see the design doc at
+  ;; https://docs.google.com/document/d/1YDlGIdVTPnmUiTAavlZxBI1d9pwGQgZT7IKFKlIXohQ/edit?usp=sharing
+  ;; The basic algorithm is to track the average size of stacks
+  ;; and start goroutines with stack equal to that average size.
+  ;; Starting at the average size uses at most 2x the space that
+  ;; an ideal algorithm would have used.
+  ;; This is just a heuristic to avoid excessive stack growth work
+  ;; early in a goroutine's lifetime. See issue 18138. Stacks that
+  ;; are allocated too small can still grow, and stacks allocated
+  ;; too large can still shrink.
+  (let [^uint64 scannedStackSize (zero uint64)
+      ^{:line 1437 :tag uint64} scannedStacks (zero uint64)]
+    (range [_ p allp]
+      (set! scannedStackSize + (.-scannedStackSize p))
+      (set! scannedStacks + (.-scannedStacks p))
+      ;; Reset for next time
+      (set! (.-scannedStackSize p) 0)
+      (set! (.-scannedStacks p) 0))
+
+    (when (== scannedStacks 0)
+      (set! startingStackSize fixedStack)
+      (return))
+
+    (let [avg (+ (/ scannedStackSize scannedStacks) stackGuard)]
+      ;; Note: we add stackGuard to ensure that a goroutine that
+      ;; uses the average space will not trigger a growth.
+      (when (> avg (conv uint64 maxstacksize))
+        (set! avg (conv uint64 maxstacksize)))
+
+      (when (< avg fixedStack)
+        (set! avg fixedStack))
+
+      ;; Note: maxstacksize fits in 30 bits, so avg also does.
+      (set! startingStackSize (conv uint32 (round2 (conv int32 avg)))))))

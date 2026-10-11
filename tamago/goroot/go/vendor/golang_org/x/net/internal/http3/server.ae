@@ -1,0 +1,865 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.internal.http3) (go/file "server.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [tls "crypto/tls"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [maps "maps"]
+    ^{:line 13} [http "net/http"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [sync "sync"]
+    ^{:line 18} [time "time"]
+
+    ^{:line 20} [httpguts "golang.org/x/net/http/httpguts"]
+    ^{:line 21} [httpcommon "golang.org/x/net/internal/httpcommon"]
+    ^{:line 22} [quic "golang.org/x/net/quic"]])
+
+
+
+
+(go/type server "A server is an HTTP/3 server.\nThe zero value for server is a valid server.\n" (struct
+
+    ^{:line 29 :tag http/Handler :doc "handler to invoke for requests, http.DefaultServeMux if nil.\n"} handler
+
+    ^{:line 31 :tag (* quic/Config)} config
+
+    ^{:line 33 :tag (func [^string addr ^{:tag (* quic/Config)} config] [(* quic/Endpoint) error])} listenQUIC
+
+    ^{:line 35 :tag sync/Once} initOnce
+
+    ^{:line 37 :tag context/Context} serveCtx
+    ^{:line 38 :tag context/CancelFunc} serveCtxCancel
+
+
+
+
+    ^{:line 43 :tag (chan any) :doc "connClosed is used to signal that a connection has been unregistered\nfrom activeConns. That way, when shutting down gracefully, the server\ncan avoid busy-waiting for activeConns to be empty.\n"} connClosed
+    ^{:line 44 :tag sync/Mutex} mu ; Guards fields below.
+    ^{:line 45 :tag (map (* serverConn) (struct))} activeConns))
+
+
+
+
+
+
+
+
+
+
+
+(go/type netHTTPHandler "netHTTPHandler is an interface that is implemented by\nnet/http.http3ServerHandler in std.\n\nIt provides a way for information to be passed between x/net and net/http\nthat would otherwise be inaccessible, such as the TLS configs that users\nhave supplied to net/http servers.\n\nThis allows us to integrate our HTTP/3 server implementation with the\nnet/http server when RegisterServer is called.\n" (interface
+    ^{:line 58} http/Handler
+    (TLSConfig ^{:tag (* tls/Config)} [])
+    (BaseContext ^context/Context [])
+    (Addr ^string [])
+    (ListenErrHook [^error err])
+    (ShutdownContext ^context/Context [])))
+
+
+(go/type ServerOpts (struct
+
+
+    ^{:line 69 :tag (func [^string addr ^{:tag (* quic/Config)} config] [(* quic/Endpoint) error]) :doc "ListenQUIC determines how the server will open a QUIC endpoint.\nBy default, quic.Listen(\"udp\", addr, config) is used.\n"} ListenQUIC
+
+
+
+
+
+
+    ^{:line 76 :tag (* quic/Config) :doc "QUICConfig is the QUIC configuration used by the server.\nQUICConfig may be nil and should not be modified after calling\nRegisterServer.\nIf QUICConfig.TLSConfig is nil, the TLSConfig of the net/http Server\ngiven to RegisterServer will be used.\n"} QUICConfig))
+
+
+
+
+
+
+^{:go/end 110} (go/func RegisterServer "RegisterServer adds HTTP/3 support to a net/http Server.\n\nRegisterServer must be called before s begins serving, and only affects\ns.ListenAndServeTLS.\n" [^{:tag (* http/Server)} s ^ServerOpts opts]
+  (when (== (.-TLSNextProto s) nil)
+    (set! (.-TLSNextProto s) (make (map string (func [(* http/Server) (* tls/Conn) http/Handler])))))
+
+  (aset (.-TLSNextProto s) "http/3" ^{:go/end 109} (fn [^{:tag (* http/Server)} s ^{:tag (* tls/Conn)} c ^http/Handler h]
+      (let [(values stdHandler ok) (assert netHTTPHandler h)]
+        (when (not ok)
+          (panic "RegisterServer was given a server that does not implement netHTTPHandler"))
+
+        (when (== (.-QUICConfig opts) nil)
+          (set! (.-QUICConfig opts) (addr (lit quic/Config))))
+
+        (when (== (.-TLSConfig (.-QUICConfig opts)) nil)
+          (set! (.-TLSConfig (.-QUICConfig opts)) (.TLSConfig stdHandler)))
+
+        (let [s3 (addr ^{:go/breaks [2 4 6 8]} (lit server
+                :config (.-QUICConfig opts)
+                :listenQUIC (.-ListenQUIC opts)
+                :handler stdHandler
+                :serveCtx (.BaseContext stdHandler)))]
+
+          (.init s3)
+          (.RegisterOnShutdown s ^{:go/end 107} (fn []
+              (.shutdown s3 (.ShutdownContext stdHandler))))
+
+          (.ListenErrHook stdHandler (.listenAndServe s3 (.Addr stdHandler))))))))
+
+
+
+^{:go/end 130} (go/method init [^{:tag (* server)} s]
+  (.Do (.-initOnce s) ^{:go/end 129} (fn []
+      (set! (.-config s) (initConfig (.-config s)))
+      (when (== (.-handler s) nil)
+        (set! (.-handler s) http/DefaultServeMux))
+
+      (when (== (.-serveCtx s) nil)
+        (set! (.-serveCtx s) (context/Background)))
+
+      (when (== (.-listenQUIC s) nil)
+        (set! (.-listenQUIC s) ^{:go/end 124} (fn [^string addr ^{:tag (* quic/Config)} config] :results [(* quic/Endpoint) error]
+            (quic/Listen "udp" addr config))))
+
+
+      (set! (values (.-serveCtx s) (.-serveCtxCancel s)) (context/WithCancel (.-serveCtx s)))
+      (set! (.-activeConns s) (make (map (* serverConn) (struct))))
+      (set! (.-connClosed s) (make (chan any) 1)))))
+
+
+
+
+
+^{:go/end 142} (go/method listenAndServe "listenAndServe listens on the UDP network address addr\nand then calls Serve to handle requests on incoming connections.\n" ^error [^{:tag (* server)} s ^string addr]
+  (.init s)
+  ^{:go/breaks [4]} (let [(values e err) ((.-listenQUIC s) addr (.-config s))]
+    (when (!= err nil)
+      (return err))
+
+    (go (.serve s e))
+    nil))
+
+
+
+
+^{:go/end 156} (go/method serve "serve accepts incoming connections on the QUIC endpoint e,\nand handles requests from those connections.\n" ^error [^{:tag (* server)} s ^{:tag (* quic/Endpoint)} e]
+  (.init s)
+  (defer (.Close e canceledCtx))
+  (while true
+    (let [(values qconn err) (.Accept e (.-serveCtx s))]
+      (when (!= err nil)
+        (return err))
+
+      (go (.newServerConn s qconn (.-handler s))))))
+
+
+
+
+^{:go/end 205} (go/method shutdown "shutdown attempts a graceful shutdown for the server.\n" [^{:tag (* server)} s ^context/Context ctx]
+  ;; Set a reasonable default in case ctx is nil.
+  (when (== ctx nil)
+    (let [^context/CancelFunc cancel (zero context/CancelFunc)]
+      (set! (values ctx cancel) (context/WithTimeout (context/Background) time/Second))
+      (defer (cancel))))
+
+
+  ;; Send GOAWAY frames to all active connections to give a chance for them
+  ;; to gracefully terminate.
+  (.Lock (.-mu s))
+  (range [sc (.-activeConns s)]
+    ;; TODO: Modify x/net/quic stream API so that write errors from context
+    ;; deadline are sticky.
+    (go (.sendGoaway sc)))
+
+  (.Unlock (.-mu s))
+
+  ;; Complete shutdown as soon as there are no more active connections or ctx
+  ;; is done, whichever comes first.
+  (defer (^{:go/end 189} (fn []
+        (.Lock (.-mu s))
+        (defer (.Unlock (.-mu s)))
+        ((.-serveCtxCancel s))
+        (range [sc (.-activeConns s)]
+          (.abort sc (addr ^{:go/breaks [2 4]} (lit connectionError
+                :code errH3NoError
+                :message "server is shutting down")))))))
+
+
+
+  (let [noMoreConns ^{:go/end 194} (fn ^bool []
+        (.Lock (.-mu s))
+        (defer (.Unlock (.-mu s)))
+        (== (len (.-activeConns s)) 0))]
+
+    (while true
+      (when (noMoreConns)
+        (return))
+
+      (select
+        (case (<! (.Done ctx))
+          (return))
+        (case (<! (.-connClosed s)))))))
+
+
+
+
+^{:go/end 211} (go/method registerConn [^{:tag (* server)} s ^{:tag (* serverConn)} sc]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (aset (.-activeConns s) sc (lit (struct))))
+
+
+^{:go/end 223} (go/method unregisterConn [^{:tag (* server)} s ^{:tag (* serverConn)} sc]
+  (.Lock (.-mu s))
+  (delete (.-activeConns s) sc)
+  (.Unlock (.-mu s))
+  (select
+    (case (>! (.-connClosed s) (lit (struct))))
+    (default)))
+;; Channel already full. No need to send more values since we are just
+;; using this channel as a simpler sync.Cond.
+
+
+
+(go/type serverConn (struct
+    ^{:line 226 :tag (* quic/Conn)} qconn
+
+    ^{:line 228} genericConn ; for handleUnidirectionalStream
+    ^{:line 229 :tag qpackEncoder} enc
+    ^{:line 230 :tag qpackDecoder} dec
+    ^{:line 231 :tag http/Handler} handler
+
+
+    ^{:line 234 :tag (* stream) :doc "For handling shutdown.\n"} controlStream
+    ^{:line 235 :tag sync/Mutex} mu ; Guards everything below.
+    ^{:line 236 :tag int64} maxRequestStreamID
+    ^{:line 237 :tag bool} goawaySent))
+
+
+^{:go/end 260} (go/method newServerConn [^{:tag (* server)} s ^{:tag (* quic/Conn)} qconn ^http/Handler handler]
+  (let [sc (addr ^{:go/breaks [2 4]} (lit serverConn
+          :qconn qconn
+          :handler handler))]
+
+    (.registerConn s sc)
+    (defer (.unregisterConn s sc))
+    (.init (.-enc sc))
+
+    ;; Create control stream and send SETTINGS frame.
+    ;; TODO: Time out on creating stream.
+    (let [^error err (zero error)]
+      (set! (values (.-controlStream sc) err) (newConnStream (context/Background) (.-qconn sc) streamTypeControl))
+      (when (!= err nil)
+        (return))
+
+      (.writeSettings (.-controlStream sc))
+      (.Flush (.-controlStream sc))
+
+      ^{:go/via [genericConn]} (.acceptStreams sc (.-qconn sc) sc))))
+
+
+^{:go/end 305} (go/method handleControlStream ^error [^{:tag (* serverConn)} sc ^{:tag (* stream)} st]
+  ;; "A SETTINGS frame MUST be sent as the first frame of each control stream [...]"
+  ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-7.2.4-2
+  (when [err (.readSettings st ^{:go/breaks [[3 276]] :go/end 277} (fn ^error [^int64 settingsType ^int64 settingsValue]
+          (switch settingsType
+            (case [settingsMaxFieldSectionSize]
+              (set! _ settingsValue)) ; TODO
+            (case [settingsQPACKMaxTableCapacity]
+              (set! _ settingsValue)) ; TODO
+            (case [settingsQPACKBlockedStreams]
+              (set! _ settingsValue)) ; TODO
+            (default))
+          ;; Unknown settings types are ignored.
+
+          nil))]
+    (!= err nil)
+    (return err))
+
+
+  (while true
+    (let [(values ftype err) (.readFrameHeader st)]
+      (when (!= err nil)
+        (return err))
+
+      (switch ftype
+        (case [frameTypeCancelPush]
+          ;; "If a server receives a CANCEL_PUSH frame for a push ID
+          ;; that has not yet been mentioned by a PUSH_PROMISE frame,
+          ;; this MUST be treated as a connection error of type H3_ID_ERROR."
+          ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-7.2.3-8
+          (return (addr ^{:go/breaks [2 4]} (lit connectionError
+                :code errH3IDError
+                :message "CANCEL_PUSH for unsent push ID"))))
+
+        (case [frameTypeGoaway]
+          (return errH3NoError))
+        (default
+          ;; Unknown frames are ignored.
+          (when [err (.discardUnknownFrame st ftype)] (!= err nil)
+            (return err)))))))
+
+
+
+
+
+^{:go/breaks [[3 309]] :go/end 310} (go/method handleEncoderStream ^error [^{:tag (* serverConn)} sc (* stream)]
+  ;; TODO
+  nil)
+
+
+^{:go/breaks [[3 314]] :go/end 315} (go/method handleDecoderStream ^error [^{:tag (* serverConn)} sc (* stream)]
+  ;; TODO
+  nil)
+
+
+^{:go/end 325} (go/method handlePushStream ^error [^{:tag (* serverConn)} sc (* stream)]
+  ;; "[...] if a server receives a client-initiated push stream,
+  ;; this MUST be treated as a connection error of type H3_STREAM_CREATION_ERROR."
+  ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-6.2.2-3
+  (addr ^{:go/breaks [2 4]} (lit connectionError
+      :code errH3StreamCreationError
+      :message "client created push stream")))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 354} (go/func hasDisallowedConnectionHeader "hasDisallowedConnectionHeader reports whether h contains connnection headers\nthat are not allowed in HTTP/3:\n\n\"An endpoint MUST NOT generate an HTTP/3 field section containing\nconnection-specific fields; any message containing connection-specific\nfields MUST be treated as malformed.\"\n\n\"The only exception to this is the TE header field, which MAY be present in\nan HTTP/3 request header; when it is, it MUST NOT contain any value other\nthan \"trailers\".\"\n" ^bool [^http/Header h]
+  ^{:go/breaks [[4 353]]} (let [neverAllowed ^{:go/breaks [2 3 4 5 6]} (lit (slice string)
+        "Connection"
+        "Keep-Alive"
+        "Proxy-Connection"
+        "Transfer-Encoding"
+        "Upgrade")]
+
+    (range [_ k neverAllowed]
+      (when [(values _ ok) (aget h k)] ok
+        (return true)))
+
+
+    (when [(values te ok) (aget h "Te")] (and ok ^:go/paren (or (!= (len te) 1) (!= (aget te 0) "trailers")))
+      (return true))
+
+    false))
+
+
+(go/type pseudoHeader (struct
+    ^{:line 357 :tag string} method
+    ^{:line 358 :tag string} scheme
+    ^{:line 359 :tag string} path
+    ^{:line 360 :tag string} authority))
+
+
+^{:go/end 441} (go/method parseHeader [^{:tag (* serverConn)} sc ^{:tag (* stream)} st] :results [http/Header pseudoHeader error]
+  (let [(values ftype err) (.readFrameHeader st)]
+    (when (!= err nil)
+      (return nil (lit pseudoHeader) err))
+
+    (when (!= ftype frameTypeHeaders)
+      (return nil (lit pseudoHeader) (addr (lit streamError errH3MessageError "received other frames when expecting HEADERS"))))
+
+    (let [header (make http/Header)
+        ^{:line 372 :tag pseudoHeader} pHeader (zero pseudoHeader)
+        ^{:line 373 :tag qpackDecoder} dec (zero qpackDecoder)
+        (values ^bool hasMethod ^bool hasScheme ^bool hasPath ^bool hasAuthority) (zero bool)]
+      (when [err (.decode dec st ^{:go/breaks [[4 410]] :go/end 411} (fn ^error [^indexType _ ^string name ^string value]
+              (when (not (httpguts/ValidHeaderFieldValue value))
+                (return (addr (lit streamError errH3MessageError "invalid field value"))))
+
+              (switch name
+                (case [":method"]
+                  (when hasMethod
+                    (return (addr (lit streamError errH3MessageError "duplicate :method"))))
+
+                  (set! hasMethod true)
+                  (set! (.-method pHeader) value))
+                (case [":scheme"]
+                  (when hasScheme
+                    (return (addr (lit streamError errH3MessageError "duplicate :scheme"))))
+
+                  (set! hasScheme true)
+                  (set! (.-scheme pHeader) value))
+                (case [":path"]
+                  (when hasPath
+                    (return (addr (lit streamError errH3MessageError "duplicate :path"))))
+
+                  (set! hasPath true)
+                  (set! (.-path pHeader) value))
+                (case [":authority"]
+                  (when hasAuthority
+                    (return (addr (lit streamError errH3MessageError "duplicate :authority"))))
+
+                  (set! hasAuthority true)
+                  (set! (.-authority pHeader) value))
+                (default
+                  (when (not (validWireHeaderFieldName name))
+                    (return (addr (lit streamError errH3MessageError "invalid field name"))))
+
+                  (.Add header name value)))
+
+              nil))]
+        (!= err nil)
+        (return nil (lit pseudoHeader) err))
+
+      (when [err (.endFrame st)] (!= err nil)
+        (return nil (lit pseudoHeader) err))
+
+      (when (hasDisallowedConnectionHeader header)
+        (return nil (lit pseudoHeader) (addr (lit streamError errH3MessageError "invalid connection-related header"))))
+
+
+      ;; "All HTTP/3 requests MUST include exactly one value for the :method,
+      ;; :scheme, and :path pseudo-header fields, unless the request is a CONNECT
+      ;; request"
+      ;;
+      ;; "A CONNECT request MUST be constructed as follows:
+      ;; - The :method pseudo-header field is set to "CONNECT"
+      ;; - The :scheme and :path pseudo-header fields are omitted
+      ;; - The :authority pseudo-header field contains the host and port to connect to"
+      (when (not hasMethod)
+        (return nil (lit pseudoHeader) (addr (lit streamError errH3MessageError "missing :method"))))
+
+      (when (and (!= (.-method pHeader) "CONNECT") ^:go/paren (or (not hasScheme) (not hasPath)))
+        (return nil (lit pseudoHeader) (addr (lit streamError errH3MessageError "missing :scheme or :path for non-CONNECT requests"))))
+
+      (when (and (== (.-method pHeader) "CONNECT") ^:go/paren (or hasScheme hasPath (not hasAuthority)))
+        (return nil (lit pseudoHeader) (addr (lit streamError
+              ^{:line 437} errH3MessageError "CONNECT request must only have :method and :authority pseudo-headers"))))
+
+
+      (return header pHeader nil))))
+
+
+^{:go/end 458} (go/method sendGoaway [^{:tag (* serverConn)} sc]
+  (.Lock (.-mu sc))
+  (when (or (.-goawaySent sc) (== (.-controlStream sc) nil))
+    (.Unlock (.-mu sc))
+    (return))
+
+  (set! (.-goawaySent sc) true)
+  (.Unlock (.-mu sc))
+
+  ;; No lock in this section in case writing to stream blocks. This is safe
+  ;; since sc.maxRequestStreamID is only updated when sc.goawaySent is false.
+  (.writeVarint (.-controlStream sc) (conv int64 frameTypeGoaway))
+  (.writeVarint (.-controlStream sc) (conv int64 (sizeVarint (conv uint64 (.-maxRequestStreamID sc)))))
+  (.writeVarint (.-controlStream sc) (.-maxRequestStreamID sc))
+  (.Flush (.-controlStream sc)))
+
+
+
+
+^{:go/end 471} (go/method requestShouldGoaway "requestShouldGoAway returns true if st has a stream ID that is equal or\ngreater than the ID we have sent in a GOAWAY frame, if any.\n" ^bool [^{:tag (* serverConn)} sc ^{:tag (* stream)} st]
+  (.Lock (.-mu sc))
+  (defer (.Unlock (.-mu sc)))
+  (if (.-goawaySent sc)
+    (return (>= (.ID (.-stream st)) (.-maxRequestStreamID sc)))
+    (do
+      (set! (.-maxRequestStreamID sc) (max (.-maxRequestStreamID sc) (.ID (.-stream st))))
+      (return false))))
+
+
+
+^{:go/end 553} (go/method handleRequestStream ^error [^{:tag (* serverConn)} sc ^{:tag (* stream)} st]
+  (when (.requestShouldGoaway sc st)
+    (return (addr ^{:go/breaks [2 4]} (lit streamError
+          :code errH3RequestRejected
+          :message "GOAWAY request with equal or lower ID than the stream has been sent"))))
+
+
+  (let [(values header pHeader err) (.parseHeader sc st)]
+    (when (!= err nil)
+      (return err))
+
+
+    (let [reqInfo (httpcommon/NewServerRequest ^{:go/breaks [2 4 6 8 10]} (lit httpcommon/ServerRequestParam
+            :Method (.-method pHeader)
+            :Scheme (.-scheme pHeader)
+            :Authority (.-authority pHeader)
+            :Path (.-path pHeader)
+            :Header header))]
+
+      (when (!= (.-InvalidReason reqInfo) "")
+        (return (addr ^{:go/breaks [2 4]} (lit streamError
+              :code errH3MessageError
+              :message (.-InvalidReason reqInfo)))))
+
+
+
+      (let [^io/ReadCloser body (zero io/ReadCloser)
+          ^{:line 500} contentLength (conv int64 -1)]
+        (when [(values n err) (strconv/Atoi (.Get header "Content-Length"))] (== err nil)
+          (set! contentLength (conv int64 n)))
+
+        (if (or (!= contentLength 0) (!= (len (.-Trailer reqInfo)) 0))
+          (set! body (addr ^{:go/breaks [2 4 6]} (lit bodyReader
+                :st st
+                :remain contentLength
+                :trailer (.-Trailer reqInfo))))
+
+
+          (set! body http/NoBody))
+
+
+        (let [req (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22]} (lit http/Request
+                :Proto "HTTP/3.0"
+                :Method (.-method pHeader)
+                :Host (.-authority pHeader)
+                :URL (.-URL reqInfo)
+                :RequestURI (.-RequestURI reqInfo)
+                :Trailer (.-Trailer reqInfo)
+                :ProtoMajor 3
+                :RemoteAddr (.String (.RemoteAddr (.-qconn sc)))
+                :Body body
+                :Header header
+                :ContentLength contentLength))]
+
+          (defer (.Close (.-Body req)))
+
+          ^{:go/breaks [5]} (let [rw (addr ^{:go/breaks [2 4 6 8 10 12]} (lit responseWriter
+                  :st st
+                  :headers (make http/Header)
+                  :trailer (make http/Header)
+                  :bb (make bodyBuffer 0 defaultBodyBufferCap)
+                  :cannotHaveBody (== (.-Method req) "HEAD")
+                  :bw (addr ^{:go/breaks [2 4 6 8 10]} (lit bodyWriter
+                      :st st
+                      :remain -1
+                      :flush false
+                      :name "response"
+                      :enc (addr (.-enc sc))))))]
+
+
+            (defer (.close rw))
+            (when (.-NeedsContinue reqInfo)
+              (set! (.-send100Continue (assert (* bodyReader) (.-Body req))) ^{:go/end 547} (fn []
+                  (.WriteHeader rw 100))))
+
+
+
+            ;; TODO: handle panic coming from the HTTP handler.
+            (.ServeHTTP (.-handler sc) rw req)
+            nil))))))
+
+
+
+^{:go/end 565} (go/method abort "abort closes the connection with an error.\n" [^{:tag (* serverConn)} sc ^error err]
+  (if [(values e ok) (assert (* connectionError) err)] ok
+    (.Abort (.-qconn sc) (addr ^{:go/breaks [2 4]} (lit quic/ApplicationError
+          :Code (conv uint64 (.-code e))
+          :Reason (.-message e))))
+
+
+    (.Abort (.-qconn sc) err)))
+
+
+
+
+
+^{:go/breaks [[5 578]] :go/end 579} (go/func responseCanHaveBody "responseCanHaveBody reports whether a given response status code permits a\nbody. See RFC 7230, section 3.3.\n" ^bool [^int status]
+  (switch
+    (case [(and (>= status 100) (<= status 199))]
+      (return false))
+    (case [(== status 204)]
+      (return false))
+    (case [(== status 304)]
+      (return false)))
+
+  true)
+
+
+(go/type responseWriter (struct
+    ^{:line 582 :tag (* stream)} st
+    ^{:line 583 :tag (* bodyWriter)} bw
+    ^{:line 584 :tag sync/Mutex} mu
+    ^{:line 585 :tag http/Header} headers
+    ^{:line 586 :tag http/Header} trailer
+    ^{:line 587 :tag bodyBuffer} bb
+    ^{:line 588 :tag bool} wroteHeader ; Non-1xx header has been (logically) written.
+    ^{:line 589 :tag int} statusCode ; Status of the response that will be sent in HEADERS frame.
+    ^{:line 590 :tag bool} statusCodeSet ; Status of the response has been set via a call to WriteHeader.
+    ^{:line 591 :tag bool} cannotHaveBody ; Response should not have a body (e.g. response to a HEAD request).
+    ^{:line 592 :tag int} bodyLenLeft)) ; How much of the content body is left to be sent, set via "Content-Length" header. -1 if unknown.
+
+
+^{:go/end 597} (go/method Header ^http/Header [^{:tag (* responseWriter)} rw]
+  (.-headers rw))
+
+
+
+
+
+^{:go/end 613} (go/method prepareTrailerForWriteLocked "prepareTrailerForWriteLocked populates any pre-declared trailer header with\nits value, and passes it to bodyWriter so it can be written after body EOF.\nCaller must hold rw.mu.\n" [^{:tag (* responseWriter)} rw]
+  (range [name (.-trailer rw)]
+    (if [(values val ok) (aget (.-headers rw) name)] ok
+      (aset (.-trailer rw) name val)
+
+      (delete (.-trailer rw) name)))
+
+
+  (when (> (len (.-trailer rw)) 0)
+    (set! (.-trailer (.-bw rw)) (.-trailer rw))))
+
+
+
+
+
+
+
+^{:go/end 655} (go/method writeHeaderLockedOnce "writeHeaderLockedOnce writes the final response header. If rw.wroteHeader is\ntrue, calling this method is a no-op. Sending informational status headers\nshould be done using writeInfoHeaderLocked, rather than this method.\nCaller must hold rw.mu.\n" [^{:tag (* responseWriter)} rw]
+  (when (.-wroteHeader rw)
+    (return))
+
+  (when (not (responseCanHaveBody (.-statusCode rw)))
+    (set! (.-cannotHaveBody rw) true))
+
+  ;; If there is any Trailer declared in headers, save them so we know which
+  ;; trailers have been pre-declared. Also, write back the extracted value,
+  ;; which is canonicalized, to rw.Header for consistency.
+  (when [(values _ ok) (aget (.-headers rw) "Trailer")] ok
+    (extractTrailerFromHeader (.-headers rw) (.-trailer rw))
+    (.Set (.-headers rw) "Trailer" (strings/Join (^{:inst [string]} slices/Sorted (^{:inst [http/Header string (slice string)]} maps/Keys (.-trailer rw))) ", ")))
+
+
+  (.inferHeader (.-bb rw) (.-headers rw) (.-statusCode rw))
+  (let [encHeaders (.encode (.-enc (.-bw rw)) ^{:go/end 649} (fn [^{:tag (func [^indexType itype ^string name ^string value])} f]
+          (f mayIndex ":status" (strconv/Itoa (.-statusCode rw)))
+          (range [name values (.-headers rw)]
+            (when (not (httpguts/ValidHeaderFieldName name))
+              (continue))
+
+            (range [_ val values]
+              (when (not (httpguts/ValidHeaderFieldValue val))
+                (continue))
+
+              ;; Issue #71374: Consider supporting never-indexed fields.
+              (f mayIndex name val)))))]
+
+
+
+
+    (.writeVarint (.-st rw) (conv int64 frameTypeHeaders))
+    (.writeVarint (.-st rw) (conv int64 (len encHeaders)))
+    (.Write (.-st rw) encHeaders)
+    (set! (.-wroteHeader rw) true)))
+
+
+
+
+
+
+^{:go/end 686} (go/method writeHeaderLocked "writeHeaderLocked writes informational status headers (i.e. status 1XX).\nIf a non-informational status header has been written via\nwriteHeaderLockedOnce, this method is a no-op.\nCaller must hold rw.mu.\n" [^{:tag (* responseWriter)} rw ^int statusCode]
+  (when (.-wroteHeader rw)
+    (return))
+
+  (let [encHeaders (.encode (.-enc (.-bw rw)) ^{:go/end 682} (fn [^{:tag (func [^indexType itype ^string name ^string value])} f]
+          (f mayIndex ":status" (strconv/Itoa statusCode))
+          (range [name values (.-headers rw)]
+            (when (or (== name "Content-Length") (== name "Transfer-Encoding"))
+              (continue))
+
+            (when (not (httpguts/ValidHeaderFieldName name))
+              (continue))
+
+            (range [_ val values]
+              (when (not (httpguts/ValidHeaderFieldValue val))
+                (continue))
+
+              ;; Issue #71374: Consider supporting never-indexed fields.
+              (f mayIndex name val)))))]
+
+
+
+    (.writeVarint (.-st rw) (conv int64 frameTypeHeaders))
+    (.writeVarint (.-st rw) (conv int64 (len encHeaders)))
+    (.Write (.-st rw) encHeaders)))
+
+
+^{:go/end 690} (go/func isInfoStatus ^bool [^int status]
+  (and (>= status 100) (< status 200)))
+
+
+
+^{:go/end 707} (go/func checkWriteHeaderCode "checkWriteHeaderCode is a copy of net/http's checkWriteHeaderCode.\n" [^int code]
+  ;; Issue 22880: require valid WriteHeader status codes.
+  ;; For now we only enforce that it's three digits.
+  ;; In the future we might block things over 599 (600 and above aren't defined
+  ;; at http://httpwg.org/specs/rfc7231.html#status.codes).
+  ;; But for now any three digits.
+  ;;
+  ;; We used to send "HTTP/1.1 000 0" on the wire in responses but there's
+  ;; no equivalent bogus thing we can realistically send in HTTP/3,
+  ;; so we'll consistently panic instead and help people find their bugs
+  ;; early. (We can't return an error from WriteHeader even if we wanted to.)
+  (when (or (< code 100) (> code 999))
+    (panic (fmt/Sprintf "invalid WriteHeader code %v" code))))
+
+
+
+^{:go/end 735} (go/method WriteHeader [^{:tag (* responseWriter)} rw ^int statusCode]
+  ;; TODO: handle sending informational status headers (e.g. 103).
+  (.Lock (.-mu rw))
+  (defer (.Unlock (.-mu rw)))
+  (when (.-statusCodeSet rw)
+    (return))
+
+  (checkWriteHeaderCode statusCode)
+
+  ;; Informational headers can be sent multiple times, and should be flushed
+  ;; immediately.
+  (when (isInfoStatus statusCode)
+    (.writeHeaderLocked rw statusCode)
+    (.Flush (.-st rw))
+    (return))
+
+
+  ;; Non-informational headers should only be set once, and should be
+  ;; buffered.
+  (set! (.-statusCodeSet rw) true)
+  (set! (.-statusCode rw) statusCode)
+  (if [(values n err) (strconv/Atoi (.Get (.Header rw) "Content-Length"))] (== err nil)
+    (set! (.-bodyLenLeft rw) n)
+
+    (set! (.-bodyLenLeft rw) -1))) ; Unknown.
+
+
+
+
+
+
+
+^{:go/end 748} (go/method trimWriteLocked "trimWriteLocked trims a byte slice, b, such that the length of b will not\nexceed rw.bodyLenLeft. This method will update rw.bodyLenLeft when trimming\nb, and will also return whether b was trimmed or not.\nCaller must hold rw.mu.\n" [^{:tag (* responseWriter)} rw ^{:tag (slice byte)} b] :results [(slice byte) bool]
+  (when (< (.-bodyLenLeft rw) 0)
+    (return b false))
+
+  (let [n (min (len b) (.-bodyLenLeft rw))]
+    (set! (.-bodyLenLeft rw) - n)
+    (return (subslice b _ n) (!= n (len b)))))
+
+
+^{:go/end 797} (go/method Write [^{:tag (* responseWriter)} rw ^{:tag (slice byte)} b] :results [^int n ^error err]
+  ;; Calling Write implicitly calls WriteHeader(200) if WriteHeader has not
+  ;; been called before.
+  (.WriteHeader rw http/StatusOK)
+  (.Lock (.-mu rw))
+  (defer (.Unlock (.-mu rw)))
+
+  (when (== (.-statusCode rw) http/StatusNotModified)
+    (return 0 http/ErrBodyNotAllowed))
+
+
+  (let [(values ^:assign b trimmed) (.trimWriteLocked rw b)]
+    (when trimmed
+      (defer (^{:go/end 765} (fn []
+            (set! err http/ErrContentLength)))))
+
+
+
+    ;; If b fits entirely in our body buffer, save it to the buffer and return
+    ;; early so we can coalesce small writes.
+    ;; As a special case, we always want to save b to the buffer even when b is
+    ;; big if we had yet to write our header, so we can infer headers like
+    ;; "Content-Type" with as much information as possible.
+    (let [initialBLen (len b)
+        ^{:line 774} initialBufLen (len (.-bb rw))]
+      (when (or (not (.-wroteHeader rw)) (<= (len b) (- (cap (.-bb rw)) (len (.-bb rw)))))
+        (set! b (.write (.-bb rw) b))
+        (when (== (len b) 0)
+          (return initialBLen nil)))
+
+
+
+      ;; Reaching this point means that our buffer has been sufficiently filled.
+      ;; Therefore, we now want to:
+      ;; 1. Infer and write response headers based on our body buffer, if not
+      ;; done yet.
+      ;; 2. Write our body buffer and the rest of b (if any).
+      ;; 3. Reset the current body buffer so it can be used again.
+      (.writeHeaderLockedOnce rw)
+      (when (.-cannotHaveBody rw)
+        (return initialBLen nil))
+
+      (when [(values n err) (.write (.-bw rw) (.-bb rw) b)] (!= err nil)
+        (return (max 0 (- n initialBufLen)) err))
+
+      (.discard (.-bb rw))
+      (return initialBLen nil))))
+
+
+^{:go/end 811} (go/method Flush [^{:tag (* responseWriter)} rw]
+  ;; Calling Flush implicitly calls WriteHeader(200) if WriteHeader has not
+  ;; been called before.
+  (.WriteHeader rw http/StatusOK)
+  (.Lock (.-mu rw))
+  (defer (.Unlock (.-mu rw)))
+  (.writeHeaderLockedOnce rw)
+  (when (not (.-cannotHaveBody rw))
+    (.Write (.-bw rw) (.-bb rw))
+    (.discard (.-bb rw)))
+
+  (.Flush (.-st rw)))
+
+
+^{:go/end 822} (go/method close ^error [^{:tag (* responseWriter)} rw]
+  (.Flush rw)
+  (.Lock (.-mu rw))
+  (defer (.Unlock (.-mu rw)))
+  (.prepareTrailerForWriteLocked rw)
+  (when [err (.Close (.-bw rw))] (!= err nil)
+    (return err))
+
+  (.Close (.-stream (.-st rw))))
+
+
+
+
+
+
+(go/const ^{:val 512 :doc "defaultBodyBufferCap is the default number of bytes of body that we are\nwilling to save in a buffer for the sake of inferring headers and coalescing\nsmall writes. 512 was chosen to be consistent with how much\nhttp.DetectContentType is willing to read.\n"} defaultBodyBufferCap 512)
+
+
+(go/type bodyBuffer "bodyBuffer is a buffer used to store body content of a response.\n" (slice byte))
+
+
+
+^{:go/end 839} (go/method write "write writes b to the buffer. It returns a new slice of b, which contains\nany remaining data that could not be written to the buffer, if any.\n" ^{:tag (slice byte)} [^{:tag (* bodyBuffer)} bb ^{:tag (slice byte)} b]
+  (let [n (min (len b) (- (cap @bb) (len @bb)))]
+    (set! @bb (append @bb (spread (subslice b _ n))))
+    (subslice b n)))
+
+
+
+^{:go/end 844} (go/method discard "discard resets the buffer so it can be used again.\n" [^{:tag (* bodyBuffer)} bb]
+  (set! @bb (subslice @bb _ 0)))
+
+
+
+
+
+
+
+^{:go/end 866} (go/method inferHeader "inferHeader populates h with the header values that we can infer from our\ncurrent buffer content, if not already explicitly set. This method should be\ncalled only once with as much body content as possible in the buffer, before\na HEADERS frame is sent, and before discard has been called. Doing so\nproperly is the responsibility of the caller.\n" [^{:tag (* bodyBuffer)} bb ^http/Header h ^int status]
+  (when [(values _ ok) (aget h "Date")] (not ok)
+    (.Set h "Date" (.Format (.UTC (time/Now)) http/TimeFormat)))
+
+  ;; If the Content-Encoding is non-blank, we shouldn't
+  ;; sniff the body. See Issue golang.org/issue/31753.
+  (let [(values _ hasCE) (aget h "Content-Encoding")
+      (values _ hasCT) (aget h "Content-Type")]
+    (when (and (not hasCE) (not hasCT) (responseCanHaveBody status) (> (len @bb) 0))
+      (.Set h "Content-Type" (http/DetectContentType @bb)))))
+
+;; We can technically infer Content-Length too here, as long as the entire
+;; response body fits within hi.buf and does not require flushing. However,
+;; we have chosen not to do so for now as Content-Length is not very
+;; important for HTTP/3, and such inconsistent behavior might be confusing.

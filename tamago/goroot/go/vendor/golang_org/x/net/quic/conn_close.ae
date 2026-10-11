@@ -1,0 +1,338 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "conn_close.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [time "time"]])
+
+
+
+(go/type connState "connState is the state of a connection.\n" int)
+
+(go/const
+
+  ^{:line 18} [^{:val 0 :doc "A connection is alive when it is first created.\n"} connStateAlive (conv connState iota)]
+
+
+
+
+
+  ^{:line 24} [^{:val 1 :doc "The connection has received a CONNECTION_CLOSE frame from the peer,\nand has not yet sent a CONNECTION_CLOSE in response.\n\nWe will send a CONNECTION_CLOSE, and then enter the draining state.\n"} connStatePeerClosed]
+
+
+
+
+
+
+
+
+
+
+  ^{:line 35} [^{:val 2 :doc "The connection is in the closing state.\n\nWe will send CONNECTION_CLOSE frames to the peer\n(once upon entering the closing state, and possibly again in response to peer packets).\n\nIf we receive a CONNECTION_CLOSE from the peer, we will enter the draining state.\nOtherwise, we will eventually time out and move to the done state.\n\nhttps://www.rfc-editor.org/rfc/rfc9000#section-10.2.1\n"} connStateClosing]
+
+
+
+
+
+
+
+  ^{:line 43} [^{:val 3 :doc "The connection is in the draining state.\n\nWe will neither send packets nor process received packets.\nWhen the drain timer expires, we move to the done state.\n\nhttps://www.rfc-editor.org/rfc/rfc9000#section-10.2.2\n"} connStateDraining]
+
+
+  ^{:line 46} [^{:val 4 :doc "The connection is done, and the conn loop will exit.\n"} connStateDone])
+
+
+
+
+
+
+(go/type lifetimeState "lifetimeState tracks the state of a connection.\n\nThis is fairly coupled to the rest of a Conn, but putting it in a struct of its own helps\nreason about operations that cause state transitions.\n" (struct
+    ^{:line 54 :tag connState} state
+
+    ^{:line 56 :tag (chan (struct))} readyc ; closed when TLS handshake completes
+    ^{:line 57 :tag (chan (struct))} donec ; closed when finalErr is set
+
+    ^{:line 59 :tag error} localErr ; error sent to the peer
+    ^{:line 60 :tag error} finalErr ; error sent by the peer, or transport error; set before closing donec
+
+    ^{:line 62 :tag time/Time} connCloseSentTime ; send time of last CONNECTION_CLOSE frame
+    ^{:line 63 :tag time/Duration} connCloseDelay ; delay until next CONNECTION_CLOSE frame sent
+    ^{:line 64 :tag time/Time} drainEndTime)) ; time the connection exits the draining state
+
+
+^{:go/end 70} (go/method lifetimeInit [^{:tag (* Conn)} c]
+  (set! (.-readyc (.-lifetime c)) (make (chan (struct))))
+  (set! (.-donec (.-lifetime c)) (make (chan (struct)))))
+
+
+(go/var
+  ^{:line 73} [errNoPeerResponse (errors/New "peer did not respond to CONNECTION_CLOSE")]
+  ^{:line 74} [errConnClosed (errors/New "connection closed")])
+
+
+
+^{:go/breaks [10] :go/end 91} (go/method lifetimeAdvance "advance is called when time passes.\n" [^{:tag (* Conn)} c ^time/Time now] :results [^bool done]
+  (when (or (.IsZero (.-drainEndTime (.-lifetime c))) (.After (.-drainEndTime (.-lifetime c)) now))
+    (return false))
+
+  ;; The connection drain period has ended, and we can shut down.
+  ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-10.2-7
+  (set! (.-drainEndTime (.-lifetime c)) (lit time/Time))
+  (when (!= (.-state (.-lifetime c)) connStateDraining)
+    ;; We were in the closing state, waiting for a CONNECTION_CLOSE from the peer.
+    (.setFinalError c errNoPeerResponse))
+
+  (.setState c now connStateDone)
+  true)
+
+
+
+^{:go/end 110} (go/method setState "setState sets the conn state.\n" [^{:tag (* Conn)} c ^time/Time now ^connState state]
+  (when (== (.-state (.-lifetime c)) state)
+    (return))
+
+  (set! (.-state (.-lifetime c)) state)
+  (switch state
+    (case [connStateClosing connStateDraining]
+      (when (.IsZero (.-drainEndTime (.-lifetime c)))
+        (set! (.-drainEndTime (.-lifetime c)) (.Add now (* 3 (.ptoBasePeriod (.-loss c)))))))
+
+    (case [connStateDone]
+      (.setFinalError c nil)))
+
+  (when (!= state connStateAlive)
+    (.streamsCleanup c)))
+
+
+
+
+^{:go/end 115} (go/method handshakeDone "handshakeDone is called when the TLS handshake completes.\n" [^{:tag (* Conn)} c]
+  (close (.-readyc (.-lifetime c))))
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 130]] :go/end 131} (go/method isDraining "isDraining reports whether the conn is in the draining state.\n\nThe draining state is entered once an endpoint receives a CONNECTION_CLOSE frame.\nThe endpoint will no longer send any packets, but we retain knowledge of the connection\nuntil the end of the drain period to ensure we discard packets for the connection\nrather than treating them as starting a new connection.\n\nhttps://www.rfc-editor.org/rfc/rfc9000.html#section-10.2.2\n" ^bool [^{:tag (* Conn)} c]
+  (switch (.-state (.-lifetime c))
+    (case [connStateDraining connStateDone]
+      (return true)))
+
+  false)
+
+
+
+^{:go/end 136} (go/method isAlive "isAlive reports whether the conn is handling packets.\n" ^bool [^{:tag (* Conn)} c]
+  (== (.-state (.-lifetime c)) connStateAlive))
+
+
+
+^{:go/end 177} (go/method sendOK "sendOK reports whether the conn can send frames at this time.\n" ^bool [^{:tag (* Conn)} c ^time/Time now]
+  (switch (.-state (.-lifetime c))
+    (case [connStateAlive]
+      (return true))
+    (case [connStatePeerClosed]
+      (when (== (.-localErr (.-lifetime c)) nil)
+        ;; We're waiting for the user to close the connection, providing us with
+        ;; a final status to send to the peer.
+        (return false))
+
+      ;; We should send a CONNECTION_CLOSE.
+      (return true))
+    (case [connStateClosing]
+      (when (.IsZero (.-connCloseSentTime (.-lifetime c)))
+        (return true))
+
+      (let [maxRecvTime (.-maxRecvTime (aget (.-acks c) initialSpace))]
+        (when [t (.-maxRecvTime (aget (.-acks c) handshakeSpace))] (.After t maxRecvTime)
+          (set! maxRecvTime t))
+
+        (when [t (.-maxRecvTime (aget (.-acks c) appDataSpace))] (.After t maxRecvTime)
+          (set! maxRecvTime t))
+
+        (when (.Before maxRecvTime (.Add (.-connCloseSentTime (.-lifetime c)) (.-connCloseDelay (.-lifetime c))))
+          ;; After sending CONNECTION_CLOSE, ignore packets from the peer for
+          ;; a delay. On the next packet received after the delay, send another
+          ;; CONNECTION_CLOSE.
+          (return false))
+
+        (return true)))
+    (case [connStateDraining]
+      ;; We are in the draining state, and will send no more packets.
+      (return false))
+    (case [connStateDone]
+      (return false))
+    (default
+      (panic "BUG: unhandled connection state"))))
+
+
+
+
+^{:go/end 199} (go/method sentConnectionClose "sentConnectionClose reports that the conn has sent a CONNECTION_CLOSE to the peer.\n" [^{:tag (* Conn)} c ^time/Time now]
+  (switch (.-state (.-lifetime c))
+    (case [connStatePeerClosed]
+      (.enterDraining c now)))
+
+  (cond (.IsZero (.-connCloseSentTime (.-lifetime c)))
+    ;; Set the initial delay before we will send another CONNECTION_CLOSE.
+    ;;
+    ;; RFC 9000 states that we should rate limit CONNECTION_CLOSE frames,
+    ;; but leaves the implementation of the limit up to us. Here, we start
+    ;; with the same delay as the PTO timer (RFC 9002, Section 6.2.1),
+    ;; not including max_ack_delay, and double it on every CONNECTION_CLOSE sent.
+    (set! (.-connCloseDelay (.-lifetime c)) (+ (.-smoothedRTT (.-rtt (.-loss c))) (max (* 4 (.-rttvar (.-rtt (.-loss c)))) timerGranularity)))
+    (not (.Equal (.-connCloseSentTime (.-lifetime c)) now))
+    ;; If connCloseSentTime == now, we're sending two CONNECTION_CLOSE frames
+    ;; coalesced into the same datagram. We only want to increase the delay once.
+    (set! (.-connCloseDelay (.-lifetime c)) * 2))
+
+  (set! (.-connCloseSentTime (.-lifetime c)) now))
+
+
+
+^{:go/end 218} (go/method handlePeerConnectionClose "handlePeerConnectionClose handles a CONNECTION_CLOSE from the peer.\n" [^{:tag (* Conn)} c ^time/Time now ^error err]
+  (.setFinalError c err)
+  (switch (.-state (.-lifetime c))
+    (case [connStateAlive]
+      (.setState c now connStatePeerClosed))
+    (case [connStatePeerClosed])
+    ;; Duplicate CONNECTION_CLOSE, ignore.
+    (case [connStateClosing]
+      (if (.IsZero (.-connCloseSentTime (.-lifetime c)))
+        (.setState c now connStatePeerClosed)
+
+        (.setState c now connStateDraining)))
+
+    (case [connStateDraining])
+    (case [connStateDone])))
+
+
+
+
+^{:go/end 229} (go/method setFinalError "setFinalError records the final connection status we report to the user.\n" [^{:tag (* Conn)} c ^error err]
+  (select
+    (case (<! (.-donec (.-lifetime c)))
+      (return)) ; already set
+    (default))
+
+  (set! (.-finalErr (.-lifetime c)) err)
+  (close (.-donec (.-lifetime c))))
+
+
+
+
+^{:go/breaks [[5 239]] :go/end 240} (go/method finalError "finalError returns the final connection status reported to the user,\nor nil if a final status has not yet been set.\n" ^error [^{:tag (* Conn)} c]
+  (select
+    (case (<! (.-donec (.-lifetime c)))
+      (return (.-finalErr (.-lifetime c))))
+    (default))
+
+  nil)
+
+
+^{:go/end 258} (go/method waitReady ^error [^{:tag (* Conn)} c ^context/Context ctx]
+  (select
+    (case (<! (.-readyc (.-lifetime c)))
+      (return nil))
+    (case (<! (.-donec (.-lifetime c)))
+      (return (.-finalErr (.-lifetime c))))
+    (default))
+
+  (select
+    (case (<! (.-readyc (.-lifetime c)))
+      (return nil))
+    (case (<! (.-donec (.-lifetime c)))
+      (return (.-finalErr (.-lifetime c))))
+    (case (<! (.Done ctx))
+      (return (.Err ctx)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 270} (go/method Close "Close closes the connection.\n\nClose is equivalent to:\n\n\tconn.Abort(nil)\n\terr := conn.Wait(context.Background())\n" ^error [^{:tag (* Conn)} c]
+  (.Abort c nil)
+  (<! (.-donec (.-lifetime c)))
+  (.-finalErr (.-lifetime c)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 286} (go/method Wait "Wait waits for the peer to close the connection.\n\nIf the connection is closed locally and the peer does not close its end of the connection,\nWait will return with a non-nil error after the drain period expires.\n\nIf the peer closes the connection with a NO_ERROR transport error, Wait returns nil.\nIf the peer closes the connection with an application error, Wait returns an ApplicationError\ncontaining the peer's error code and reason.\nIf the peer closes the connection with any other status, Wait returns a non-nil error.\n" ^error [^{:tag (* Conn)} c ^context/Context ctx]
+  (when [err (.waitOnDone c ctx (.-donec (.-lifetime c)))] (!= err nil)
+    (return err))
+
+  (.-finalErr (.-lifetime c)))
+
+
+
+
+
+
+
+^{:go/end 300} (go/method Abort "Abort closes the connection and returns immediately.\n\nIf err is nil, Abort sends a transport error of NO_ERROR to the peer.\nIf err is an ApplicationError, Abort sends its error code and text.\nOtherwise, Abort sends a transport error of APPLICATION_ERROR with the error's text.\n" [^{:tag (* Conn)} c ^error err]
+  (when (== err nil)
+    (set! err (lit localTransportError :code errNo)))
+
+  (.sendMsg c ^{:go/end 299} (fn [^time/Time now ^{:tag (* Conn)} c]
+      (.enterClosing c now err))))
+
+
+
+
+^{:go/end 306} (go/method abort "abort terminates a connection with an error.\n" [^{:tag (* Conn)} c ^time/Time now ^error err]
+  (.setFinalError c err) ; this error takes precedence over the peer's CONNECTION_CLOSE
+  (.enterClosing c now err))
+
+
+
+
+^{:go/end 313} (go/method abortImmediately "abortImmediately terminates a connection.\nThe connection does not send a CONNECTION_CLOSE, and skips the draining period.\n" [^{:tag (* Conn)} c ^time/Time now ^error err]
+  (.setFinalError c err)
+  (.setState c now connStateDone))
+
+
+
+
+^{:go/end 325} (go/method enterClosing "enterClosing starts an immediate close.\nWe will send a CONNECTION_CLOSE to the peer and wait for their response.\n" [^{:tag (* Conn)} c ^time/Time now ^error err]
+  (switch (.-state (.-lifetime c))
+    (case [connStateAlive]
+      (set! (.-localErr (.-lifetime c)) err)
+      (.setState c now connStateClosing))
+    (case [connStatePeerClosed]
+      (set! (.-localErr (.-lifetime c)) err))))
+
+
+
+
+^{:go/end 333} (go/method enterDraining "enterDraining moves directly to the draining state, without sending a CONNECTION_CLOSE.\n" [^{:tag (* Conn)} c ^time/Time now]
+  (switch (.-state (.-lifetime c))
+    (case [connStateAlive connStatePeerClosed connStateClosing]
+      (.setState c now connStateDraining))))
+
+
+
+
+^{:go/end 340} (go/method exit "exit fully terminates a connection immediately.\n" [^{:tag (* Conn)} c]
+  (.sendMsg c ^{:go/end 339} (fn [^time/Time now ^{:tag (* Conn)} c]
+      (.abortImmediately c now (errors/New "connection closed")))))

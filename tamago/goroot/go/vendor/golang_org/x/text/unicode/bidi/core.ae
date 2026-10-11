@@ -1,0 +1,1063 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.text.unicode.bidi) (go/file "core.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [log "log"]])
+
+
+;; This implementation is a port based on the reference implementation found at:
+;; https://www.unicode.org/Public/PROGRAMS/BidiReferenceJava/
+;;
+;; described in Unicode Bidirectional Algorithm (UAX #9).
+;;
+;; Input:
+;; There are two levels of input to the algorithm, since clients may prefer to
+;; supply some information from out-of-band sources rather than relying on the
+;; default behavior.
+;;
+;; - Bidi class array
+;; - Bidi class array, with externally supplied base line direction
+;;
+;; Output:
+;; Output is separated into several stages:
+;;
+;;  - levels array over entire paragraph
+;;  - reordering array over entire paragraph
+;;  - levels array over line
+;;  - reordering array over line
+;;
+;; Note that for conformance to the Unicode Bidirectional Algorithm,
+;; implementations are only required to generate correct reordering and
+;; character directionality (odd or even levels) over a line. Generating
+;; identical level arrays over a line is not required. Bidi explicit format
+;; codes (LRE, RLE, LRO, RLO, PDF) and BN can be assigned arbitrary levels and
+;; positions as long as the rest of the input is properly reordered.
+;;
+;; As the algorithm is defined to operate on a single paragraph at a time, this
+;; implementation is written to handle single paragraphs. Thus rule P1 is
+;; presumed by this implementation-- the data provided to the implementation is
+;; assumed to be a single paragraph, and either contains no 'B' codes, or a
+;; single 'B' code at the end of the input. 'B' is allowed as input to
+;; illustrate how the algorithm assigns it a level.
+;;
+;; Also note that rules L3 and L4 depend on the rendering engine that uses the
+;; result of the bidi algorithm. This implementation assumes that the rendering
+;; engine expects combining marks in visual order (e.g. to the left of their
+;; base character in RTL runs) and that it adjusts the glyphs used to render
+;; mirrored characters that are in RTL runs so that they render appropriately.
+
+
+
+
+(go/type level "level is the embedding level of a character. Even embedding levels indicate\nleft-to-right order and odd levels indicate right-to-left order. The special\nlevel of -1 is reserved for undefined order.\n" int8)
+
+(go/const ^{:tag level :val -1} implicitLevel -1)
+
+
+^{:go/breaks [[5 67]] :go/end 68} (go/method in "in returns if x is equal to any of the values in set.\n" ^bool [^Class c & ^{:tag (slice Class)} set]
+  (range [_ s set]
+    (when (== c s)
+      (return true)))
+
+
+  false)
+
+
+
+(go/type paragraph "A paragraph contains the state of a paragraph.\n" (struct
+    ^{:line 72 :tag (slice Class)} initialTypes
+
+
+    ^{:line 75 :tag (slice bracketType) :doc "Arrays of properties needed for paired bracket evaluation in N0\n"} pairTypes ; paired Bracket types for paragraph
+    ^{:line 76 :tag (slice rune)} pairValues ; rune for opening bracket or pbOpen and pbClose; 0 for pbNone
+
+    ^{:line 78 :tag level} embeddingLevel ; default: = implicitLevel;
+
+
+    ^{:line 81 :tag (slice Class) :doc "at the paragraph levels\n"} resultTypes
+    ^{:line 82 :tag (slice level)} resultLevels
+
+
+
+
+
+    ^{:line 88 :tag (slice int) :doc "Index of matching PDI for isolate initiator characters. For other\ncharacters, the value of matchingPDI will be set to -1. For isolate\ninitiators with no matching PDI, matchingPDI will be set to the length of\nthe input string.\n"} matchingPDI
+
+
+
+
+    ^{:line 93 :tag (slice int) :doc "Index of matching isolate initiator for PDI characters. For other\ncharacters, and for PDIs with no matching isolate initiator, the value of\nmatchingIsolateInitiator will be set to -1.\n"} matchingIsolateInitiator))
+
+
+
+
+
+
+
+
+
+^{:go/end 129} (go/func newParagraph "newParagraph initializes a paragraph. The user needs to supply a few arrays\ncorresponding to the preprocessed text input. The types correspond to the\nUnicode BiDi classes for each rune. pairTypes indicates the bracket type for\neach rune. pairValues provides a unique bracket class identifier for each\nrune (suggested is the rune of the open bracket for opening and matching\nclose brackets, after normalization). The embedding levels are optional, but\nmay be supplied to encode embedding levels of styled text.\n" [^{:tag (slice Class)} types ^{:tag (slice bracketType)} pairTypes ^{:tag (slice rune)} pairValues ^level levels] :results [(* paragraph) error]
+  (let [^error err (zero error)]
+    (when [(set! err (validateTypes types))] (!= err nil)
+      (return nil err))
+
+    (when [(set! err (validatePbTypes pairTypes))] (!= err nil)
+      (return nil err))
+
+    (when [(set! err (validatePbValues pairValues pairTypes))] (!= err nil)
+      (return nil err))
+
+    (when [(set! err (validateParagraphEmbeddingLevel levels))] (!= err nil)
+      (return nil err))
+
+
+    (let [p (addr ^{:go/breaks [2 4 [6 122] 8 [10 125]]} (lit paragraph
+            :initialTypes (append (conv (slice Class) nil) (spread types))
+            :embeddingLevel levels
+
+            :pairTypes pairTypes
+            :pairValues pairValues
+
+            :resultTypes (append (conv (slice Class) nil) (spread types))))]
+
+      (.run p)
+      (return p nil))))
+
+
+^{:go/end 131} (go/method Len ^int [^{:tag (* paragraph)} p] (len (.-initialTypes p)))
+
+
+
+^{:go/end 187} (go/method run "The algorithm. Does not include line-based processing (Rules L1, L2).\nThese are applied later in the line-based phase of the algorithm.\n" [^{:tag (* paragraph)} p]
+  (.determineMatchingIsolates p)
+
+  ;; 1) determining the paragraph level
+  ;; Rule P1 is the requirement for entering this algorithm.
+  ;; Rules P2, P3.
+  ;; If no externally supplied paragraph embedding level, use default.
+  (when (== (.-embeddingLevel p) implicitLevel)
+    (set! (.-embeddingLevel p) (.determineParagraphEmbeddingLevel p 0 (.Len p))))
+
+
+  ;; Initialize result levels to paragraph embedding level.
+  (set! (.-resultLevels p) (make (slice level) (.Len p)))
+  (setLevels (.-resultLevels p) (.-embeddingLevel p))
+
+  ;; 2) Explicit levels and directions
+  ;; Rules X1-X8.
+  (.determineExplicitEmbeddingLevels p)
+
+  ;; Rule X9.
+  ;; We do not remove the embeddings, the overrides, the PDFs, and the BNs
+  ;; from the string explicitly. But they are not copied into isolating run
+  ;; sequences when they are created, so they are removed for all
+  ;; practical purposes.
+
+  ;; Rule X10.
+  ;; Run remainder of algorithm one isolating run sequence at a time
+  (range [_ seq (.determineIsolatingRunSequences p)]
+    ;; 3) resolving weak types
+    ;; Rules W1-W7.
+    (.resolveWeakTypes seq)
+
+    ;; 4a) resolving paired brackets
+    ;; Rule N0
+    (resolvePairedBrackets seq)
+
+    ;; 4b) resolving neutral types
+    ;; Rules N1-N3.
+    (.resolveNeutralTypes seq)
+
+    ;; 5) resolving implicit embedding levels
+    ;; Rules I1, I2.
+    (.resolveImplicitLevels seq)
+
+    ;; Apply the computed levels and types
+    (.applyLevelsAndTypes seq))
+
+
+  ;; Assign appropriate levels to 'hide' LREs, RLEs, LROs, RLOs, PDFs, and
+  ;; BNs. This is for convenience, so the resulting level array will have
+  ;; a value for every character.
+  (.assignLevelsToCharactersRemovedByX9 p))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 233} (go/method determineMatchingIsolates "determineMatchingIsolates determines the matching PDI for each isolate\ninitiator and vice versa.\n\nDefinition BD9.\n\nAt the end of this function:\n\n  - The member variable matchingPDI is set to point to the index of the\n    matching PDI character for each isolate initiator character. If there is\n    no matching PDI, it is set to the length of the input text. For other\n    characters, it is set to -1.\n  - The member variable matchingIsolateInitiator is set to point to the\n    index of the matching isolate initiator character for each PDI character.\n    If there is no matching isolate initiator, or the character is not a PDI,\n    it is set to -1.\n" [^{:tag (* paragraph)} p]
+  (set! (.-matchingPDI p) (make (slice int) (.Len p)))
+  (set! (.-matchingIsolateInitiator p) (make (slice int) (.Len p)))
+
+  (range [i (.-matchingIsolateInitiator p)]
+    (aset (.-matchingIsolateInitiator p) i -1))
+
+
+  (range [i (.-matchingPDI p)]
+    (aset (.-matchingPDI p) i -1)
+
+    (when [t (aget (.-resultTypes p) i)] (.in t LRI RLI FSI)
+      (let [depthCounter 1]
+        (for [j (+ i 1)] (< j (.Len p)) (inc! j)
+          (if [u (aget (.-resultTypes p) j)] (.in u LRI RLI FSI)
+            (inc! depthCounter)
+            (when (== u PDI)
+              (when [(dec! depthCounter)] (== depthCounter 0)
+                (aset (.-matchingPDI p) i j)
+                (aset (.-matchingIsolateInitiator p) j i)
+                (break)))))
+
+
+
+        (when (== (aget (.-matchingPDI p) i) -1)
+          (aset (.-matchingPDI p) i (.Len p)))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 265} (go/method determineParagraphEmbeddingLevel "determineParagraphEmbeddingLevel reports the resolved paragraph direction of\nthe substring limited by the given range [start, end).\n\nDetermines the paragraph level based on rules P2, P3. This is also used\nin rule X5c to find if an FSI should resolve to LRI or RLI.\n" ^level [^{:tag (* paragraph)} p ^int start ^int end]
+  (let [^Class strongType unknownClass]
+
+    ;; Rule P2.
+    (for [i start] (< i end) (inc! i)
+      (if [t (aget (.-resultTypes p) i)] (.in t L AL R) (do
+          (set! strongType t)
+          (break))
+        (when (.in t FSI LRI RLI)
+          (set! i (aget (.-matchingPDI p) i)) ; skip over to the matching PDI
+          (when (> i end)
+            (log/Panic "assert (i <= end)")))))
+
+
+
+    ;; Rule P3.
+    (switch strongType
+      (case [unknownClass] ; none found
+        ;; default embedding level when no strong types found is 0.
+        (return 0))
+      (case [L]
+        (return 0))
+      (default ; AL, R
+        (return 1)))))
+
+
+
+(go/const ^{:val 125} maxDepth 125)
+
+
+
+(go/type directionalStatusStack "This stack will store the embedding levels and override and isolated\nstatuses\n" (struct
+    ^{:line 272 :tag int} stackCounter
+    ^{:line 273 :tag (array (+ maxDepth 1) level)} embeddingLevelStack
+    ^{:line 274 :tag (array (+ maxDepth 1) Class)} overrideStatusStack
+    ^{:line 275 :tag (array (+ maxDepth 1) bool)} isolateStatusStack))
+
+
+^{:go/end 278} (go/method empty [^{:tag (* directionalStatusStack)} s] (set! (.-stackCounter s) 0))
+^{:go/end 279} (go/method pop [^{:tag (* directionalStatusStack)} s] (dec! (.-stackCounter s)))
+^{:go/end 280} (go/method depth ^int [^{:tag (* directionalStatusStack)} s] (.-stackCounter s))
+
+^{:go/end 287} (go/method push [^{:tag (* directionalStatusStack)} s ^level level ^Class overrideStatus ^bool isolateStatus]
+  (aset (.-embeddingLevelStack s) (.-stackCounter s) level)
+  (aset (.-overrideStatusStack s) (.-stackCounter s) overrideStatus)
+  (aset (.-isolateStatusStack s) (.-stackCounter s) isolateStatus)
+  (inc! (.-stackCounter s)))
+
+
+^{:go/end 291} (go/method lastEmbeddingLevel ^level [^{:tag (* directionalStatusStack)} s]
+  (aget (.-embeddingLevelStack s) (- (.-stackCounter s) 1)))
+
+
+^{:go/end 295} (go/method lastDirectionalOverrideStatus ^Class [^{:tag (* directionalStatusStack)} s]
+  (aget (.-overrideStatusStack s) (- (.-stackCounter s) 1)))
+
+
+^{:go/end 299} (go/method lastDirectionalIsolateStatus ^bool [^{:tag (* directionalStatusStack)} s]
+  (aget (.-isolateStatusStack s) (- (.-stackCounter s) 1)))
+
+
+
+^{:go/end 415} (go/method determineExplicitEmbeddingLevels "Determine explicit levels using rules X1 - X8\n" [^{:tag (* paragraph)} p]
+  (let [^directionalStatusStack stack (zero directionalStatusStack)
+      (values ^int overflowIsolateCount ^int overflowEmbeddingCount ^int validIsolateCount) (zero int)]
+
+    ;; Rule X1.
+    (.push stack (.-embeddingLevel p) ON false)
+
+    (range [i t (.-resultTypes p)]
+      ;; Rules X2, X3, X4, X5, X5a, X5b, X5c
+      (switch t
+        (case [RLE LRE RLO LRO RLI LRI FSI]
+          (let [isIsolate (.in t RLI LRI FSI)
+              ^{:line 314} isRTL (.in t RLE RLO RLI)]
+
+            ;; override if this is an FSI that resolves to RLI
+            (when (== t FSI)
+              (set! isRTL (== (.determineParagraphEmbeddingLevel p (+ i 1) (aget (.-matchingPDI p) i)) 1)))
+
+            (when isIsolate
+              (aset (.-resultLevels p) i (.lastEmbeddingLevel stack))
+              (when (!= (.lastDirectionalOverrideStatus stack) ON)
+                (aset (.-resultTypes p) i (.lastDirectionalOverrideStatus stack))))
+
+
+
+            (let [^level newLevel (zero level)]
+              (if isRTL
+                ;; least greater odd
+                (set! newLevel (bit-or (+ (.lastEmbeddingLevel stack) 1) 1))
+
+                ;; least greater even
+                (set! newLevel (bit-and-not (+ (.lastEmbeddingLevel stack) 2) 1)))
+
+
+              (if (and (<= newLevel maxDepth) (== overflowIsolateCount 0) (== overflowEmbeddingCount 0)) (do
+                  (when isIsolate
+                    (inc! validIsolateCount))
+
+                  ;; Push new embedding level, override status, and isolated
+                  ;; status.
+                  ;; No check for valid stack counter, since the level check
+                  ;; suffices.
+                  (switch t
+                    (case [LRO]
+                      (.push stack newLevel L isIsolate))
+                    (case [RLO]
+                      (.push stack newLevel R isIsolate))
+                    (default
+                      (.push stack newLevel ON isIsolate)))
+
+                  ;; Not really part of the spec
+                  (when (not isIsolate)
+                    (aset (.-resultLevels p) i newLevel)))
+
+                (do
+                  ;; This is an invalid explicit formatting character,
+                  ;; so apply the "Otherwise" part of rules X2-X5b.
+                  (if isIsolate
+                    (inc! overflowIsolateCount)
+                    (do ; !isIsolate
+                      (when (== overflowIsolateCount 0)
+                        (inc! overflowEmbeddingCount)))))))))
+
+
+
+
+        ;; Rule X6a
+        (case [PDI]
+          (cond (> overflowIsolateCount 0)
+            (dec! overflowIsolateCount)
+            (== validIsolateCount 0) (do) :else
+            ;; do nothing
+            (do
+              (set! overflowEmbeddingCount 0)
+              (while (not (.lastDirectionalIsolateStatus stack))
+                (.pop stack))
+
+              (.pop stack)
+              (dec! validIsolateCount)))
+
+          (aset (.-resultLevels p) i (.lastEmbeddingLevel stack)))
+
+        ;; Rule X7
+        (case [PDF]
+          ;; Not really part of the spec
+          (aset (.-resultLevels p) i (.lastEmbeddingLevel stack))
+
+          (cond (> overflowIsolateCount 0) (do)
+            ;; do nothing
+            (> overflowEmbeddingCount 0)
+            (dec! overflowEmbeddingCount)
+            (and (not (.lastDirectionalIsolateStatus stack)) (>= (.depth stack) 2))
+            (.pop stack)))
+
+
+        (case [B] ; paragraph separator.
+          ;; Rule X8.
+
+          ;; These values are reset for clarity, in this implementation B
+          ;; can only occur as the last code in the array.
+          (.empty stack)
+          (set! overflowIsolateCount 0)
+          (set! overflowEmbeddingCount 0)
+          (set! validIsolateCount 0)
+          (aset (.-resultLevels p) i (.-embeddingLevel p)))
+
+        (default
+          (aset (.-resultLevels p) i (.lastEmbeddingLevel stack))
+          (when (!= (.lastDirectionalOverrideStatus stack) ON)
+            (aset (.-resultTypes p) i (.lastDirectionalOverrideStatus stack))))))))
+
+
+
+
+
+(go/type isolatingRunSequence (struct
+    ^{:line 418 :tag (* paragraph)} p
+
+    ^{:line 420 :tag (slice int)} indexes ; indexes to the original string
+
+    ^{:line 422 :tag (slice Class)} types ; type of each character using the index
+    ^{:line 423 :tag (slice level)} resolvedLevels ; resolved levels after application of rules
+    ^{:line 424 :tag level} level
+    ^{:line 425 :tag Class} sos ^Class eos))
+
+
+^{:go/end 428} (go/method Len ^int [^{:tag (* isolatingRunSequence)} i] (len (.-indexes i)))
+
+
+
+^{:go/end 473} (go/method isolatingRunSequence "Rule X10, second bullet: Determine the start-of-sequence (sos) and end-of-sequence (eos) types,\neither L or R, for each isolating run sequence.\n" ^{:tag (* isolatingRunSequence)} [^{:tag (* paragraph)} p ^{:tag (slice int)} indexes]
+  (let [length (len indexes)
+      ^{:line 434} types (make (slice Class) length)]
+    (range [i x indexes]
+      (aset types i (aget (.-resultTypes p) x)))
+
+
+    ;; assign level, sos and eos
+    (let [prevChar (- (aget indexes 0) 1)]
+      (while (and (>= prevChar 0) (isRemovedByX9 (aget (.-initialTypes p) prevChar)))
+        (dec! prevChar))
+
+      (let [prevLevel (.-embeddingLevel p)]
+        (when (>= prevChar 0)
+          (set! prevLevel (aget (.-resultLevels p) prevChar)))
+
+
+        (let [^level succLevel (zero level)
+            ^{:line 450} lastType (aget types (- length 1))]
+          (if (.in lastType LRI RLI FSI)
+            (set! succLevel (.-embeddingLevel p))
+
+            ;; the first character after the end of run sequence
+            (let [limit (+ (aget indexes (- length 1)) 1)]
+              (for [] (and (< limit (.Len p)) (isRemovedByX9 (aget (.-initialTypes p) limit))) (inc! limit))
+
+
+              (set! succLevel (.-embeddingLevel p))
+              (when (< limit (.Len p))
+                (set! succLevel (aget (.-resultLevels p) limit)))))
+
+
+          (let [level (aget (.-resultLevels p) (aget indexes 0))]
+            (addr ^{:go/breaks [2 4 6 8 10 12]} (lit isolatingRunSequence
+                :p p
+                :indexes indexes
+                :types types
+                :level level
+                :sos (typeForLevel (max prevLevel level))
+                :eos (typeForLevel (max succLevel level))))))))))
+
+
+
+
+
+
+
+^{:go/end 596} (go/method resolveWeakTypes "Resolving weak types Rules W1-W7.\n\nNote that some weak types (EN, AN) remain after this processing is\ncomplete.\n" [^{:tag (* isolatingRunSequence)} s]
+
+  ;; on entry, only these types remain
+  (.assertOnly s L R AL EN ES ET AN CS B S WS ON NSM LRI RLI FSI PDI)
+
+  ;; Rule W1.
+  ;; Changes all NSMs.
+  (let [precedingCharacterType (.-sos s)]
+    (range [i t (.-types s)]
+      (if (== t NSM)
+        (aset (.-types s) i precedingCharacterType)
+
+        ;; if t.in(LRI, RLI, FSI, PDI) {
+        ;; 	precedingCharacterType = ON
+        ;; }
+        (set! precedingCharacterType t)))
+
+
+
+    ;; Rule W2.
+    ;; EN does not change at the start of the run, because sos != AL.
+    (range [i t (.-types s)]
+      (when (== t EN)
+        (for [j (- i 1)] (>= j 0) (dec! j)
+          (when [t (aget (.-types s) j)] (.in t L R AL)
+            (when (== t AL)
+              (aset (.-types s) i AN))
+
+            (break)))))
+
+
+
+
+
+    ;; Rule W3.
+    (range [i t (.-types s)]
+      (when (== t AL)
+        (aset (.-types s) i R)))
+
+
+
+    ;; Rule W4.
+    ;; Since there must be values on both sides for this rule to have an
+    ;; effect, the scan skips the first and last value.
+    ;;
+    ;; Although the scan proceeds left to right, and changes the type
+    ;; values in a way that would appear to affect the computations
+    ;; later in the scan, there is actually no problem. A change in the
+    ;; current value can only affect the value to its immediate right,
+    ;; and only affect it if it is ES or CS. But the current value can
+    ;; only change if the value to its right is not ES or CS. Thus
+    ;; either the current value will not change, or its change will have
+    ;; no effect on the remainder of the analysis.
+
+    (for [i 1] (< i (- (.Len s) 1)) (inc! i)
+      (let [t (aget (.-types s) i)]
+        (when (or (== t ES) (== t CS))
+          (let [prevSepType (aget (.-types s) (- i 1))
+              ^{:line 537} succSepType (aget (.-types s) (+ i 1))]
+            (cond (and (== prevSepType EN) (== succSepType EN))
+              (aset (.-types s) i EN)
+              (and (== (aget (.-types s) i) CS) (== prevSepType AN) (== succSepType AN))
+              (aset (.-types s) i AN))))))
+
+
+
+
+    ;; Rule W5.
+    (range [i t (.-types s)]
+      (when (== t ET)
+        ;; locate end of sequence
+        (let [runStart i
+            ^{:line 551} runEnd (.findRunLimit s runStart ET)
+
+            ;; check values at ends of sequence
+            ^{:line 554} t (.-sos s)]
+          (when (> runStart 0)
+            (set! t (aget (.-types s) (- runStart 1))))
+
+          (when (!= t EN)
+            (set! t (.-eos s))
+            (when (< runEnd (len (.-types s)))
+              (set! t (aget (.-types s) runEnd))))
+
+
+          (when (== t EN)
+            (setTypes (subslice (.-types s) runStart runEnd) EN))
+
+          ;; continue at end of sequence
+          (set! i runEnd))))
+
+
+
+    ;; Rule W6.
+    (range [i t (.-types s)]
+      (when (.in t ES ET CS)
+        (aset (.-types s) i ON)))
+
+
+
+    ;; Rule W7.
+    (range [i t (.-types s)]
+      (when (== t EN)
+        ;; set default if we reach start of run
+        (let [prevStrongType (.-sos s)]
+          (for [j (- i 1)] (>= j 0) (dec! j)
+            (set! t (aget (.-types s) j))
+            (when (or (== t L) (== t R)) ; AL's have been changed to R
+              (set! prevStrongType t)
+              (break)))
+
+
+          (when (== prevStrongType L)
+            (aset (.-types s) i L)))))))
+
+
+
+
+
+
+^{:go/end 650} (go/method resolveNeutralTypes "6) resolving neutral types Rules N1-N2.\n" [^{:tag (* isolatingRunSequence)} s]
+
+  ;; on entry, only these types can be in resultTypes
+  (.assertOnly s L R EN AN B S WS ON RLI LRI FSI PDI)
+
+  (range [i t (.-types s)]
+    (switch t
+      (case [WS ON B S RLI LRI FSI PDI]
+        ;; find bounds of run of neutrals
+        (let [runStart i
+            ^{:line 609} runEnd (.findRunLimit s runStart B S WS ON RLI LRI FSI PDI)
+
+            ;; determine effective types at ends of run
+            (values ^Class leadType ^Class trailType) (zero Class)]
+
+          ;; Note that the character found can only be L, R, AN, or
+          ;; EN.
+          (if (== runStart 0)
+            (set! leadType (.-sos s))
+            (do
+              (set! leadType (aget (.-types s) (- runStart 1)))
+              (when (.in leadType AN EN)
+                (set! leadType R))))
+
+
+          (if (== runEnd (len (.-types s)))
+            (set! trailType (.-eos s))
+            (do
+              (set! trailType (aget (.-types s) runEnd))
+              (when (.in trailType AN EN)
+                (set! trailType R))))
+
+
+
+          (let [^Class resolvedType (zero Class)]
+            (if (== leadType trailType)
+              ;; Rule N1.
+              (set! resolvedType leadType)
+
+              ;; Rule N2.
+              ;; Notice the embedding level of the run is used, not
+              ;; the paragraph embedding level.
+              (set! resolvedType (typeForLevel (.-level s))))
+
+
+            (setTypes (subslice (.-types s) runStart runEnd) resolvedType)
+
+            ;; skip over run of (former) neutrals
+            (set! i runEnd)))))))
+
+
+
+
+^{:go/end 656} (go/func setLevels [^{:tag (slice level)} levels ^level newLevel]
+  (range [i levels]
+    (aset levels i newLevel)))
+
+
+
+^{:go/end 662} (go/func setTypes [^{:tag (slice Class)} types ^Class newType]
+  (range [i types]
+    (aset types i newType)))
+
+
+
+
+^{:go/end 694} (go/method resolveImplicitLevels "7) resolving implicit embedding levels Rules I1, I2.\n" [^{:tag (* isolatingRunSequence)} s]
+
+  ;; on entry, only these types can be in resultTypes
+  (.assertOnly s L R EN AN)
+
+  (set! (.-resolvedLevels s) (make (slice level) (len (.-types s))))
+  (setLevels (.-resolvedLevels s) (.-level s))
+
+  (if (== (bit-and (.-level s) 1) 0) ; even level
+    (range [i t (.-types s)]
+      ;; Rule I1.
+      (cond (== t L) (do)
+        ;; no change
+        (== t R)
+        (set! (aget (.-resolvedLevels s) i) + 1) :else
+        ;; t == AN || t == EN
+        (set! (aget (.-resolvedLevels s) i) + 2)))
+
+
+    ;; odd level
+    (range [i t (.-types s)]
+      ;; Rule I2.
+      (if (== t R) (do)
+        ;; no change
+        ;; t == L || t == AN || t == EN
+        (set! (aget (.-resolvedLevels s) i) + 1)))))
+
+
+
+
+
+
+
+^{:go/end 703} (go/method applyLevelsAndTypes "Applies the levels and types resolved in rules W1-I2 to the\nresultLevels array.\n" [^{:tag (* isolatingRunSequence)} s]
+  (range [i x (.-indexes s)]
+    (aset (.-resultTypes (.-p s)) x (aget (.-types s) i))
+    (aset (.-resultLevels (.-p s)) x (aget (.-resolvedLevels s) i))))
+
+
+
+
+
+
+^{:go/end 720} (go/method findRunLimit "Return the limit of the run consisting only of the types in validSet\nstarting at index. This checks the value at index, and will return\nindex if that value is not in validSet.\n" ^int [^{:tag (* isolatingRunSequence)} s ^int index & ^{:tag (slice Class)} validSet]
+  (label :loop
+    (for [] (< index (len (.-types s))) (inc! index)
+      (let [t (aget (.-types s) index)]
+        (range [_ valid validSet]
+          (when (== t valid)
+            (continue :loop)))
+
+
+        (return index)))) ; didn't find a match in validSet
+
+  (len (.-types s)))
+
+
+
+
+^{:go/end 734} (go/method assertOnly "Algorithm validation. Assert that all values in types are in the\nprovided set.\n" [^{:tag (* isolatingRunSequence)} s & ^{:tag (slice Class)} codes]
+  (label :loop
+    (range [i t (.-types s)]
+      (range [_ c codes]
+        (when (== t c)
+          (continue :loop)))
+
+
+      (log/Panicf "invalid bidi code %v present in assertOnly at position %d" t (aget (.-indexes s) i)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 766} (go/method determineLevelRuns "determineLevelRuns returns an array of level runs. Each level run is\ndescribed as an array of indexes into the input string.\n\nDetermines the level runs. Rule X9 will be applied in determining the\nruns, in the way that makes sure the characters that are supposed to be\nremoved are not included in the runs.\n" ^{:tag (slice (slice int))} [^{:tag (* paragraph)} p]
+  (let [run (lit (slice int))
+      ^{:line 744} allRuns (lit (slice (slice int)))
+      ^{:line 745} currentLevel implicitLevel]
+
+    (range [i (.-initialTypes p)]
+      (when (not (isRemovedByX9 (aget (.-initialTypes p) i)))
+        (when (!= (aget (.-resultLevels p) i) currentLevel)
+          ;; we just encountered a new run; wrap up last run
+          (when (>= currentLevel 0) ; only wrap it up if there was a run
+            (set! allRuns (append allRuns run))
+            (set! run nil))
+
+          ;; Start new run
+          (set! currentLevel (aget (.-resultLevels p) i)))
+
+        (set! run (append run i))))
+
+
+    ;; Wrap up the final run, if any
+    (when (> (len run) 0)
+      (set! allRuns (append allRuns run)))
+
+    ^{:line 765} allRuns))
+
+
+
+^{:go/end 805} (go/method determineIsolatingRunSequences "Definition BD13. Determine isolating run sequences.\n" ^{:tag (slice (* isolatingRunSequence))} [^{:tag (* paragraph)} p]
+  (let [levelRuns (.determineLevelRuns p)
+
+      ;; Compute the run that each character belongs to
+      ^{:line 773} runForCharacter (make (slice int) (.Len p))]
+    (range [i run levelRuns]
+      (range [_ index run]
+        (aset runForCharacter index i)))
+
+
+
+    (let [sequences (lit (slice (* isolatingRunSequence)))
+
+        ^{:line 782 :tag (slice int)} currentRunSequence (zero (slice int))]
+
+      (range [_ run levelRuns]
+        (let [first (aget run 0)]
+          (when (or (!= (aget (.-initialTypes p) first) PDI) (== (aget (.-matchingIsolateInitiator p) first) -1))
+            (set! currentRunSequence nil)
+            ;; int run = i;
+            (while true
+              ;; Copy this level run into currentRunSequence
+              (set! currentRunSequence (append currentRunSequence (spread run)))
+
+              (let [last (aget currentRunSequence (- (len currentRunSequence) 1))
+                  ^{:line 794} lastT (aget (.-initialTypes p) last)]
+                (if (and (.in lastT LRI RLI FSI) (!= (aget (.-matchingPDI p) last) (.Len p)))
+                  (set! run (aget levelRuns (aget runForCharacter (aget (.-matchingPDI p) last))))
+
+                  (break))))
+
+
+            (set! sequences (append sequences (.isolatingRunSequence p currentRunSequence))))))
+
+
+      ^{:line 804} sequences)))
+
+
+
+
+
+
+^{:go/end 832} (go/method assignLevelsToCharactersRemovedByX9 "Assign level information to characters removed by rule X9. This is for\nease of relating the level information to the original input data. Note\nthat the levels assigned to these codes are arbitrary, they're chosen so\nas to avoid breaking level runs.\n" [^{:tag (* paragraph)} p]
+  (range [i t (.-initialTypes p)]
+    (when (.in t LRE RLE LRO RLO PDF BN)
+      (aset (.-resultTypes p) i t)
+      (aset (.-resultLevels p) i -1)))
+
+
+  ;; now propagate forward the levels information (could have
+  ;; propagated backward, the main thing is not to introduce a level
+  ;; break where one doesn't already exist).
+
+  (when (== (aget (.-resultLevels p) 0) -1)
+    (aset (.-resultLevels p) 0 (.-embeddingLevel p)))
+
+  (for [i 1] (< i (len (.-initialTypes p))) (inc! i)
+    (when (== (aget (.-resultLevels p) i) -1)
+      (aset (.-resultLevels p) i (aget (.-resultLevels p) (- i 1))))))
+
+
+;; Embedding information is for informational purposes only so need not be
+;; adjusted.
+
+
+;;
+;; Output
+;;
+
+
+
+
+
+
+
+^{:go/end 893} (go/method getLevels "getLevels computes levels array breaking lines at offsets in linebreaks.\nRule L1.\n\nThe linebreaks array must include at least one value. The values must be\nin strictly increasing order (no duplicates) between 1 and the length of\nthe text, inclusive. The last value must be the length of the text.\n" ^{:tag (slice level)} [^{:tag (* paragraph)} p ^{:tag (slice int)} linebreaks]
+  ;; Note that since the previous processing has removed all
+  ;; P, S, and WS values from resultTypes, the values referred to
+  ;; in these rules are the initial types, before any processing
+  ;; has been applied (including processing of overrides).
+  ;;
+  ;; This example implementation has reinserted explicit format codes
+  ;; and BN, in order that the levels array correspond to the
+  ;; initial text. Their final placement is not normative.
+  ;; These codes are treated like WS in this implementation,
+  ;; so they don't interrupt sequences of WS.
+
+  (validateLineBreaks linebreaks (.Len p))
+
+  (let [result (append (conv (slice level) nil) (spread (.-resultLevels p)))]
+
+    ;; don't worry about linebreaks since if there is a break within
+    ;; a series of WS values preceding S, the linebreak itself
+    ;; causes the reset.
+    (range [i t (.-initialTypes p)]
+      (when (.in t B S)
+        ;; Rule L1, clauses one and two.
+        (aset result i (.-embeddingLevel p))
+
+        ;; Rule L1, clause three.
+        (for [j (- i 1)] (>= j 0) (dec! j)
+          (if (isWhitespace (aget (.-initialTypes p) j)) ; including format codes
+            (aset result j (.-embeddingLevel p))
+
+            (break)))))
+
+
+
+
+
+    ;; Rule L1, clause four.
+    (let [start 0]
+      (range [_ limit linebreaks]
+        (for [j (- limit 1)] (>= j start) (dec! j)
+          (if (isWhitespace (aget (.-initialTypes p) j)) ; including format codes
+            (aset result j (.-embeddingLevel p))
+
+            (break)))
+
+
+        (set! start limit))
+
+
+      ^{:line 892} result)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 914} (go/method getReordering "getReordering returns the reordering of lines from a visual index to a\nlogical index for line breaks at the given offsets.\n\nLines are concatenated from left to right. So for example, the fifth\ncharacter from the left on the third line is\n\n\tgetReordering(linebreaks)[linebreaks[1] + 4]\n\n(linebreaks[1] is the position after the last character of the second\nline, which is also the index of the first character on the third line,\nand adding four gets the fifth character from the left).\n\nThe linebreaks array must include at least one value. The values must be\nin strictly increasing order (no duplicates) between 1 and the length of\nthe text, inclusive. The last value must be the length of the text.\n" ^{:tag (slice int)} [^{:tag (* paragraph)} p ^{:tag (slice int)} linebreaks]
+  (validateLineBreaks linebreaks (.Len p))
+
+  (computeMultilineReordering (.getLevels p linebreaks) linebreaks))
+
+
+
+
+^{:go/end 932} (go/func computeMultilineReordering "Return multiline reordering array for a given level array. Reordering\ndoes not occur across a line break.\n" ^{:tag (slice int)} [^{:tag (slice level)} levels ^{:tag (slice int)} linebreaks]
+  (let [result (make (slice int) (len levels))
+
+      ^{:line 921} start 0]
+    (range [_ limit linebreaks]
+      (let [tempLevels (make (slice level) (- limit start))]
+        (copy tempLevels (subslice levels start))
+
+        (range [j order (computeReordering tempLevels)]
+          (aset result (+ start j) (+ order start)))
+
+        (set! start limit)))
+
+    ^{:line 931} result))
+
+
+
+
+
+^{:go/end 978} (go/func computeReordering "Return reordering array for a given level array. This reorders a single\nline. The reordering is a visual to logical map. For example, the\nleftmost char is string.charAt(order[0]). Rule L2.\n" ^{:tag (slice int)} [^{:tag (slice level)} levels]
+  (let [result (make (slice int) (len levels))]
+    ;; initialize order
+    (range [i result]
+      (aset result i i))
+
+
+    ;; locate highest level found on line.
+    ;; Note the rules say text, but no reordering across line bounds is
+    ;; performed, so this is sufficient.
+    (let [highestLevel (conv level 0)
+        ^{:line 948} lowestOddLevel (conv level (+ maxDepth 2))]
+      (range [_ level levels]
+        (when (> level highestLevel)
+          (set! highestLevel level))
+
+        (when (and (!= (bit-and level 1) 0) (< level lowestOddLevel))
+          (set! lowestOddLevel level)))
+
+
+
+      (for [level highestLevel] (>= level lowestOddLevel) (dec! level)
+        (for [i 0] (< i (len levels)) (inc! i)
+          (when (>= (aget levels i) level)
+            ;; find range of text at or above this level
+            (let [start i
+                ^{:line 963} limit (+ i 1)]
+              (while (and (< limit (len levels)) (>= (aget levels limit) level))
+                (inc! limit))
+
+
+              (for [(values j k) (values start (- limit 1))] (< j k) (set! (values j k) (values (+ j 1) (- k 1)))
+                (set! (values (aget result j) (aget result k)) (values (aget result k) (aget result j))))
+
+              ;; skip to end of level run
+              (set! i limit)))))
+
+
+
+
+      ^{:line 977} result)))
+
+
+
+
+^{:go/breaks [[5 987]] :go/end 988} (go/func isWhitespace "isWhitespace reports whether the type is considered a whitespace type for the\nline break rules.\n" ^bool [^Class c]
+  (switch c
+    (case [LRE RLE LRO RLO PDF LRI RLI FSI PDI BN WS]
+      (return true)))
+
+  false)
+
+
+
+^{:go/breaks [[5 996]] :go/end 997} (go/func isRemovedByX9 "isRemovedByX9 reports whether the type is one of the types removed in X9.\n" ^bool [^Class c]
+  (switch c
+    (case [LRE RLE LRO RLO PDF BN]
+      (return true)))
+
+  false)
+
+
+
+^{:go/end 1005} (go/func typeForLevel "typeForLevel reports the strong type (L or R) corresponding to the level.\n" ^Class [^level level]
+  (when (== (bit-and level 0x1) 0)
+    (return L))
+
+  ^{:line 1004} R)
+
+
+^{:go/breaks [[5 1016]] :go/end 1017} (go/func validateTypes ^error [^{:tag (slice Class)} types]
+  (when (== (len types) 0)
+    (return (fmt/Errorf "types is null")))
+
+  (range [i t (subslice types _ (- (len types) 1))]
+    (when (== t B)
+      (return (fmt/Errorf "B type before end of paragraph at index: %d" i))))
+
+
+  nil)
+
+
+^{:go/breaks [[4 1025]] :go/end 1026} (go/func validateParagraphEmbeddingLevel ^error [^level embeddingLevel]
+  (when (and (!= embeddingLevel implicitLevel)
+      (!= embeddingLevel 0)
+      (!= embeddingLevel 1))
+    (return (fmt/Errorf "illegal paragraph embedding level: %d" embeddingLevel)))
+
+  nil)
+
+
+^{:go/end 1040} (go/func validateLineBreaks ^error [^{:tag (slice int)} linebreaks ^int textLength]
+  ^{:go/breaks [[4 1039]]} (let [prev 0]
+    (range [i next linebreaks]
+      (when (<= next prev)
+        (return (fmt/Errorf "bad linebreak: %d at index: %d" next i)))
+
+      (set! prev next))
+
+    (when (!= prev textLength)
+      (return (fmt/Errorf "last linebreak was %d, want %d" prev textLength)))
+
+    nil))
+
+
+^{:go/breaks [[5 1053]] :go/end 1054} (go/func validatePbTypes ^error [^{:tag (slice bracketType)} pairTypes]
+  (when (== (len pairTypes) 0)
+    (return (fmt/Errorf "pairTypes is null")))
+
+  (range [i pt pairTypes]
+    (switch pt
+      (case [bpNone bpOpen bpClose])
+      (default
+        (return (fmt/Errorf "illegal pairType value at %d: %v" i (aget pairTypes i))))))
+
+
+  nil)
+
+
+^{:go/breaks [[5 1063]] :go/end 1064} (go/func validatePbValues ^error [^{:tag (slice rune)} pairValues ^{:tag (slice bracketType)} pairTypes]
+  (when (== pairValues nil)
+    (return (fmt/Errorf "pairValues is null")))
+
+  (when (!= (len pairTypes) (len pairValues))
+    (return (fmt/Errorf "pairTypes is different length from pairValues")))
+
+  nil)

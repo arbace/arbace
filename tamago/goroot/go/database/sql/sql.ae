@@ -1,0 +1,3723 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package sql provides a generic interface around SQL (or SQL-like)
+;; databases.
+;;
+;; The sql package must be used in conjunction with a database driver.
+;; See https://golang.org/s/sqldrivers for a list of drivers.
+;;
+;; Drivers that do not support context cancellation will not return until
+;; after the query is completed.
+;;
+;; For usage examples, see the wiki page at
+;; https://golang.org/s/sqlwiki.
+(in-ns 'go.database.sql) (go/file "sql.go" :doc "Package sql provides a generic interface around SQL (or SQL-like)\ndatabases.\n\nThe sql package must be used in conjunction with a database driver.\nSee https://golang.org/s/sqldrivers for a list of drivers.\n\nDrivers that do not support context cancellation will not return until\nafter the query is completed.\n\nFor usage examples, see the wiki page at\nhttps://golang.org/s/sqlwiki.\n" :imports [
+
+
+    ^{:line 19} [context "context"]
+    ^{:line 20} [driver "database/sql/driver"]
+    ^{:line 21} [internal "database/sql/internal"]
+    ^{:line 22} [errors "errors"]
+    ^{:line 23} [fmt "fmt"]
+    ^{:line 24} [io "io"]
+    ^{:line 25} [maps "maps"]
+    ^{:line 26} [rand "math/rand/v2"]
+    ^{:line 27} [reflect "reflect"]
+    ^{:line 28} [runtime "runtime"]
+    ^{:line 29} [slices "slices"]
+    ^{:line 30} [strconv "strconv"]
+    ^{:line 31} [sync "sync"]
+    ^{:line 32} [atomic "sync/atomic"]
+    ^{:line 33} [time "time"]
+    ^{:line 34} [_ "unsafe"]])
+
+
+(go/var ^sync/RWMutex driversMu)
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "drivers should be an internal detail,\nbut widely used packages access it using linkname.\n(It is extra wrong that they linkname drivers but not driversMu.)\nNotable members of the hall of shame include:\n  - github.com/instana/go-sensor\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" :go/linkname "drivers"} drivers (make (map string driver/Driver)))
+
+
+
+
+^{:go/end 64} (go/func Register "Register makes a database driver available by the provided name.\nIf Register is called twice with the same name or if driver is nil,\nit panics.\n" [^string name ^driver/Driver driver]
+  (.Lock driversMu)
+  (defer (.Unlock driversMu))
+  (when (== driver nil)
+    (panic "sql: Register driver is nil"))
+
+  (when [(values _ dup) (aget drivers name)] dup
+    (panic (+ "sql: Register called twice for driver " name)))
+
+  (aset drivers name driver))
+
+
+^{:go/end 71} (go/func unregisterAllDrivers []
+  (.Lock driversMu)
+  (defer (.Unlock driversMu))
+  ;; For tests.
+  (set! drivers (make (map string driver/Driver))))
+
+
+
+^{:go/end 78} (go/func Drivers "Drivers returns a sorted list of the names of the registered drivers.\n" ^{:tag (slice string)} []
+  (.RLock driversMu)
+  (defer (.RUnlock driversMu))
+  (^{:inst [string]} slices/Sorted (^{:inst [(map string driver/Driver) string driver/Driver]} maps/Keys drivers)))
+
+
+
+
+
+
+
+
+(go/type NamedArg "A NamedArg is a named argument. NamedArg values may be used as\narguments to [DB.Query] or [DB.Exec] and bind to the corresponding named\nparameter in the SQL statement.\n\nFor a more concise way to create NamedArg values, see\nthe [Named] function.\n" (struct
+    ^{:line 87 :tag (struct)} _NamedFieldsRequired
+
+
+
+
+
+
+
+    ^{:line 95 :tag string :doc "Name is the name of the parameter placeholder.\n\nIf empty, the ordinal position in the argument list will be\nused.\n\nName must omit any symbol prefix.\n"} Name
+
+
+
+
+    ^{:line 100 :tag any :doc "Value is the value of the parameter.\nIt may be assigned the same value types as the query\narguments.\n"} Value))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 121} (go/func Named "Named provides a more concise way to create [NamedArg] values.\n\nExample usage:\n\n\tdb.ExecContext(ctx, `\n\t    delete from Invoice\n\t    where\n\t        TimeCreated < @end\n\t        and TimeCreated >= @start;`,\n\t    sql.Named(\"start\", startTime),\n\t    sql.Named(\"end\", endTime),\n\t)\n" ^NamedArg [^string name ^any value]
+  ;; This method exists because the go1compat promise
+  ;; doesn't guarantee that structs don't grow more fields,
+  ;; so unkeyed struct literals are a vet error. Thus, we don't
+  ;; want to allow sql.NamedArg{name, value}.
+  (lit NamedArg :Name name :Value value))
+
+
+
+(go/type IsolationLevel "IsolationLevel is the transaction isolation level used in [TxOptions].\n" int)
+
+
+
+
+
+(go/const "Various isolation levels that drivers may support in [DB.BeginTx].\nIf a driver does not support a given isolation level an error may be returned.\n\nSee https://en.wikipedia.org/wiki/Isolation_(database_systems)#Isolation_levels.\n"
+  ^{:line 131} [^{:tag IsolationLevel :val 0} LevelDefault iota]
+  ^{:line 132} [^{:val 1} LevelReadUncommitted]
+  ^{:line 133} [^{:val 2} LevelReadCommitted]
+  ^{:line 134} [^{:val 3} LevelWriteCommitted]
+  ^{:line 135} [^{:val 4} LevelRepeatableRead]
+  ^{:line 136} [^{:val 5} LevelSnapshot]
+  ^{:line 137} [^{:val 6} LevelSerializable]
+  ^{:line 138} [^{:val 7} LevelLinearizable])
+
+
+
+^{:go/end 163} (go/method String "String returns the name of the transaction isolation level.\n" ^string [^IsolationLevel i]
+  (switch i
+    (case [LevelDefault]
+      (return "Default"))
+    (case [LevelReadUncommitted]
+      (return "Read Uncommitted"))
+    (case [LevelReadCommitted]
+      (return "Read Committed"))
+    (case [LevelWriteCommitted]
+      (return "Write Committed"))
+    (case [LevelRepeatableRead]
+      (return "Repeatable Read"))
+    (case [LevelSnapshot]
+      (return "Snapshot"))
+    (case [LevelSerializable]
+      (return "Serializable"))
+    (case [LevelLinearizable]
+      (return "Linearizable"))
+    (default
+      (return (+ "IsolationLevel(" (strconv/Itoa (conv int i)) ")")))))
+
+
+
+(go/var ^fmt/Stringer _ LevelDefault)
+
+
+(go/type TxOptions "TxOptions holds the transaction options to be used in [DB.BeginTx].\n" (struct
+
+
+    ^{:line 171 :tag IsolationLevel :doc "Isolation is the transaction isolation level.\nIf zero, the driver or database's default level is used.\n"} Isolation
+    ^{:line 172 :tag bool} ReadOnly))
+
+
+
+
+
+(go/type RawBytes "RawBytes is a byte slice that holds a reference to memory owned by\nthe database itself. After a [Rows.Scan] into a RawBytes, the slice is only\nvalid until the next call to [Rows.Next], [Rows.Scan], or [Rows.Close].\n" (slice byte))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type NullString "NullString represents a string that may be null.\nNullString implements the [Scanner] interface so\nit can be used as a scan destination:\n\n\tvar s NullString\n\terr := db.QueryRow(\"SELECT name FROM foo WHERE id=?\", id).Scan(&s)\n\t...\n\tif s.Valid {\n\t   // use s.String\n\t} else {\n\t   // NULL value\n\t}\n" (struct
+    ^{:line 193 :tag string} String
+    ^{:line 194 :tag bool} Valid)) ; Valid is true if String is not NULL
+
+
+
+^{:go/end 206} (go/method Scan "Scan implements the [Scanner] interface.\n" ^error [^{:tag (* NullString)} ns ^any value]
+  (when (== value nil)
+    (set! (values (.-String ns) (.-Valid ns)) (values "" false))
+    (return nil))
+
+  (let [err (convertAssign (addr (.-String ns)) value)]
+    (set! (.-Valid ns) (== err nil))
+    ^{:line 205} err))
+
+
+
+^{:go/end 214} (go/method Value "Value implements the [driver.Valuer] interface.\n" [^NullString ns] :results [driver/Value error]
+  (when (not (.-Valid ns))
+    (return nil nil))
+
+  (return (.-String ns) nil))
+
+
+
+
+
+(go/type NullInt64 "NullInt64 represents an int64 that may be null.\nNullInt64 implements the [Scanner] interface so\nit can be used as a scan destination, similar to [NullString].\n" (struct
+    ^{:line 220 :tag int64} Int64
+    ^{:line 221 :tag bool} Valid)) ; Valid is true if Int64 is not NULL
+
+
+
+^{:go/end 233} (go/method Scan "Scan implements the [Scanner] interface.\n" ^error [^{:tag (* NullInt64)} n ^any value]
+  (when (== value nil)
+    (set! (values (.-Int64 n) (.-Valid n)) (values 0 false))
+    (return nil))
+
+  (let [err (convertAssign (addr (.-Int64 n)) value)]
+    (set! (.-Valid n) (== err nil))
+    ^{:line 232} err))
+
+
+
+^{:go/end 241} (go/method Value "Value implements the [driver.Valuer] interface.\n" [^NullInt64 n] :results [driver/Value error]
+  (when (not (.-Valid n))
+    (return nil nil))
+
+  (return (.-Int64 n) nil))
+
+
+
+
+
+(go/type NullInt32 "NullInt32 represents an int32 that may be null.\nNullInt32 implements the [Scanner] interface so\nit can be used as a scan destination, similar to [NullString].\n" (struct
+    ^{:line 247 :tag int32} Int32
+    ^{:line 248 :tag bool} Valid)) ; Valid is true if Int32 is not NULL
+
+
+
+^{:go/end 260} (go/method Scan "Scan implements the [Scanner] interface.\n" ^error [^{:tag (* NullInt32)} n ^any value]
+  (when (== value nil)
+    (set! (values (.-Int32 n) (.-Valid n)) (values 0 false))
+    (return nil))
+
+  (let [err (convertAssign (addr (.-Int32 n)) value)]
+    (set! (.-Valid n) (== err nil))
+    ^{:line 259} err))
+
+
+
+^{:go/end 268} (go/method Value "Value implements the [driver.Valuer] interface.\n" [^NullInt32 n] :results [driver/Value error]
+  (when (not (.-Valid n))
+    (return nil nil))
+
+  (return (conv int64 (.-Int32 n)) nil))
+
+
+
+
+
+(go/type NullInt16 "NullInt16 represents an int16 that may be null.\nNullInt16 implements the [Scanner] interface so\nit can be used as a scan destination, similar to [NullString].\n" (struct
+    ^{:line 274 :tag int16} Int16
+    ^{:line 275 :tag bool} Valid)) ; Valid is true if Int16 is not NULL
+
+
+
+^{:go/end 287} (go/method Scan "Scan implements the [Scanner] interface.\n" ^error [^{:tag (* NullInt16)} n ^any value]
+  (when (== value nil)
+    (set! (values (.-Int16 n) (.-Valid n)) (values 0 false))
+    (return nil))
+
+  (let [err (convertAssign (addr (.-Int16 n)) value)]
+    (set! (.-Valid n) (== err nil))
+    ^{:line 286} err))
+
+
+
+^{:go/end 295} (go/method Value "Value implements the [driver.Valuer] interface.\n" [^NullInt16 n] :results [driver/Value error]
+  (when (not (.-Valid n))
+    (return nil nil))
+
+  (return (conv int64 (.-Int16 n)) nil))
+
+
+
+
+
+(go/type NullByte "NullByte represents a byte that may be null.\nNullByte implements the [Scanner] interface so\nit can be used as a scan destination, similar to [NullString].\n" (struct
+    ^{:line 301 :tag byte} Byte
+    ^{:line 302 :tag bool} Valid)) ; Valid is true if Byte is not NULL
+
+
+
+^{:go/end 314} (go/method Scan "Scan implements the [Scanner] interface.\n" ^error [^{:tag (* NullByte)} n ^any value]
+  (when (== value nil)
+    (set! (values (.-Byte n) (.-Valid n)) (values 0 false))
+    (return nil))
+
+  (let [err (convertAssign (addr (.-Byte n)) value)]
+    (set! (.-Valid n) (== err nil))
+    ^{:line 313} err))
+
+
+
+^{:go/end 322} (go/method Value "Value implements the [driver.Valuer] interface.\n" [^NullByte n] :results [driver/Value error]
+  (when (not (.-Valid n))
+    (return nil nil))
+
+  (return (conv int64 (.-Byte n)) nil))
+
+
+
+
+
+(go/type NullFloat64 "NullFloat64 represents a float64 that may be null.\nNullFloat64 implements the [Scanner] interface so\nit can be used as a scan destination, similar to [NullString].\n" (struct
+    ^{:line 328 :tag float64} Float64
+    ^{:line 329 :tag bool} Valid)) ; Valid is true if Float64 is not NULL
+
+
+
+^{:go/end 341} (go/method Scan "Scan implements the [Scanner] interface.\n" ^error [^{:tag (* NullFloat64)} n ^any value]
+  (when (== value nil)
+    (set! (values (.-Float64 n) (.-Valid n)) (values 0 false))
+    (return nil))
+
+  (let [err (convertAssign (addr (.-Float64 n)) value)]
+    (set! (.-Valid n) (== err nil))
+    ^{:line 340} err))
+
+
+
+^{:go/end 349} (go/method Value "Value implements the [driver.Valuer] interface.\n" [^NullFloat64 n] :results [driver/Value error]
+  (when (not (.-Valid n))
+    (return nil nil))
+
+  (return (.-Float64 n) nil))
+
+
+
+
+
+(go/type NullBool "NullBool represents a bool that may be null.\nNullBool implements the [Scanner] interface so\nit can be used as a scan destination, similar to [NullString].\n" (struct
+    ^{:line 355 :tag bool} Bool
+    ^{:line 356 :tag bool} Valid)) ; Valid is true if Bool is not NULL
+
+
+
+^{:go/end 368} (go/method Scan "Scan implements the [Scanner] interface.\n" ^error [^{:tag (* NullBool)} n ^any value]
+  (when (== value nil)
+    (set! (values (.-Bool n) (.-Valid n)) (values false false))
+    (return nil))
+
+  (let [err (convertAssign (addr (.-Bool n)) value)]
+    (set! (.-Valid n) (== err nil))
+    ^{:line 367} err))
+
+
+
+^{:go/end 376} (go/method Value "Value implements the [driver.Valuer] interface.\n" [^NullBool n] :results [driver/Value error]
+  (when (not (.-Valid n))
+    (return nil nil))
+
+  (return (.-Bool n) nil))
+
+
+
+
+
+(go/type NullTime "NullTime represents a [time.Time] that may be null.\nNullTime implements the [Scanner] interface so\nit can be used as a scan destination, similar to [NullString].\n" (struct
+    ^{:line 382 :tag time/Time} Time
+    ^{:line 383 :tag bool} Valid)) ; Valid is true if Time is not NULL
+
+
+
+^{:go/end 395} (go/method Scan "Scan implements the [Scanner] interface.\n" ^error [^{:tag (* NullTime)} n ^any value]
+  (when (== value nil)
+    (set! (values (.-Time n) (.-Valid n)) (values (lit time/Time) false))
+    (return nil))
+
+  (let [err (convertAssign (addr (.-Time n)) value)]
+    (set! (.-Valid n) (== err nil))
+    ^{:line 394} err))
+
+
+
+^{:go/end 403} (go/method Value "Value implements the [driver.Valuer] interface.\n" [^NullTime n] :results [driver/Value error]
+  (when (not (.-Valid n))
+    (return nil nil))
+
+  (return (.-Time n) nil))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Null "Null represents a value that may be null.\nNull implements the [Scanner] interface so\nit can be used as a scan destination:\n\n\tvar s Null[string]\n\terr := db.QueryRow(\"SELECT name FROM foo WHERE id=?\", id).Scan(&s)\n\t...\n\tif s.Valid {\n\t   // use s.V\n\t} else {\n\t   // NULL value\n\t}\n\nT should be one of the types accepted by [driver.Value].\n" :type-params [T] (struct
+    ^{:line 420 :tag T} V
+    ^{:line 421 :tag bool} Valid))
+
+
+^{:go/end 432} (go/method Scan ^error [^{:tag (* (Null T))} n ^any value]
+  (when (== value nil)
+    (set! (values (.-V n) (.-Valid n)) (values @(new T) false))
+    (return nil))
+
+  (let [err (convertAssign (addr (.-V n)) value)]
+    (set! (.-Valid n) (== err nil))
+    ^{:line 431} err))
+
+
+^{:go/end 449} (go/method Value [^{:tag (Null T)} n] :results [driver/Value error]
+  (when (not (.-Valid n))
+    (return nil nil))
+
+  (let [v (conv any (.-V n))]
+    ;; See issue 69728.
+    (when [(values valuer ok) (assert driver/Valuer v)] ok
+      (let [(values val err) (callValuerValue valuer)]
+        (when (!= err nil)
+          (return val err))
+
+        (set! v val)))
+
+    ;; See issue 69837.
+    (.ConvertValue driver/DefaultParameterConverter v)))
+
+
+
+(go/type Scanner "Scanner is an interface used by [Rows.Scan].\n" (interface
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "Scan assigns a value from a database driver.\n\nThe src value will be of one of the following types:\n\n   int64\n   float64\n   bool\n   []byte\n   string\n   time.Time\n   nil - for NULL values\n\nAn error should be returned if the value cannot be stored\nwithout loss of information.\n\nReference types such as []byte are only valid until the next call to Scan\nand should not be retained. Their underlying memory is owned by the driver.\nIf retention is necessary, copy their values before the next call to Scan.\n"} Scan ^error [^any src])))
+
+
+
+
+
+
+
+
+
+
+(go/type Out "Out may be used to retrieve OUTPUT value parameters from stored procedures.\n\nNot all drivers and databases support OUTPUT value parameters.\n\nExample usage:\n\n\tvar outArg string\n\t_, err := db.ExecContext(ctx, \"ProcName\", sql.Named(\"Arg1\", sql.Out{Dest: &outArg}))\n" (struct
+    ^{:line 483 :tag (struct)} _NamedFieldsRequired
+
+
+
+    ^{:line 487 :tag any :doc "Dest is a pointer to the value that will be set to the result of the\nstored procedure's OUTPUT parameter.\n"} Dest
+
+
+
+
+    ^{:line 492 :tag bool :doc "In is whether the parameter is an INOUT parameter. If so, the input value to the stored\nprocedure is the dereferenced value of Dest's pointer, which is then replaced with\nthe output value.\n"} In))
+
+
+
+
+
+(go/var ^{:doc "ErrNoRows is returned by [Row.Scan] when [DB.QueryRow] doesn't return a\nrow. In such a case, QueryRow returns a placeholder [*Row] value that\ndefers this error until a Scan.\n"} ErrNoRows (errors/New "sql: no rows in result set"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type DB "DB is a database handle representing a pool of zero or more\nunderlying connections. It's safe for concurrent use by multiple\ngoroutines.\n\nThe sql package creates and frees connections automatically; it\nalso maintains a free pool of idle connections. If the database has\na concept of per-connection state, such state can be reliably observed\nwithin a transaction ([Tx]) or connection ([Conn]). Once [DB.Begin] is called, the\nreturned [Tx] is bound to a single connection. Once [Tx.Commit] or\n[Tx.Rollback] is called on the transaction, that transaction's\nconnection is returned to [DB]'s idle connection pool. The pool size\ncan be controlled with [DB.SetMaxIdleConns].\n" (struct
+
+    ^{:line 514 :tag atomic/Int64 :doc "Total time waited for new connections.\n"} waitDuration
+
+    ^{:line 516 :tag driver/Connector} connector
+
+
+
+    ^{:line 520 :tag atomic/Uint64 :doc "numClosed is an atomic counter which represents a total number of\nclosed connections. Stmt.openStmt checks it before cleaning closed\nconnections in Stmt.css.\n"} numClosed
+
+    ^{:line 522 :tag sync/Mutex} mu ; protects following fields
+    ^{:line 523 :tag (slice (* driverConn))} freeConn ; free connections ordered by returnedAt oldest to newest
+    ^{:line 524 :tag connRequestSet} connRequests
+    ^{:line 525 :tag int} numOpen ; number of opened and pending open connections
+
+
+
+
+
+    ^{:line 531 :tag (chan (struct)) :doc "Used to signal the need for new connections\na goroutine running connectionOpener() reads on this chan and\nmaybeOpenNewConnections sends on the chan (one send per needed connection)\nIt is closed during db.Close(). The close tells the connectionOpener\ngoroutine to exit.\n"} openerCh
+    ^{:line 532 :tag bool} closed
+    ^{:line 533 :tag (map finalCloser depSet)} dep
+    ^{:line 534 :tag (map (* driverConn) string)} lastPut ; stacktrace of last conn's put; debug only
+    ^{:line 535 :tag int} maxIdleCount ; zero means defaultMaxIdleConns; negative means 0
+    ^{:line 536 :tag int} maxOpen ; <= 0 means unlimited
+    ^{:line 537 :tag time/Duration} maxLifetime ; maximum amount of time a connection may be reused
+    ^{:line 538 :tag time/Duration} maxIdleTime ; maximum amount of time a connection may be idle before being closed
+    ^{:line 539 :tag (chan (struct))} cleanerCh
+    ^{:line 540 :tag int64} waitCount ; Total number of connections waited for.
+    ^{:line 541 :tag int64} maxIdleClosed ; Total number of connections closed due to idle count.
+    ^{:line 542 :tag int64} maxIdleTimeClosed ; Total number of connections closed due to idle time.
+    ^{:line 543 :tag int64} maxLifetimeClosed ; Total number of connections closed due to max connection lifetime limit.
+
+    ^{:line 545 :tag (func [])} stop)) ; stop cancels the connection opener.
+
+
+
+(go/type connReuseStrategy "connReuseStrategy determines how (*DB).conn returns database connections.\n" uint8)
+
+(go/const
+
+  ^{:line 553} [^{:tag connReuseStrategy :val 0 :doc "alwaysNewConn forces a new connection to the database.\n"} alwaysNewConn iota]
+
+
+
+  ^{:line 557} [^{:val 1 :doc "cachedOrNewConn returns a cached connection, if available, else waits\nfor one to become available (if MaxOpenConns has been reached) or\ncreates a new database connection.\n"} cachedOrNewConn])
+
+
+
+
+
+
+(go/type driverConn "driverConn wraps a driver.Conn with a mutex, to\nbe held during all calls into the Conn. (including any calls onto\ninterfaces returned via that Conn, such as calls on Tx, Stmt,\nResult, Rows)\n" (struct
+    ^{:line 565 :tag (* DB)} db
+    ^{:line 566 :tag time/Time} createdAt
+
+    ^{:line 568} sync/Mutex ; guards following
+    ^{:line 569 :tag driver/Conn} ci
+    ^{:line 570 :tag bool} needReset ; The connection session should be reset before use if true.
+    ^{:line 571 :tag bool} closed
+    ^{:line 572 :tag bool} finalClosed ; ci.Close has been called
+    ^{:line 573 :tag (map (* driverStmt) bool)} openStmt
+
+
+    ^{:line 576 :tag bool :doc "guarded by db.mu\n"} inUse
+    ^{:line 577 :tag bool} dbmuClosed ; same as closed, but guarded by db.mu, for removeClosedStmtLocked
+    ^{:line 578 :tag time/Time} returnedAt ; Time the connection was created or returned.
+    ^{:line 579 :tag (slice (func []))} onPut)) ; code (with db.mu held) run when conn is next returned
+
+
+^{:go/end 584} (go/method releaseConn [^{:tag (* driverConn)} dc ^error err]
+  (.putConn (.-db dc) dc err true))
+
+
+^{:go/end 590} (go/method removeOpenStmt [^{:tag (* driverConn)} dc ^{:tag (* driverStmt)} ds]
+  ^{:go/via [Mutex]} (.Lock dc)
+  (defer ^{:go/via [Mutex]} (.Unlock dc))
+  (delete (.-openStmt dc) ds))
+
+
+^{:go/end 597} (go/method expired ^bool [^{:tag (* driverConn)} dc ^time/Duration timeout]
+  (when (<= timeout 0)
+    (return false))
+
+  (.Before (.Add (.-createdAt dc) timeout) (time/Now)))
+
+
+
+
+^{:go/breaks [[8 611]] :go/end 612} (go/method resetSession "resetSession checks if the driver connection needs the\nsession to be reset and if required, resets it.\n" ^error [^{:tag (* driverConn)} dc ^context/Context ctx]
+  ^{:go/via [Mutex]} (.Lock dc)
+  (defer ^{:go/via [Mutex]} (.Unlock dc))
+
+  (when (not (.-needReset dc))
+    (return nil))
+
+  (when [(values cr ok) (assert driver/SessionResetter (.-ci dc))] ok
+    (return (.ResetSession cr ctx)))
+
+  nil)
+
+
+
+
+^{:go/breaks [[8 626]] :go/end 627} (go/method validateConnection "validateConnection checks if the connection is valid and can\nstill be used. It also marks the session for reset if required.\n" ^bool [^{:tag (* driverConn)} dc ^bool needsReset]
+  ^{:go/via [Mutex]} (.Lock dc)
+  (defer ^{:go/via [Mutex]} (.Unlock dc))
+
+  (when needsReset
+    (set! (.-needReset dc) true))
+
+  (when [(values cv ok) (assert driver/Validator (.-ci dc))] ok
+    (return (.IsValid cv)))
+
+  true)
+
+
+
+
+^{:go/end 652} (go/method prepareLocked "prepareLocked prepares the query on dc. When cg == nil the dc must keep track of\nthe prepared statements in a pool.\n" [^{:tag (* driverConn)} dc ^context/Context ctx ^stmtConnGrabber cg ^string query] :results [(* driverStmt) error]
+  (let [(values si err) (ctxDriverPrepare ctx (.-ci dc) query)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [ds (addr (lit driverStmt :Locker dc :si si))]
+
+      ;; No need to manage open statements if there is a single connection grabber.
+      (when (!= cg nil)
+        (return ds nil))
+
+
+      ;; Track each driverConn's open statements, so we can close them
+      ;; before closing the conn.
+      ;;
+      ;; Wrap all driver.Stmt is *driverStmt to ensure they are only closed once.
+      (when (== (.-openStmt dc) nil)
+        (set! (.-openStmt dc) (make (map (* driverStmt) bool))))
+
+      (aset (.-openStmt dc) ds true)
+      (return ds nil))))
+
+
+
+^{:go/end 663} (go/method closeDBLocked "the dc.db's Mutex is held.\n" ^{:tag (func [] [error])} [^{:tag (* driverConn)} dc]
+  ^{:go/via [Mutex]} (.Lock dc)
+  (defer ^{:go/via [Mutex]} (.Unlock dc))
+  (when (.-closed dc)
+    (return ^{:go/end 659} (fn ^error [] (errors/New "sql: duplicate driverConn close"))))
+
+  (set! (.-closed dc) true)
+  (.removeDepLocked (.-db dc) dc dc))
+
+
+^{:go/end 680} (go/method Close ^error [^{:tag (* driverConn)} dc]
+  ^{:go/via [Mutex]} (.Lock dc)
+  (when (.-closed dc)
+    ^{:go/via [Mutex]} (.Unlock dc)
+    (return (errors/New "sql: duplicate driverConn close")))
+
+  (set! (.-closed dc) true)
+  ^{:go/via [Mutex]} (.Unlock dc) ; not defer; removeDep finalClose calls may need to lock
+
+  ;; And now updates that require holding dc.mu.Lock.
+  (.Lock (.-mu (.-db dc)))
+  (set! (.-dbmuClosed dc) true)
+  (let [fn (.removeDepLocked (.-db dc) dc dc)]
+    (.Unlock (.-mu (.-db dc)))
+    (go/call fn)))
+
+
+^{:go/end 711} (go/method finalClose ^error [^{:tag (* driverConn)} dc]
+  (let [^error err (zero error)
+
+      ;; Each *driverStmt has a lock to the dc. Copy the list out of the dc
+      ;; before calling close on each stmt.
+      ^{:line 687 :tag (slice (* driverStmt))} openStmt (zero (slice (* driverStmt)))]
+    (withLock dc ^{:go/end 694} (fn []
+        (set! openStmt (make (slice (* driverStmt)) 0 (len (.-openStmt dc))))
+        (range [ds (.-openStmt dc)]
+          (set! openStmt (append openStmt ds)))
+
+        (set! (.-openStmt dc) nil)))
+
+    (range [_ ds openStmt]
+      (.Close ds))
+
+    (withLock dc ^{:go/end 702} (fn []
+        (set! (.-finalClosed dc) true)
+        (set! err (.Close (.-ci dc)))
+        (set! (.-ci dc) nil)))
+
+
+    (.Lock (.-mu (.-db dc)))
+    (dec! (.-numOpen (.-db dc)))
+    (.maybeOpenNewConnections (.-db dc))
+    (.Unlock (.-mu (.-db dc)))
+
+    (.Add (.-numClosed (.-db dc)) 1)
+    ^{:line 710} err))
+
+
+
+
+
+(go/type driverStmt "driverStmt associates a driver.Stmt with the\n*driverConn from which it came, so the driverConn's lock can be\nheld during calls.\n" (struct
+    ^{:line 717} sync/Locker ; the *driverConn
+    ^{:line 718 :tag driver/Stmt} si
+    ^{:line 719 :tag bool} closed
+    ^{:line 720 :tag error} closeErr)) ; return value of previous Close call
+
+
+
+
+^{:go/end 734} (go/method Close "Close ensures driver.Stmt is only closed once and always returns the same\nresult.\n" ^error [^{:tag (* driverStmt)} ds]
+  ^{:go/via [Locker]} (.Lock ds)
+  (defer ^{:go/via [Locker]} (.Unlock ds))
+  (when (.-closed ds)
+    (return (.-closeErr ds)))
+
+  (set! (.-closed ds) true)
+  (set! (.-closeErr ds) (.Close (.-si ds)))
+  (.-closeErr ds))
+
+
+
+(go/type depSet "depSet is a finalCloser's outstanding dependencies\n" (map any bool)) ; set of true bools
+
+
+
+(go/type finalCloser "The finalCloser interface is used by (*DB).addDep and related\ndependency reference counting.\n" (interface
+
+
+    (^{:doc "finalClose is called when the reference count of an object\ngoes to zero. (*DB).mu is not held while calling it.\n"} finalClose ^error [])))
+
+
+
+
+^{:go/end 753} (go/method addDep "addDep notes that x now depends on dep, and x's finalClose won't be\ncalled until all of x's dependencies are removed with removeDep.\n" [^{:tag (* DB)} db ^finalCloser x ^any dep]
+  (.Lock (.-mu db))
+  (defer (.Unlock (.-mu db)))
+  (.addDepLocked db x dep))
+
+
+^{:go/end 765} (go/method addDepLocked [^{:tag (* DB)} db ^finalCloser x ^any dep]
+  (when (== (.-dep db) nil)
+    (set! (.-dep db) (make (map finalCloser depSet))))
+
+  (let [xdep (aget (.-dep db) x)]
+    (when (== xdep nil)
+      (set! xdep (make depSet))
+      (aset (.-dep db) x xdep))
+
+    (aset xdep dep true)))
+
+
+
+
+
+
+^{:go/end 776} (go/method removeDep "removeDep notes that x no longer depends on dep.\nIf x still has dependencies, nil is returned.\nIf x no longer has any dependencies, its finalClose method will be\ncalled and its error value will be returned.\n" ^error [^{:tag (* DB)} db ^finalCloser x ^any dep]
+  (.Lock (.-mu db))
+  (let [fn (.removeDepLocked db x dep)]
+    (.Unlock (.-mu db))
+    (go/call fn)))
+
+
+^{:go/end 799} (go/method removeDepLocked ^{:tag (func [] [error])} [^{:tag (* DB)} db ^finalCloser x ^any dep]
+  (let [(values xdep ok) (aget (.-dep db) x)]
+    (when (not ok)
+      (panic (fmt/Sprintf "unpaired removeDep: no deps for %T" x)))
+
+
+    (let [l0 (len xdep)]
+      (delete xdep dep)
+
+      (switch (len xdep)
+        (case [l0]
+          ;; Nothing removed. Shouldn't happen.
+          (panic (fmt/Sprintf "unpaired removeDep: no %T dep on %T" dep x)))
+        (case [0]
+          ;; No more dependencies.
+          (delete (.-dep db) x)
+          (return (.-finalClose x)))
+        (default
+          ;; Dependencies remain.
+          (return ^{:go/end 797} (fn ^error [] nil)))))))
+
+
+
+
+
+
+
+
+(go/var ^{:doc "This is the size of the connectionOpener request chan (DB.openerCh).\nThis value should be larger than the maximum typical value\nused for DB.maxOpen. If maxOpen is significantly larger than\nconnectionRequestQueueSize then it is possible for ALL calls into the *DB\nto block until the connectionOpener can satisfy the backlog of requests.\n"} connectionRequestQueueSize 1000000)
+
+(go/type dsnConnector (struct
+    ^{:line 809 :tag string} dsn
+    ^{:line 810 :tag driver/Driver} driver))
+
+
+^{:go/end 815} (go/method Connect [^dsnConnector t ^context/Context _] :results [driver/Conn error]
+  (.Open (.-driver t) (.-dsn t)))
+
+
+^{:go/end 819} (go/method Driver ^driver/Driver [^dsnConnector t]
+  (.-driver t))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 849} (go/func OpenDB "OpenDB opens a database using a [driver.Connector], allowing drivers to\nbypass a string based data source name.\n\nMost users will open a database via a driver-specific connection\nhelper function that returns a [*DB]. No database drivers are included\nin the Go standard library. See https://golang.org/s/sqldrivers for\na list of third-party drivers.\n\nOpenDB may just validate its arguments without creating a connection\nto the database. To verify that the data source name is valid, call\n[DB.Ping].\n\nThe returned [DB] is safe for concurrent use by multiple goroutines\nand maintains its own pool of idle connections. Thus, the OpenDB\nfunction should be called just once. It is rarely necessary to\nclose a [DB].\n" ^{:tag (* DB)} [^driver/Connector c]
+  (let [(values ctx cancel) (context/WithCancel (context/Background))
+      ^{:line 839} db (addr ^{:go/breaks [2 4 6 8]} (lit DB
+          :connector c
+          :openerCh (make (chan (struct)) connectionRequestQueueSize)
+          :lastPut (make (map (* driverConn) string))
+          :stop cancel))]
+
+
+    (go (.connectionOpener db ctx))
+
+    ^{:line 848} db))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 885} (go/func Open "Open opens a database specified by its database driver name and a\ndriver-specific data source name, usually consisting of at least a\ndatabase name and connection information.\n\nMost users will open a database via a driver-specific connection\nhelper function that returns a [*DB]. No database drivers are included\nin the Go standard library. See https://golang.org/s/sqldrivers for\na list of third-party drivers.\n\nOpen may just validate its arguments without creating a connection\nto the database. To verify that the data source name is valid, call\n[DB.Ping].\n\nThe returned [DB] is safe for concurrent use by multiple goroutines\nand maintains its own pool of idle connections. Thus, the Open\nfunction should be called just once. It is rarely necessary to\nclose a [DB].\n" [^string driverName ^string dataSourceName] :results [(* DB) error]
+  (.RLock driversMu)
+  (let [(values driveri ok) (aget drivers driverName)]
+    (.RUnlock driversMu)
+    (when (not ok)
+      (return nil (fmt/Errorf "sql: unknown driver %q (forgotten import?)" driverName)))
+
+
+    (when [(values driverCtx ok) (assert driver/DriverContext driveri)] ok
+      (let [(values connector err) (.OpenConnector driverCtx dataSourceName)]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (OpenDB connector) nil)))
+
+
+    (return (OpenDB (lit dsnConnector :dsn dataSourceName :driver driveri)) nil)))
+
+
+^{:go/end 896} (go/method pingDC ^error [^{:tag (* DB)} db ^context/Context ctx ^{:tag (* driverConn)} dc ^{:tag (func [error])} release]
+  (let [^error err (zero error)]
+    (when [(values pinger ok) (assert driver/Pinger (.-ci dc))] ok
+      (withLock dc ^{:go/end 892} (fn []
+          (set! err (.Ping pinger ctx)))))
+
+
+    (release err)
+    ^{:line 895} err))
+
+
+
+
+^{:go/end 914} (go/method PingContext "PingContext verifies a connection to the database is still alive,\nestablishing a connection if necessary.\n" ^error [^{:tag (* DB)} db ^context/Context ctx]
+  (let [^{:tag (* driverConn)} dc (zero (* driverConn))
+      ^{:line 902 :tag error} err (zero error)]
+
+    (set! err (.retry db ^{:go/end 907} (fn ^error [^connReuseStrategy strategy]
+          (set! (values dc err) (.conn db ctx strategy))
+          ^{:line 906} err)))
+
+
+    (when (!= err nil)
+      (return err))
+
+
+    (.pingDC db ctx dc (.-releaseConn dc))))
+
+
+
+
+
+
+
+^{:go/end 923} (go/method Ping "Ping verifies a connection to the database is still alive,\nestablishing a connection if necessary.\n\nPing uses [context.Background] internally; to specify the context, use\n[DB.PingContext].\n" ^error [^{:tag (* DB)} db]
+  (.PingContext db (context/Background)))
+
+
+
+
+
+
+
+
+^{:go/end 963} (go/method Close "Close closes the database and prevents new queries from starting.\nClose then waits for all queries that have started processing on the server\nto finish.\n\nIt is rare to Close a [DB], as the [DB] handle is meant to be\nlong-lived and shared between many goroutines.\n" ^error [^{:tag (* DB)} db]
+  (.Lock (.-mu db))
+  (when (.-closed db) ; Make DB.Close idempotent
+    (.Unlock (.-mu db))
+    (return nil))
+
+  (when (!= (.-cleanerCh db) nil)
+    (close (.-cleanerCh db)))
+
+  (let [^error err (zero error)
+      ^{:line 941} fns (make (slice (func [] [error])) 0 (len (.-freeConn db)))]
+    (range [_ dc (.-freeConn db)]
+      (set! fns (append fns (.closeDBLocked dc))))
+
+    (set! (.-freeConn db) nil)
+    (set! (.-closed db) true)
+    (.CloseAndRemoveAll (.-connRequests db))
+    (.Unlock (.-mu db))
+    (range [_ fn fns]
+      (let [err1 (go/call fn)]
+        (when (!= err1 nil)
+          (set! err err1))))
+
+
+    ((.-stop db))
+    (when [(values c ok) (assert io/Closer (.-connector db))] ok
+      (let [err1 (.Close c)]
+        (when (!= err1 nil)
+          (set! err err1))))
+
+
+    ^{:line 962} err))
+
+
+(go/const ^{:val 2} defaultMaxIdleConns 2)
+
+^{:go/end 978} (go/method maxIdleConnsLocked ^int [^{:tag (* DB)} db]
+  (let [n (.-maxIdleCount db)]
+    (switch
+      (case [(== n 0)]
+        ;; TODO(bradfitz): ask driver, if supported, for its default preference
+        (return defaultMaxIdleConns))
+      (case [(< n 0)]
+        (return 0))
+      (default
+        (return n)))))
+
+
+
+^{:go/end 988} (go/method shortestIdleTimeLocked ^time/Duration [^{:tag (* DB)} db]
+  (when (<= (.-maxIdleTime db) 0)
+    (return (.-maxLifetime db)))
+
+  (when (<= (.-maxLifetime db) 0)
+    (return (.-maxIdleTime db)))
+
+  (min (.-maxIdleTime db) (.-maxLifetime db)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1024} (go/method SetMaxIdleConns "SetMaxIdleConns sets the maximum number of connections in the idle\nconnection pool.\n\nIf MaxOpenConns is greater than 0 but less than the new MaxIdleConns,\nthen the new MaxIdleConns will be reduced to match the MaxOpenConns limit.\n\nIf n <= 0, no idle connections are retained.\n\nThe default max idle connections is currently 2. This may change in\na future release.\n" [^{:tag (* DB)} db ^int n]
+  (.Lock (.-mu db))
+  (if (> n 0)
+    (set! (.-maxIdleCount db) n)
+
+    ;; No idle connections.
+    (set! (.-maxIdleCount db) -1))
+
+  ;; Make sure maxIdle doesn't exceed maxOpen
+  (when (and (> (.-maxOpen db) 0) (> (.maxIdleConnsLocked db) (.-maxOpen db)))
+    (set! (.-maxIdleCount db) (.-maxOpen db)))
+
+  (let [^{:tag (slice (* driverConn))} closing (zero (slice (* driverConn)))
+      ^{:line 1013} idleCount (len (.-freeConn db))
+      ^{:line 1014} maxIdle (.maxIdleConnsLocked db)]
+    (when (> idleCount maxIdle)
+      (set! closing (subslice (.-freeConn db) maxIdle))
+      (set! (.-freeConn db) (subslice (.-freeConn db) _ maxIdle)))
+
+    (set! (.-maxIdleClosed db) + (conv int64 (len closing)))
+    (.Unlock (.-mu db))
+    (range [_ c closing]
+      (.Close c))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1045} (go/method SetMaxOpenConns "SetMaxOpenConns sets the maximum number of open connections to the database.\n\nIf MaxIdleConns is greater than 0 and the new MaxOpenConns is less than\nMaxIdleConns, then MaxIdleConns will be reduced to match the new\nMaxOpenConns limit.\n\nIf n <= 0, then there is no limit on the number of open connections.\nThe default is 0 (unlimited).\n" [^{:tag (* DB)} db ^int n]
+  (.Lock (.-mu db))
+  (set! (.-maxOpen db) n)
+  (when (< n 0)
+    (set! (.-maxOpen db) 0))
+
+  (let [syncMaxIdle (and (> (.-maxOpen db) 0) (> (.maxIdleConnsLocked db) (.-maxOpen db)))]
+    (.Unlock (.-mu db))
+    (when syncMaxIdle
+      (.SetMaxIdleConns db n))))
+
+
+
+
+
+
+
+
+^{:go/end 1067} (go/method SetConnMaxLifetime "SetConnMaxLifetime sets the maximum amount of time a connection may be reused.\n\nExpired connections may be closed lazily before reuse.\n\nIf d <= 0, connections are not closed due to a connection's age.\n" [^{:tag (* DB)} db ^time/Duration d]
+  (when (< d 0)
+    (set! d 0))
+
+  (.Lock (.-mu db))
+  ;; Wake cleaner up when lifetime is shortened.
+  (when (and (> d 0) (< d (.shortestIdleTimeLocked db)) (!= (.-cleanerCh db) nil))
+    (select
+      (case (>! (.-cleanerCh db) (lit (struct))))
+      (default)))
+
+
+  (set! (.-maxLifetime db) d)
+  (.startCleanerLocked db)
+  (.Unlock (.-mu db)))
+
+
+
+
+
+
+
+^{:go/end 1090} (go/method SetConnMaxIdleTime "SetConnMaxIdleTime sets the maximum amount of time a connection may be idle.\n\nExpired connections may be closed lazily before reuse.\n\nIf d <= 0, connections are not closed due to a connection's idle time.\n" [^{:tag (* DB)} db ^time/Duration d]
+  (when (< d 0)
+    (set! d 0))
+
+  (.Lock (.-mu db))
+  (defer (.Unlock (.-mu db)))
+
+  ;; Wake cleaner up when idle time is shortened.
+  (when (and (> d 0) (< d (.shortestIdleTimeLocked db)) (!= (.-cleanerCh db) nil))
+    (select
+      (case (>! (.-cleanerCh db) (lit (struct))))
+      (default)))
+
+
+  (set! (.-maxIdleTime db) d)
+  (.startCleanerLocked db))
+
+
+
+^{:go/end 1098} (go/method startCleanerLocked "startCleanerLocked starts connectionCleaner if needed.\n" [^{:tag (* DB)} db]
+  (when (and ^:go/paren (or (> (.-maxLifetime db) 0) (> (.-maxIdleTime db) 0)) (> (.-numOpen db) 0) (== (.-cleanerCh db) nil))
+    (set! (.-cleanerCh db) (make (chan (struct)) 1))
+    (go (.connectionCleaner db (.shortestIdleTimeLocked db)))))
+
+
+
+^{:go/end 1141} (go/method connectionCleaner [^{:tag (* DB)} db ^time/Duration d]
+  (let [^:const ^{:val 1000000000} minInterval time/Second]
+
+    (when (< d minInterval)
+      (set! d minInterval))
+
+    (let [t (time/NewTimer d)]
+
+      (while true
+        (select
+          (case (<! (.-C t)))
+          (case (<! (.-cleanerCh db)))) ; maxLifetime was changed or db was closed.
+
+
+        (.Lock (.-mu db))
+
+        (set! d (.shortestIdleTimeLocked db))
+        (when (or (.-closed db) (== (.-numOpen db) 0) (<= d 0))
+          (set! (.-cleanerCh db) nil)
+          (.Unlock (.-mu db))
+          (return))
+
+
+        (let [(values d closing) (.connectionCleanerRunLocked db d)]
+          (.Unlock (.-mu db))
+          (range [_ c closing]
+            (.Close c))
+
+
+          (when (< d minInterval)
+            (set! d minInterval))
+
+
+          (when (not (.Stop t))
+            (select
+              (case (<! (.-C t)))
+              (default)))
+
+
+          (.Reset t d))))))
+
+
+
+
+
+
+^{:go/end 1200} (go/method connectionCleanerRunLocked "connectionCleanerRunLocked removes connections that should be closed from\nfreeConn and returns them along side an updated duration to the next check\nif a quicker check is required to ensure connections are checked appropriately.\n" [^{:tag (* DB)} db ^time/Duration d] :results [time/Duration (slice (* driverConn))]
+  (let [^int64 idleClosing (zero int64)
+      ^{:line 1148 :tag (slice (* driverConn))} closing (zero (slice (* driverConn)))]
+    (when (> (.-maxIdleTime db) 0)
+      ;; As freeConn is ordered by returnedAt process
+      ;; in reverse order to minimise the work needed.
+      (let [idleSince (.Add (time/Now) (- (.-maxIdleTime db)))
+          ^{:line 1153} last (- (len (.-freeConn db)) 1)]
+        (for [i last] (>= i 0) (dec! i)
+          (let [c (aget (.-freeConn db) i)]
+            (when (.Before (.-returnedAt c) idleSince)
+              (inc! i)
+              (set! closing (subslice (.-freeConn db) _ i i))
+              (set! (.-freeConn db) (subslice (.-freeConn db) i))
+              (set! idleClosing (conv int64 (len closing)))
+              (set! (.-maxIdleTimeClosed db) + idleClosing)
+              (break))))
+
+
+
+        (when (> (len (.-freeConn db)) 0)
+          (let [c (aget (.-freeConn db) 0)]
+            (when [d2 (.Sub (.-returnedAt c) idleSince)] (< d2 d)
+              ;; Ensure idle connections are cleaned up as soon as
+              ;; possible.
+              (set! d d2))))))
+
+
+
+
+    (when (> (.-maxLifetime db) 0)
+      (let [expiredSince (.Add (time/Now) (- (.-maxLifetime db)))]
+        (for [i 0] (< i (len (.-freeConn db))) (inc! i)
+          (let [c (aget (.-freeConn db) i)]
+            (if (.Before (.-createdAt c) expiredSince) (do
+                (set! closing (append closing c))
+
+                (let [last (- (len (.-freeConn db)) 1)]
+                  ;; Use slow delete as order is required to ensure
+                  ;; connections are reused least idle time first.
+                  (copy (subslice (.-freeConn db) i) (subslice (.-freeConn db) (+ i 1)))
+                  (aset (.-freeConn db) last nil)
+                  (set! (.-freeConn db) (subslice (.-freeConn db) _ last))
+                  (dec! i)))
+              (when [d2 (.Sub (.-createdAt c) expiredSince)] (< d2 d)
+                ;; Prevent connections sitting the freeConn when they
+                ;; have expired by updating our next deadline d.
+                (set! d d2)))))
+
+
+        (set! (.-maxLifetimeClosed db) + (- (conv int64 (len closing)) idleClosing))))
+
+
+    (return d closing)))
+
+
+
+(go/type DBStats "DBStats contains database statistics.\n" (struct
+    ^{:line 1204 :tag int} MaxOpenConnections ; Maximum number of open connections to the database.
+
+
+    ^{:line 1207 :tag int :doc "Pool Status\n"} OpenConnections ; The number of established connections both in use and idle.
+    ^{:line 1208 :tag int} InUse ; The number of connections currently in use.
+    ^{:line 1209 :tag int} Idle ; The number of idle connections.
+
+
+    ^{:line 1212 :tag int64 :doc "Counters\n"} WaitCount ; The total number of connections waited for.
+    ^{:line 1213 :tag time/Duration} WaitDuration ; The total time blocked waiting for a new connection.
+    ^{:line 1214 :tag int64} MaxIdleClosed ; The total number of connections closed due to SetMaxIdleConns.
+    ^{:line 1215 :tag int64} MaxIdleTimeClosed ; The total number of connections closed due to SetConnMaxIdleTime.
+    ^{:line 1216 :tag int64} MaxLifetimeClosed)) ; The total number of connections closed due to SetConnMaxLifetime.
+
+
+
+^{:go/end 1240} (go/method Stats "Stats returns database statistics.\n" ^DBStats [^{:tag (* DB)} db]
+  (let [wait (.Load (.-waitDuration db))]
+
+    (.Lock (.-mu db))
+    (defer (.Unlock (.-mu db)))
+
+    (let [stats ^{:go/breaks [2 [4 1229] 6 8 [10 1233] 12 14 16 18]} (lit DBStats
+          :MaxOpenConnections (.-maxOpen db)
+
+          :Idle (len (.-freeConn db))
+          :OpenConnections (.-numOpen db)
+          :InUse (- (.-numOpen db) (len (.-freeConn db)))
+
+          :WaitCount (.-waitCount db)
+          :WaitDuration (conv time/Duration wait)
+          :MaxIdleClosed (.-maxIdleClosed db)
+          :MaxIdleTimeClosed (.-maxIdleTimeClosed db)
+          :MaxLifetimeClosed (.-maxLifetimeClosed db))]
+
+      ^{:line 1239} stats)))
+
+
+
+
+
+^{:go/end 1261} (go/method maybeOpenNewConnections "Assumes db.mu is locked.\nIf there are connRequests and the connection limit hasn't been reached,\nthen tell the connectionOpener to open new connections.\n" [^{:tag (* DB)} db]
+  (let [numRequests (.Len (.-connRequests db))]
+    (when (> (.-maxOpen db) 0)
+      (let [numCanOpen (- (.-maxOpen db) (.-numOpen db))]
+        (when (> numRequests numCanOpen)
+          (set! numRequests numCanOpen))))
+
+
+    (while (> numRequests 0)
+      (inc! (.-numOpen db)) ; optimistically
+      (dec! numRequests)
+      (when (.-closed db)
+        (return))
+
+      (>! (.-openerCh db) (lit (struct))))))
+
+
+
+
+^{:go/end 1273} (go/method connectionOpener "Runs in a separate goroutine, opens new connections when requested.\n" [^{:tag (* DB)} db ^context/Context ctx]
+  (while true
+    (select
+      (case (<! (.Done ctx))
+        (return))
+      (case (<! (.-openerCh db))
+        (.openNewConnection db ctx)))))
+
+
+
+
+
+^{:go/end 1308} (go/method openNewConnection "Open one new connection\n" [^{:tag (* DB)} db ^context/Context ctx]
+  ;; maybeOpenNewConnections has already executed db.numOpen++ before it sent
+  ;; on db.openerCh. This function must execute db.numOpen-- if the
+  ;; connection fails or is closed before returning.
+  (let [(values ci err) (.Connect (.-connector db) ctx)]
+    (.Lock (.-mu db))
+    (defer (.Unlock (.-mu db)))
+    (when (.-closed db)
+      (when (== err nil)
+        (.Close ci))
+
+      (dec! (.-numOpen db))
+      (return))
+
+    (when (!= err nil)
+      (dec! (.-numOpen db))
+      (.putConnDBLocked db nil err)
+      (.maybeOpenNewConnections db)
+      (return))
+
+    (let [dc (addr ^{:go/breaks [2 4 6 8]} (lit driverConn
+            :db db
+            :createdAt (time/Now)
+            :returnedAt (time/Now)
+            :ci ci))]
+
+      (if (.putConnDBLocked db dc err)
+        (.addDepLocked db dc dc)
+        (do
+          (dec! (.-numOpen db))
+          (.Close ci))))))
+
+
+
+
+
+
+(go/type connRequest "connRequest represents one request for a new connection\nWhen there are no idle connections available, DB.conn will create\na new connRequest and put it on the db.connRequests list.\n" (struct
+    ^{:line 1314 :tag (* driverConn)} conn
+    ^{:line 1315 :tag error} err))
+
+
+(go/var errDBClosed (errors/New "sql: database is closed"))
+
+
+^{:go/end 1455} (go/method conn "conn returns a newly-opened or cached *driverConn.\n" [^{:tag (* DB)} db ^context/Context ctx ^connReuseStrategy strategy] :results [(* driverConn) error]
+  (.Lock (.-mu db))
+  (when (.-closed db)
+    (.Unlock (.-mu db))
+    (return nil errDBClosed))
+
+  ;; Check if the context is expired.
+  (select
+    (default)
+    (case (<! (.Done ctx))
+      (.Unlock (.-mu db))
+      (return nil (.Err ctx))))
+
+  (let [lifetime (.-maxLifetime db)
+
+      ;; Prefer a free connection, if possible.
+      ^{:line 1337} last (- (len (.-freeConn db)) 1)]
+    (when (and (== strategy cachedOrNewConn) (>= last 0))
+      ;; Reuse the lowest idle time connection so we can close
+      ;; connections which remain idle as soon as possible.
+      (let [conn (aget (.-freeConn db) last)]
+        (set! (.-freeConn db) (subslice (.-freeConn db) _ last))
+        (set! (.-inUse conn) true)
+        (when (.expired conn lifetime)
+          (inc! (.-maxLifetimeClosed db))
+          (.Unlock (.-mu db))
+          (.Close conn)
+          (return nil driver/ErrBadConn))
+
+        (.Unlock (.-mu db))
+
+        ;; Reset the session if required.
+        (when [err (.resetSession conn ctx)] (errors/Is err driver/ErrBadConn)
+          (.Close conn)
+          (return nil err))
+
+
+        (return conn nil)))
+
+
+    ;; Out of free connections or we were asked not to use one. If we're not
+    ;; allowed to open any more connections, make a request and wait.
+    (when (and (> (.-maxOpen db) 0) (>= (.-numOpen db) (.-maxOpen db)))
+      ;; Make the connRequest channel. It's buffered so that the
+      ;; connectionOpener doesn't block while waiting for the req to be read.
+      (let [req (make (chan connRequest) 1)
+          ^{:line 1367} delHandle (.Add (.-connRequests db) req)]
+        (inc! (.-waitCount db))
+        (.Unlock (.-mu db))
+
+        (let [waitStart (time/Now)]
+
+          ;; Timeout the connection request with the context.
+          (select
+            (case (<! (.Done ctx))
+              ;; Remove the connection request and ensure no value has been sent
+              ;; on it after removing.
+              (.Lock (.-mu db))
+              (let [deleted (.Delete (.-connRequests db) delHandle)]
+                (.Unlock (.-mu db))
+
+                (.Add (.-waitDuration db) (conv int64 (time/Since waitStart)))
+
+                ;; If we failed to delete it, that means either the DB was closed or
+                ;; something else grabbed it and is about to send on it.
+                (when (not deleted)
+                  ;; TODO(bradfitz): rather than this best effort select, we
+                  ;; should probably start a goroutine to read from req. This best
+                  ;; effort select existed before the change to check 'deleted'.
+                  ;; But if we know for sure it wasn't deleted and a sender is
+                  ;; outstanding, we should probably block on req (in a new
+                  ;; goroutine) to get the connection back.
+                  (select
+                    (default)
+                    (case [(values ret ok) (<! req)]
+                      (when (and ok (!= (.-conn ret) nil))
+                        (.putConn db (.-conn ret) (.-err ret) false)))))
+
+
+
+                (return nil (.Err ctx))))
+            (case [(values ret ok) (<! req)]
+              (.Add (.-waitDuration db) (conv int64 (time/Since waitStart)))
+
+              (when (not ok)
+                (return nil errDBClosed))
+
+              ;; Only check if the connection is expired if the strategy is cachedOrNewConns.
+              ;; If we require a new connection, just re-use the connection without looking
+              ;; at the expiry time. If it is expired, it will be checked when it is placed
+              ;; back into the connection pool.
+              ;; This prioritizes giving a valid connection to a client over the exact connection
+              ;; lifetime, which could expire exactly after this point anyway.
+              (when (and (== strategy cachedOrNewConn) (== (.-err ret) nil) (.expired (.-conn ret) lifetime))
+                (.Lock (.-mu db))
+                (inc! (.-maxLifetimeClosed db))
+                (.Unlock (.-mu db))
+                (.Close (.-conn ret))
+                (return nil driver/ErrBadConn))
+
+              (when (== (.-conn ret) nil)
+                (return nil (.-err ret)))
+
+
+              ;; Reset the session if required.
+              (when [err (.resetSession (.-conn ret) ctx)] (errors/Is err driver/ErrBadConn)
+                (.Close (.-conn ret))
+                (return nil err))
+
+              (return (.-conn ret) (.-err ret)))))))
+
+
+
+    (inc! (.-numOpen db)) ; optimistically
+    (.Unlock (.-mu db))
+    (let [(values ci err) (.Connect (.-connector db) ctx)]
+      (when (!= err nil)
+        (.Lock (.-mu db))
+        (dec! (.-numOpen db)) ; correct for earlier optimism
+        (.maybeOpenNewConnections db)
+        (.Unlock (.-mu db))
+        (return nil err))
+
+      (.Lock (.-mu db))
+      (let [dc (addr ^{:go/breaks [2 4 6 8 10]} (lit driverConn
+              :db db
+              :createdAt (time/Now)
+              :returnedAt (time/Now)
+              :ci ci
+              :inUse true))]
+
+        (.addDepLocked db dc dc)
+        (.Unlock (.-mu db))
+        (return dc nil)))))
+
+
+
+(go/var ^{:tag (func [(* DB) (* driverConn)]) :doc "putConnHook is a hook for testing.\n"} putConnHook)
+
+
+
+
+^{:go/end 1478} (go/method noteUnusedDriverStatement "noteUnusedDriverStatement notes that ds is no longer used and should\nbe closed whenever possible (when c is next not in use), unless c is\nalready closed.\n" [^{:tag (* DB)} db ^{:tag (* driverConn)} c ^{:tag (* driverStmt)} ds]
+  (.Lock (.-mu db))
+  (defer (.Unlock (.-mu db)))
+  (if (.-inUse c)
+    (set! (.-onPut c) (append (.-onPut c) ^{:go/end 1469} (fn []
+          (.Close ds))))
+
+    (do
+      ^{:go/via [Mutex]} (.Lock c)
+      (let [fc (.-finalClosed c)]
+        ^{:go/via [Mutex]} (.Unlock c)
+        (when (not fc)
+          (.Close ds))))))
+
+
+
+
+
+
+(go/const ^{:val false :doc "debugGetPut determines whether getConn & putConn calls' stack traces\nare returned for more verbose crashes.\n"} debugGetPut false)
+
+
+
+^{:go/end 1536} (go/method putConn "putConn adds a connection to the db's free pool.\nerr is optionally the last error that occurred on this connection.\n" [^{:tag (* DB)} db ^{:tag (* driverConn)} dc ^error err ^bool resetSession]
+  (when (not (errors/Is err driver/ErrBadConn))
+    (when (not (.validateConnection dc resetSession))
+      (set! err driver/ErrBadConn)))
+
+
+  (.Lock (.-mu db))
+  (when (not (.-inUse dc))
+    (.Unlock (.-mu db))
+    (when debugGetPut
+      (fmt/Printf "putConn(%v) DUPLICATE was: %s\n\nPREVIOUS was: %s" dc (stack) (aget (.-lastPut db) dc)))
+
+    (panic "sql: connection returned that was never out"))
+
+
+  (when (and (not (errors/Is err driver/ErrBadConn)) (.expired dc (.-maxLifetime db)))
+    (inc! (.-maxLifetimeClosed db))
+    (set! err driver/ErrBadConn))
+
+  (when debugGetPut
+    (aset (.-lastPut db) dc (stack)))
+
+  (set! (.-inUse dc) false)
+  (set! (.-returnedAt dc) (time/Now))
+
+  (range [_ fn (.-onPut dc)]
+    (go/call fn))
+
+  (set! (.-onPut dc) nil)
+
+  (when (errors/Is err driver/ErrBadConn)
+    ;; Don't reuse bad connections.
+    ;; Since the conn is considered bad and is being discarded, treat it
+    ;; as closed. Don't decrement the open count here, finalClose will
+    ;; take care of that.
+    (.maybeOpenNewConnections db)
+    (.Unlock (.-mu db))
+    (.Close dc)
+    (return))
+
+  (when (!= putConnHook nil)
+    (putConnHook db dc))
+
+  (let [added (.putConnDBLocked db dc nil)]
+    (.Unlock (.-mu db))
+
+    (when (not added)
+      (.Close dc)
+      (return))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 1571]] :go/end 1572} (go/method putConnDBLocked "Satisfy a connRequest or put the driverConn in the idle pool and return true\nor return false.\nputConnDBLocked will satisfy a connRequest if there is one, or it will\nreturn the *driverConn to the freeConn list if err == nil and the idle\nconnection limit will not be exceeded.\nIf err != nil, the value of dc is ignored.\nIf err == nil, then dc must not equal nil.\nIf a connRequest was fulfilled or the *driverConn was placed in the\nfreeConn list, then true is returned, otherwise false is returned.\n" ^bool [^{:tag (* DB)} db ^{:tag (* driverConn)} dc ^error err]
+  (when (.-closed db)
+    (return false))
+
+  (when (and (> (.-maxOpen db) 0) (> (.-numOpen db) (.-maxOpen db)))
+    (return false))
+
+  (if [(values req ok) (.TakeRandom (.-connRequests db))] ok (do
+      (when (== err nil)
+        (set! (.-inUse dc) true))
+
+      (>! req ^{:go/breaks [2 4]} (lit connRequest
+          :conn dc
+          :err err))
+
+      (return true))
+    (when (and (== err nil) (not (.-closed db)))
+      (when (> (.maxIdleConnsLocked db) (len (.-freeConn db)))
+        (set! (.-freeConn db) (append (.-freeConn db) dc))
+        (.startCleanerLocked db)
+        (return true))
+
+      (inc! (.-maxIdleClosed db))))
+
+  false)
+
+
+
+
+
+(go/const ^{:val 2 :doc "maxBadConnRetries is the number of maximum retries if the driver returns\ndriver.ErrBadConn to signal a broken connection before forcing a new\nconnection to be opened.\n"} maxBadConnRetries 2)
+
+^{:go/end 1589} (go/method retry ^error [^{:tag (* DB)} db ^{:tag (func [^connReuseStrategy strategy] [error])} fn]
+  (for [i (conv int64 0)] (< i maxBadConnRetries) (inc! i)
+    (let [err (go/call fn cachedOrNewConn)]
+      ;; retry if err is driver.ErrBadConn
+      (when (or (== err nil) (not (errors/Is err driver/ErrBadConn)))
+        (return err))))
+
+
+
+  (go/call fn alwaysNewConn))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1609} (go/method PrepareContext "PrepareContext creates a prepared statement for later queries or executions.\nMultiple queries or executions may be run concurrently from the\nreturned statement.\nThe caller must call the statement's [*Stmt.Close] method\nwhen the statement is no longer needed.\n\nThe provided context is used for the preparation of the statement, not for the\nexecution of the statement.\n" [^{:tag (* DB)} db ^context/Context ctx ^string query] :results [(* Stmt) error]
+  (let [^{:tag (* Stmt)} stmt (zero (* Stmt))
+      ^{:line 1601 :tag error} err (zero error)]
+
+    (set! err (.retry db ^{:go/end 1606} (fn ^error [^connReuseStrategy strategy]
+          (set! (values stmt err) (.prepare db ctx query strategy))
+          ^{:line 1605} err)))
+
+
+    (return stmt err)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1621} (go/method Prepare "Prepare creates a prepared statement for later queries or executions.\nMultiple queries or executions may be run concurrently from the\nreturned statement.\nThe caller must call the statement's [*Stmt.Close] method\nwhen the statement is no longer needed.\n\nPrepare uses [context.Background] internally; to specify the context, use\n[DB.PrepareContext].\n" [^{:tag (* DB)} db ^string query] :results [(* Stmt) error]
+  (.PrepareContext db (context/Background) query))
+
+
+^{:go/end 1635} (go/method prepare [^{:tag (* DB)} db ^context/Context ctx ^string query ^connReuseStrategy strategy] :results [(* Stmt) error]
+  ;; TODO: check if db.driver supports an optional
+  ;; driver.Preparer interface and call that instead, if so,
+  ;; otherwise we make a prepared statement that's bound
+  ;; to a connection, and to execute this prepared statement
+  ;; we either need to use this connection (if it's free), else
+  ;; get a new connection + re-prepare + execute on that one.
+  (let [(values dc err) (.conn db ctx strategy)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.prepareDC db ctx dc (.-releaseConn dc) nil query)))
+
+
+
+
+
+^{:go/end 1668} (go/method prepareDC "prepareDC prepares a query on the driverConn and calls release before\nreturning. When cg == nil it implies that a connection pool is used, and\nwhen cg != nil only a single driver connection is used.\n" [^{:tag (* DB)} db ^context/Context ctx ^{:tag (* driverConn)} dc ^{:tag (func [error])} release ^stmtConnGrabber cg ^string query] :results [(* Stmt) error]
+  (let [^{:tag (* driverStmt)} ds (zero (* driverStmt))
+      ^{:line 1642 :tag error} err (zero error)]
+    (defer (^{:go/end 1645} (fn []
+          (release err))))
+
+    (withLock dc ^{:go/end 1648} (fn []
+        (set! (values ds err) (.prepareLocked dc ctx cg query))))
+
+    (when (!= err nil)
+      (return nil err))
+
+    (let [stmt (addr ^{:go/breaks [2 4 6 8]} (lit Stmt
+            :db db
+            :query query
+            :cg cg
+            :cgds ds))]
+
+
+      ;; When cg == nil this statement will need to keep track of various
+      ;; connections they are prepared on and record the stmt dependency on
+      ;; the DB.
+      (when (== cg nil)
+        (set! (.-css stmt) (lit (slice connStmt) (lit _ dc ds)))
+        (set! (.-lastNumClosed stmt) (.Load (.-numClosed db)))
+        (.addDep db stmt stmt))
+
+      (return stmt nil))))
+
+
+
+
+^{:go/end 1682} (go/method ExecContext "ExecContext executes a query without returning any rows.\nThe args are for any placeholder parameters in the query.\n" [^{:tag (* DB)} db ^context/Context ctx ^string query & ^{:tag (slice any)} args] :results [Result error]
+  (let [^Result res (zero Result)
+      ^{:line 1674 :tag error} err (zero error)]
+
+    (set! err (.retry db ^{:go/end 1679} (fn ^error [^connReuseStrategy strategy]
+          (set! (values res err) (.exec db ctx query args strategy))
+          ^{:line 1678} err)))
+
+
+    (return res err)))
+
+
+
+
+
+
+
+^{:go/end 1691} (go/method Exec "Exec executes a query without returning any rows.\nThe args are for any placeholder parameters in the query.\n\nExec uses [context.Background] internally; to specify the context, use\n[DB.ExecContext].\n" [^{:tag (* DB)} db ^string query & ^{:tag (slice any)} args] :results [Result error]
+  (.ExecContext db (context/Background) query (spread args)))
+
+
+^{:go/end 1699} (go/method exec [^{:tag (* DB)} db ^context/Context ctx ^string query ^{:tag (slice any)} args ^connReuseStrategy strategy] :results [Result error]
+  (let [(values dc err) (.conn db ctx strategy)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.execDC db ctx dc (.-releaseConn dc) query args)))
+
+
+^{:go/end 1738} (go/method execDC [^{:tag (* DB)} db ^context/Context ctx ^{:tag (* driverConn)} dc ^{:tag (func [error])} release ^string query ^{:tag (slice any)} args] :results [^Result res ^error err]
+  (defer (^{:go/end 1704} (fn []
+        (release err))))
+
+  (let [(values execerCtx ok) (assert driver/ExecerContext (.-ci dc))
+      ^{:line 1706 :tag driver/Execer} execer (zero driver/Execer)]
+    (when (not ok)
+      (set! (values execer ok) (assert driver/Execer (.-ci dc))))
+
+    (when ok
+      (let [^{:tag (slice driver/NamedValue)} nvdargs (zero (slice driver/NamedValue))
+          ^{:line 1712 :tag driver/Result} resi (zero driver/Result)]
+        (withLock dc ^{:go/end 1719} (fn []
+            (set! (values nvdargs err) (driverArgsConnLocked (.-ci dc) nil args))
+            (when (!= err nil)
+              (return))
+
+            (set! (values resi err) (ctxDriverExec ctx execerCtx execer query nvdargs))))
+
+        (when (!= err driver/ErrSkip)
+          (when (!= err nil)
+            (return nil err))
+
+          (return (lit driverResult dc resi) nil))))
+
+
+
+    (let [^driver/Stmt si (zero driver/Stmt)]
+      (withLock dc ^{:go/end 1731} (fn []
+          (set! (values si err) (ctxDriverPrepare ctx (.-ci dc) query))))
+
+      (when (!= err nil)
+        (return nil err))
+
+      (let [ds (addr (lit driverStmt :Locker dc :si si))]
+        (defer (.Close ds))
+        (resultFromStatement ctx (.-ci dc) ds (spread args))))))
+
+
+
+
+^{:go/end 1752} (go/method QueryContext "QueryContext executes a query that returns rows, typically a SELECT.\nThe args are for any placeholder parameters in the query.\n" [^{:tag (* DB)} db ^context/Context ctx ^string query & ^{:tag (slice any)} args] :results [(* Rows) error]
+  (let [^{:tag (* Rows)} rows (zero (* Rows))
+      ^{:line 1744 :tag error} err (zero error)]
+
+    (set! err (.retry db ^{:go/end 1749} (fn ^error [^connReuseStrategy strategy]
+          (set! (values rows err) (.query db ctx query args strategy))
+          ^{:line 1748} err)))
+
+
+    (return rows err)))
+
+
+
+
+
+
+
+^{:go/end 1761} (go/method Query "Query executes a query that returns rows, typically a SELECT.\nThe args are for any placeholder parameters in the query.\n\nQuery uses [context.Background] internally; to specify the context, use\n[DB.QueryContext].\n" [^{:tag (* DB)} db ^string query & ^{:tag (slice any)} args] :results [(* Rows) error]
+  (.QueryContext db (context/Background) query (spread args)))
+
+
+^{:go/end 1770} (go/method query [^{:tag (* DB)} db ^context/Context ctx ^string query ^{:tag (slice any)} args ^connReuseStrategy strategy] :results [(* Rows) error]
+  (let [(values dc err) (.conn db ctx strategy)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (.queryDC db ctx nil dc (.-releaseConn dc) query args)))
+
+
+
+
+
+
+^{:go/end 1838} (go/method queryDC "queryDC executes a query on the given connection.\nThe connection gets released by the releaseConn function.\nThe ctx context is from a query method and the txctx context is from an\noptional transaction context.\n" [^{:tag (* DB)} db ^context/Context ctx ^context/Context txctx ^{:tag (* driverConn)} dc ^{:tag (func [error])} releaseConn ^string query ^{:tag (slice any)} args] :results [(* Rows) error]
+  (let [(values queryerCtx ok) (assert driver/QueryerContext (.-ci dc))
+      ^{:line 1778 :tag driver/Queryer} queryer (zero driver/Queryer)]
+    (when (not ok)
+      (set! (values queryer ok) (assert driver/Queryer (.-ci dc))))
+
+    (when ok
+      (let [^{:tag (slice driver/NamedValue)} nvdargs (zero (slice driver/NamedValue))
+          ^{:line 1784 :tag driver/Rows} rowsi (zero driver/Rows)
+          ^{:line 1785 :tag error} err (zero error)]
+        (withLock dc ^{:go/end 1792} (fn []
+            (set! (values nvdargs err) (driverArgsConnLocked (.-ci dc) nil args))
+            (when (!= err nil)
+              (return))
+
+            (set! (values rowsi err) (ctxDriverQuery ctx queryerCtx queryer query nvdargs))))
+
+        (when (!= err driver/ErrSkip)
+          (when (!= err nil)
+            (releaseConn err)
+            (return nil err))
+
+          ;; Note: ownership of dc passes to the *Rows, to be freed
+          ;; with releaseConn.
+          (let [rows (addr ^{:go/breaks [2 4 6]} (lit Rows
+                  :dc dc
+                  :releaseConn releaseConn
+                  :rowsi rowsi))]
+
+            (.initContextClose rows ctx txctx)
+            (return rows nil)))))
+
+
+
+    (let [^driver/Stmt si (zero driver/Stmt)
+        ^{:line 1811 :tag error} err (zero error)]
+      (withLock dc ^{:go/end 1814} (fn []
+          (set! (values si err) (ctxDriverPrepare ctx (.-ci dc) query))))
+
+      (when (!= err nil)
+        (releaseConn err)
+        (return nil err))
+
+
+      (let [ds (addr (lit driverStmt :Locker dc :si si))
+          (values rowsi ^:assign err) (rowsiFromStatement ctx (.-ci dc) ds (spread args))]
+        (when (!= err nil)
+          (.Close ds)
+          (releaseConn err)
+          (return nil err))
+
+
+        ;; Note: ownership of ci passes to the *Rows, to be freed
+        ;; with releaseConn.
+        (let [rows (addr ^{:go/breaks [2 4 6 8]} (lit Rows
+                :dc dc
+                :releaseConn releaseConn
+                :rowsi rowsi
+                :closeStmt ds))]
+
+          (.initContextClose rows ctx txctx)
+          (return rows nil))))))
+
+
+
+
+
+
+
+
+^{:go/end 1849} (go/method QueryRowContext "QueryRowContext executes a query that is expected to return at most one row.\nQueryRowContext always returns a non-nil value. Errors are deferred until\n[Row]'s Scan method is called.\nIf the query selects no rows, the [*Row.Scan] will return [ErrNoRows].\nOtherwise, [*Row.Scan] scans the first selected row and discards\nthe rest.\n" ^{:tag (* Row)} [^{:tag (* DB)} db ^context/Context ctx ^string query & ^{:tag (slice any)} args]
+  (let [(values rows err) (.QueryContext db ctx query (spread args))]
+    (addr (lit Row :rows rows :err err))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1862} (go/method QueryRow "QueryRow executes a query that is expected to return at most one row.\nQueryRow always returns a non-nil value. Errors are deferred until\n[Row]'s Scan method is called.\nIf the query selects no rows, the [*Row.Scan] will return [ErrNoRows].\nOtherwise, [*Row.Scan] scans the first selected row and discards\nthe rest.\n\nQueryRow uses [context.Background] internally; to specify the context, use\n[DB.QueryRowContext].\n" ^{:tag (* Row)} [^{:tag (* DB)} db ^string query & ^{:tag (slice any)} args]
+  (.QueryRowContext db (context/Background) query (spread args)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1884} (go/method BeginTx "BeginTx starts a transaction.\n\nThe provided context is used until the transaction is committed or rolled back.\nIf the context is canceled, the sql package will roll back\nthe transaction. [Tx.Commit] will return an error if the context provided to\nBeginTx is canceled.\n\nThe provided [TxOptions] is optional and may be nil if defaults should be used.\nIf a non-default isolation level is used that the driver doesn't support,\nan error will be returned.\n" [^{:tag (* DB)} db ^context/Context ctx ^{:tag (* TxOptions)} opts] :results [(* Tx) error]
+  (let [^{:tag (* Tx)} tx (zero (* Tx))
+      ^{:line 1876 :tag error} err (zero error)]
+
+    (set! err (.retry db ^{:go/end 1881} (fn ^error [^connReuseStrategy strategy]
+          (set! (values tx err) (.begin db ctx opts strategy))
+          ^{:line 1880} err)))
+
+
+    (return tx err)))
+
+
+
+
+
+
+
+^{:go/end 1893} (go/method Begin "Begin starts a transaction. The default isolation level is dependent on\nthe driver.\n\nBegin uses [context.Background] internally; to specify the context, use\n[DB.BeginTx].\n" [^{:tag (* DB)} db] :results [(* Tx) error]
+  (.BeginTx db (context/Background) nil))
+
+
+^{:go/end 1901} (go/method begin [^{:tag (* DB)} db ^context/Context ctx ^{:tag (* TxOptions)} opts ^connReuseStrategy strategy] :results [^{:tag (* Tx)} tx ^error err]
+  (let [(values dc ^:assign err) (.conn db ctx strategy)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.beginDC db ctx dc (.-releaseConn dc) opts)))
+
+
+
+^{:go/end 1932} (go/method beginDC "beginDC starts a transaction. The provided dc must be valid and ready to use.\n" [^{:tag (* DB)} db ^context/Context ctx ^{:tag (* driverConn)} dc ^{:tag (func [error])} release ^{:tag (* TxOptions)} opts] :results [^{:tag (* Tx)} tx ^error err]
+  (let [^driver/Tx txi (zero driver/Tx)
+      ^{:line 1906} keepConnOnRollback false]
+    (withLock dc ^{:go/end 1912} (fn []
+        (let [(values _ hasSessionResetter) (assert driver/SessionResetter (.-ci dc))
+            (values _ hasConnectionValidator) (assert driver/Validator (.-ci dc))]
+          (set! keepConnOnRollback (and hasSessionResetter hasConnectionValidator))
+          (set! (values txi err) (ctxDriverBegin ctx opts (.-ci dc))))))
+
+    (when (!= err nil)
+      (release err)
+      (return nil err))
+
+
+    ;; Schedule the transaction to rollback when the context is canceled.
+    ;; The cancel function in Tx will be called after done is set to true.
+    (let [(values ^:assign ctx cancel) (context/WithCancel ctx)]
+      (set! tx (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit Tx
+            :db db
+            :dc dc
+            :releaseConn release
+            :txi txi
+            :cancel cancel
+            :keepConnOnRollback keepConnOnRollback
+            :ctx ctx)))
+
+      (go (.awaitDone tx))
+      (return tx nil))))
+
+
+
+^{:go/end 1937} (go/method Driver "Driver returns the database's underlying driver.\n" ^driver/Driver [^{:tag (* DB)} db]
+  (.Driver (.-connector db)))
+
+
+
+
+(go/var ^{:doc "ErrConnDone is returned by any operation that is performed on a connection\nthat has already been returned to the connection pool.\n"} ErrConnDone (errors/New "sql: connection is already closed"))
+
+
+
+
+
+
+
+
+^{:go/end 1968} (go/method Conn "Conn returns a single connection by either opening a new connection\nor returning an existing connection from the connection pool. Conn will\nblock until either a connection is returned or ctx is canceled.\nQueries run on the same Conn will be run in the same database session.\n\nEvery Conn must be returned to the database pool after use by\ncalling [Conn.Close].\n" [^{:tag (* DB)} db ^context/Context ctx] :results [(* Conn) error]
+  (let [^{:tag (* driverConn)} dc (zero (* driverConn))
+      ^{:line 1952 :tag error} err (zero error)]
+
+    (set! err (.retry db ^{:go/end 1957} (fn ^error [^connReuseStrategy strategy]
+          (set! (values dc err) (.conn db ctx strategy))
+          ^{:line 1956} err)))
+
+
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [conn (addr ^{:go/breaks [2 4]} (lit Conn
+            :db db
+            :dc dc))]
+
+      (return conn nil))))
+
+
+(go/type releaseConn (func [error]))
+
+
+
+
+
+
+
+
+
+
+(go/type Conn "Conn represents a single database connection rather than a pool of database\nconnections. Prefer running queries from [DB] unless there is a specific\nneed for a continuous single database connection.\n\nA Conn must call [Conn.Close] to return the connection to the database pool\nand may do so concurrently with a running query.\n\nAfter a call to [Conn.Close], all operations on the\nconnection fail with [ErrConnDone].\n" (struct
+    ^{:line 1982 :tag (* DB)} db
+
+
+
+
+    ^{:line 1987 :tag closingMutex :doc "closemu prevents the connection from closing while there\nis an active query. It is held for read during queries\nand exclusively during close.\n"} closemu
+
+
+
+    ^{:line 1991 :tag (* driverConn) :doc "dc is owned until close, at which point\nit's returned to the connection pool.\n"} dc
+
+
+
+    ^{:line 1995 :tag atomic/Bool :doc "done transitions from false to true exactly once, on close.\nOnce done, all operations fail with ErrConnDone.\n"} done
+
+    ^{:line 1997 :tag sync/Once} releaseConnOnce
+
+
+    ^{:line 2000 :tag releaseConn :doc "releaseConnCache is a cache of c.closemuRUnlockCondReleaseConn\nto save allocations in a call to grabConn.\n"} releaseConnCache))
+
+
+
+
+^{:go/end 2014} (go/method grabConn "grabConn takes a context to implement stmtConnGrabber\nbut the context is not used.\n" [^{:tag (* Conn)} c context/Context] :results [(* driverConn) releaseConn error]
+  (when (.Load (.-done c))
+    (return nil nil ErrConnDone))
+
+  (.Do (.-releaseConnOnce c) ^{:go/end 2011} (fn []
+      (set! (.-releaseConnCache c) (.-closemuRUnlockCondReleaseConn c))))
+
+  (.RLock (.-closemu c))
+  (return (.-dc c) (.-releaseConnCache c) nil))
+
+
+
+^{:go/end 2023} (go/method PingContext "PingContext verifies the connection to the database is still alive.\n" ^error [^{:tag (* Conn)} c ^context/Context ctx]
+  (let [(values dc release err) (.grabConn c ctx)]
+    (when (!= err nil)
+      (return err))
+
+    (.pingDC (.-db c) ctx dc release)))
+
+
+
+
+^{:go/end 2033} (go/method ExecContext "ExecContext executes a query without returning any rows.\nThe args are for any placeholder parameters in the query.\n" [^{:tag (* Conn)} c ^context/Context ctx ^string query & ^{:tag (slice any)} args] :results [Result error]
+  (let [(values dc release err) (.grabConn c ctx)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.execDC (.-db c) ctx dc release query args)))
+
+
+
+
+^{:go/end 2043} (go/method QueryContext "QueryContext executes a query that returns rows, typically a SELECT.\nThe args are for any placeholder parameters in the query.\n" [^{:tag (* Conn)} c ^context/Context ctx ^string query & ^{:tag (slice any)} args] :results [(* Rows) error]
+  (let [(values dc release err) (.grabConn c ctx)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.queryDC (.-db c) ctx nil dc release query args)))
+
+
+
+
+
+
+
+
+^{:go/end 2054} (go/method QueryRowContext "QueryRowContext executes a query that is expected to return at most one row.\nQueryRowContext always returns a non-nil value. Errors are deferred until\nthe [*Row.Scan] method is called.\nIf the query selects no rows, the [*Row.Scan] will return [ErrNoRows].\nOtherwise, the [*Row.Scan] scans the first selected row and discards\nthe rest.\n" ^{:tag (* Row)} [^{:tag (* Conn)} c ^context/Context ctx ^string query & ^{:tag (slice any)} args]
+  (let [(values rows err) (.QueryContext c ctx query (spread args))]
+    (addr (lit Row :rows rows :err err))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2070} (go/method PrepareContext "PrepareContext creates a prepared statement for later queries or executions.\nMultiple queries or executions may be run concurrently from the\nreturned statement.\nThe caller must call the statement's [*Stmt.Close] method\nwhen the statement is no longer needed.\n\nThe provided context is used for the preparation of the statement, not for the\nexecution of the statement.\n" [^{:tag (* Conn)} c ^context/Context ctx ^string query] :results [(* Stmt) error]
+  (let [(values dc release err) (.grabConn c ctx)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.prepareDC (.-db c) ctx dc release c query)))
+
+
+
+
+
+
+
+^{:go/end 2103} (go/method Raw "Raw executes f exposing the underlying driver connection for the\nduration of f. The driverConn must not be used outside of f.\n\nOnce f returns and err is not [driver.ErrBadConn], the [Conn] will continue to be usable\nuntil [Conn.Close] is called.\n" [^{:tag (* Conn)} c ^{:tag (func [^any driverConn] [error])} f] :results [^error err]
+  (let [^{:tag (* driverConn)} dc (zero (* driverConn))
+      ^{:line 2079 :tag releaseConn} release (zero releaseConn)]
+
+    ;; grabConn takes a context to implement stmtConnGrabber, but the context is not used.
+    (set! (values dc release err) (.grabConn c nil))
+    (when (!= err nil)
+      (return))
+
+    (let [fPanic true]
+      (.Lock (.-Mutex dc))
+      (defer (^{:go/end 2098} (fn []
+            (.Unlock (.-Mutex dc))
+
+            ;; If f panics fPanic will remain true.
+            ;; Ensure an error is passed to release so the connection
+            ;; may be discarded.
+            (when fPanic
+              (set! err driver/ErrBadConn))
+
+            (release err))))
+
+      (set! err (f (.-ci dc)))
+      (set! fPanic false)
+
+      (return))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2121} (go/method BeginTx "BeginTx starts a transaction.\n\nThe provided context is used until the transaction is committed or rolled back.\nIf the context is canceled, the sql package will roll back\nthe transaction. [Tx.Commit] will return an error if the context provided to\nBeginTx is canceled.\n\nThe provided [TxOptions] is optional and may be nil if defaults should be used.\nIf a non-default isolation level is used that the driver doesn't support,\nan error will be returned.\n" [^{:tag (* Conn)} c ^context/Context ctx ^{:tag (* TxOptions)} opts] :results [(* Tx) error]
+  (let [(values dc release err) (.grabConn c ctx)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.beginDC (.-db c) ctx dc release opts)))
+
+
+
+
+^{:go/end 2130} (go/method closemuRUnlockCondReleaseConn "closemuRUnlockCondReleaseConn read unlocks closemu\nas the sql operation is done with the dc.\n" [^{:tag (* Conn)} c ^error err]
+  (.RUnlock (.-closemu c))
+  (when (errors/Is err driver/ErrBadConn)
+    (.close c err)))
+
+
+
+^{:go/breaks [3] :go/end 2134} (go/method txCtx ^context/Context [^{:tag (* Conn)} c]
+  nil)
+
+
+^{:go/end 2150} (go/method close ^error [^{:tag (* Conn)} c ^error err]
+  (when (not (.CompareAndSwap (.-done c) false true))
+    (return ErrConnDone))
+
+
+  ;; Lock around releasing the driver connection
+  ;; to ensure all queries have been stopped before doing so.
+  (.Lock (.-closemu c))
+  (defer (.Unlock (.-closemu c)))
+
+  (.releaseConn (.-dc c) err)
+  (set! (.-dc c) nil)
+  (set! (.-db c) nil)
+  ^{:line 2149} err)
+
+
+
+
+
+
+
+^{:go/end 2159} (go/method Close "Close returns the connection to the connection pool.\nAll operations after a Close will return with [ErrConnDone].\nClose is safe to call concurrently with other operations and will\nblock until all other operations finish. It may be useful to first\ncancel any used context and then call close directly after.\n" ^error [^{:tag (* Conn)} c]
+  (.close c nil))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Tx "Tx is an in-progress database transaction.\n\nA transaction must end with a call to [Tx.Commit] or [Tx.Rollback].\n\nAfter a call to [Tx.Commit] or [Tx.Rollback], all operations on the\ntransaction fail with [ErrTxDone].\n\nThe statements prepared for a transaction by calling\nthe transaction's [Tx.Prepare] or [Tx.Stmt] methods are closed\nby the call to [Tx.Commit] or [Tx.Rollback].\n" (struct
+    ^{:line 2172 :tag (* DB)} db
+
+
+
+
+    ^{:line 2177 :tag closingMutex :doc "closemu prevents the transaction from closing while there\nis an active query. It is held for read during queries\nand exclusively during close.\n"} closemu
+
+
+
+    ^{:line 2181 :tag (* driverConn) :doc "dc is owned exclusively until Commit or Rollback, at which point\nit's returned with putConn.\n"} dc
+    ^{:line 2182 :tag driver/Tx} txi
+
+
+
+    ^{:line 2186 :tag (func [error]) :doc "releaseConn is called once the Tx is closed to release\nany held driverConn back to the pool.\n"} releaseConn
+
+
+
+
+    ^{:line 2191 :tag atomic/Bool :doc "done transitions from false to true exactly once, on Commit\nor Rollback. once done, all operations fail with\nErrTxDone.\n"} done
+
+
+
+
+    ^{:line 2196 :tag bool :doc "keepConnOnRollback is true if the driver knows\nhow to reset the connection's session and if need be discard\nthe connection.\n"} keepConnOnRollback
+
+
+
+    ^{:line 2200 :tag (struct sync/Mutex ^{:tag (slice (* Stmt))} v) :doc "All Stmts prepared for this transaction. These will be closed after the\ntransaction has been committed or rolled back.\n"} stmts
+
+
+
+
+
+    ^{:line 2206 :tag (func []) :doc "cancel is called after done transitions from 0 to 1.\n"} cancel
+
+
+    ^{:line 2209 :tag context/Context :doc "ctx lives for the life of the transaction.\n"} ctx))
+
+
+
+
+^{:go/end 2227} (go/method awaitDone "awaitDone blocks until the context in Tx is canceled and rolls back\nthe transaction if it's not already done.\n" [^{:tag (* Tx)} tx]
+  ;; Wait for either the transaction to be committed or rolled
+  ;; back, or for the associated context to be closed.
+  (<! (.Done (.-ctx tx)))
+
+  ;; Discard and close the connection used to ensure the
+  ;; transaction is closed and the resources are released.  This
+  ;; rollback does nothing if the transaction has already been
+  ;; committed or rolled back.
+  ;; Do not discard the connection if the connection knows
+  ;; how to reset the session.
+  (let [discardConnection (not (.-keepConnOnRollback tx))]
+    (.rollback tx discardConnection)))
+
+
+^{:go/end 2231} (go/method isDone ^bool [^{:tag (* Tx)} tx]
+  (.Load (.-done tx)))
+
+
+
+
+(go/var ^{:doc "ErrTxDone is returned by any operation that is performed on a transaction\nthat has already been committed or rolled back.\n"} ErrTxDone (errors/New "sql: transaction has already been committed or rolled back"))
+
+
+
+
+^{:go/end 2244} (go/method close "close returns the connection to the pool and\nmust only be called by Tx.rollback or Tx.Commit while\ntx is already canceled and won't be executed concurrently.\n" [^{:tag (* Tx)} tx ^error err]
+  ((.-releaseConn tx) err)
+  (set! (.-dc tx) nil)
+  (set! (.-txi tx) nil))
+
+
+
+
+(go/var ^{:tag (func []) :doc "hookTxGrabConn specifies an optional hook to be called on\na successful call to (*Tx).grabConn. For tests.\n"} hookTxGrabConn)
+
+^{:go/end 2268} (go/method grabConn [^{:tag (* Tx)} tx ^context/Context ctx] :results [(* driverConn) releaseConn error]
+  (select
+    (default)
+    (case (<! (.Done ctx))
+      (return nil nil (.Err ctx))))
+
+
+  ;; closemu.RLock must come before the check for isDone to prevent the Tx from
+  ;; closing while a query is executing.
+  (.RLock (.-closemu tx))
+  (when (.isDone tx)
+    (.RUnlock (.-closemu tx))
+    (return nil nil ErrTxDone))
+
+  (when (!= hookTxGrabConn nil) ; test hook
+    (hookTxGrabConn))
+
+  (return (.-dc tx) (.-closemuRUnlockRelease tx) nil))
+
+
+^{:go/end 2272} (go/method txCtx ^context/Context [^{:tag (* Tx)} tx]
+  (.-ctx tx))
+
+
+
+
+
+
+^{:go/end 2280} (go/method closemuRUnlockRelease "closemuRUnlockRelease is used as a func(error) method value in\n[DB.ExecContext] and [DB.QueryContext]. Unlocking in the releaseConn keeps\nthe driver conn from being returned to the connection pool until\nthe Rows has been closed.\n" [^{:tag (* Tx)} tx error]
+  (.RUnlock (.-closemu tx)))
+
+
+
+^{:go/end 2289} (go/method closePrepared "Closes all Stmts prepared for this transaction.\n" [^{:tag (* Tx)} tx]
+  ^{:go/via [Mutex]} (.Lock (.-stmts tx))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-stmts tx)))
+  (range [_ stmt (.-v (.-stmts tx))]
+    (.Close stmt)))
+
+
+
+
+^{:go/end 2325} (go/method Commit "Commit commits the transaction.\n" ^error [^{:tag (* Tx)} tx]
+  ;; Check context first to avoid transaction leak.
+  ;; If put it behind tx.done CompareAndSwap statement, we can't ensure
+  ;; the consistency between tx.done and the real COMMIT operation.
+  (select
+    (default)
+    (case (<! (.Done (.-ctx tx)))
+      (when (.Load (.-done tx))
+        (return ErrTxDone))
+
+      (return (.Err (.-ctx tx)))))
+
+  (when (not (.CompareAndSwap (.-done tx) false true))
+    (return ErrTxDone))
+
+
+  ;; Cancel the Tx to release any active R-closemu locks.
+  ;; This is safe to do because tx.done has already transitioned
+  ;; from 0 to 1. Hold the W-closemu lock prior to rollback
+  ;; to ensure no other connection has an active query.
+  ((.-cancel tx))
+  (.Lock (.-closemu tx))
+  (.Unlock (.-closemu tx))
+
+  (let [^error err (zero error)]
+    (withLock (.-dc tx) ^{:go/end 2319} (fn []
+        (set! err (.Commit (.-txi tx)))))
+
+    (when (not (errors/Is err driver/ErrBadConn))
+      (.closePrepared tx))
+
+    (.close tx err)
+    ^{:line 2324} err))
+
+
+(go/var ^{:tag (func [])} rollbackHook)
+
+
+
+^{:go/end 2360} (go/method rollback "rollback aborts the transaction and optionally forces the pool to discard\nthe connection.\n" ^error [^{:tag (* Tx)} tx ^bool discardConn]
+  (when (not (.CompareAndSwap (.-done tx) false true))
+    (return ErrTxDone))
+
+
+  (when (!= rollbackHook nil)
+    (rollbackHook))
+
+
+  ;; Cancel the Tx to release any active R-closemu locks.
+  ;; This is safe to do because tx.done has already transitioned
+  ;; from 0 to 1. Hold the W-closemu lock prior to rollback
+  ;; to ensure no other connection has an active query.
+  ((.-cancel tx))
+  (.Lock (.-closemu tx))
+  (.Unlock (.-closemu tx))
+
+  (let [^error err (zero error)]
+    (withLock (.-dc tx) ^{:go/end 2351} (fn []
+        (set! err (.Rollback (.-txi tx)))))
+
+    (when (not (errors/Is err driver/ErrBadConn))
+      (.closePrepared tx))
+
+    (when discardConn
+      (set! err driver/ErrBadConn))
+
+    (.close tx err)
+    ^{:line 2359} err))
+
+
+
+^{:go/end 2365} (go/method Rollback "Rollback aborts the transaction.\n" ^error [^{:tag (* Tx)} tx]
+  (.rollback tx false))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2391} (go/method PrepareContext "PrepareContext creates a prepared statement for use within a transaction.\n\nThe returned statement operates within the transaction and will be closed\nwhen the transaction has been committed or rolled back.\n\nTo use an existing prepared statement on this transaction, see [Tx.Stmt].\n\nThe provided context will be used for the preparation of the context, not\nfor the execution of the returned statement. The returned statement\nwill run in the transaction context.\n" [^{:tag (* Tx)} tx ^context/Context ctx ^string query] :results [(* Stmt) error]
+  (let [(values dc release err) (.grabConn tx ctx)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [(values stmt ^:assign err) (.prepareDC (.-db tx) ctx dc release tx query)]
+      (when (!= err nil)
+        (return nil err))
+
+      ^{:go/via [Mutex]} (.Lock (.-stmts tx))
+      (set! (.-v (.-stmts tx)) (append (.-v (.-stmts tx)) stmt))
+      ^{:go/via [Mutex]} (.Unlock (.-stmts tx))
+      (return stmt nil))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2404} (go/method Prepare "Prepare creates a prepared statement for use within a transaction.\n\nThe returned statement operates within the transaction and will be closed\nwhen the transaction has been committed or rolled back.\n\nTo use an existing prepared statement on this transaction, see [Tx.Stmt].\n\nPrepare uses [context.Background] internally; to specify the context, use\n[Tx.PrepareContext].\n" [^{:tag (* Tx)} tx ^string query] :results [(* Stmt) error]
+  (.PrepareContext tx (context/Background) query))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2492} (go/method StmtContext "StmtContext returns a transaction-specific prepared statement from\nan existing statement.\n\nExample:\n\n\tupdateMoney, err := db.Prepare(\"UPDATE balance SET money=money+? WHERE id=?\")\n\t...\n\ttx, err := db.Begin()\n\t...\n\tres, err := tx.StmtContext(ctx, updateMoney).Exec(123.45, 98293203)\n\nThe provided context is used for the preparation of the statement, not for the\nexecution of the statement.\n\nThe returned statement operates within the transaction and will be closed\nwhen the transaction has been committed or rolled back.\n" ^{:tag (* Stmt)} [^{:tag (* Tx)} tx ^context/Context ctx ^{:tag (* Stmt)} stmt]
+  (let [(values dc release err) (.grabConn tx ctx)]
+    (when (!= err nil)
+      (return (addr (lit Stmt :stickyErr err))))
+
+    (defer (release nil))
+
+    (when (!= (.-db tx) (.-db stmt))
+      (return (addr (lit Stmt :stickyErr (errors/New "sql: Tx.Stmt: statement from different database used")))))
+
+    (let [^driver/Stmt si (zero driver/Stmt)
+        ^{:line 2433 :tag (* Stmt)} parentStmt (zero (* Stmt))]
+      (.Lock (.-mu stmt))
+      (if (or (.-closed stmt) (!= (.-cg stmt) nil)) (do
+          ;; If the statement has been closed or already belongs to a
+          ;; transaction, we can't reuse it in this connection.
+          ;; Since tx.StmtContext should never need to be called with a
+          ;; Stmt already belonging to tx, we ignore this edge case and
+          ;; re-prepare the statement in this case. No need to add
+          ;; code-complexity for this.
+          (.Unlock (.-mu stmt))
+          (withLock dc ^{:go/end 2445} (fn []
+              (set! (values si err) (ctxDriverPrepare ctx (.-ci dc) (.-query stmt)))))
+
+          (when (!= err nil)
+            (return (addr (lit Stmt :stickyErr err)))))
+
+        (do
+          (.removeClosedStmtLocked stmt)
+          ;; See if the statement has already been prepared on this connection,
+          ;; and reuse it if possible.
+          (range [_ v (.-css stmt)]
+            (when (== (.-dc v) dc)
+              (set! si (.-si (.-ds v)))
+              (break)))
+
+
+
+          (.Unlock (.-mu stmt))
+
+          (when (== si nil)
+            (let [^{:tag (* driverStmt)} ds (zero (* driverStmt))]
+              (withLock dc ^{:go/end 2466} (fn []
+                  (set! (values ds err) (.prepareOnConnLocked stmt ctx dc))))
+
+              (when (!= err nil)
+                (return (addr (lit Stmt :stickyErr err))))
+
+              (set! si (.-si ds))))
+
+          (set! parentStmt stmt)))
+
+
+      (let [txs (addr ^{:go/breaks [2 4 6 [8 2482] 10]} (lit Stmt
+              :db (.-db tx)
+              :cg tx
+              :cgds (addr ^{:go/breaks [2 4]} (lit driverStmt
+                  :Locker dc
+                  :si si))
+
+              :parentStmt parentStmt
+              :query (.-query stmt)))]
+
+        (when (!= parentStmt nil)
+          (.addDep (.-db tx) parentStmt txs))
+
+        ^{:go/via [Mutex]} (.Lock (.-stmts tx))
+        (set! (.-v (.-stmts tx)) (append (.-v (.-stmts tx)) txs))
+        ^{:go/via [Mutex]} (.Unlock (.-stmts tx))
+        ^{:line 2491} txs))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2512} (go/method Stmt "Stmt returns a transaction-specific prepared statement from\nan existing statement.\n\nExample:\n\n\tupdateMoney, err := db.Prepare(\"UPDATE balance SET money=money+? WHERE id=?\")\n\t...\n\ttx, err := db.Begin()\n\t...\n\tres, err := tx.Stmt(updateMoney).Exec(123.45, 98293203)\n\nThe returned statement operates within the transaction and will be closed\nwhen the transaction has been committed or rolled back.\n\nStmt uses [context.Background] internally; to specify the context, use\n[Tx.StmtContext].\n" ^{:tag (* Stmt)} [^{:tag (* Tx)} tx ^{:tag (* Stmt)} stmt]
+  (.StmtContext tx (context/Background) stmt))
+
+
+
+
+^{:go/end 2522} (go/method ExecContext "ExecContext executes a query that doesn't return rows.\nFor example: an INSERT and UPDATE.\n" [^{:tag (* Tx)} tx ^context/Context ctx ^string query & ^{:tag (slice any)} args] :results [Result error]
+  (let [(values dc release err) (.grabConn tx ctx)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.execDC (.-db tx) ctx dc release query args)))
+
+
+
+
+
+
+
+^{:go/end 2531} (go/method Exec "Exec executes a query that doesn't return rows.\nFor example: an INSERT and UPDATE.\n\nExec uses [context.Background] internally; to specify the context, use\n[Tx.ExecContext].\n" [^{:tag (* Tx)} tx ^string query & ^{:tag (slice any)} args] :results [Result error]
+  (.ExecContext tx (context/Background) query (spread args)))
+
+
+
+^{:go/end 2541} (go/method QueryContext "QueryContext executes a query that returns rows, typically a SELECT.\n" [^{:tag (* Tx)} tx ^context/Context ctx ^string query & ^{:tag (slice any)} args] :results [(* Rows) error]
+  (let [(values dc release err) (.grabConn tx ctx)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (.queryDC (.-db tx) ctx (.-ctx tx) dc release query args)))
+
+
+
+
+
+
+^{:go/end 2549} (go/method Query "Query executes a query that returns rows, typically a SELECT.\n\nQuery uses [context.Background] internally; to specify the context, use\n[Tx.QueryContext].\n" [^{:tag (* Tx)} tx ^string query & ^{:tag (slice any)} args] :results [(* Rows) error]
+  (.QueryContext tx (context/Background) query (spread args)))
+
+
+
+
+
+
+
+
+^{:go/end 2560} (go/method QueryRowContext "QueryRowContext executes a query that is expected to return at most one row.\nQueryRowContext always returns a non-nil value. Errors are deferred until\n[Row]'s Scan method is called.\nIf the query selects no rows, the [*Row.Scan] will return [ErrNoRows].\nOtherwise, the [*Row.Scan] scans the first selected row and discards\nthe rest.\n" ^{:tag (* Row)} [^{:tag (* Tx)} tx ^context/Context ctx ^string query & ^{:tag (slice any)} args]
+  (let [(values rows err) (.QueryContext tx ctx query (spread args))]
+    (addr (lit Row :rows rows :err err))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2573} (go/method QueryRow "QueryRow executes a query that is expected to return at most one row.\nQueryRow always returns a non-nil value. Errors are deferred until\n[Row]'s Scan method is called.\nIf the query selects no rows, the [*Row.Scan] will return [ErrNoRows].\nOtherwise, the [*Row.Scan] scans the first selected row and discards\nthe rest.\n\nQueryRow uses [context.Background] internally; to specify the context, use\n[Tx.QueryRowContext].\n" ^{:tag (* Row)} [^{:tag (* Tx)} tx ^string query & ^{:tag (slice any)} args]
+  (.QueryRowContext tx (context/Background) query (spread args)))
+
+
+
+(go/type connStmt "connStmt is a prepared statement on a particular connection.\n" (struct
+    ^{:line 2577 :tag (* driverConn)} dc
+    ^{:line 2578 :tag (* driverStmt)} ds))
+
+
+
+
+(go/type stmtConnGrabber "stmtConnGrabber represents a Tx or Conn that will return the underlying\ndriverConn and release function.\n" (interface
+
+
+    (^{:doc "grabConn returns the driverConn and the associated release function\nthat must be called when the operation completes.\n"} grabConn [context/Context] :results [(* driverConn) releaseConn error])
+
+
+
+
+    (^{:doc "txCtx returns the transaction context if available.\nThe returned context should be selected on along with\nany query context when awaiting a cancel.\n"} txCtx ^context/Context [])))
+
+
+(go/var
+  ^{:line 2595} [^stmtConnGrabber _ (addr (lit Tx))]
+  ^{:line 2596} [^stmtConnGrabber _ (addr (lit Conn))])
+
+
+
+
+
+
+
+
+
+
+
+(go/type Stmt "Stmt is a prepared statement.\nA Stmt is safe for concurrent use by multiple goroutines.\n\nIf a Stmt is prepared on a [Tx] or [Conn], it will be bound to a single\nunderlying connection forever. If the [Tx] or [Conn] closes, the Stmt will\nbecome unusable and all operations will return an error.\nIf a Stmt is prepared on a [DB], it will remain usable for the lifetime of the\n[DB]. When the Stmt needs to execute on a new underlying connection, it will\nprepare itself on the new connection automatically.\n" (struct
+
+    ^{:line 2610 :tag (* DB) :doc "Immutable:\n"} db ; where we came from
+    ^{:line 2611 :tag string} query ; that created the Stmt
+    ^{:line 2612 :tag error} stickyErr ; if non-nil, this error is returned for all operations
+
+    ^{:line 2614 :tag closingMutex} closemu ; held exclusively during close, for read otherwise.
+
+
+
+
+
+
+    ^{:line 2621 :tag stmtConnGrabber :doc "If Stmt is prepared on a Tx or Conn then cg is present and will\nonly ever grab a connection from cg.\nIf cg is nil then the Stmt must grab an arbitrary connection\nfrom db and determine if it must prepare the stmt again by\ninspecting css.\n"} cg
+    ^{:line 2622 :tag (* driverStmt)} cgds
+
+
+
+
+
+
+
+    ^{:line 2630 :tag (* Stmt) :doc "parentStmt is set when a transaction-specific statement\nis requested from an identical statement prepared on the same\nconn. parentStmt is used to track the dependency of this statement\non its originating (\"parent\") statement so that parentStmt may\nbe closed by the user without them having to know whether or not\nany transactions are still using it.\n"} parentStmt
+
+    ^{:line 2632 :tag sync/Mutex} mu ; protects the rest of the fields
+    ^{:line 2633 :tag bool} closed
+
+
+
+
+
+    ^{:line 2639 :tag (slice connStmt) :doc "css is a list of underlying driver statement interfaces\nthat are valid on particular connections. This is only\nused if cg == nil and one is found that has idle\nconnections. If cg != nil, cgds is always used.\n"} css
+
+
+
+    ^{:line 2643 :tag uint64 :doc "lastNumClosed is copied from db.numClosed when Stmt is created\nwithout tx and closed connections in css are removed.\n"} lastNumClosed))
+
+
+
+
+^{:go/end 2665} (go/method ExecContext "ExecContext executes a prepared statement with the given arguments and\nreturns a [Result] summarizing the effect of the statement.\n" [^{:tag (* Stmt)} s ^context/Context ctx & ^{:tag (slice any)} args] :results [Result error]
+  (.RLock (.-closemu s))
+  (defer (.RUnlock (.-closemu s)))
+
+  (let [^Result res (zero Result)
+      ^{:line 2653} err (.retry (.-db s) ^{:go/end 2662} (fn ^error [^connReuseStrategy strategy]
+          (let [(values dc releaseConn ds err) (.connStmt s ctx strategy)]
+            (when (!= err nil)
+              (return err))
+
+
+            (set! (values res err) (resultFromStatement ctx (.-ci dc) ds (spread args)))
+            (releaseConn err)
+            ^{:line 2661} err)))]
+
+
+    (return res err)))
+
+
+
+
+
+
+
+^{:go/end 2674} (go/method Exec "Exec executes a prepared statement with the given arguments and\nreturns a [Result] summarizing the effect of the statement.\n\nExec uses [context.Background] internally; to specify the context, use\n[Stmt.ExecContext].\n" [^{:tag (* Stmt)} s & ^{:tag (slice any)} args] :results [Result error]
+  (.ExecContext s (context/Background) (spread args)))
+
+
+^{:go/end 2690} (go/func resultFromStatement [^context/Context ctx ^driver/Conn ci ^{:tag (* driverStmt)} ds & ^{:tag (slice any)} args] :results [Result error]
+  ^{:go/via [Locker]} (.Lock ds)
+  (defer ^{:go/via [Locker]} (.Unlock ds))
+
+  (let [(values dargs err) (driverArgsConnLocked ci ds args)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [(values resi ^:assign err) (ctxDriverStmtExec ctx (.-si ds) dargs)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (lit driverResult (.-Locker ds) resi) nil))))
+
+
+
+
+
+
+^{:go/end 2718} (go/method removeClosedStmtLocked "removeClosedStmtLocked removes closed conns in s.css.\n\nTo avoid lock contention on DB.mu, we do it only when\ns.db.numClosed - s.lastNum is large enough.\n" [^{:tag (* Stmt)} s]
+  (let [t (+ (/ (len (.-css s)) 2) 1)]
+    (when (> t 10)
+      (set! t 10))
+
+    (let [dbClosed (.Load (.-numClosed (.-db s)))]
+      (when (< (- dbClosed (.-lastNumClosed s)) (conv uint64 t))
+        (return))
+
+
+      (.Lock (.-mu (.-db s)))
+      (for [i 0] (< i (len (.-css s))) (inc! i)
+        (when (.-dbmuClosed (.-dc (aget (.-css s) i)))
+          (aset (.-css s) i (aget (.-css s) (- (len (.-css s)) 1)))
+          ;; Zero out the last element (for GC) before shrinking the slice.
+          (aset (.-css s) (- (len (.-css s)) 1) (lit connStmt))
+          (set! (.-css s) (subslice (.-css s) _ (- (len (.-css s)) 1)))
+          (dec! i)))
+
+
+      (.Unlock (.-mu (.-db s)))
+      (set! (.-lastNumClosed s) dbClosed))))
+
+
+
+
+
+^{:go/end 2772} (go/method connStmt "connStmt returns a free driver connection on which to execute the\nstatement, a function to call to release the connection, and a\nstatement bound to that connection.\n" [^{:tag (* Stmt)} s ^context/Context ctx ^connReuseStrategy strategy] :results [^{:tag (* driverConn)} dc ^{:tag (func [error])} releaseConn ^{:tag (* driverStmt)} ds ^error err]
+  (when [(set! err (.-stickyErr s))] (!= err nil)
+    (return))
+
+  (.Lock (.-mu s))
+  (when (.-closed s)
+    (.Unlock (.-mu s))
+    (set! err (errors/New "sql: statement is closed"))
+    (return))
+
+
+  ;; In a transaction or connection, we always use the connection that the
+  ;; stmt was created on.
+  (when (!= (.-cg s) nil)
+    (.Unlock (.-mu s))
+    (set! (values dc releaseConn err) (.grabConn (.-cg s) ctx)) ; blocks, waiting for the connection.
+    (when (!= err nil)
+      (return))
+
+    (return dc releaseConn (.-cgds s) nil))
+
+
+  (.removeClosedStmtLocked s)
+  (.Unlock (.-mu s))
+
+  (set! (values dc err) (.conn (.-db s) ctx strategy))
+  (when (!= err nil)
+    (return nil nil nil err))
+
+
+  (.Lock (.-mu s))
+  (range [_ v (.-css s)]
+    (when (== (.-dc v) dc)
+      (.Unlock (.-mu s))
+      (return dc (.-releaseConn dc) (.-ds v) nil)))
+
+
+  (.Unlock (.-mu s))
+
+  ;; No luck; we need to prepare the statement on this connection
+  (withLock dc ^{:go/end 2765} (fn []
+      (set! (values ds err) (.prepareOnConnLocked s ctx dc))))
+
+  (when (!= err nil)
+    (.releaseConn dc err)
+    (return nil nil nil err))
+
+
+  (return dc (.-releaseConn dc) ds nil))
+
+
+
+
+^{:go/end 2786} (go/method prepareOnConnLocked "prepareOnConnLocked prepares the query in Stmt s on dc and adds it to the list of\nopen connStmt on the statement. It assumes the caller is holding the lock on dc.\n" [^{:tag (* Stmt)} s ^context/Context ctx ^{:tag (* driverConn)} dc] :results [(* driverStmt) error]
+  (let [(values si err) (.prepareLocked dc ctx (.-cg s) (.-query s))]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [cs (lit connStmt dc si)]
+      (.Lock (.-mu s))
+      (set! (.-css s) (append (.-css s) cs))
+      (.Unlock (.-mu s))
+      (return (.-ds cs) nil))))
+
+
+
+
+^{:go/end 2835} (go/method QueryContext "QueryContext executes a prepared query statement with the given arguments\nand returns the query results as a [*Rows].\n" [^{:tag (* Stmt)} s ^context/Context ctx & ^{:tag (slice any)} args] :results [(* Rows) error]
+  (.RLock (.-closemu s))
+  (defer (.RUnlock (.-closemu s)))
+
+  (let [^driver/Rows rowsi (zero driver/Rows)
+      ^{:line 2795 :tag (* Rows)} rows (zero (* Rows))
+
+      ^{:line 2797} err (.retry (.-db s) ^{:go/end 2832} (fn ^error [^connReuseStrategy strategy]
+          (let [(values dc releaseConn ds err) (.connStmt s ctx strategy)]
+            (when (!= err nil)
+              (return err))
+
+
+            (set! (values rowsi err) (rowsiFromStatement ctx (.-ci dc) ds (spread args)))
+            (when (== err nil)
+              ;; Note: ownership of ci passes to the *Rows, to be freed
+              ;; with releaseConn.
+              (set! rows (addr ^{:go/breaks [2 4]} (lit Rows
+                    :dc dc
+                    :rowsi rowsi)))
+              ;; releaseConn set below
+
+              ;; addDep must be added before initContextClose or it could attempt
+              ;; to removeDep before it has been added.
+              (.addDep (.-db s) s rows)
+
+              ;; releaseConn must be set before initContextClose or it could
+              ;; release the connection before it is set.
+              (set! (.-releaseConn rows) ^{:go/end 2821} (fn [^error err]
+                  (releaseConn err)
+                  (.removeDep (.-db s) s rows)))
+
+              (let [^context/Context txctx (zero context/Context)]
+                (when (!= (.-cg s) nil)
+                  (set! txctx (.txCtx (.-cg s))))
+
+                (.initContextClose rows ctx txctx)
+                (return nil)))
+
+
+            (releaseConn err)
+            ^{:line 2831} err)))]
+
+
+    (return rows err)))
+
+
+
+
+
+
+
+^{:go/end 2844} (go/method Query "Query executes a prepared query statement with the given arguments\nand returns the query results as a *Rows.\n\nQuery uses [context.Background] internally; to specify the context, use\n[Stmt.QueryContext].\n" [^{:tag (* Stmt)} s & ^{:tag (slice any)} args] :results [(* Rows) error]
+  (.QueryContext s (context/Background) (spread args)))
+
+
+^{:go/end 2854} (go/func rowsiFromStatement [^context/Context ctx ^driver/Conn ci ^{:tag (* driverStmt)} ds & ^{:tag (slice any)} args] :results [driver/Rows error]
+  ^{:go/via [Locker]} (.Lock ds)
+  (defer ^{:go/via [Locker]} (.Unlock ds))
+  (let [(values dargs err) (driverArgsConnLocked ci ds args)]
+    (when (!= err nil)
+      (return nil err))
+
+    (ctxDriverStmtQuery ctx (.-si ds) dargs)))
+
+
+
+
+
+
+
+
+^{:go/end 2868} (go/method QueryRowContext "QueryRowContext executes a prepared query statement with the given arguments.\nIf an error occurs during the execution of the statement, that error will\nbe returned by a call to Scan on the returned [*Row], which is always non-nil.\nIf the query selects no rows, the [*Row.Scan] will return [ErrNoRows].\nOtherwise, the [*Row.Scan] scans the first selected row and discards\nthe rest.\n" ^{:tag (* Row)} [^{:tag (* Stmt)} s ^context/Context ctx & ^{:tag (slice any)} args]
+  (let [(values rows err) (.QueryContext s ctx (spread args))]
+    (when (!= err nil)
+      (return (addr (lit Row :err err))))
+
+    (addr (lit Row :rows rows))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2886} (go/method QueryRow "QueryRow executes a prepared query statement with the given arguments.\nIf an error occurs during the execution of the statement, that error will\nbe returned by a call to Scan on the returned [*Row], which is always non-nil.\nIf the query selects no rows, the [*Row.Scan] will return [ErrNoRows].\nOtherwise, the [*Row.Scan] scans the first selected row and discards\nthe rest.\n\nExample usage:\n\n\tvar name string\n\terr := nameByUseridStmt.QueryRow(id).Scan(&name)\n\nQueryRow uses [context.Background] internally; to specify the context, use\n[Stmt.QueryRowContext].\n" ^{:tag (* Row)} [^{:tag (* Stmt)} s & ^{:tag (slice any)} args]
+  (.QueryRowContext s (context/Background) (spread args)))
+
+
+
+^{:go/end 2917} (go/method Close "Close closes the statement.\n" ^error [^{:tag (* Stmt)} s]
+  (.Lock (.-closemu s))
+  (defer (.Unlock (.-closemu s)))
+
+  (when (!= (.-stickyErr s) nil)
+    (return (.-stickyErr s)))
+
+  (.Lock (.-mu s))
+  (when (.-closed s)
+    (.Unlock (.-mu s))
+    (return nil))
+
+  (set! (.-closed s) true)
+  (let [txds (.-cgds s)]
+    (set! (.-cgds s) nil)
+
+    (.Unlock (.-mu s))
+
+    (when (== (.-cg s) nil)
+      (return (.removeDep (.-db s) s s)))
+
+
+    (when (!= (.-parentStmt s) nil)
+      ;; If parentStmt is set, we must not close s.txds since it's stored
+      ;; in the css array of the parentStmt.
+      (return (.removeDep (.-db s) (.-parentStmt s) s)))
+
+    (.Close txds)))
+
+
+^{:go/breaks [[6 2929]] :go/end 2930} (go/method finalClose ^error [^{:tag (* Stmt)} s]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (when (!= (.-css s) nil)
+    (range [_ v (.-css s)]
+      (.noteUnusedDriverStatement (.-db s) (.-dc v) (.-ds v))
+      (.removeOpenStmt (.-dc v) (.-ds v)))
+
+    (set! (.-css s) nil))
+
+  nil)
+
+
+
+
+(go/type Rows "Rows is the result of a query. Its cursor starts before the first row\nof the result set. Use [Rows.Next] to advance from row to row.\n" (struct
+    ^{:line 2935 :tag (* driverConn)} dc ; owned; must call releaseConn when closed to release
+    ^{:line 2936 :tag (func [error])} releaseConn
+    ^{:line 2937 :tag driver/Rows} rowsi
+    ^{:line 2938 :tag (func [])} cancel ; called when Rows is closed, may be nil.
+    ^{:line 2939 :tag (* driverStmt)} closeStmt ; if non-nil, statement to Close on close
+
+    ^{:line 2941 :tag (atomic/Pointer error)} contextDone ; error that awaitDone saw; set before close attempt
+
+
+
+
+
+
+    ^{:line 2948 :tag closingMutex :doc "closemu prevents Rows from closing while there\nis an active streaming result. It is held for read during non-close operations\nand exclusively during close.\n\nclosemu guards lasterr and closed.\n"} closemu
+    ^{:line 2949 :tag error} lasterr ; non-nil only if closed is true
+    ^{:line 2950 :tag bool} closed
+
+
+
+
+
+
+
+
+    ^{:line 2959 :tag bool :doc "closemuScanHold is whether the previous call to Scan kept closemu RLock'ed\nwithout unlocking it. It does that when the user passes a *RawBytes scan\ntarget. In that case, we need to prevent awaitDone from closing the Rows\nwhile the user's still using the memory. See go.dev/issue/60304.\n\nIt is only used by Scan, Next, and NextResultSet which are expected\nnot to be called concurrently.\n"} closemuScanHold
+
+
+
+
+
+    ^{:line 2965 :tag bool :doc "hitEOF is whether Next hit the end of the rows without\nencountering an error. It's set in Next before\nreturning. It's only used by Next and Err which are\nexpected not to be called concurrently.\n"} hitEOF
+
+
+    ^{:line 2968 :tag bool :doc "nextCalled is set by the first call to Next.\n"} nextCalled
+
+
+
+    ^{:line 2972 :tag (slice driver/Value) :doc "lastcols is only used in Scan, Next, and NextResultSet which are expected\nnot to be called concurrently.\n"} lastcols
+
+
+    ^{:line 2975 :tag int :doc "numCols is the number of columns, and is initialized by the first Next call.\n"} numCols
+
+
+
+
+
+
+    ^{:line 2982 :tag (slice byte) :doc "raw is a buffer for RawBytes that persists between Scan calls.\nThis is used when the driver returns a mismatched type that requires\na cloning allocation. For example, if the driver returns a *string and\nthe user is scanning into a *RawBytes, we need to copy the string.\nThe raw buffer here lets us reuse the memory for that copy across Scan calls.\n"} raw))
+
+
+
+
+^{:go/end 2992} (go/method lasterrOrErrLocked "lasterrOrErrLocked returns either lasterr or the provided err.\nrs.closemu must be read-locked.\n" ^error [^{:tag (* Rows)} rs ^error err]
+  (when (and (!= (.-lasterr rs) nil) (!= (.-lasterr rs) io/EOF))
+    (return (.-lasterr rs)))
+
+  ^{:line 2991} err)
+
+
+
+
+(go/var ^{:doc "bypassRowsAwaitDone is only used for testing.\nIf true, it will not close the Rows automatically from the context.\n"} bypassRowsAwaitDone false)
+
+^{:go/end 3008} (go/method initContextClose [^{:tag (* Rows)} rs ^context/Context ctx ^context/Context txctx]
+  (when (and (== (.Done ctx) nil) ^:go/paren (or (== txctx nil) (== (.Done txctx) nil)))
+    (return))
+
+  (when bypassRowsAwaitDone
+    (return))
+
+  (let [(values closectx cancel) (context/WithCancel ctx)]
+    (set! (.-cancel rs) cancel)
+    (go (.awaitDone rs ctx txctx closectx))))
+
+
+
+
+
+
+
+^{:go/end 3032} (go/method awaitDone "awaitDone blocks until ctx, txctx, or closectx is canceled.\nThe ctx is provided from the query context.\nIf the query was issued in a transaction, the transaction's context\nis also provided in txctx, to ensure Rows is closed if the Tx is closed.\nThe closectx is closed by an explicit call to rs.Close.\n" [^{:tag (* Rows)} rs ^context/Context ctx ^context/Context txctx ^context/Context closectx]
+  (let [^{:tag (chan :recv (struct))} txctxDone (zero (chan :recv (struct)))]
+    (when (!= txctx nil)
+      (set! txctxDone (.Done txctx)))
+
+    (select
+      (case (<! (.Done ctx))
+        (let [err (.Err ctx)]
+          (.Store (.-contextDone rs) (addr err))))
+      (case (<! txctxDone)
+        (let [err (.Err txctx)]
+          (.Store (.-contextDone rs) (addr err))))
+      (case (<! (.Done closectx))))
+    ;; rs.cancel was called via Close(); don't store this into contextDone
+    ;; to ensure Err() is unaffected.
+
+    (.close rs (.Err ctx))))
+
+
+
+
+
+
+
+
+^{:go/end 3063} (go/method Next "Next prepares the next result row for reading with the [Rows.Scan] method. It\nreturns true on success, or false if there is no next result row or an error\nhappened while preparing it. [Rows.Err] should be consulted to distinguish between\nthe two cases.\n\nEvery call to [Rows.Scan], even the first one, must be preceded by a call to [Rows.Next].\n" ^bool [^{:tag (* Rows)} rs]
+  ;; If the user's calling Next, they're done with their previous row's Scan
+  ;; results (any RawBytes memory), so we can release the read lock that would
+  ;; be preventing awaitDone from calling close.
+  (.closemuRUnlockIfHeldByScan rs)
+
+  (when (!= (.Load (.-contextDone rs)) nil)
+    (return false))
+
+
+  (let [(values ^bool doClose ^bool ok) (zero bool)]
+    (^{:go/end 3055} (fn []
+        (.RLock (.-closemu rs))
+        (defer (.RUnlock (.-closemu rs)))
+        (set! (values doClose ok) (.nextLocked rs))))
+
+    (when doClose
+      (.Close rs))
+
+    (when (and doClose (not ok))
+      (set! (.-hitEOF rs) true))
+
+    ^{:line 3062} ok))
+
+
+^{:go/end 3107} (go/method nextLocked [^{:tag (* Rows)} rs] :results [^bool doClose ^bool ok]
+  (when (.-closed rs)
+    (return false false))
+
+
+  ;; Lock the driver connection before calling the driver interface
+  ;; rowsi to prevent a Tx from rolling back the connection at the same time.
+  ^{:go/via [Mutex]} (.Lock (.-dc rs))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-dc rs)))
+
+  (when (not (.-nextCalled rs))
+    (set! (.-numCols rs) (len (.Columns (.-rowsi rs))))
+    (set! (.-nextCalled rs) true))
+
+
+  (if [(values rscan ok) (assert driver/RowsColumnScanner (.-rowsi rs))] ok
+    (set! (.-lasterr rs) (.NextRow rscan))
+    (do
+      (when (== (.-lastcols rs) nil)
+        (set! (.-lastcols rs) (make (slice driver/Value) (.-numCols rs))))
+
+      (set! (.-lasterr rs) (.Next (.-rowsi rs) (.-lastcols rs)))))
+
+
+  (when (!= (.-lasterr rs) nil)
+    ;; Close the connection if there is a driver error.
+    (when (!= (.-lasterr rs) io/EOF)
+      (return true false))
+
+    (let [(values nextResultSet ok) (assert driver/RowsNextResultSet (.-rowsi rs))]
+      (when (not ok)
+        (return true false))
+
+      ;; The driver is at the end of the current result set.
+      ;; Test to see if there is another result set after the current one.
+      ;; Only close Rows if there is no further result sets to read.
+      (when (not (.HasNextResultSet nextResultSet))
+        (set! doClose true))
+
+      (return doClose false)))
+
+  (return false true))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3155} (go/method NextResultSet "NextResultSet prepares the next result set for reading. It reports whether\nthere is further result sets, or false if there is no further result set\nor if there is an error advancing to it. The [Rows.Err] method should be consulted\nto distinguish between the two cases.\n\nAfter calling NextResultSet, the [Rows.Next] method should always be called before\nscanning. If there are further result sets they may not have rows in the result\nset.\n" ^bool [^{:tag (* Rows)} rs]
+  ;; If the user's calling NextResultSet, they're done with their previous
+  ;; row's Scan results (any RawBytes memory), so we can release the read lock
+  ;; that would be preventing awaitDone from calling close.
+  (.closemuRUnlockIfHeldByScan rs)
+
+  (let [^bool doClose (zero bool)]
+    (defer (^{:go/end 3128} (fn []
+          (when doClose
+            (.Close rs)))))
+
+
+    (.RLock (.-closemu rs))
+    (defer (.RUnlock (.-closemu rs)))
+
+    (when (.-closed rs)
+      (return false))
+
+
+    (set! (.-nextCalled rs) false)
+    (set! (.-lastcols rs) nil)
+    ^{:go/breaks [[7 3154]]} (let [(values nextResultSet ok) (assert driver/RowsNextResultSet (.-rowsi rs))]
+      (when (not ok)
+        (set! doClose true)
+        (return false))
+
+
+      ;; Lock the driver connection before calling the driver interface
+      ;; rowsi to prevent a Tx from rolling back the connection at the same time.
+      ^{:go/via [Mutex]} (.Lock (.-dc rs))
+      (defer ^{:go/via [Mutex]} (.Unlock (.-dc rs)))
+
+      (set! (.-lasterr rs) (.NextResultSet nextResultSet))
+      (when (!= (.-lasterr rs) nil)
+        (set! doClose true)
+        (return false))
+
+      true)))
+
+
+
+
+^{:go/end 3173} (go/method Err "Err returns the error, if any, that was encountered during iteration.\nErr may be called after an explicit or implicit [Rows.Close].\n" ^error [^{:tag (* Rows)} rs]
+  ;; Return any context error that might've happened during row iteration,
+  ;; but only if we haven't reported the final Next() = false after rows
+  ;; are done, in which case the user might've canceled their own context
+  ;; before calling Rows.Err.
+  (when (not (.-hitEOF rs))
+    (when [errp (.Load (.-contextDone rs))] (!= errp nil)
+      (return @errp)))
+
+
+
+  (.RLock (.-closemu rs))
+  (defer (.RUnlock (.-closemu rs)))
+  (.lasterrOrErrLocked rs nil))
+
+
+
+
+
+
+
+
+^{:go/end 3187} (go/method rawbuf "rawbuf returns the buffer to append RawBytes values to.\nThis buffer is reused across calls to Rows.Scan.\n\nUsage:\n\n\trawBytes = rows.setrawbuf(append(rows.rawbuf(), value...))\n" ^{:tag (slice byte)} [^{:tag (* Rows)} rs]
+  (when (== rs nil)
+    ;; convertAssignRows can take a nil *Rows; for simplicity handle it here
+    (return nil))
+
+  (.-raw rs))
+
+
+
+
+^{:go/end 3199} (go/method setrawbuf "setrawbuf updates the RawBytes buffer with the result of appending a new value to it.\nIt returns the new value.\n" ^RawBytes [^{:tag (* Rows)} rs ^{:tag (slice byte)} b]
+  (when (== rs nil)
+    ;; convertAssignRows can take a nil *Rows; for simplicity handle it here
+    (return (conv RawBytes b)))
+
+  (let [off (len (.-raw rs))]
+    (set! (.-raw rs) b)
+    (conv RawBytes (subslice (.-raw rs) off))))
+
+
+(go/var errRowsClosed (errors/New "sql: Rows are closed"))
+(go/var errNoRows (errors/New "sql: no Rows available"))
+
+
+
+^{:go/end 3219} (go/method Columns "Columns returns the column names.\nColumns returns an error if the rows are closed.\n" [^{:tag (* Rows)} rs] :results [(slice string) error]
+  (.RLock (.-closemu rs))
+  (defer (.RUnlock (.-closemu rs)))
+  (when (.-closed rs)
+    (return nil (.lasterrOrErrLocked rs errRowsClosed)))
+
+  (when (== (.-rowsi rs) nil)
+    (return nil (.lasterrOrErrLocked rs errNoRows)))
+
+  ^{:go/via [Mutex]} (.Lock (.-dc rs))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-dc rs)))
+
+  (return (.Columns (.-rowsi rs)) nil))
+
+
+
+
+^{:go/end 3236} (go/method ColumnTypes "ColumnTypes returns column information such as column type, length,\nand nullable. Some information may not be available from some drivers.\n" [^{:tag (* Rows)} rs] :results [(slice (* ColumnType)) error]
+  (.RLock (.-closemu rs))
+  (defer (.RUnlock (.-closemu rs)))
+  (when (.-closed rs)
+    (return nil (.lasterrOrErrLocked rs errRowsClosed)))
+
+  (when (== (.-rowsi rs) nil)
+    (return nil (.lasterrOrErrLocked rs errNoRows)))
+
+  ^{:go/via [Mutex]} (.Lock (.-dc rs))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-dc rs)))
+
+  (return (rowsColumnInfoSetupConnLocked (.-rowsi rs)) nil))
+
+
+
+(go/type ColumnType "ColumnType contains the name and type of a column.\n" (struct
+    ^{:line 3240 :tag string} name
+
+    ^{:line 3242 :tag bool} hasNullable
+    ^{:line 3243 :tag bool} hasLength
+    ^{:line 3244 :tag bool} hasPrecisionScale
+
+    ^{:line 3246 :tag bool} nullable
+    ^{:line 3247 :tag int64} length
+    ^{:line 3248 :tag string} databaseType
+    ^{:line 3249 :tag int64} precision
+    ^{:line 3250 :tag int64} scale
+    ^{:line 3251 :tag reflect/Type} scanType))
+
+
+
+^{:go/end 3257} (go/method Name "Name returns the name or alias of the column.\n" ^string [^{:tag (* ColumnType)} ci]
+  (.-name ci))
+
+
+
+
+
+
+
+^{:go/end 3266} (go/method Length "Length returns the column type length for variable length column types such\nas text and binary field types. If the type length is unbounded the value will\nbe [math.MaxInt64] (any database limits will still apply).\nIf the column type is not variable length, such as an int, or if not supported\nby the driver ok is false.\n" [^{:tag (* ColumnType)} ci] :results [^int64 length ^bool ok]
+  (return (.-length ci) (.-hasLength ci)))
+
+
+
+
+^{:go/end 3272} (go/method DecimalSize "DecimalSize returns the scale and precision of a decimal type.\nIf not applicable or if not supported ok is false.\n" [^{:tag (* ColumnType)} ci] :results [^int64 precision ^int64 scale ^bool ok]
+  (return (.-precision ci) (.-scale ci) (.-hasPrecisionScale ci)))
+
+
+
+
+
+^{:go/end 3279} (go/method ScanType "ScanType returns a Go type suitable for scanning into using [Rows.Scan].\nIf a driver does not support this property ScanType will return\nthe type of an empty interface.\n" ^reflect/Type [^{:tag (* ColumnType)} ci]
+  (.-scanType ci))
+
+
+
+
+^{:go/end 3285} (go/method Nullable "Nullable reports whether the column may be null.\nIf a driver does not support this property ok will be false.\n" [^{:tag (* ColumnType)} ci] :results [^bool nullable ^bool ok]
+  (return (.-nullable ci) (.-hasNullable ci)))
+
+
+
+
+
+
+
+
+^{:go/end 3295} (go/method DatabaseTypeName "DatabaseTypeName returns the database system name of the column type. If an empty\nstring is returned, then the driver type name is not supported.\nConsult your driver documentation for a list of driver data types. [ColumnType.Length] specifiers\nare not included.\nCommon type names include \"VARCHAR\", \"TEXT\", \"NVARCHAR\", \"DECIMAL\", \"BOOL\",\n\"INT\", and \"BIGINT\".\n" ^string [^{:tag (* ColumnType)} ci]
+  (.-databaseType ci))
+
+
+^{:go/end 3326} (go/func rowsColumnInfoSetupConnLocked ^{:tag (slice (* ColumnType))} [^driver/Rows rowsi]
+  (let [names (.Columns rowsi)
+
+      ^{:line 3300} list (make (slice (* ColumnType)) (len names))]
+    (range [i list]
+      (let [ci (addr ^{:go/breaks [2]} (lit ColumnType
+              :name (aget names i)))]
+
+        (aset list i ci)
+
+        (if [(values prop ok) (assert driver/RowsColumnTypeScanType rowsi)] ok
+          (set! (.-scanType ci) (.ColumnTypeScanType prop i))
+
+          (set! (.-scanType ci) ((inst reflect/TypeFor any))))
+
+        (when [(values prop ok) (assert driver/RowsColumnTypeDatabaseTypeName rowsi)] ok
+          (set! (.-databaseType ci) (.ColumnTypeDatabaseTypeName prop i)))
+
+        (when [(values prop ok) (assert driver/RowsColumnTypeLength rowsi)] ok
+          (set! (values (.-length ci) (.-hasLength ci)) (.ColumnTypeLength prop i)))
+
+        (when [(values prop ok) (assert driver/RowsColumnTypeNullable rowsi)] ok
+          (set! (values (.-nullable ci) (.-hasNullable ci)) (.ColumnTypeNullable prop i)))
+
+        (when [(values prop ok) (assert driver/RowsColumnTypePrecisionScale rowsi)] ok
+          (set! (values (.-precision ci) (.-scale ci) (.-hasPrecisionScale ci)) (.ColumnTypePrecisionScale prop i)))))
+
+
+    ^{:line 3325} list))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3410} (go/method Scan "Scan copies the columns in the current row into the values pointed\nat by dest. The number of values in dest must be the same as the\nnumber of columns in [Rows].\n\nScan converts columns read from the database into the following\ncommon Go types and special types provided by the sql package:\n\n\t*string\n\t*[]byte\n\t*int, *int8, *int16, *int32, *int64\n\t*uint, *uint8, *uint16, *uint32, *uint64\n\t*bool\n\t*float32, *float64\n\t*any\n\t*RawBytes\n\t*Rows (cursor value)\n\t*time.Time\n\t*uuid.UUID\n\tany type implementing Scanner (see Scanner docs)\n\nIn the most simple case, if the type of the value from the source\ncolumn is an integer, bool or string type T and dest is of type *T,\nScan simply assigns the value through the pointer.\n\nScan also converts between string and numeric types, as long as no\ninformation would be lost. While Scan stringifies all numbers\nscanned from numeric database columns into *string, scans into\nnumeric types are checked for overflow. For example, a float64 with\nvalue 300 or a string with value \"300\" can scan into a uint16, but\nnot into a uint8, though float64(255) or \"255\" can scan into a\nuint8. One exception is that scans of some float64 numbers to\nstrings may lose information when stringifying. In general, scan\nfloating point columns into *float64.\n\nIf a dest argument has type *[]byte, Scan saves in that argument a\ncopy of the corresponding data. The copy is owned by the caller and\ncan be modified and held indefinitely. The copy can be avoided by\nusing an argument of type [*RawBytes] instead; see the documentation\nfor [RawBytes] for restrictions on its use.\n\nIf an argument has type *any, Scan copies the value\nprovided by the underlying driver without conversion. When scanning\nfrom a source value of type []byte to *interface{}, a copy of the\nslice is made and the caller owns the result.\n\nSource values of type [time.Time] may be scanned into values of type\n*time.Time, *interface{}, *string, or *[]byte. When converting to\nthe latter two, [time.RFC3339Nano] is used.\n\nSource values of type string and byte may be scanned into\nvalues of type [*uuid.UUID]. The source may contain the string\nrepresentation of a UUID, or a 16-byte []byte.\n\nSource values of type bool may be scanned into types *bool,\n*interface{}, *string, *[]byte, or [*RawBytes].\n\nFor scanning into *bool, the source may be true, false, 1, 0, or\nstring inputs parseable by [strconv.ParseBool].\n\nScan can also convert a cursor returned from a query, such as\n\"select cursor(select * from my_table) from dual\", into a\n[*Rows] value that can itself be scanned from. The parent\nselect query will close any cursor [*Rows] if the parent [*Rows] is closed.\n\nIf any of the first arguments implementing [Scanner] returns an error,\nthat error will be wrapped in the returned error.\n" ^error [^{:tag (* Rows)} rs & ^{:tag (slice any)} dest]
+  (when (.-closemuScanHold rs)
+    ;; This should only be possible if the user calls Scan twice in a row
+    ;; without calling Next.
+    (return (fmt/Errorf "sql: Scan called without calling Next (closemuScanHold)")))
+
+
+  (.RLock (.-closemu rs))
+  (set! (.-raw rs) (subslice (.-raw rs) _ 0))
+  (let [err (.scanLocked rs (spread dest))]
+    (if (and (== err nil) (scanArgsContainRawBytes dest))
+      (set! (.-closemuScanHold rs) true)
+
+      (.RUnlock (.-closemu rs)))
+
+    ^{:line 3409} err))
+
+
+
+(go/type rowsScanContext "rowsScanContext is used to pass a *Rows through ScanColumn into ConvertAssign.\n" (struct
+    ^{:line 3414 :tag (* Rows)} rs))
+
+
+^{:go/breaks [[9 3453]] :go/end 3454} (go/method scanLocked ^error [^{:tag (* Rows)} rs & ^{:tag (slice any)} dest]
+  (when (and (!= (.-lasterr rs) nil) (!= (.-lasterr rs) io/EOF))
+    (return (.-lasterr rs)))
+
+  (when (.-closed rs)
+    (return (.lasterrOrErrLocked rs errRowsClosed)))
+
+
+  (when (not (.-nextCalled rs))
+    (return (errors/New "sql: Scan called without calling Next")))
+
+  (when (!= (len dest) (.-numCols rs))
+    (return (fmt/Errorf "sql: expected %d destination arguments in Scan, not %d" (.-numCols rs) (len dest))))
+
+
+  (when [(values rscan ok) (assert driver/RowsColumnScanner (.-rowsi rs))] ok
+    ;; Lock the driver connection before calling the driver interface
+    ;; rowsi to prevent a Tx from rolling back the connection at the same time.
+    ^{:go/via [Mutex]} (.Lock (.-dc rs))
+    (defer ^{:go/via [Mutex]} (.Unlock (.-dc rs)))
+
+    (range [i d dest]
+      (let [scanCtx (conv driver/ScanContext (internal/NewScanContext rs))]
+        (when [err (.ScanColumn rscan scanCtx i d)] (!= err nil)
+          (return (fmt/Errorf "sql: Scan error on column index %d, name %q: %w" i (aget (.Columns (.-rowsi rs)) i) err)))))
+
+
+    (return nil))
+
+
+  (range [i sv (.-lastcols rs)]
+    (let [err (convertAssignRows (aget dest i) sv rs)]
+      (when (!= err nil)
+        (return (fmt/Errorf "sql: Scan error on column index %d, name %q: %w" i (aget (.Columns (.-rowsi rs)) i) err)))))
+
+
+  nil)
+
+
+
+
+^{:go/end 3463} (go/method closemuRUnlockIfHeldByScan "closemuRUnlockIfHeldByScan releases any closemu.RLock held open by a previous\ncall to Scan with *RawBytes.\n" [^{:tag (* Rows)} rs]
+  (when (.-closemuScanHold rs)
+    (set! (.-closemuScanHold rs) false)
+    (.RUnlock (.-closemu rs))))
+
+
+
+^{:go/breaks [[4 3471]] :go/end 3472} (go/func scanArgsContainRawBytes ^bool [^{:tag (slice any)} args]
+  (range [_ a args]
+    (when [(values _ ok) (assert (* RawBytes) a)] ok
+      (return true)))
+
+
+  false)
+
+
+
+
+(go/var ^{:doc "rowsCloseHook returns a function so tests may install the\nhook through a test only mutex.\n"} rowsCloseHook ^{:go/end 3476} (fn ^{:tag (func [(* Rows) (* error)])} [] nil))
+
+
+
+
+
+^{:go/end 3489} (go/method Close "Close closes the [Rows], preventing further enumeration. If [Rows.Next] is called\nand returns false and there are no further result sets,\nthe [Rows] are closed automatically and it will suffice to check the\nresult of [Rows.Err]. Close is idempotent and does not affect the result of [Rows.Err].\n" ^error [^{:tag (* Rows)} rs]
+  ;; If the user's calling Close, they're done with their previous row's Scan
+  ;; results (any RawBytes memory), so we can release the read lock that would
+  ;; be preventing awaitDone from calling the unexported close before we do so.
+  (.closemuRUnlockIfHeldByScan rs)
+
+  (.close rs nil))
+
+
+^{:go/end 3521} (go/method close ^error [^{:tag (* Rows)} rs ^error err]
+  (.Lock (.-closemu rs))
+  (defer (.Unlock (.-closemu rs)))
+
+  (when (.-closed rs)
+    (return nil))
+
+  (set! (.-closed rs) true)
+
+  (when (== (.-lasterr rs) nil)
+    (set! (.-lasterr rs) err))
+
+
+  (withLock (.-dc rs) ^{:go/end 3506} (fn []
+      (set! err (.Close (.-rowsi rs)))))
+
+  (when [fn (rowsCloseHook)] (!= fn nil)
+    (go/call fn rs (addr err)))
+
+  (when (!= (.-cancel rs) nil)
+    ((.-cancel rs)))
+
+
+  (when (!= (.-closeStmt rs) nil)
+    (.Close (.-closeStmt rs)))
+
+  ((.-releaseConn rs) err)
+
+  (set! (.-lasterr rs) (.lasterrOrErrLocked rs err))
+  ^{:line 3520} err)
+
+
+
+(go/type Row "Row is the result of calling [DB.QueryRow] to select a single row.\n" (struct
+
+    ^{:line 3526 :tag error :doc "One of these two will be non-nil:\n"} err ; deferred error for easy chaining
+    ^{:line 3527 :tag (* Rows)} rows))
+
+
+
+
+
+
+
+^{:go/end 3570} (go/method Scan "Scan copies the columns from the matched row into the values\npointed at by dest. See the documentation on [Rows.Scan] for details.\nIf more than one row matches the query,\nScan uses the first row and discards the rest. If no row matches\nthe query, Scan returns [ErrNoRows].\n" ^error [^{:tag (* Row)} r & ^{:tag (slice any)} dest]
+  (when (!= (.-err r) nil)
+    (return (.-err r)))
+
+
+  ;; TODO(bradfitz): for now we need to defensively clone all
+  ;; []byte that the driver returned (not permitting
+  ;; *RawBytes in Rows.Scan), since we're about to close
+  ;; the Rows in our defer, when we return from this function.
+  ;; the contract with the driver.Next(...) interface is that it
+  ;; can return slices into read-only temporary memory that's
+  ;; only valid until the next Scan/Close. But the TODO is that
+  ;; for a lot of drivers, this copy will be unnecessary. We
+  ;; should provide an optional interface for drivers to
+  ;; implement to say, "don't worry, the []bytes that I return
+  ;; from Next will not be modified again." (for instance, if
+  ;; they were obtained from the network anyway) But for now we
+  ;; don't care.
+  (defer (.Close (.-rows r)))
+  (when (scanArgsContainRawBytes dest)
+    (return (errors/New "sql: RawBytes isn't allowed on Row.Scan")))
+
+
+  (when (not (.Next (.-rows r)))
+    (when [err (.Err (.-rows r))] (!= err nil)
+      (return err))
+
+    (return ErrNoRows))
+
+  (let [err (.Scan (.-rows r) (spread dest))]
+    (when (!= err nil)
+      (return err))
+
+    ;; Make sure the query can be processed to completion with no errors.
+    (.Close (.-rows r))))
+
+
+
+
+
+
+^{:go/end 3578} (go/method Err "Err provides a way for wrapping packages to check for\nquery errors without calling [Row.Scan].\nErr returns the error, if any, that was encountered while running the query.\nIf this error is not nil, this error will also be returned from [Row.Scan].\n" ^error [^{:tag (* Row)} r]
+  (.-err r))
+
+
+
+(go/type Result "A Result summarizes an executed SQL command.\n" (interface
+
+
+
+
+
+    (^{:doc "LastInsertId returns the integer generated by the database\nin response to a command. Typically this will be from an\n\"auto increment\" column when inserting a new row. Not all\ndatabases support this feature, and the syntax of such\nstatements varies.\n"} LastInsertId [] :results [int64 error])
+
+
+
+
+    (^{:doc "RowsAffected returns the number of rows affected by an\nupdate, insert, or delete. Not every database or database\ndriver may support this.\n"} RowsAffected [] :results [int64 error])))
+
+
+(go/type driverResult (struct
+    ^{:line 3596} sync/Locker ; the *driverConn
+    ^{:line 3597 :tag driver/Result} resi))
+
+
+^{:go/end 3604} (go/method LastInsertId [^driverResult dr] :results [int64 error]
+  ^{:go/via [Locker]} (.Lock dr)
+  (defer ^{:go/via [Locker]} (.Unlock dr))
+  (.LastInsertId (.-resi dr)))
+
+
+^{:go/end 3610} (go/method RowsAffected [^driverResult dr] :results [int64 error]
+  ^{:go/via [Locker]} (.Lock dr)
+  (defer ^{:go/via [Locker]} (.Unlock dr))
+  (.RowsAffected (.-resi dr)))
+
+
+^{:go/end 3615} (go/func stack ^string []
+  (let [^{:tag (array (<< 2 10) byte)} buf (zero (array (<< 2 10) byte))]
+    (conv string (subslice buf _ (runtime/Stack (subslice buf) false)))))
+
+
+
+^{:go/end 3622} (go/func withLock "withLock runs while holding lk.\n" [^sync/Locker lk ^{:tag (func [])} fn]
+  (.Lock lk)
+  (defer (.Unlock lk)) ; in case fn panics
+  (go/call fn))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type connRequestSet "connRequestSet is a set of chan connRequest that's\noptimized for:\n\n  - adding an element\n  - removing an element (only by the caller who added it)\n  - taking (get + delete) a random element\n\nWe previously used a map for this but the take of a random element\nwas expensive, making mapiters. This type avoids a map entirely\nand just uses a slice.\n" (struct
+
+    ^{:line 3636 :tag (slice connRequestAndIndex) :doc "s are the elements in the set.\n"} s))
+
+
+(go/type connRequestAndIndex (struct
+
+    ^{:line 3641 :tag (chan connRequest) :doc "req is the element in the set.\n"} req
+
+
+
+    ^{:line 3645 :tag (* int) :doc "curIdx points to the current location of this element in\nconnRequestSet.s. It gets set to -1 upon removal.\n"} curIdx))
+
+
+
+
+^{:go/end 3656} (go/method CloseAndRemoveAll "CloseAndRemoveAll closes all channels in the set\nand clears the set.\n" [^{:tag (* connRequestSet)} s]
+  (range [_ v (.-s s)]
+    (set! @(.-curIdx v) -1)
+    (close (.-req v)))
+
+  (set! (.-s s) nil))
+
+
+
+^{:go/end 3659} (go/method Len "Len returns the length of the set.\n" ^int [^{:tag (* connRequestSet)} s] (len (.-s s)))
+
+
+
+(go/type connRequestDelHandle "connRequestDelHandle is an opaque handle to delete an\nitem from calling Add.\n" (struct
+    ^{:line 3664 :tag (* int)} idx)) ; pointer to index; or -1 if not in slice
+
+
+
+
+
+^{:go/end 3683} (go/method Add "Add adds v to the set of waiting requests.\nThe returned connRequestDelHandle can be used to remove the item from\nthe set.\n" ^connRequestDelHandle [^{:tag (* connRequestSet)} s ^{:tag (chan connRequest)} v]
+  (let [idx (len (.-s s))
+      ;; TODO(bradfitz): for simplicity, this always allocates a new int-sized
+      ;; allocation to store the index. But generally the set will be small and
+      ;; under a scannable-threshold. As an optimization, we could permit the *int
+      ;; to be nil when the set is small and should be scanned. This works even if
+      ;; the set grows over the threshold with delete handles outstanding because
+      ;; an element can only move to a lower index. So if it starts with a nil
+      ;; position, it'll always be in a low index and thus scannable. But that
+      ;; can be done in a follow-up change.
+      ^{:line 3680} idxPtr (addr idx)]
+    (set! (.-s s) (append (.-s s) (lit connRequestAndIndex v idxPtr)))
+    (lit connRequestDelHandle idxPtr)))
+
+
+
+
+
+
+^{:go/end 3696} (go/method Delete "Delete removes an element from the set.\n\nIt reports whether the element was deleted. (It can return false if a caller\nof TakeRandom took it meanwhile, or upon the second call to Delete)\n" ^bool [^{:tag (* connRequestSet)} s ^connRequestDelHandle h]
+  ^{:go/breaks [4]} (let [idx @(.-idx h)]
+    (when (< idx 0)
+      (return false))
+
+    (.deleteIndex s idx)
+    true))
+
+
+^{:go/end 3711} (go/method deleteIndex [^{:tag (* connRequestSet)} s ^int idx]
+  ;; Mark item as deleted.
+  (set! @(.-curIdx (aget (.-s s) idx)) -1)
+  ;; Copy last element, updating its position
+  ;; to its new home.
+  (when (< idx (- (len (.-s s)) 1))
+    (let [last (aget (.-s s) (- (len (.-s s)) 1))]
+      (set! @(.-curIdx last) idx)
+      (aset (.-s s) idx last)))
+
+  ;; Zero out last element (for GC) before shrinking the slice.
+  (aset (.-s s) (- (len (.-s s)) 1) (lit connRequestAndIndex))
+  (set! (.-s s) (subslice (.-s s) _ (- (len (.-s s)) 1))))
+
+
+
+
+
+^{:go/end 3724} (go/method TakeRandom "TakeRandom returns and removes a random element from s\nand reports whether there was one to take. (It returns ok=false\nif the set is empty.)\n" [^{:tag (* connRequestSet)} s] :results [^{:tag (chan connRequest)} v ^bool ok]
+  (when (== (len (.-s s)) 0)
+    (return nil false))
+
+  (let [pick (rand/IntN (len (.-s s)))
+      ^{:line 3721} e (aget (.-s s) pick)]
+    (.deleteIndex s pick)
+    (return (.-req e) true)))

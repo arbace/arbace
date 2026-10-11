@@ -1,0 +1,169 @@
+;; AMD64 processor support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.amd64) (go/file "timer.go" :imports [
+
+
+    ^{:line 12} [lapic "github.com/usbarmory/tamago/amd64/lapic"]
+    ^{:line 13} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 14} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 15} [kvmclock "github.com/usbarmory/tamago/kvm/clock"]])
+
+
+
+(go/const ^{:tag uint32 :val 1000000000 :doc "nanoseconds\n"} refFreq 1.0E9)
+
+
+(go/const "ACPI PM Timer constants\n"
+  ^{:line 23} [^{:val 45064} ACPI_PM_TIMER_PORT 0xb008]
+  ^{:line 24} [^{:val 3579545} ACPI_PM_FREQ 3579545])
+
+
+
+(go/func ^:extern read_tsc "defined in timer.s\n" ^uint64 [])
+(go/func ^:extern write_tsc_deadline [^uint64 cnt])
+
+
+^{:go/end 39} (go/method calibrateByPairing "calibrate frequency based on KVM clock\n" [^{:tag (* CPU)} cpu]
+  (let [(values _ nsecA tscA) (kvmclock/Pairing)
+      (values _ nsecB tscB) (kvmclock/Pairing)]
+
+    (when [den (conv uint64 (- nsecB nsecA))] (!= den 0)
+      (set! (.-freq cpu) (conv uint32 (/ (* (- tscB tscA) (conv uint64 refFreq)) den))))))
+
+
+
+
+^{:go/end 71} (go/method calibrateByTimer "calibrate frequency based on ACPI PM timer\n" [^{:tag (* CPU)} cpu]
+  (let [^uint32 apmB (zero uint32)
+      ^{:line 44 :tag uint64} tscB (zero uint64)
+
+      ^{:line 46} loop (/ ACPI_PM_FREQ (conv uint32 100))
+      ^{:line 47} mask (conv uint32 0xffffff)
+
+      ^{:line 49} apmA (reg/In32 ACPI_PM_TIMER_PORT)
+      ^{:line 50} tscA (read_tsc)]
+
+    (when (!= (bit-and apmA (bit-not mask)) 0)
+      ;; invalid I/O port
+      (return))
+
+
+    (while true
+      (set! apmB (reg/In32 ACPI_PM_TIMER_PORT))
+
+      (when (> (bit-and (- apmB apmA) mask) loop)
+        (set! tscB (read_tsc))
+        (break)))
+
+
+
+    (when [den (bit-and (- apmB apmA) mask)] (!= den 0)
+      (set! (.-freq cpu) (* (conv uint32 (/ (- tscB tscA) (conv uint64 den))) ACPI_PM_FREQ)))
+
+
+    (return)))
+
+
+^{:go/end 114} (go/method detectCoreFrequency [^{:tag (* CPU)} cpu]
+  (when [(values den num nominalFreq _) (cpuid CPUID_TSC_CCC 0)] (!= den 0)
+    (when (== nominalFreq 0)
+      (let [(values baseFreq _ _ _) (cpuid CPUID_CPU_FRQ 0)]
+        (set! nominalFreq (conv uint32 (/ (* (conv uint64 baseFreq) 1000000.0 (conv uint64 den)) (conv uint64 num))))))
+
+
+    (set! (.-freq cpu) (conv uint32 (/ (* (conv uint64 num) (conv uint64 nominalFreq)) (conv uint64 den)))))
+
+
+  (when (.-KVM (.-features cpu))
+    (if [(values khz _ _ _) (cpuid CPUID_KVM_TSC_KHZ 0)] (!= khz 0)
+      (set! (.-freq cpu) (* khz 1000))
+      (do
+        (.calibrateByPairing cpu)
+
+        (when (== (.-freq cpu) 0)
+          (.calibrateByTimer cpu)))))
+
+
+
+
+  (when (!= (.-freq cpu) 0)
+    (return))
+
+
+  (when [(values _ _ ecx _) (cpuid CPUID_VENDOR 0)] (and (== ecx CPUID_VENDOR_ECX_AMD) (.-HwPstate (.-features cpu)))
+    ;; Open-Source Register Reference
+    ;; For AMD Family 17h Processors Models 00h-2Fh
+    ;; Rev 3.03 - July, 2018 - Core::X86::Msr::PStateDef
+    (let [pstate (conv uint32 (reg/ReadMSR MSR_AMD_PSTATE))
+
+        ^{:line 105} num (* (conv float64 (bits/GetN (addr pstate) 0 0xff)) 25)
+        ^{:line 106} den (/ (conv float64 (bits/GetN (addr pstate) 8 2r111111)) 8)]
+
+      (when (and (!= num 0) (!= den 0))
+        (set! (.-freq cpu) (* (conv uint32 (/ num den)) 1000000.0)))))
+
+
+
+  (return))
+
+
+^{:go/end 125} (go/method initTimers [^{:tag (* CPU)} cpu]
+  (.detectCoreFrequency cpu)
+
+  (when (== (.-freq cpu) 0)
+    (print "WARNING: TSC frequency is unavailable\n")
+    (set! (.-freq cpu) 1))
+
+
+  (set! (.-TimerMultiplier cpu) (/ (conv float64 refFreq) (conv float64 (.-freq cpu)))))
+
+
+
+^{:go/end 130} (go/method Freq "Freq() returns the AMD64 core frequency.\n" [^{:tag (* CPU)} cpu] :results [^uint32 hz]
+  (.-freq cpu))
+
+
+
+^{:go/end 135} (go/method Counter "Counter returns the CPU Time Stamp Counter (TSC).\n" ^uint64 [^{:tag (* CPU)} cpu]
+  (read_tsc))
+
+
+
+^{:go/end 140} (go/method GetTime "GetTime returns the system time in nanoseconds.\n" ^int64 [^{:tag (* CPU)} cpu]
+  (+ (conv int64 (* (conv float64 (.Counter cpu)) (.-TimerMultiplier cpu))) (.-TimerOffset cpu)))
+
+
+
+^{:go/end 149} (go/method SetTime "SetTime adjusts the system time to the argument nanoseconds value.\n" [^{:tag (* CPU)} cpu ^int64 ns]
+  (when (== (.-TimerMultiplier cpu) 0)
+    (return))
+
+
+  (set! (.-TimerOffset cpu) (- ns (conv int64 (* (conv float64 (read_tsc)) (.-TimerMultiplier cpu))))))
+
+
+
+
+
+
+^{:go/end 170} (go/method SetAlarm "SetAlarm sets a physical timer to the absolute time matching the argument\nnanoseconds value, an interrupt (see [IRQ_WAKEUP] is generated on\nexpiration. The timer is enabled only on [CPU] instances supporting\n[Features.TSCDeadline].\n" [^{:tag (* CPU)} cpu ^int64 ns]
+  (when (or (== (.-TimerMultiplier cpu) 0) (not (.-TSCDeadline (.-features cpu))))
+    (return))
+
+
+  (.SetTimer (.-LAPIC cpu) IRQ_WAKEUP lapic/TIMER_MODE_TSC_DEADLINE)
+
+  (when (== ns 0)
+    (.IPI (.-LAPIC cpu) 0 IRQ_WAKEUP (bit-or lapic/ICR_DST_REST lapic/ICR_DLV_IRQ))
+    (write_tsc_deadline 0)
+    (return))
+
+
+  (let [cnt (/ (conv float64 (- ns (.-TimerOffset cpu))) (.-TimerMultiplier cpu))]
+    (write_tsc_deadline (conv uint64 cnt))))

@@ -1,0 +1,565 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "packet_writer.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+
+    ^{:line 10} [quicwire "golang.org/x/net/internal/quic/quicwire"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type packetWriter "A packetWriter constructs QUIC datagrams.\n\nA datagram consists of one or more packets.\nA packet consists of a header followed by one or more frames.\n\nPackets are written in three steps:\n- startProtectedLongHeaderPacket or start1RTT packet prepare the packet;\n- append*Frame appends frames to the payload; and\n- finishProtectedLongHeaderPacket or finish1RTT finalize the packet.\n\nThe start functions are efficient, so we can start speculatively\nwriting a packet before we know whether we have any frames to\nput in it. The finish functions will abandon the packet if the\npayload contains no data.\n" (struct
+    ^{:line 28 :tag int} dgramLim ; max datagram size
+    ^{:line 29 :tag int} pktLim ; max packet size
+    ^{:line 30 :tag int} pktOff ; offset of the start of the current packet
+    ^{:line 31 :tag int} payOff ; offset of the payload of the current packet
+    ^{:line 32 :tag (slice byte)} b
+    ^{:line 33 :tag (* sentPacket)} sent))
+
+
+
+^{:go/end 43} (go/method reset "reset prepares to write a datagram of at most lim bytes.\n" [^{:tag (* packetWriter)} w ^int lim]
+  (when (< (cap (.-b w)) lim)
+    (set! (.-b w) (make (slice byte) 0 lim)))
+
+  (set! (.-dgramLim w) lim)
+  (set! (.-b w) (subslice (.-b w) _ 0)))
+
+
+
+^{:go/end 48} (go/method datagram "datagram returns the current datagram.\n" ^{:tag (slice byte)} [^{:tag (* packetWriter)} w]
+  (.-b w))
+
+
+
+^{:go/end 53} (go/method packetLen "packetLen returns the size of the current packet.\n" ^int [^{:tag (* packetWriter)} w]
+  (+ (len (subslice (.-b w) (.-pktOff w))) aeadOverhead))
+
+
+
+^{:go/end 58} (go/method payload "payload returns the payload of the current packet.\n" ^{:tag (slice byte)} [^{:tag (* packetWriter)} w]
+  (subslice (.-b w) (.-payOff w)))
+
+
+^{:go/end 63} (go/method abandonPacket [^{:tag (* packetWriter)} w]
+  (set! (.-b w) (subslice (.-b w) _ (.-payOff w)))
+  (.reset (.-sent w)))
+
+
+
+^{:go/end 103} (go/method startProtectedLongHeaderPacket "startProtectedLongHeaderPacket starts writing an Initial, 0-RTT, or Handshake packet.\n" [^{:tag (* packetWriter)} w ^packetNumber pnumMaxAcked ^longPacket p]
+  (when (== (.-sent w) nil)
+    (set! (.-sent w) (newSentPacket)))
+
+  (set! (.-pktOff w) (len (.-b w)))
+  (let [hdrSize 1] ; packet type
+    (set! hdrSize + 4) ; version
+    (set! hdrSize + (+ 1 (len (.-dstConnID p))))
+    (set! hdrSize + (+ 1 (len (.-srcConnID p))))
+    (switch (.-ptype p)
+      (case [packetTypeInitial]
+        (set! hdrSize + (+ (quicwire/SizeVarint (conv uint64 (len (.-extra p)))) (len (.-extra p))))))
+
+    (set! hdrSize + 2) ; length, hardcoded to a 2-byte varint
+    (let [pnumOff (+ (len (.-b w)) hdrSize)]
+      (set! hdrSize + (packetNumberLength (.-num p) pnumMaxAcked))
+      (let [payOff (+ (len (.-b w)) hdrSize)]
+        ;; Check if we have enough space to hold the packet, including the header,
+        ;; header protection sample (RFC 9001, section 5.4.2), and encryption overhead.
+        (when (>= (+ pnumOff 4 headerProtectionSampleSize aeadOverhead) (.-dgramLim w))
+          ;; Set the limit on the packet size to be the current write buffer length,
+          ;; ensuring that any writes to the payload fail.
+          (set! (.-payOff w) (len (.-b w)))
+          (set! (.-pktLim w) (len (.-b w)))
+          (return))
+
+        (set! (.-payOff w) payOff)
+        (set! (.-pktLim w) (- (.-dgramLim w) aeadOverhead))
+        ;; We hardcode the payload length field to be 2 bytes, which limits the payload
+        ;; (including the packet number) to 16383 bytes (the largest 2-byte QUIC varint).
+        ;;
+        ;; Most networks don't support datagrams over 1472 bytes, and even Ethernet
+        ;; jumbo frames are generally only about 9000 bytes.
+        (when [lim (- (+ pnumOff 16383) aeadOverhead)] (< lim (.-pktLim w))
+          (set! (.-pktLim w) lim))
+
+        (set! (.-b w) (subslice (.-b w) _ payOff))))))
+
+
+
+
+
+^{:go/end 145} (go/method finishProtectedLongHeaderPacket "finishProtectedLongHeaderPacket finishes writing an Initial, 0-RTT, or Handshake packet,\ncanceling the packet if it contains no payload.\nIt returns a sentPacket describing the packet, or nil if no packet was written.\n" ^{:tag (* sentPacket)} [^{:tag (* packetWriter)} w ^packetNumber pnumMaxAcked ^fixedKeys k ^longPacket p]
+  (when (== (len (.-b w)) (.-payOff w))
+    ;; The payload is empty, so just abandon the packet.
+    (set! (.-b w) (subslice (.-b w) _ (.-pktOff w)))
+    (return nil))
+
+  (let [pnumLen (packetNumberLength (.-num p) pnumMaxAcked)
+      ^{:line 115} plen (.padPacketLength w pnumLen)
+      ^{:line 116} hdr (subslice (.-b w) _ (.-pktOff w))
+      ^{:line 117 :tag byte} typeBits (zero byte)]
+    (switch (.-ptype p)
+      (case [packetTypeInitial]
+        (set! typeBits longPacketTypeInitial))
+      (case [packetType0RTT]
+        (set! typeBits longPacketType0RTT))
+      (case [packetTypeHandshake]
+        (set! typeBits longPacketTypeHandshake))
+      (case [packetTypeRetry]
+        (set! typeBits longPacketTypeRetry)))
+
+    (set! hdr (append hdr (bit-or headerFormLong fixedBit typeBits (conv byte (- pnumLen 1)))))
+    (set! hdr (.AppendUint32 binary/BigEndian hdr (.-version p)))
+    (set! hdr (quicwire/AppendUint8Bytes hdr (.-dstConnID p)))
+    (set! hdr (quicwire/AppendUint8Bytes hdr (.-srcConnID p)))
+    (switch (.-ptype p)
+      (case [packetTypeInitial]
+        (set! hdr (quicwire/AppendVarintBytes hdr (.-extra p))))) ; token
+
+
+    ;; Packet length, always encoded as a 2-byte varint.
+    (set! hdr (append hdr (bit-or 0x40 (conv byte (>> plen 8))) (conv byte plen)))
+
+    (let [pnumOff (len hdr)]
+      (set! hdr (appendPacketNumber hdr (.-num p) pnumMaxAcked))
+
+      (.protect k (subslice hdr (.-pktOff w)) (subslice (.-b w) (len hdr)) (- pnumOff (.-pktOff w)) (.-num p))
+      (.finish w (.-ptype p) (.-num p)))))
+
+
+
+^{:go/end 166} (go/method start1RTTPacket "start1RTTPacket starts writing a 1-RTT (short header) packet.\n" [^{:tag (* packetWriter)} w ^packetNumber pnum ^packetNumber pnumMaxAcked ^{:tag (slice byte)} dstConnID]
+  (when (== (.-sent w) nil)
+    (set! (.-sent w) (newSentPacket)))
+
+  (set! (.-pktOff w) (len (.-b w)))
+  (let [hdrSize 1] ; packet type
+    (set! hdrSize + (len dstConnID))
+    ;; Ensure we have enough space to hold the packet, including the header,
+    ;; header protection sample (RFC 9001, section 5.4.2), and encryption overhead.
+    (when (>= (+ (len (.-b w)) hdrSize 4 headerProtectionSampleSize aeadOverhead) (.-dgramLim w))
+      (set! (.-payOff w) (len (.-b w)))
+      (set! (.-pktLim w) (len (.-b w)))
+      (return))
+
+    (set! hdrSize + (packetNumberLength pnum pnumMaxAcked))
+    (set! (.-payOff w) (+ (len (.-b w)) hdrSize))
+    (set! (.-pktLim w) (- (.-dgramLim w) aeadOverhead))
+    (set! (.-b w) (subslice (.-b w) _ (.-payOff w)))))
+
+
+
+
+
+^{:go/end 187} (go/method finish1RTTPacket "finish1RTTPacket finishes writing a 1-RTT packet,\ncanceling the packet if it contains no payload.\nIt returns a sentPacket describing the packet, or nil if no packet was written.\n" ^{:tag (* sentPacket)} [^{:tag (* packetWriter)} w ^packetNumber pnum ^packetNumber pnumMaxAcked ^{:tag (slice byte)} dstConnID ^{:tag (* updatingKeyPair)} k]
+  (when (== (len (.-b w)) (.-payOff w))
+    ;; The payload is empty, so just abandon the packet.
+    (set! (.-b w) (subslice (.-b w) _ (.-pktOff w)))
+    (return nil))
+
+  ;; TODO: Spin
+  (let [pnumLen (packetNumberLength pnum pnumMaxAcked)
+      ^{:line 179} hdr (subslice (.-b w) _ (.-pktOff w))]
+    (set! hdr (append hdr (bit-or 0x40 (conv byte (- pnumLen 1)))))
+    (set! hdr (append hdr (spread dstConnID)))
+    (let [pnumOff (len hdr)]
+      (set! hdr (appendPacketNumber hdr pnum pnumMaxAcked))
+      (.padPacketLength w pnumLen)
+      (.protect k (subslice hdr (.-pktOff w)) (subslice (.-b w) (len hdr)) (- pnumOff (.-pktOff w)) pnum)
+      (.finish w packetType1RTT pnum))))
+
+
+
+
+
+^{:go/end 204} (go/method padPacketLength "padPacketLength pads out the payload of the current packet to the minimum size,\nand returns the combined length of the packet number and payload (used for the Length\nfield of long header packets).\n" ^int [^{:tag (* packetWriter)} w ^int pnumLen]
+  (let [plen (+ (- (len (.-b w)) (.-payOff w)) pnumLen aeadOverhead)]
+    ;; "To ensure that sufficient data is available for sampling, packets are
+    ;; padded so that the combined lengths of the encoded packet number and
+    ;; protected payload is at least 4 bytes longer than the sample required
+    ;; for header protection."
+    ;; https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4.2
+    (while (< plen (+ 4 headerProtectionSampleSize))
+      (set! (.-b w) (append (.-b w) 0))
+      (inc! plen))
+
+    ^{:line 203} plen))
+
+
+
+^{:go/end 215} (go/method finish "finish finishes the current packet after protection is applied.\n" ^{:tag (* sentPacket)} [^{:tag (* packetWriter)} w ^packetType ptype ^packetNumber pnum]
+  (set! (.-b w) (subslice (.-b w) _ (+ (len (.-b w)) aeadOverhead)))
+  (set! (.-size (.-sent w)) (- (len (.-b w)) (.-pktOff w)))
+  (set! (.-ptype (.-sent w)) ptype)
+  (set! (.-num (.-sent w)) pnum)
+  (let [sent (.-sent w)]
+    (set! (.-sent w) nil)
+    ^{:line 214} sent))
+
+
+
+^{:go/end 220} (go/method avail "avail reports how many more bytes may be written to the current packet.\n" ^int [^{:tag (* packetWriter)} w]
+  (- (.-pktLim w) (len (.-b w))))
+
+
+
+
+^{:go/end 239} (go/method appendPaddingTo "appendPaddingTo appends PADDING frames until the total datagram size\n(including AEAD overhead of the current packet) is n.\n" [^{:tag (* packetWriter)} w ^int n]
+  (set! n - aeadOverhead)
+  (let [lim (.-pktLim w)]
+    (when (< n lim)
+      (set! lim n))
+
+    (when (>= (len (.-b w)) lim)
+      (return))
+
+    (while (< (len (.-b w)) lim)
+      (set! (.-b w) (append (.-b w) frameTypePadding)))
+
+    ;; Packets are considered in flight when they contain a PADDING frame.
+    ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-2-3.6.1
+    (set! (.-inFlight (.-sent w)) true)))
+
+
+^{:go/breaks [8] :go/end 248} (go/method appendPingFrame [^{:tag (* packetWriter)} w] :results [^bool added]
+  (when (>= (len (.-b w)) (.-pktLim w))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypePing))
+  (.markAckEliciting (.-sent w)) ; no need to record the frame itself
+  true)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 314} (go/method appendAckFrame "appendAckFrame appends an ACK frame to the payload.\nIt includes at least the most recent range in the rangeset\n(the range with the largest packet numbers),\nfollowed by as many additional ranges as fit within the packet.\n\nWe always place ACK frames at the start of packets,\nwe limit the number of ack ranges retained, and\nwe set a minimum packet payload size.\nAs a result, appendAckFrame will rarely if ever drop ranges\nin practice.\n\nIn the event that ranges are dropped, the impact is limited\nto the peer potentially failing to receive an acknowledgement\nfor an older packet during a period of high packet loss or\nreordering. This may result in unnecessary retransmissions.\n" [^{:tag (* packetWriter)} w ^{:tag (rangeset packetNumber)} seen ^unscaledAckDelay delay ^ecnCounts ecn] :results [^bool added]
+  (when (== (len seen) 0)
+    (return false))
+
+  (let [
+      ^:var ^{:line 270} largest (conv uint64 (.max seen))
+      ^:var ^{:line 271} firstRange (conv uint64 (- (.size (aget seen (- (len seen) 1))) 1))
+
+      ^{:line 273 :tag int} ecnLen (zero int)
+      ^{:line 274} ackType (conv byte frameTypeAck)]
+    (when (!= ecn (lit ecnCounts))
+      ;; "Even if an endpoint does not set an ECT field in packets it sends,
+      ;; the endpoint MUST provide feedback about ECN markings it receives, if
+      ;; these are accessible."
+      ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-13.4.1-2
+      (set! ecnLen (+ (quicwire/SizeVarint (conv uint64 (.-ce ecn))) (quicwire/SizeVarint (conv uint64 (.-t0 ecn))) (quicwire/SizeVarint (conv uint64 (.-t1 ecn)))))
+      (set! ackType frameTypeAckECN))
+
+    (when (< (.avail w) (+ 1 (quicwire/SizeVarint largest) (quicwire/SizeVarint (conv uint64 delay)) 1 (quicwire/SizeVarint firstRange) ecnLen))
+      (return false))
+
+    (set! (.-b w) (append (.-b w) ackType))
+    (set! (.-b w) (quicwire/AppendVarint (.-b w) largest))
+    (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 delay)))
+    ;; The range count is technically a varint, but we'll reserve a single byte for it
+    ;; and never add more than 62 ranges (the maximum varint that fits in a byte).
+    (let [rangeCountOff (len (.-b w))]
+      (set! (.-b w) (append (.-b w) 0))
+      (set! (.-b w) (quicwire/AppendVarint (.-b w) firstRange))
+      ^{:go/breaks [7]} (let [rangeCount (conv byte 0)]
+        (for [i (- (len seen) 2)] (>= i 0) (dec! i)
+          (let [gap (conv uint64 (- (.-start (aget seen (+ i 1))) (.-end (aget seen i)) 1))
+              ^{:line 297} size (conv uint64 (- (.size (aget seen i)) 1))]
+            (when (or (< (.avail w) (+ (quicwire/SizeVarint gap) (quicwire/SizeVarint size) ecnLen)) (> rangeCount 62))
+              (break))
+
+            (set! (.-b w) (quicwire/AppendVarint (.-b w) gap))
+            (set! (.-b w) (quicwire/AppendVarint (.-b w) size))
+            (inc! rangeCount)))
+
+        (aset (.-b w) rangeCountOff rangeCount)
+        (when (== ackType frameTypeAckECN)
+          (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 (.-t0 ecn))))
+          (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 (.-t1 ecn))))
+          (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 (.-ce ecn)))))
+
+        (.appendNonAckElicitingFrame (.-sent w) ackType)
+        (.appendInt (.-sent w) (conv uint64 (.max seen)))
+        true))))
+
+
+^{:go/breaks [8] :go/end 323} (go/method appendNewTokenFrame [^{:tag (* packetWriter)} w ^{:tag (slice byte)} token] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 (len token))) (len token)))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeNewToken))
+  (set! (.-b w) (quicwire/AppendVarintBytes (.-b w) token))
+  true)
+
+
+^{:go/breaks [12] :go/end 336} (go/method appendResetStreamFrame [^{:tag (* packetWriter)} w ^streamID id ^uint64 code ^int64 finalSize] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 id)) (quicwire/SizeVarint code) (quicwire/SizeVarint (conv uint64 finalSize))))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeResetStream))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 id)))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) code))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 finalSize)))
+  (.appendAckElicitingFrame (.-sent w) frameTypeResetStream)
+  (.appendInt (.-sent w) (conv uint64 id))
+  true)
+
+
+^{:go/breaks [11] :go/end 348} (go/method appendStopSendingFrame [^{:tag (* packetWriter)} w ^streamID id ^uint64 code] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 id)) (quicwire/SizeVarint code)))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeStopSending))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 id)))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) code))
+  (.appendAckElicitingFrame (.-sent w) frameTypeStopSending)
+  (.appendInt (.-sent w) (conv uint64 id))
+  true)
+
+
+
+
+
+^{:go/end 372} (go/method appendCryptoFrame "appendCryptoFrame appends a CRYPTO frame.\nIt returns a []byte into which the data should be written and whether a frame was added.\nThe returned []byte may be smaller than size if the packet cannot hold all the data.\n" [^{:tag (* packetWriter)} w ^int64 off ^int size] :results [^{:tag (slice byte)} _ ^bool added]
+  (let [max (.avail w)]
+    (set! max - 1) ; frame type
+    (set! max - (quicwire/SizeVarint (conv uint64 off))) ; offset
+    (set! max - (quicwire/SizeVarint (conv uint64 size))) ; maximum length
+    (when (<= max 0)
+      (return nil false))
+
+    (when (< max size)
+      (set! size max))
+
+    (set! (.-b w) (append (.-b w) frameTypeCrypto))
+    (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 off)))
+    (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 size)))
+    (let [start (len (.-b w))]
+      (set! (.-b w) (subslice (.-b w) _ (+ start size)))
+      (.appendAckElicitingFrame (.-sent w) frameTypeCrypto)
+      (.appendOffAndSize (.-sent w) off size)
+      (return (subslice (subslice (.-b w) start) _ size) true))))
+
+
+
+
+
+^{:go/end 407} (go/method appendStreamFrame "appendStreamFrame appends a STREAM frame.\nIt returns a []byte into which the data should be written and whether a frame was added.\nThe returned []byte may be smaller than size if the packet cannot hold all the data.\n" [^{:tag (* packetWriter)} w ^streamID id ^int64 off ^int size ^bool fin] :results [^{:tag (slice byte)} _ ^bool added]
+  (let [typ (conv uint8 (bit-or frameTypeStreamBase streamLenBit))
+      ^{:line 379} max (.avail w)]
+    (set! max - 1) ; frame type
+    (set! max - (quicwire/SizeVarint (conv uint64 id)))
+    (when (!= off 0)
+      (set! max - (quicwire/SizeVarint (conv uint64 off)))
+      (set! typ bit-or streamOffBit))
+
+    (set! max - (quicwire/SizeVarint (conv uint64 size))) ; maximum length
+    (when (or (< max 0) ^:go/paren (and (== max 0) (> size 0)))
+      (return nil false))
+
+    (cond (< max size)
+      (set! size max)
+      ^{:line 392} fin
+      (set! typ bit-or streamFinBit))
+
+    (set! (.-b w) (append (.-b w) typ))
+    (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 id)))
+    (when (!= off 0)
+      (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 off))))
+
+    (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 size)))
+    (let [start (len (.-b w))]
+      (set! (.-b w) (subslice (.-b w) _ (+ start size)))
+      (.appendAckElicitingFrame (.-sent w) (bit-and typ (bit-or frameTypeStreamBase streamFinBit)))
+      (.appendInt (.-sent w) (conv uint64 id))
+      (.appendOffAndSize (.-sent w) off size)
+      (return (subslice (subslice (.-b w) start) _ size) true))))
+
+
+^{:go/breaks [9] :go/end 417} (go/method appendMaxDataFrame [^{:tag (* packetWriter)} w ^int64 max] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 max))))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeMaxData))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 max)))
+  (.appendAckElicitingFrame (.-sent w) frameTypeMaxData)
+  true)
+
+
+^{:go/breaks [11] :go/end 429} (go/method appendMaxStreamDataFrame [^{:tag (* packetWriter)} w ^streamID id ^int64 max] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 id)) (quicwire/SizeVarint (conv uint64 max))))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeMaxStreamData))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 id)))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 max)))
+  (.appendAckElicitingFrame (.-sent w) frameTypeMaxStreamData)
+  (.appendInt (.-sent w) (conv uint64 id))
+  true)
+
+
+^{:go/end 445} (go/method appendMaxStreamsFrame [^{:tag (* packetWriter)} w ^streamType streamType ^int64 max] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 max))))
+    (return false))
+
+  ^{:go/breaks [6]} (let [^byte typ (zero byte)]
+    (if (== streamType bidiStream)
+      (set! typ frameTypeMaxStreamsBidi)
+
+      (set! typ frameTypeMaxStreamsUni))
+
+    (set! (.-b w) (append (.-b w) typ))
+    (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 max)))
+    (.appendAckElicitingFrame (.-sent w) typ)
+    true))
+
+
+^{:go/breaks [9] :go/end 455} (go/method appendDataBlockedFrame [^{:tag (* packetWriter)} w ^int64 max] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 max))))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeDataBlocked))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 max)))
+  (.appendAckElicitingFrame (.-sent w) frameTypeDataBlocked)
+  true)
+
+
+^{:go/breaks [11] :go/end 467} (go/method appendStreamDataBlockedFrame [^{:tag (* packetWriter)} w ^streamID id ^int64 max] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 id)) (quicwire/SizeVarint (conv uint64 max))))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeStreamDataBlocked))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 id)))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 max)))
+  (.appendAckElicitingFrame (.-sent w) frameTypeStreamDataBlocked)
+  (.appendInt (.-sent w) (conv uint64 id))
+  true)
+
+
+^{:go/end 483} (go/method appendStreamsBlockedFrame [^{:tag (* packetWriter)} w ^streamType typ ^int64 max] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 max))))
+    (return false))
+
+  ^{:go/breaks [6]} (let [^byte ftype (zero byte)]
+    (if (== typ bidiStream)
+      (set! ftype frameTypeStreamsBlockedBidi)
+
+      (set! ftype frameTypeStreamsBlockedUni))
+
+    (set! (.-b w) (append (.-b w) ftype))
+    (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 max)))
+    (.appendAckElicitingFrame (.-sent w) ftype)
+    true))
+
+
+^{:go/breaks [13] :go/end 497} (go/method appendNewConnectionIDFrame [^{:tag (* packetWriter)} w ^int64 seq ^int64 retirePriorTo ^{:tag (slice byte)} connID ^{:tag (array 16 byte)} token] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 seq)) (quicwire/SizeVarint (conv uint64 retirePriorTo)) 1 (len connID) (len token)))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeNewConnectionID))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 seq)))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 retirePriorTo)))
+  (set! (.-b w) (quicwire/AppendUint8Bytes (.-b w) connID))
+  (set! (.-b w) (append (.-b w) (spread (subslice token))))
+  (.appendAckElicitingFrame (.-sent w) frameTypeNewConnectionID)
+  (.appendInt (.-sent w) (conv uint64 seq))
+  true)
+
+
+^{:go/breaks [10] :go/end 508} (go/method appendRetireConnectionIDFrame [^{:tag (* packetWriter)} w ^int64 seq] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 seq))))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeRetireConnectionID))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 seq)))
+  (.appendAckElicitingFrame (.-sent w) frameTypeRetireConnectionID)
+  (.appendInt (.-sent w) (conv uint64 seq))
+  true)
+
+
+^{:go/breaks [9] :go/end 518} (go/method appendPathChallengeFrame [^{:tag (* packetWriter)} w ^pathChallengeData data] :results [^bool added]
+  (when (< (.avail w) (+ 1 8))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypePathChallenge))
+  (set! (.-b w) (append (.-b w) (spread (subslice data))))
+  (.markAckEliciting (.-sent w)) ; no need to record the frame itself
+  true)
+
+
+^{:go/breaks [9] :go/end 528} (go/method appendPathResponseFrame [^{:tag (* packetWriter)} w ^pathChallengeData data] :results [^bool added]
+  (when (< (.avail w) (+ 1 8))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypePathResponse))
+  (set! (.-b w) (append (.-b w) (spread (subslice data))))
+  (.markAckEliciting (.-sent w)) ; no need to record the frame itself
+  true)
+
+
+
+
+^{:go/breaks [[11 542]] :go/end 543} (go/method appendConnectionCloseTransportFrame "appendConnectionCloseTransportFrame appends a CONNECTION_CLOSE frame\ncarrying a transport error code.\n" [^{:tag (* packetWriter)} w ^transportError code ^uint64 frameType ^string reason] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint (conv uint64 code)) (quicwire/SizeVarint frameType) (quicwire/SizeVarint (conv uint64 (len reason))) (len reason)))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeConnectionCloseTransport))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) (conv uint64 code)))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) frameType))
+  (set! (.-b w) (quicwire/AppendVarintBytes (.-b w) (conv (slice byte) reason)))
+  ;; We don't record CONNECTION_CLOSE frames in w.sent, since they are never acked or
+  ;; detected as lost.
+  true)
+
+
+
+
+^{:go/breaks [[10 556]] :go/end 557} (go/method appendConnectionCloseApplicationFrame "appendConnectionCloseApplicationFrame appends a CONNECTION_CLOSE frame\ncarrying an application protocol error code.\n" [^{:tag (* packetWriter)} w ^uint64 code ^string reason] :results [^bool added]
+  (when (< (.avail w) (+ 1 (quicwire/SizeVarint code) (quicwire/SizeVarint (conv uint64 (len reason))) (len reason)))
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeConnectionCloseApplication))
+  (set! (.-b w) (quicwire/AppendVarint (.-b w) code))
+  (set! (.-b w) (quicwire/AppendVarintBytes (.-b w) (conv (slice byte) reason)))
+  ;; We don't record CONNECTION_CLOSE frames in w.sent, since they are never acked or
+  ;; detected as lost.
+  true)
+
+
+^{:go/breaks [8] :go/end 566} (go/method appendHandshakeDoneFrame [^{:tag (* packetWriter)} w] :results [^bool added]
+  (when (< (.avail w) 1)
+    (return false))
+
+  (set! (.-b w) (append (.-b w) frameTypeHandshakeDone))
+  (.appendAckElicitingFrame (.-sent w) frameTypeHandshakeDone)
+  true)

@@ -1,0 +1,145 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.pprof) (go/file "label.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [label "internal/runtime/pprof/label"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [strings "strings"]])
+
+
+
+(go/type LabelSet "LabelSet is a set of labels.\n" (struct
+    ^{:line 17 :tag (slice label/Label)} list))
+
+
+
+(go/type labelContextKey "labelContextKey is the type of contextKeys used for profiler labels.\n" (struct))
+
+^{:go/end 29} (go/func labelValue ^labelMap [^context/Context ctx]
+  (let [(values labels _) (assert (* labelMap) (.Value ctx (lit labelContextKey)))]
+    (when (== labels nil)
+      (return (lit labelMap)))
+
+    ^{:line 28} @labels))
+
+
+
+
+
+(go/type labelMap "labelMap is the representation of the label set held in the context type.\nThis is an initial implementation, but it will be replaced with something\nthat admits incremental immutable modification more efficiently.\n" (struct
+    ^{:line 35} label/Set))
+
+
+
+
+^{:go/end 52} (go/method String "String satisfies Stringer and returns key, value pairs in a consistent\norder.\n" ^string [^{:tag (* labelMap)} l]
+  (when (== l nil)
+    (return ""))
+
+  (let [keyVals (make (slice string) 0 (len (.-List (.-Set l))))]
+
+    (range [_ lbl (.-List (.-Set l))]
+      (set! keyVals (append keyVals (fmt/Sprintf "%q:%q" (.-Key lbl) (.-Value lbl)))))
+
+
+    (^{:inst [(slice string) string]} slices/Sort keyVals)
+    (+ "{" (strings/Join keyVals ", ") "}")))
+
+
+
+
+^{:go/end 59} (go/func WithLabels "WithLabels returns a new [context.Context] with the given labels added.\nA label overwrites a prior label with the same key.\n" ^context/Context [^context/Context ctx ^LabelSet labels]
+  (let [parentLabels (labelValue ctx)]
+    (context/WithValue ctx (lit labelContextKey) (addr (lit labelMap (mergeLabelSets (.-Set parentLabels) labels))))))
+
+
+^{:go/end 91} (go/func mergeLabelSets ^label/Set [^label/Set left ^LabelSet right]
+  (cond (== (len (.-List left)) 0)
+    (return (label/NewSet (.-list right)))
+    (== (len (.-list right)) 0)
+    (return left))
+
+
+  (let [(values lList rList) (values (.-List left) (.-list right))
+      (values l r) (values 0 0)
+      ^{:line 70} result (make (slice label/Label) 0 (len rList))]
+    (while (and (< l (len lList)) (< r (len rList)))
+      (switch (strings/Compare (.-Key (aget lList l)) (.-Key (aget rList r)))
+        (case [-1] ; left key < right key
+          (set! result (append result (aget lList l)))
+          (inc! l))
+        (case [1] ; right key < left key
+          (set! result (append result (aget rList r)))
+          (inc! r))
+        (case [0] ; keys are equal, right value overwrites left value
+          (set! result (append result (aget rList r)))
+          (inc! l)
+          (inc! r))))
+
+
+
+    ;; Append the remaining elements
+    (set! result (append result (spread (subslice lList l))))
+    (set! result (append result (spread (subslice rList r))))
+
+    (label/NewSet result)))
+
+
+
+
+
+
+
+
+^{:go/end 125} (go/func Labels "Labels takes an even number of strings representing key-value pairs\nand makes a [LabelSet] containing them.\nA label overwrites a prior label with the same key.\nCurrently only the CPU and goroutine profiles utilize any labels\ninformation.\nSee https://golang.org/issue/23458 for details.\n" ^LabelSet [& ^{:tag (slice string)} args]
+  (when (!= (% (len args) 2) 0)
+    (panic "uneven number of arguments to pprof.Labels"))
+
+  (let [list (make (slice label/Label) 0 (/ (len args) 2))
+      ^{:line 104} sortedNoDupes true]
+    (for [i 0] (< (+ i 1) (len args)) (set! i + 2)
+      (set! list (append list (lit label/Label :Key (aget args i) :Value (aget args (+ i 1)))))
+      (set! sortedNoDupes (and sortedNoDupes ^:go/paren (or (< i 2) (> (aget args i) (aget args (- i 2)))))))
+
+    (when (not sortedNoDupes)
+      ;; slow path: keys are unsorted, contain duplicates, or both
+      (^{:inst [(slice label/Label) label/Label]} slices/SortStableFunc list ^{:go/end 113} (fn ^int [^label/Label a ^label/Label b]
+          (strings/Compare (.-Key a) (.-Key b))))
+
+      (let [deduped (make (slice label/Label) 0 (len list))]
+        (range [i lbl list]
+          (if (or (== i 0) (!= (.-Key lbl) (.-Key (aget list (- i 1)))))
+            (set! deduped (append deduped lbl))
+
+            (aset deduped (- (len deduped) 1) lbl)))
+
+
+        (set! list deduped)))
+
+    (lit LabelSet :list list)))
+
+
+
+
+^{:go/end 137} (go/func Label "Label returns the value of the label with the given key on ctx, and a boolean indicating\nwhether that label exists.\n" [^context/Context ctx ^string key] :results [string bool]
+  (let [ctxLabels (labelValue ctx)]
+    (range [_ lbl (.-List (.-Set ctxLabels))]
+      (when (== (.-Key lbl) key)
+        (return (.-Value lbl) true)))
+
+
+    (return "" false)))
+
+
+
+
+^{:go/end 148} (go/func ForLabels "ForLabels invokes f with each label set on the context.\nThe function f should return true to continue iteration or false to stop iteration early.\n" [^context/Context ctx ^{:tag (func [^string key ^string value] [bool])} f]
+  (let [ctxLabels (labelValue ctx)]
+    (range [_ lbl (.-List (.-Set ctxLabels))]
+      (when (not (f (.-Key lbl) (.-Value lbl)))
+        (break)))))

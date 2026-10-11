@@ -1,0 +1,257 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package crc32 implements the 32-bit cyclic redundancy check, or CRC-32,
+;; checksum. See https://en.wikipedia.org/wiki/Cyclic_redundancy_check for
+;; information.
+;;
+;; Polynomials are represented in LSB-first form also known as reversed representation.
+;;
+;; See https://en.wikipedia.org/wiki/Mathematics_of_cyclic_redundancy_checks#Reversed_representations_and_reciprocal_polynomials
+;; for information.
+(in-ns 'go.hash.crc32) (go/file "crc32.go" :doc "Package crc32 implements the 32-bit cyclic redundancy check, or CRC-32,\nchecksum. See https://en.wikipedia.org/wiki/Cyclic_redundancy_check for\ninformation.\n\nPolynomials are represented in LSB-first form also known as reversed representation.\n\nSee https://en.wikipedia.org/wiki/Mathematics_of_cyclic_redundancy_checks#Reversed_representations_and_reciprocal_polynomials\nfor information.\n" :imports [
+
+
+    ^{:line 16} [errors "errors"]
+    ^{:line 17} [hash "hash"]
+    ^{:line 18} [byteorder "internal/byteorder"]
+    ^{:line 19} [sync "sync"]
+    ^{:line 20} [atomic "sync/atomic"]])
+
+
+
+(go/const ^{:val 4 :doc "The size of a CRC-32 checksum in bytes.\n"} Size 4)
+
+
+(go/const "Predefined polynomials.\n"
+
+
+  ^{:line 30} [^{:val 3988292384 :doc "IEEE is by far and away the most common CRC-32 polynomial.\nUsed by ethernet (IEEE 802.3), v.42, fddi, gzip, zip, png, ...\n"} IEEE 0xedb88320]
+
+
+
+
+  ^{:line 35} [^{:val 2197175160 :doc "Castagnoli's polynomial, used in iSCSI.\nHas better error detection characteristics than IEEE.\nhttps://dx.doi.org/10.1109/26.231911\n"} Castagnoli 0x82f63b78]
+
+
+
+
+  ^{:line 40} [^{:val 3945912366 :doc "Koopman's polynomial.\nAlso has better error detection characteristics than IEEE.\nhttps://dx.doi.org/10.1109/DSN.2002.1028931\n"} Koopman 0xeb31d82e])
+
+
+
+(go/type Table "Table is a 256-word table representing the polynomial for efficient processing.\n" (array 256 uint32))
+
+;; This file makes use of functions implemented in architecture-specific files.
+;; The interface that they implement is as follows:
+;;
+;;    // archAvailableIEEE reports whether an architecture-specific CRC32-IEEE
+;;    // algorithm is available.
+;;    archAvailableIEEE() bool
+;;
+;;    // archInitIEEE initializes the architecture-specific CRC3-IEEE algorithm.
+;;    // It can only be called if archAvailableIEEE() returns true.
+;;    archInitIEEE()
+;;
+;;    // archUpdateIEEE updates the given CRC32-IEEE. It can only be called if
+;;    // archInitIEEE() was previously called.
+;;    archUpdateIEEE(crc uint32, p []byte) uint32
+;;
+;;    // archAvailableCastagnoli reports whether an architecture-specific
+;;    // CRC32-C algorithm is available.
+;;    archAvailableCastagnoli() bool
+;;
+;;    // archInitCastagnoli initializes the architecture-specific CRC32-C
+;;    // algorithm. It can only be called if archAvailableCastagnoli() returns
+;;    // true.
+;;    archInitCastagnoli()
+;;
+;;    // archUpdateCastagnoli updates the given CRC32-C. It can only be called
+;;    // if archInitCastagnoli() was previously called.
+;;    archUpdateCastagnoli(crc uint32, p []byte) uint32
+
+
+
+
+
+(go/var ^{:tag (* Table) :doc "castagnoliTable points to a lazily initialized Table for the Castagnoli\npolynomial. MakeTable will always return this value when asked to make a\nCastagnoli table so we can compare against it to find when the caller is\nusing this polynomial.\n"} castagnoliTable)
+(go/var ^{:tag (* slicing8Table)} castagnoliTable8)
+(go/var ^{:tag (func [^uint32 crc ^{:tag (slice byte)} p] [uint32])} updateCastagnoli)
+(go/var ^atomic/Bool haveCastagnoli)
+
+(go/var castagnoliInitOnce (sync/OnceFunc ^{:go/end 98} (fn []
+      (set! castagnoliTable (simpleMakeTable Castagnoli))
+
+      (if (archAvailableCastagnoli) (do
+          (archInitCastagnoli)
+          (set! updateCastagnoli archUpdateCastagnoli))
+        (do
+          ;; Initialize the slicing-by-8 table.
+          (set! castagnoliTable8 (slicingMakeTable Castagnoli))
+          (set! updateCastagnoli ^{:go/end 94} (fn ^uint32 [^uint32 crc ^{:tag (slice byte)} p]
+              (slicingUpdate crc castagnoliTable8 p)))))
+
+
+
+      (.Store haveCastagnoli true))))
+
+
+
+(go/var ^{:doc "IEEETable is the table for the [IEEE] polynomial.\n"} IEEETable (simpleMakeTable IEEE))
+
+
+(go/var ^{:tag (* slicing8Table) :doc "ieeeTable8 is the slicing8Table for IEEE\n"} ieeeTable8)
+(go/var ^{:tag (func [^uint32 crc ^{:tag (slice byte)} p] [uint32])} updateIEEE)
+
+(go/var ieeeInitOnce (sync/OnceFunc ^{:go/end 118} (fn []
+      (if (archAvailableIEEE) (do
+          (archInitIEEE)
+          (set! updateIEEE archUpdateIEEE))
+        (do
+          ;; Initialize the slicing-by-8 table.
+          (set! ieeeTable8 (slicingMakeTable IEEE))
+          (set! updateIEEE ^{:go/end 116} (fn ^uint32 [^uint32 crc ^{:tag (slice byte)} p]
+              (slicingUpdate crc ieeeTable8 p))))))))
+
+
+
+
+
+
+^{:go/end 133} (go/func MakeTable "MakeTable returns a [Table] constructed from the specified polynomial.\nThe contents of this [Table] must not be modified.\n" ^{:tag (* Table)} [^uint32 poly]
+  (switch poly
+    (case [IEEE]
+      (ieeeInitOnce)
+      (return IEEETable))
+    (case [Castagnoli]
+      (castagnoliInitOnce)
+      (return castagnoliTable))
+    (default
+      (return (simpleMakeTable poly)))))
+
+
+
+
+(go/type digest "digest represents the partial evaluation of a checksum.\n" (struct
+    ^{:line 137 :tag uint32} crc
+    ^{:line 138 :tag (* Table)} tab))
+
+
+
+
+
+
+
+^{:go/end 151} (go/func New "New creates a new [hash.Hash32] computing the CRC-32 checksum using the\npolynomial represented by the [Table]. Its Sum method will lay the\nvalue out in big-endian byte order. The returned Hash32 also\nimplements [encoding.BinaryMarshaler] and [encoding.BinaryUnmarshaler] to\nmarshal and unmarshal the internal state of the hash.\n" ^hash/Hash32 [^{:tag (* Table)} tab]
+  (when (== tab IEEETable)
+    (ieeeInitOnce))
+
+  (addr (lit digest 0 tab)))
+
+
+
+
+
+
+
+^{:go/end 158} (go/func NewIEEE "NewIEEE creates a new [hash.Hash32] computing the CRC-32 checksum using\nthe [IEEE] polynomial. Its Sum method will lay the value out in\nbig-endian byte order. The returned Hash32 also implements\n[encoding.BinaryMarshaler] and [encoding.BinaryUnmarshaler] to marshal\nand unmarshal the internal state of the hash.\n" ^hash/Hash32 [] (New IEEETable))
+
+^{:go/end 160} (go/method Size ^int [^{:tag (* digest)} d] Size)
+
+^{:go/end 162} (go/method BlockSize ^int [^{:tag (* digest)} d] 1)
+
+^{:go/end 164} (go/method Reset [^{:tag (* digest)} d] (set! (.-crc d) 0))
+
+(go/const
+  ^{:line 167} [^{:val "crc\u0001"} magic "crc\u0001"]
+  ^{:line 168} [^{:val 12} marshaledSize (+ (len magic) 4 4)])
+
+
+^{:go/end 176} (go/method AppendBinary [^{:tag (* digest)} d ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (set! b (append b (spread magic)))
+  (set! b (byteorder/BEAppendUint32 b (tableSum (.-tab d))))
+  (set! b (byteorder/BEAppendUint32 b (.-crc d)))
+  (return b nil))
+
+
+^{:go/end 181} (go/method MarshalBinary [^{:tag (* digest)} d] :results [(slice byte) error]
+  (.AppendBinary d (make (slice byte) 0 marshaledSize)))
+
+
+
+^{:go/breaks [7] :go/end 195} (go/method UnmarshalBinary ^error [^{:tag (* digest)} d ^{:tag (slice byte)} b]
+  (when (or (< (len b) (len magic)) (!= (conv string (subslice b _ (len magic))) magic))
+    (return (errors/New "hash/crc32: invalid hash state identifier")))
+
+  (when (!= (len b) marshaledSize)
+    (return (errors/New "hash/crc32: invalid hash state size")))
+
+  (when (!= (tableSum (.-tab d)) (byteorder/BEUint32 (subslice b 4)))
+    (return (errors/New "hash/crc32: tables do not match")))
+
+  (set! (.-crc d) (byteorder/BEUint32 (subslice b 8)))
+  nil)
+
+
+^{:go/end 200} (go/method Clone [^{:tag (* digest)} d] :results [hash/Cloner error]
+  (let [r @d]
+    (return (addr r) nil)))
+
+
+^{:go/end 214} (go/func update ^uint32 [^uint32 crc ^{:tag (* Table)} tab ^{:tag (slice byte)} p ^bool checkInitIEEE]
+  (switch
+    (case [(and (.Load haveCastagnoli) (== tab castagnoliTable))]
+      (return (updateCastagnoli crc p)))
+    (case [(== tab IEEETable)]
+      (when checkInitIEEE
+        (ieeeInitOnce))
+
+      (return (updateIEEE crc p)))
+    (default
+      (return (simpleUpdate crc tab p)))))
+
+
+
+
+^{:go/end 221} (go/func Update "Update returns the result of adding the bytes in p to the crc.\n" ^uint32 [^uint32 crc ^{:tag (* Table)} tab ^{:tag (slice byte)} p]
+  ;; Unfortunately, because IEEETable is exported, IEEE may be used without a
+  ;; call to MakeTable. We have to make sure it gets initialized in that case.
+  (update crc tab p true))
+
+
+^{:go/end 228} (go/method Write [^{:tag (* digest)} d ^{:tag (slice byte)} p] :results [^int n ^error err]
+  ;; We only create digest objects through New() which takes care of
+  ;; initialization in this case.
+  (set! (.-crc d) (update (.-crc d) (.-tab d) p false))
+  (return (len p) nil))
+
+
+^{:go/end 230} (go/method Sum32 ^uint32 [^{:tag (* digest)} d] (.-crc d))
+
+^{:go/end 235} (go/method Sum ^{:tag (slice byte)} [^{:tag (* digest)} d ^{:tag (slice byte)} in]
+  (let [s (.Sum32 d)]
+    (append in (conv byte (>> s 24)) (conv byte (>> s 16)) (conv byte (>> s 8)) (conv byte s))))
+
+
+
+
+^{:go/end 239} (go/func Checksum "Checksum returns the CRC-32 checksum of data\nusing the polynomial represented by the [Table].\n" ^uint32 [^{:tag (slice byte)} data ^{:tag (* Table)} tab] (Update 0 tab data))
+
+
+
+^{:go/end 246} (go/func ChecksumIEEE "ChecksumIEEE returns the CRC-32 checksum of data\nusing the [IEEE] polynomial.\n" ^uint32 [^{:tag (slice byte)} data]
+  (ieeeInitOnce)
+  (updateIEEE 0 data))
+
+
+
+^{:go/end 258} (go/func tableSum "tableSum returns the IEEE checksum of table t.\n" ^uint32 [^{:tag (* Table)} t]
+  (let [^{:tag (array 1024 byte)} a (zero (array 1024 byte))
+      ^{:line 251} b (subslice a _ 0)]
+    (when (!= t nil)
+      (range [_ x t]
+        (set! b (byteorder/BEAppendUint32 b x))))
+
+
+    (ChecksumIEEE b)))

@@ -1,0 +1,429 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.build) (go/file "read.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [ast "go/ast"]
+    ^{:line 13} [parser "go/parser"]
+    ^{:line 14} [scanner "go/scanner"]
+    ^{:line 15} [token "go/token"]
+    ^{:line 16} [io "io"]
+    ^{:line 17} [strconv "strconv"]
+    ^{:line 18} [strings "strings"]
+    ^{:line 19} [unicode "unicode"]
+    ^{:line 20} [utf8 "unicode/utf8"]
+    ^{:line 21} [_ "unsafe"]]) ; for linkname
+
+
+(go/type importReader (struct
+    ^{:line 25 :tag (* bufio/Reader)} b
+    ^{:line 26 :tag (slice byte)} buf
+    ^{:line 27 :tag byte} peek
+    ^{:line 28 :tag error} err
+    ^{:line 29 :tag bool} eof
+    ^{:line 30 :tag int} nerr
+    ^{:line 31 :tag token/Position} pos))
+
+
+(go/var bom (lit (slice byte) 0xef 0xbb 0xbf))
+
+^{:go/end 53} (go/func newImportReader ^{:tag (* importReader)} [^string name ^io/Reader r]
+  (let [b (bufio/NewReader r)]
+    ;; Remove leading UTF-8 BOM.
+    ;; Per https://golang.org/ref/spec#Source_code_representation:
+    ;; a compiler may ignore a UTF-8-encoded byte order mark (U+FEFF)
+    ;; if it is the first Unicode code point in the source text.
+    (when [(values leadingBytes err) (.Peek b 3)] (and (== err nil) (bytes/Equal leadingBytes bom))
+      (.Discard b 3))
+
+    (addr ^{:go/breaks [2 4]} (lit importReader
+        :b b
+        :pos ^{:go/breaks [2 4 6]} (lit token/Position
+          :Filename name
+          :Line 1
+          :Column 1)))))
+
+
+
+
+^{:go/end 57} (go/func isIdent ^bool [^byte c]
+  (or (and (<= \A c) (<= c \Z)) (and (<= \a c) (<= c \z)) (and (<= \0 c) (<= c \9)) (== c \_) (>= c utf8/RuneSelf)))
+
+
+(go/var
+  ^{:line 60} [errSyntax (errors/New "syntax error")]
+  ^{:line 61} [errNUL (errors/New "unexpected NUL in input")])
+
+
+
+^{:go/end 69} (go/method syntaxError "syntaxError records a syntax error, but only if an I/O error has not already been recorded.\n" [^{:tag (* importReader)} r]
+  (when (== (.-err r) nil)
+    (set! (.-err r) errSyntax)))
+
+
+
+
+
+^{:go/end 90} (go/method readByte "readByte reads the next byte from the input, saves it in buf, and returns it.\nIf an error occurs, readByte records the error in r.err and returns 0.\n" ^byte [^{:tag (* importReader)} r]
+  (let [(values c err) (.ReadByte (.-b r))]
+    (when (== err nil)
+      (set! (.-buf r) (append (.-buf r) c))
+      (when (== c 0)
+        (set! err errNUL)))
+
+
+    (when (!= err nil)
+      (cond (== err io/EOF)
+        (set! (.-eof r) true)
+        (== (.-err r) nil)
+        (set! (.-err r) err))
+
+      (set! c 0))
+
+    ^{:line 89} c))
+
+
+
+^{:go/end 110} (go/method readRest "readRest reads the entire rest of the file into r.buf.\n" [^{:tag (* importReader)} r]
+  (while true
+    (when (== (len (.-buf r)) (cap (.-buf r)))
+      ;; Grow the buffer
+      (set! (.-buf r) (subslice (append (.-buf r) 0) _ (len (.-buf r)))))
+
+    (let [(values n err) (.Read (.-b r) (subslice (.-buf r) (len (.-buf r)) (cap (.-buf r))))]
+      (set! (.-buf r) (subslice (.-buf r) _ (+ (len (.-buf r)) n)))
+      (when (!= err nil)
+        (cond (== err io/EOF)
+          (set! (.-eof r) true)
+          (== (.-err r) nil)
+          (set! (.-err r) err))
+
+        (break)))))
+
+
+
+
+
+
+^{:go/end 163} (go/method peekByte "peekByte returns the next byte from the input reader but does not advance beyond it.\nIf skipSpace is set, peekByte skips leading spaces and comments.\n" ^byte [^{:tag (* importReader)} r ^bool skipSpace]
+  (when (!= (.-err r) nil)
+    (when [(inc! (.-nerr r))] (> (.-nerr r) 10000)
+      (panic "go/build: import reader looping"))
+
+    (return 0))
+
+
+  ;; Use r.peek as first input byte.
+  ;; Don't just return r.peek here: it might have been left by peekByte(false)
+  ;; and this might be peekByte(true).
+  (let [c (.-peek r)]
+    (when (== c 0)
+      (set! c (.readByte r)))
+
+    (while (and (== (.-err r) nil) (not (.-eof r)))
+      (when skipSpace
+        ;; For the purposes of this reader, semicolons are never necessary to
+        ;; understand the input and are treated as spaces.
+        (switch c
+          (case [\space \formfeed \tab \return \newline \;]
+            (set! c (.readByte r))
+            (continue))
+
+          (case [\/]
+            (set! c (.readByte r))
+            (cond (== c \/)
+              (while (and (!= c \newline) (== (.-err r) nil) (not (.-eof r)))
+                (set! c (.readByte r)))
+
+              (== c \*)
+              (let [^byte c1 (zero byte)]
+                (while (and ^:go/paren (or (!= c \*) (!= c1 \/)) (== (.-err r) nil))
+                  (when (.-eof r)
+                    (.syntaxError r))
+
+                  (set! (values c c1) (values c1 (.readByte r))))) :else
+
+
+              (.syntaxError r))
+
+            (set! c (.readByte r))
+            (continue))))
+
+
+      (break))
+
+    (set! (.-peek r) c)
+    (.-peek r)))
+
+
+
+^{:go/end 170} (go/method nextByte "nextByte is like peekByte but advances beyond the returned byte.\n" ^byte [^{:tag (* importReader)} r ^bool skipSpace]
+  (let [c (.peekByte r skipSpace)]
+    (set! (.-peek r) 0)
+    ^{:line 169} c))
+
+
+
+
+^{:go/end 185} (go/method readKeyword "readKeyword reads the given keyword from the input.\nIf the keyword is not present, readKeyword records a syntax error.\n" [^{:tag (* importReader)} r ^string kw]
+  (.peekByte r true)
+  (for [i 0] (< i (len kw)) (inc! i)
+    (when (!= (.nextByte r false) (aget kw i))
+      (.syntaxError r)
+      (return)))
+
+
+  (when (isIdent (.peekByte r false))
+    (.syntaxError r)))
+
+
+
+
+
+^{:go/end 198} (go/method readIdent "readIdent reads an identifier from the input.\nIf an identifier is not present, readIdent records a syntax error.\n" [^{:tag (* importReader)} r]
+  (let [c (.peekByte r true)]
+    (when (not (isIdent c))
+      (.syntaxError r)
+      (return))
+
+    (while (isIdent (.peekByte r false))
+      (set! (.-peek r) 0))))
+
+
+
+
+
+^{:go/end 229} (go/method readString "readString reads a quoted string literal from the input.\nIf an identifier is not present, readString records a syntax error.\n" [^{:tag (* importReader)} r]
+  (switch (.nextByte r true)
+    (case [\`]
+      (while (== (.-err r) nil)
+        (when (== (.nextByte r false) \`)
+          (break))
+
+        (when (.-eof r)
+          (.syntaxError r))))
+
+
+    (case [\"]
+      (while (== (.-err r) nil)
+        (let [c (.nextByte r false)]
+          (when (== c \")
+            (break))
+
+          (when (or (.-eof r) (== c \newline))
+            (.syntaxError r))
+
+          (when (== c \\)
+            (.nextByte r false)))))
+
+
+    (default
+      (.syntaxError r))))
+
+
+
+
+
+^{:go/end 241} (go/method readImport "readImport reads an import clause - optional identifier followed by quoted string -\nfrom the input.\n" [^{:tag (* importReader)} r]
+  (let [c (.peekByte r true)]
+    (cond (== c \.)
+      (set! (.-peek r) 0)
+      (isIdent c)
+      (.readIdent r))
+
+    (.readString r)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 263} (go/func ^{:go/linkname "readComments"} readComments "readComments is like io.ReadAll, except that it only reads the leading\nblock of comments in the file.\n\nreadComments should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bazelbuild/bazel-gazelle\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^io/Reader f] :results [(slice byte) error]
+  (let [r (newImportReader "" f)]
+    (.peekByte r true)
+    (when (and (== (.-err r) nil) (not (.-eof r)))
+      ;; Didn't reach EOF, so must have found a non-space byte. Remove it.
+      (set! (.-buf r) (subslice (.-buf r) _ (- (len (.-buf r)) 1))))
+
+    (return (.-buf r) (.-err r))))
+
+
+
+
+
+
+
+
+
+^{:go/end 397} (go/func readGoInfo "readGoInfo expects a Go file as input and reads the file up to and including the import section.\nIt records what it learned in *info.\nIf info.fset is non-nil, readGoInfo parses the file and sets info.parsed, info.parseErr,\ninfo.imports and info.embeds.\n\nIt only returns an error if there are problems reading the file,\nnot for syntax errors in the file itself.\n" ^error [^io/Reader f ^{:tag (* fileInfo)} info]
+  (let [r (newImportReader (.-name info) f)]
+
+    (.readKeyword r "package")
+    (.readIdent r)
+    (while (== (.peekByte r true) \i)
+      (.readKeyword r "import")
+      (if (== (.peekByte r true) \() (do
+          (.nextByte r false)
+          (while (and (!= (.peekByte r true) \)) (== (.-err r) nil))
+            (.readImport r))
+
+          (.nextByte r false))
+
+        (.readImport r)))
+
+
+
+    (set! (.-header info) (.-buf r))
+
+    ;; If we stopped successfully before EOF, we read a byte that told us we were done.
+    ;; Return all but that last byte, which would cause a syntax error if we let it through.
+    (when (and (== (.-err r) nil) (not (.-eof r)))
+      (set! (.-header info) (subslice (.-buf r) _ (- (len (.-buf r)) 1))))
+
+
+    ;; If we stopped for a syntax error, consume the whole file so that
+    ;; we are sure we don't change the errors that go/parser returns.
+    (when (== (.-err r) errSyntax)
+      (set! (.-err r) nil)
+      (.readRest r)
+      (set! (.-header info) (.-buf r)))
+
+    (when (!= (.-err r) nil)
+      (return (.-err r)))
+
+
+    (when (== (.-fset info) nil)
+      (return nil))
+
+
+    ;; Parse file header & record imports.
+    (set! (values (.-parsed info) (.-parseErr info)) (parser/ParseFile (.-fset info) (.-name info) (.-header info) (bit-or parser/ImportsOnly parser/ParseComments parser/SkipObjectResolution)))
+    (when (!= (.-parseErr info) nil)
+      (return nil))
+
+
+    ^{:go/breaks [[5 396]]} (let [hasEmbed false]
+      (range [_ decl (.-Decls (.-parsed info))]
+        (let [(values d ok) (assert (* ast/GenDecl) decl)]
+          (when (not ok)
+            (continue))
+
+          (range [_ dspec (.-Specs d)]
+            (let [(values spec ok) (assert (* ast/ImportSpec) dspec)]
+              (when (not ok)
+                (continue))
+
+              (let [quoted (.-Value (.-Path spec))
+                  (values path err) (strconv/Unquote quoted)]
+                (when (!= err nil)
+                  (return (fmt/Errorf "parser returned invalid quoted string: <%s>" quoted)))
+
+                (when (not (isValidImport path))
+                  ;; The parser used to return a parse error for invalid import paths, but
+                  ;; no longer does, so check for and create the error here instead.
+                  (set! (.-parseErr info) (addr (lit scanner/Error :Pos (.Position (.-fset info) (.Pos spec)) :Msg (+ "invalid import path: " path))))
+                  (set! (.-imports info) nil)
+                  (return nil))
+
+                (when (== path "embed")
+                  (set! hasEmbed true))
+
+
+                (let [doc (.-Doc spec)]
+                  (when (and (== doc nil) (== (len (.-Specs d)) 1))
+                    (set! doc (.-Doc d)))
+
+                  (set! (.-imports info) (append (.-imports info) (lit fileImport path (.Pos spec) doc)))))))))
+
+
+
+      ;; Extract directives.
+      (range [_ group (.-Comments (.-parsed info))]
+        (when (>= (.Pos group) (.-Package (.-parsed info)))
+          (break))
+
+        (range [_ c (.-List group)]
+          (when (strings/HasPrefix (.-Text c) "//go:")
+            (set! (.-directives info) (append (.-directives info) (lit Directive (.-Text c) (.Position (.-fset info) (.-Slash c))))))))
+
+
+
+
+      ;; If the file imports "embed",
+      ;; we have to look for //go:embed comments
+      ;; in the remainder of the file.
+      ;; The compiler will enforce the mapping of comments to
+      ;; declared variables. We just need to know the patterns.
+      ;; If there were //go:embed comments earlier in the file
+      ;; (near the package statement or imports), the compiler
+      ;; will reject them. They can be (and have already been) ignored.
+      (when hasEmbed
+        (.readRest r)
+        (let [fset (token/NewFileSet)
+            ^{:line 377} file (.AddFile fset (.-Filename (.-pos r)) -1 (len (.-buf r)))
+            ^{:line 378 :tag scanner/Scanner} sc (zero scanner/Scanner)]
+          (.Init sc file (.-buf r) nil scanner/ScanComments)
+          (while true
+            (let [(values pos tok lit) (.Scan sc)]
+              (when (== tok token/EOF)
+                (break))
+
+              (when (and (== tok token/COMMENT) (strings/HasPrefix lit "//go:embed"))
+                ;; Ignore badly-formed lines - the compiler will report them when it finds them,
+                ;; and we can pretend they are not there to help go list succeed with what it knows.
+                (let [(values embs err) (parseGoEmbed fset pos lit)]
+                  (when (== err nil)
+                    (set! (.-embeds info) (append (.-embeds info) (spread embs))))))))))
+
+
+
+
+
+      nil)))
+
+
+
+
+
+
+^{:go/end 411} (go/func isValidImport "isValidImport checks if the import is a valid import using the more strict\nchecks allowed by the implementation restriction in https://go.dev/ref/spec#Import_declarations.\nIt was ported from the function of the same name that was removed from the\nparser in CL 424855, when the parser stopped doing these checks.\n" ^bool [^string s]
+  (let [^:const ^{:val "!\"#$%&'()*,:;<=>?[\\]^{|}`\ufffd"} illegalChars (+ "!\"#$%&'()*,:;<=>?[\\]^{|}" "`\ufffd")]
+    (range [_ r s]
+      (when (or (not (unicode/IsGraphic r)) (unicode/IsSpace r) (strings/ContainsRune illegalChars r))
+        (return false)))
+
+
+    (!= s "")))
+
+
+
+
+
+^{:go/end 430} (go/func parseGoEmbed "parseGoEmbed parses a \"//go:embed\" to extract the glob patterns.\nIt accepts unquoted space-separated patterns as well as double-quoted and back-quoted Go strings.\nThis must match the behavior of cmd/compile/internal/noder.go.\n" [^{:tag (* token/FileSet)} fset ^token/Pos pos ^string comment] :results [(slice fileEmbed) error]
+  (let [(values dir ok) (ast/ParseDirective pos comment)]
+    (when (or (not ok) (!= (.-Tool dir) "go") (!= (.-Name dir) "embed"))
+      (return nil nil))
+
+    (let [(values args err) (.ParseArgs dir)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [^{:tag (slice fileEmbed)} list (zero (slice fileEmbed))]
+        (range [_ arg args]
+          (set! list (append list (lit fileEmbed (.-Arg arg) (.Position fset (.-Pos arg))))))
+
+        (return list nil)))))

@@ -1,0 +1,364 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; backtrack is a regular expression search with submatch
+;; tracking for small regular expressions and texts. It allocates
+;; a bit vector with (length of input) * (length of prog) bits,
+;; to make sure it never explores the same (character position, instruction)
+;; state multiple times. This limits the search to run in time linear in
+;; the length of the test.
+;;
+;; backtrack is a fast replacement for the NFA code on small
+;; regexps when onepass cannot be used.
+
+(in-ns 'go.regexp) (go/file "backtrack.go" :imports [
+
+
+    ^{:line 18} [syntax "regexp/syntax"]
+    ^{:line 19} [sync "sync"]])
+
+
+
+
+(go/type job "A job is an entry on the backtracker's job stack. It holds\nthe instruction pc and the position in the input.\n" (struct
+    ^{:line 25 :tag uint32} pc
+    ^{:line 26 :tag bool} arg
+    ^{:line 27 :tag int} pos))
+
+
+(go/const
+  ^{:line 31} [^{:val 32} visitedBits 32]
+  ^{:line 32} [^{:val 500} maxBacktrackProg 500] ; len(prog.Inst) <= max
+  ^{:line 33} [^{:val 262144} maxBacktrackVector (* 256 1024)]) ; bit vector size <= max (bits)
+
+
+
+(go/type bitState "bitState holds state for the backtracker.\n" (struct
+    ^{:line 38 :tag int} end
+    ^{:line 39 :tag (slice int)} cap
+    ^{:line 40 :tag (slice int)} matchcap
+    ^{:line 41 :tag (slice job)} jobs
+    ^{:line 42 :tag (slice uint32)} visited
+
+    ^{:line 44 :tag inputs} inputs))
+
+
+(go/var ^sync/Pool bitStatePool)
+
+^{:go/end 55} (go/func newBitState ^{:tag (* bitState)} []
+  (let [(values b ok) (assert (* bitState) (.Get bitStatePool))]
+    (when (not ok)
+      (set! b (new bitState)))
+
+    ^{:line 54} b))
+
+
+^{:go/end 60} (go/func freeBitState [^{:tag (* bitState)} b]
+  (.clear (.-inputs b))
+  (.Put bitStatePool b))
+
+
+
+
+^{:go/end 69} (go/func maxBitStateLen "maxBitStateLen returns the maximum length of a string to search with\nthe backtracker using prog.\n" ^int [^{:tag (* syntax/Prog)} prog]
+  (when (not (shouldBacktrack prog))
+    (return 0))
+
+  (/ maxBacktrackVector (len (.-Inst prog))))
+
+
+
+
+^{:go/end 75} (go/func shouldBacktrack "shouldBacktrack reports whether the program is too\nlong for the backtracker to run.\n" ^bool [^{:tag (* syntax/Prog)} prog]
+  (<= (len (.-Inst prog)) maxBacktrackProg))
+
+
+
+
+
+^{:go/end 114} (go/method reset "reset resets the state of the backtracker.\nend is the end position in the input.\nncap is the number of captures.\n" [^{:tag (* bitState)} b ^{:tag (* syntax/Prog)} prog ^int end ^int ncap]
+  (set! (.-end b) end)
+
+  (if (== (cap (.-jobs b)) 0)
+    (set! (.-jobs b) (make (slice job) 0 256))
+
+    (set! (.-jobs b) (subslice (.-jobs b) _ 0)))
+
+
+  (let [visitedSize (/ (- (+ (* (len (.-Inst prog)) (+ end 1)) visitedBits) 1) visitedBits)]
+    (if (< (cap (.-visited b)) visitedSize)
+      (set! (.-visited b) (make (slice uint32) visitedSize (/ maxBacktrackVector visitedBits)))
+      (do
+        (set! (.-visited b) (subslice (.-visited b) _ visitedSize))
+        (clear (.-visited b)))) ; set to 0
+
+
+    (if (< (cap (.-cap b)) ncap)
+      (set! (.-cap b) (make (slice int) ncap))
+
+      (set! (.-cap b) (subslice (.-cap b) _ ncap)))
+
+    (range [i (.-cap b)]
+      (aset (.-cap b) i -1))
+
+
+    (if (< (cap (.-matchcap b)) ncap)
+      (set! (.-matchcap b) (make (slice int) ncap))
+
+      (set! (.-matchcap b) (subslice (.-matchcap b) _ ncap)))
+
+    (range [i (.-matchcap b)]
+      (aset (.-matchcap b) i -1))))
+
+
+
+
+
+^{:go/end 125} (go/method shouldVisit "shouldVisit reports whether the combination of (pc, pos) has not\nbeen visited yet.\n" ^bool [^{:tag (* bitState)} b ^uint32 pc ^int pos]
+  ^{:go/breaks [4]} (let [n (conv uint (+ (* (conv int pc) (+ (.-end b) 1)) pos))]
+    (when (!= (bit-and (aget (.-visited b) (/ n visitedBits)) ^uint32 (<< 1 (bit-and n (- visitedBits 1)))) 0)
+      (return false))
+
+    (set! (aget (.-visited b) (/ n visitedBits)) bit-or ^uint32 (<< 1 (bit-and n (- visitedBits 1))))
+    true))
+
+
+
+
+^{:go/end 135} (go/method push "push pushes (pc, pos, arg) onto the job stack if it should be\nvisited.\n" [^{:tag (* bitState)} b ^{:tag (* Regexp)} re ^uint32 pc ^int pos ^bool arg]
+  ;; Only check shouldVisit when arg is false.
+  ;; When arg is true, we are continuing a previous visit.
+  (when (and (!= (.-Op (aget (.-Inst (.-prog re)) pc)) syntax/InstFail) ^:go/paren (or arg (.shouldVisit b pc pos)))
+    (set! (.-jobs b) (append (.-jobs b) (lit job :pc pc :arg arg :pos pos)))))
+
+
+
+
+^{:go/end 302} (go/method tryBacktrack "tryBacktrack runs a backtracking search starting at pos.\n" ^bool [^{:tag (* Regexp)} re ^{:tag (* bitState)} b ^input i ^uint32 pc ^int pos]
+  (let [longest (.-longest re)]
+
+    (.push b re pc pos false)
+    (while (> (len (.-jobs b)) 0)
+      (let [l (- (len (.-jobs b)) 1)
+          ;; Pop job off the stack.
+          ^{:line 145} pc (.-pc (aget (.-jobs b) l))
+          ^{:line 146} pos (.-pos (aget (.-jobs b) l))
+          ^{:line 147} arg (.-arg (aget (.-jobs b) l))]
+        (set! (.-jobs b) (subslice (.-jobs b) _ l))
+
+        ;; Optimization: rather than push and pop,
+        ;; code that is going to Push and continue
+        ;; the loop simply updates ip, p, and arg
+        ;; and jumps to CheckAndLoop. We have to
+        ;; do the ShouldVisit check that Push
+        ;; would have, but we avoid the stack
+        ;; manipulation.
+        (goto :Skip)
+        (label :CheckAndLoop
+          (when (not (.shouldVisit b pc pos))
+            (continue)))
+
+        (let [
+
+            ^{:line 164 :go/label :Skip} inst (addr (aget (.-Inst (.-prog re)) pc))]
+
+          (switch (.-Op inst)
+            (default
+              (panic "bad inst"))
+            (case [syntax/InstFail]
+              (panic "unexpected InstFail"))
+            (case [syntax/InstAlt]
+              ;; Cannot just
+              ;;   b.push(inst.Out, pos, false)
+              ;;   b.push(inst.Arg, pos, false)
+              ;; If during the processing of inst.Out, we encounter
+              ;; inst.Arg via another path, we want to process it then.
+              ;; Pushing it here will inhibit that. Instead, re-push
+              ;; inst with arg==true as a reminder to push inst.Arg out
+              ;; later.
+              (if arg (do
+                  ;; Finished inst.Out; try inst.Arg.
+                  (set! arg false)
+                  (set! pc (.-Arg inst))
+                  (goto :CheckAndLoop))
+                (do
+                  (.push b re pc pos true)
+                  (set! pc (.-Out inst))
+                  (goto :CheckAndLoop))))
+
+
+            (case [syntax/InstAltMatch]
+              ;; One opcode consumes runes; the other leads to match.
+              (switch (.-Op (aget (.-Inst (.-prog re)) (.-Out inst)))
+                (case [syntax/InstRune syntax/InstRune1 syntax/InstRuneAny syntax/InstRuneAnyNotNL]
+                  ;; inst.Arg is the match.
+                  (.push b re (.-Arg inst) pos false)
+                  (set! pc (.-Arg inst))
+                  (set! pos (.-end b))
+                  (goto :CheckAndLoop)))
+
+              ;; inst.Out is the match - non-greedy
+              (.push b re (.-Out inst) (.-end b) false)
+              (set! pc (.-Out inst))
+              (goto :CheckAndLoop))
+
+            (case [syntax/InstRune]
+              (let [(values r width) (.step i pos)]
+                (when (not (.MatchRune inst r))
+                  (continue))
+
+                (set! pos + width)
+                (set! pc (.-Out inst))
+                (goto :CheckAndLoop)))
+
+            (case [syntax/InstRune1]
+              (let [(values r width) (.step i pos)]
+                (when (!= r (aget (.-Rune inst) 0))
+                  (continue))
+
+                (set! pos + width)
+                (set! pc (.-Out inst))
+                (goto :CheckAndLoop)))
+
+            (case [syntax/InstRuneAnyNotNL]
+              (let [(values r width) (.step i pos)]
+                (when (or (== r \newline) (== r endOfText))
+                  (continue))
+
+                (set! pos + width)
+                (set! pc (.-Out inst))
+                (goto :CheckAndLoop)))
+
+            (case [syntax/InstRuneAny]
+              (let [(values r width) (.step i pos)]
+                (when (== r endOfText)
+                  (continue))
+
+                (set! pos + width)
+                (set! pc (.-Out inst))
+                (goto :CheckAndLoop)))
+
+            (case [syntax/InstCapture]
+              (if arg (do
+                  ;; Finished inst.Out; restore the old value.
+                  (aset (.-cap b) (.-Arg inst) pos)
+                  (continue))
+                (do
+                  (when (< (.-Arg inst) (conv uint32 (len (.-cap b))))
+                    ;; Capture pos to register, but save old value.
+                    (.push b re pc (aget (.-cap b) (.-Arg inst)) true) ; come back when we're done.
+                    (aset (.-cap b) (.-Arg inst) pos))
+
+                  (set! pc (.-Out inst))
+                  (goto :CheckAndLoop))))
+
+
+            (case [syntax/InstEmptyWidth]
+              (let [flag (.context i pos)]
+                (when (not (.match flag (conv syntax/EmptyOp (.-Arg inst))))
+                  (continue))
+
+                (set! pc (.-Out inst))
+                (goto :CheckAndLoop)))
+
+            (case [syntax/InstNop]
+              (set! pc (.-Out inst))
+              (goto :CheckAndLoop))
+
+            (case [syntax/InstMatch]
+              ;; We found a match. If the caller doesn't care
+              ;; where the match is, no point going further.
+              (when (== (len (.-cap b)) 0)
+                (return true))
+
+
+              ;; Record best match so far.
+              ;; Only need to check end point, because this entire
+              ;; call is only considering one start position.
+              (when (> (len (.-cap b)) 1)
+                (aset (.-cap b) 1 pos))
+
+              (when [old (aget (.-matchcap b) 1)] (or (== old -1) ^:go/paren (and longest (> pos 0) (> pos old)))
+                (copy (.-matchcap b) (.-cap b)))
+
+
+              ;; If going for first match, we're done.
+              (when (not longest)
+                (return true))
+
+
+              ;; If we used the entire text, no longer match is possible.
+              (when (== pos (.-end b))
+                (return true))
+
+
+              ;; Otherwise, continue on in hope of a longer match.
+              (continue))))))
+
+
+
+    (and longest (> (len (.-matchcap b)) 1) (>= (aget (.-matchcap b) 1) 0))))
+
+
+
+^{:go/end 365} (go/method backtrack "backtrack runs a backtracking search of prog on the input starting at pos.\n" ^{:tag (slice int)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} ib ^string is ^int pos ^int ncap ^{:tag (slice int)} dstCap]
+  (let [startCond (.-cond re)]
+    (when (== startCond (bit-not (conv syntax/EmptyOp 0))) ; impossible
+      (return nil))
+
+    (when (and (!= (bit-and startCond syntax/EmptyBeginText) 0) (!= pos 0))
+      ;; Anchored match, past beginning of text.
+      (return nil))
+
+
+    (let [b (newBitState)
+        (values i end) (.init (.-inputs b) nil ib is)]
+      (.reset b (.-prog re) end ncap)
+
+      ;; Anchored search must start at the beginning of the input
+      (if (!= (bit-and startCond syntax/EmptyBeginText) 0) (do
+          (when (> (len (.-cap b)) 0)
+            (aset (.-cap b) 0 pos))
+
+          (when (not (.tryBacktrack re b i (conv uint32 (.-Start (.-prog re))) pos))
+            (freeBitState b)
+            (return nil)))
+
+
+
+        ;; Unanchored search, starting from each possible text position.
+        ;; Notice that we have to try the empty string at the end of
+        ;; the text, so the loop condition is pos <= end, not pos < end.
+        ;; This looks like it's quadratic in the size of the text,
+        ;; but we are not clearing visited between calls to TrySearch,
+        ;; so no work is duplicated and it ends up still being linear.
+        (let [width -1]
+          (for [] (and (<= pos end) (!= width 0)) (set! pos + width)
+            (when (> (len (.-prefix re)) 0)
+              ;; Match requires literal prefix; fast search for it.
+              (let [advance (.index i re pos)]
+                (when (< advance 0)
+                  (freeBitState b)
+                  (return nil))
+
+                (set! pos + advance)))
+
+
+            (when (> (len (.-cap b)) 0)
+              (aset (.-cap b) 0 pos))
+
+            (when (.tryBacktrack re b i (conv uint32 (.-Start (.-prog re))) pos)
+              ;; Match must be leftmost; done.
+              (goto :Match))
+
+            (set! (values _ width) (.step i pos)))
+
+          (freeBitState b)
+          (return nil)))
+
+
+      (label :Match
+        (set! dstCap (append dstCap (spread (.-matchcap b)))))
+      (freeBitState b)
+      ^{:line 364} dstCap)))

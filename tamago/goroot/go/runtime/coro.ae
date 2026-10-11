@@ -1,0 +1,259 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "coro.go" :imports [
+
+
+    ^{:line 8} [sys "internal/runtime/sys"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type coro "A coro represents extra concurrency without extra parallelism,\nas would be needed for a coroutine implementation.\nThe coro does not represent a specific coroutine, only the ability\nto do coroutine-style control transfers.\nIt can be thought of as like a special channel that always has\na goroutine blocked on it. If another goroutine calls coroswitch(c),\nthe caller becomes the goroutine blocked in c, and the goroutine\nformerly blocked in c starts running.\nThese switches continue until a call to coroexit(c),\nwhich ends the use of the coro by releasing the blocked\ngoroutine in c and exiting the current goroutine.\n\nCoros are heap allocated and garbage collected, so that user code\ncan hold a pointer to a coro without causing potential dangling\npointer errors.\n" (struct
+    ^{:line 28 :tag guintptr} gp
+    ^{:line 29 :tag (func [(* coro)])} f
+
+
+    ^{:line 32 :tag (* m) :doc "State for validating thread-lock interactions.\n"} mp
+    ^{:line 33 :tag uint32} lockedExt ; mp's external LockOSThread counter at coro creation time.
+    ^{:line 34 :tag uint32} lockedInt)) ; mp's internal lockOSThread counter at coro creation time.
+
+
+(go/directive "//go:linknamestd newcoro")
+
+
+
+
+^{:go/end 64} (go/func newcoro "newcoro creates a new coro containing a\ngoroutine blocked waiting to run f\nand returns that coro.\n" ^{:tag (* coro)} [^{:tag (func [(* coro)])} f]
+  (let [c (new coro)]
+    (set! (.-f c) f)
+    (let [pc (sys/GetCallerPC)
+        ^{:line 46} gp (getg)]
+      (systemstack ^{:go/end 60} (fn []
+          (let [mp (.-m gp)
+              ^{:line 49} start corostart
+              ^{:line 50} startfv @(conv (* (* funcval)) (conv unsafe/Pointer (addr start)))]
+            (set! gp (newproc1 startfv gp pc true waitReasonCoroutine))
+
+            ;; Scribble down locked thread state if needed and/or donate
+            ;; thread-lock state to the new goroutine.
+            (when (!= (+ (.-lockedExt mp) (.-lockedInt mp)) 0)
+              (set! (.-mp c) mp)
+              (set! (.-lockedExt c) (.-lockedExt mp))
+              (set! (.-lockedInt c) (.-lockedInt mp))))))
+
+
+      (set! (.-coroarg gp) c)
+      (.set (.-gp c) gp)
+      ^{:line 63} c)))
+
+
+
+
+
+^{:go/end 76} (go/func corostart "corostart is the entry func for a new coroutine.\nIt runs the coroutine user function f passed to corostart\nand then calls coroexit to remove the extra concurrency.\n" []
+  (let [gp (getg)
+      ^{:line 71} c (.-coroarg gp)]
+    (set! (.-coroarg gp) nil)
+
+    (defer (coroexit c))
+    ((.-f c) c)))
+
+
+
+
+^{:go/end 85} (go/func coroexit "coroexit is like coroswitch but closes the coro\nand exits the current goroutine\n" [^{:tag (* coro)} c]
+  (let [gp (getg)]
+    (set! (.-coroarg gp) c)
+    (set! (.-coroexit gp) true)
+    (mcall coroswitch_m)))
+
+
+(go/directive "//go:linknamestd coroswitch")
+
+
+
+^{:go/end 95} (go/func coroswitch "coroswitch switches to the goroutine blocked on c\nand then blocks the current goroutine on c.\n" [^{:tag (* coro)} c]
+  (let [gp (getg)]
+    (set! (.-coroarg gp) c)
+    (mcall coroswitch_m)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 260} (go/func coroswitch_m "coroswitch_m is the implementation of coroswitch\nthat runs on the m stack.\n\nNote: Coroutine switches are expected to happen at\nan order of magnitude (or more) higher frequency\nthan regular goroutine switches, so this path is heavily\noptimized to remove unnecessary work.\nThe fast path here is three CAS: the one at the top on gp.atomicstatus,\nthe one in the middle to choose the next g,\nand the one at the bottom on gnext.atomicstatus.\nIt is important not to add more atomic operations or other\nexpensive operations to the fast path.\n" [^{:tag (* g)} gp]
+  (let [c (.-coroarg gp)]
+    (set! (.-coroarg gp) nil)
+    (let [exit (.-coroexit gp)]
+      (set! (.-coroexit gp) false)
+      (let [mp (.-m gp)
+
+          ;; Track and validate thread-lock interactions.
+          ;;
+          ;; The rules with thread-lock interactions are simple. When a coro goroutine is switched to,
+          ;; the same thread must be used, and the locked state must match with the thread-lock state of
+          ;; the goroutine which called newcoro. Thread-lock state consists of the thread and the number
+          ;; of internal (cgo callback, etc.) and external (LockOSThread) thread locks.
+          ^{:line 122} locked (!= (.-lockedm gp) 0)]
+        (when (or (!= (.-mp c) nil) locked)
+          (when (or (!= mp (.-mp c)) (!= (.-lockedInt mp) (.-lockedInt c)) (!= (.-lockedExt mp) (.-lockedExt c)))
+            (print "coro: got thread " (conv unsafe/Pointer mp) ", want " (conv unsafe/Pointer (.-mp c)) "\n")
+            (print "coro: got lock internal " (.-lockedInt mp) ", want " (.-lockedInt c) "\n")
+            (print "coro: got lock external " (.-lockedExt mp) ", want " (.-lockedExt c) "\n")
+            (throw "coro: OS thread locking must match locking at coroutine creation")))
+
+
+
+        ;; Acquire tracer for writing for the duration of this call.
+        ;;
+        ;; There's a lot of state manipulation performed with shortcuts
+        ;; but we need to make sure the tracer can only observe the
+        ;; start and end states to maintain a coherent model and avoid
+        ;; emitting an event for every single transition.
+        (let [trace (traceAcquire)
+
+            ^{:line 140} canCAS true
+            ^{:line 141} bubble (.-bubble gp)]
+          (when (!= bubble nil)
+            ;; If we're in a synctest group, always use casgstatus (which tracks
+            ;; group idleness) rather than directly CASing. Mark the group as active
+            ;; while we're in the process of transferring control.
+            (set! canCAS false)
+            (.incActive bubble))
+
+
+          (when locked
+            ;; Detach the goroutine from the thread; we'll attach to the goroutine we're
+            ;; switching to before returning.
+            (.set (.-lockedm gp) nil))
+
+
+          (if exit (do
+              ;; The M might have a non-zero OS thread lock count when we get here, gdestroy
+              ;; will avoid destroying the M if the G isn't explicitly locked to it via lockedm,
+              ;; which we cleared above. It's fine to gdestroy here also, even when locked to
+              ;; the thread, because we'll be switching back to another goroutine anyway, which
+              ;; will take back its thread-lock state before returning.
+              (gdestroy gp)
+              (set! gp nil))
+            (do
+              ;; If we can CAS ourselves directly from running to waiting, so do,
+              ;; keeping the control transfer as lightweight as possible.
+              (set! (.-waitreason gp) waitReasonCoroutine)
+              (when (or (not canCAS) (not (.CompareAndSwap (.-atomicstatus gp) _Grunning _Gwaiting)))
+                ;; The CAS failed: use casgstatus, which will take care of
+                ;; coordinating with the garbage collector about the state change.
+                (casgstatus gp _Grunning _Gwaiting))
+
+
+              ;; Clear gp.m.
+              (setMNoWB (addr (.-m gp)) nil)))
+
+
+          ;; The goroutine stored in c is the one to run next.
+          ;; Swap it with ourselves.
+          (let [^{:tag (* g)} gnext (zero (* g))]
+            (while true
+              ;; Note: this is a racy load, but it will eventually
+              ;; get the right value, and if it gets the wrong value,
+              ;; the c.gp.cas will fail, so no harm done other than
+              ;; a wasted loop iteration.
+              ;; The cas will also sync c.gp's
+              ;; memory enough that the next iteration of the racy load
+              ;; should see the correct value.
+              ;; We are avoiding the atomic load to keep this path
+              ;; as lightweight as absolutely possible.
+              ;; (The atomic load is free on x86 but not free elsewhere.)
+              (let [next (.-gp c)]
+                (when (== (.ptr next) nil)
+                  (throw "coroswitch on exited coro"))
+
+                (let [^guintptr self (zero guintptr)]
+                  (.set self gp)
+                  (when (.cas (.-gp c) next self)
+                    (set! gnext (.ptr next))
+                    (break)))))
+
+
+
+            ;; Check if we're switching to ourselves. This case is able to break our
+            ;; thread-lock invariants and an unbuffered channel implementation of
+            ;; coroswitch would deadlock. It's clear that this case should just not
+            ;; work.
+            (when (== gnext gp)
+              (throw "coroswitch of a goroutine to itself"))
+
+
+            ;; Emit the trace event after getting gnext but before changing curg.
+            ;; GoSwitch expects that the current G is running and that we haven't
+            ;; switched yet for correct status emission.
+            (when (.ok trace)
+              (.GoSwitch trace gnext exit))
+
+
+            ;; Start running next, without heavy scheduling machinery.
+            ;; Set mp.curg and gnext.m and then update scheduling state
+            ;; directly if possible.
+            (setGNoWB (addr (.-curg mp)) gnext)
+            (setMNoWB (addr (.-m gnext)) mp)
+
+            ;; Synchronize with any out-standing goroutine profile. We're about to start
+            ;; executing, and an invariant of the profiler is that we tryRecordGoroutineProfile
+            ;; whenever a goroutine is about to start running.
+            ;;
+            ;; N.B. We must do this before transitioning to _Grunning but after installing gnext
+            ;; in curg, so that we have a valid curg for allocation (tryRecordGoroutineProfile
+            ;; may allocate).
+            (when (.-active goroutineProfile)
+              (tryRecordGoroutineProfile gnext nil osyield))
+
+
+            (when (or (not canCAS) (not (.CompareAndSwap (.-atomicstatus gnext) _Gwaiting _Grunning)))
+              ;; The CAS failed: use casgstatus, which will take care of
+              ;; coordinating with the garbage collector about the state change.
+              (casgstatus gnext _Gwaiting _Grunnable)
+              (casgstatus gnext _Grunnable _Grunning))
+
+
+            ;; Donate locked state.
+            (when locked
+              (.set (.-lockedg mp) gnext)
+              (.set (.-lockedm gnext) mp))
+
+
+            ;; Release the trace locker. We've completed all the necessary transitions..
+            (when (.ok trace)
+              (traceRelease trace))
+
+
+            (when (!= bubble nil)
+              (.decActive bubble))
+
+
+            ;; Switch to gnext. Does not return.
+            (gogo (addr (.-sched gnext)))))))))

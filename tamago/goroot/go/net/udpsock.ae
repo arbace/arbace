@@ -1,0 +1,371 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "udpsock.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [strconv "internal/strconv"]
+    ^{:line 10} [netip "net/netip"]
+    ^{:line 11} [syscall "syscall"]])
+
+
+;; BUG(mikio): On Plan 9, the ReadMsgUDP and
+;; WriteMsgUDP methods of UDPConn are not implemented.
+
+;; BUG(mikio): On JS, methods and functions related to UDPConn are not
+;; implemented.
+
+
+(go/type UDPAddr "UDPAddr represents the address of a UDP end point.\n" (struct
+    ^{:line 22 :tag IP} IP
+    ^{:line 23 :tag int} Port
+    ^{:line 24 :tag string} Zone)) ; IPv6 scoped addressing zone
+
+
+
+
+
+
+
+^{:go/end 39} (go/method AddrPort "AddrPort returns the [UDPAddr] a as a [netip.AddrPort].\n\nIf a.Port does not fit in a uint16, it's silently truncated.\n\nIf a is nil, a zero value is returned.\n" ^netip/AddrPort [^{:tag (* UDPAddr)} a]
+  (when (== a nil)
+    (return (lit netip/AddrPort)))
+
+  (let [(values na _) (netip/AddrFromSlice (.-IP a))]
+    (set! na (.WithZone na (.-Zone a)))
+    (netip/AddrPortFrom na (conv uint16 (.-Port a)))))
+
+
+
+^{:go/end 42} (go/method Network "Network returns the address's network name, \"udp\".\n" ^string [^{:tag (* UDPAddr)} a] "udp")
+
+^{:go/end 53} (go/method String ^string [^{:tag (* UDPAddr)} a]
+  (when (== a nil)
+    (return "<nil>"))
+
+  (let [ip (ipEmptyString (.-IP a))]
+    (when (!= (.-Zone a) "")
+      (return (JoinHostPort (+ ip "%" (.-Zone a)) (strconv/Itoa (.-Port a)))))
+
+    (JoinHostPort ip (strconv/Itoa (.-Port a)))))
+
+
+^{:go/end 60} (go/method isWildcard ^bool [^{:tag (* UDPAddr)} a]
+  (when (or (== a nil) (== (.-IP a) nil))
+    (return true))
+
+  (.IsUnspecified (.-IP a)))
+
+
+^{:go/end 67} (go/method opAddr ^Addr [^{:tag (* UDPAddr)} a]
+  (when (== a nil)
+    (return nil))
+
+  ^{:line 66} a)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 97} (go/func ResolveUDPAddr "ResolveUDPAddr returns an address of UDP end point.\n\nThe network must be a UDP network name.\n\nIf the host in the address parameter is not a literal IP address or\nthe port is not a literal port number, ResolveUDPAddr resolves the\naddress to an address of UDP end point.\nOtherwise, it parses the address as a pair of literal IP address\nand port number.\nThe address parameter can use a host name, but this is not\nrecommended, because it will return at most one of the host name's\nIP addresses.\n\nSee func [Dial] for a description of the network and address\nparameters.\n" [^string network ^string address] :results [(* UDPAddr) error]
+  (switch network
+    (case ["udp" "udp4" "udp6"])
+    (case [""] ; a hint wildcard for Go 1.0 undocumented behavior
+      (set! network "udp"))
+    (default
+      (return nil (conv UnknownNetworkError network))))
+
+  (let [(values addrs err) (.internetAddrList DefaultResolver (context/Background) network address)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (assert (* UDPAddr) (.forResolve addrs network address)) nil)))
+
+
+
+
+
+^{:go/end 108} (go/func UDPAddrFromAddrPort "UDPAddrFromAddrPort returns addr as a [UDPAddr]. If addr.IsValid() is false,\nthen the returned UDPAddr will contain a nil IP field, indicating an\naddress family-agnostic unspecified address.\n" ^{:tag (* UDPAddr)} [^netip/AddrPort addr]
+  (addr ^{:go/breaks [2 4 6]} (lit UDPAddr
+      :IP (.AsSlice (.Addr addr))
+      :Zone (.Zone (.Addr addr))
+      :Port (conv int (.Port addr)))))
+
+
+
+
+(go/type addrPortUDPAddr "An addrPortUDPAddr is a netip.AddrPort-based UDP address that satisfies the Addr interface.\n" (struct
+    ^{:line 112} netip/AddrPort))
+
+
+^{:go/end 115} (go/method Network ^string [addrPortUDPAddr] "udp")
+
+
+
+(go/type UDPConn "UDPConn is the implementation of the [Conn] and [PacketConn] interfaces\nfor UDP network connections.\n" (struct
+    ^{:line 120} conn))
+
+
+
+
+^{:go/end 130} (go/method SyscallConn "SyscallConn returns a raw network connection.\nThis implements the [syscall.Conn] interface.\n" [^{:tag (* UDPConn)} c] :results [syscall/RawConn error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return nil syscall/EINVAL))
+
+  (return (newRawConn ^{:go/via [conn]} (.-fd c)) nil))
+
+
+
+^{:go/end 139} (go/method ReadFromUDP "ReadFromUDP acts like [UDPConn.ReadFrom] but returns a UDPAddr.\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b] :results [^int n ^{:tag (* UDPAddr)} addr ^error err]
+  ;; This function is designed to allow the caller to control the lifetime
+  ;; of the returned *UDPAddr and thereby prevent an allocation.
+  ;; See https://blog.filippo.io/efficient-go-apis-with-the-inliner/.
+  ;; The real work is done by readFromUDP, below.
+  (.readFromUDP c b (addr (lit UDPAddr))))
+
+
+
+^{:go/end 151} (go/method readFromUDP "readFromUDP implements ReadFromUDP.\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b ^{:tag (* UDPAddr)} addr] :results [int (* UDPAddr) error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 nil syscall/EINVAL))
+
+  (let [(values n ^:assign addr err) (.readFrom c b addr)]
+    (when (!= err nil)
+      (set! err (addr (lit OpError :Op "read" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+    (return n addr err)))
+
+
+
+^{:go/end 161} (go/method ReadFrom "ReadFrom implements the [PacketConn] ReadFrom method.\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b] :results [int Addr error]
+  (let [(values n addr err) (.readFromUDP c b (addr (lit UDPAddr)))]
+    (when (== addr nil)
+      ;; Return Addr(nil), not Addr(*UDPConn(nil)).
+      (return n nil err))
+
+    (return n addr err)))
+
+
+
+
+
+
+
+^{:go/end 177} (go/method ReadFromUDPAddrPort "ReadFromUDPAddrPort acts like ReadFrom but returns a [netip.AddrPort].\n\nIf c is bound to an unspecified address, the returned\nnetip.AddrPort's address might be an IPv4-mapped IPv6 address.\nUse [netip.Addr.Unmap] to get the address without the IPv6 prefix.\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b] :results [^int n ^netip/AddrPort addr ^error err]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 (lit netip/AddrPort) syscall/EINVAL))
+
+  (set! (values n addr err) (.readFromAddrPort c b))
+  (when (!= err nil)
+    (set! err (addr (lit OpError :Op "read" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+  (return n addr err))
+
+
+
+
+
+
+
+
+
+^{:go/end 193} (go/method ReadMsgUDP "ReadMsgUDP reads a message from c, copying the payload into b and\nthe associated out-of-band data into oob. It returns the number of\nbytes copied into b, the number of bytes copied into oob, the flags\nthat were set on the message and the source address of the message.\n\nThe packages [golang.org/x/net/ipv4] and [golang.org/x/net/ipv6] can be\nused to manipulate IP-level socket options in oob.\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob] :results [^int n ^int oobn ^int flags ^{:tag (* UDPAddr)} addr ^error err]
+  (let [^netip/AddrPort ap (zero netip/AddrPort)]
+    (set! (values n oobn flags ap err) (.ReadMsgUDPAddrPort c b oob))
+    (when (.IsValid ap)
+      (set! addr (UDPAddrFromAddrPort ap)))
+
+    (return)))
+
+
+
+^{:go/end 205} (go/method ReadMsgUDPAddrPort "ReadMsgUDPAddrPort is like [UDPConn.ReadMsgUDP] but returns an [netip.AddrPort] instead of a [UDPAddr].\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob] :results [^int n ^int oobn ^int flags ^netip/AddrPort addr ^error err]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 0 0 (lit netip/AddrPort) syscall/EINVAL))
+
+  (set! (values n oobn flags addr err) (.readMsg c b oob))
+  (when (!= err nil)
+    (set! err (addr (lit OpError :Op "read" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.-raddr ^{:go/via [conn]} (.-fd c)) :Err err))))
+
+  (return))
+
+
+
+^{:go/end 217} (go/method WriteToUDP "WriteToUDP acts like [UDPConn.WriteTo] but takes a [UDPAddr].\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b ^{:tag (* UDPAddr)} addr] :results [int error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 syscall/EINVAL))
+
+  (let [(values n err) (.writeTo c b addr)]
+    (when (!= err nil)
+      (set! err (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.opAddr addr) :Err err))))
+
+    (return n err)))
+
+
+
+^{:go/end 229} (go/method WriteToUDPAddrPort "WriteToUDPAddrPort acts like [UDPConn.WriteTo] but takes a [netip.AddrPort].\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b ^netip/AddrPort addr] :results [int error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 syscall/EINVAL))
+
+  (let [(values n err) (.writeToAddrPort c b addr)]
+    (when (!= err nil)
+      (set! err (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (lit addrPortUDPAddr addr) :Err err))))
+
+    (return n err)))
+
+
+
+^{:go/end 245} (go/method WriteTo "WriteTo implements the [PacketConn] WriteTo method.\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b ^Addr addr] :results [int error]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 syscall/EINVAL))
+
+  (let [(values a ok) (assert (* UDPAddr) addr)]
+    (when (not ok)
+      (return 0 (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr addr :Err syscall/EINVAL))))
+
+    (let [(values n err) (.writeTo c b a)]
+      (when (!= err nil)
+        (set! err (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.opAddr a) :Err err))))
+
+      (return n err))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 264} (go/method WriteMsgUDP "WriteMsgUDP writes a message to addr via c if c isn't connected, or\nto c's remote address if c is connected (in which case addr must be\nnil). The payload is copied from b and the associated out-of-band\ndata is copied from oob. It returns the number of payload and\nout-of-band bytes written.\n\nThe packages [golang.org/x/net/ipv4] and [golang.org/x/net/ipv6] can be\nused to manipulate IP-level socket options in oob.\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob ^{:tag (* UDPAddr)} addr] :results [^int n ^int oobn ^error err]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 0 syscall/EINVAL))
+
+  (set! (values n oobn err) (.writeMsg c b oob addr))
+  (when (!= err nil)
+    (set! err (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (.opAddr addr) :Err err))))
+
+  (return))
+
+
+
+^{:go/end 276} (go/method WriteMsgUDPAddrPort "WriteMsgUDPAddrPort is like [UDPConn.WriteMsgUDP] but takes a [netip.AddrPort] instead of a [UDPAddr].\n" [^{:tag (* UDPConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob ^netip/AddrPort addr] :results [^int n ^int oobn ^error err]
+  (when (not ^{:go/via [conn]} (.ok c))
+    (return 0 0 syscall/EINVAL))
+
+  (set! (values n oobn err) (.writeMsgAddrPort c b oob addr))
+  (when (!= err nil)
+    (set! err (addr (lit OpError :Op "write" :Net (.-net ^{:go/via [conn]} (.-fd c)) :Source (.-laddr ^{:go/via [conn]} (.-fd c)) :Addr (lit addrPortUDPAddr addr) :Err err))))
+
+  (return))
+
+
+^{:go/end 278} (go/func newUDPConn ^{:tag (* UDPConn)} [^{:tag (* netFD)} fd] (addr (lit UDPConn (lit conn fd))))
+
+
+
+
+
+
+
+
+^{:go/end 289} (go/func DialUDP "DialUDP acts like [Dial] for UDP networks.\n\nThe network must be a UDP network name; see func [Dial] for details.\n\nIf laddr is nil, a local address is automatically chosen.\nIf the IP field of raddr is nil or an unspecified IP address, the\nlocal system is assumed.\n" [^string network ^{:tag (* UDPAddr)} laddr ^{:tag (* UDPAddr)} raddr] :results [(* UDPConn) error]
+  (dialUDP (context/Background) nil network laddr raddr))
+
+
+^{:go/end 309} (go/func dialUDP [^context/Context ctx ^{:tag (* Dialer)} dialer ^string network ^{:tag (* UDPAddr)} laddr ^{:tag (* UDPAddr)} raddr] :results [(* UDPConn) error]
+  (switch network
+    (case ["udp" "udp4" "udp6"])
+    (default
+      (return nil (addr (lit OpError :Op "dial" :Net network :Source (.opAddr laddr) :Addr (.opAddr raddr) :Err (conv UnknownNetworkError network))))))
+
+  (when (== raddr nil)
+    (return nil (addr (lit OpError :Op "dial" :Net network :Source (.opAddr laddr) :Addr nil :Err errMissingAddress))))
+
+  (let [sd (addr (lit sysDialer :network network :address (.String raddr)))]
+    (when (!= dialer nil)
+      (set! (.-Dialer sd) @dialer))
+
+    (let [(values c err) (.dialUDP sd ctx laddr raddr)]
+      (when (!= err nil)
+        (return nil (addr (lit OpError :Op "dial" :Net network :Source (.opAddr laddr) :Addr (.opAddr raddr) :Err err))))
+
+      (return c nil))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 335} (go/func ListenUDP "ListenUDP acts like [ListenPacket] for UDP networks.\n\nThe network must be a UDP network name; see func [Dial] for details.\n\nIf the IP field of laddr is nil or an unspecified IP address,\nListenUDP listens on all available IP addresses of the local system\nexcept multicast IP addresses.\nIf the Port field of laddr is 0, a port number is automatically\nchosen.\n" [^string network ^{:tag (* UDPAddr)} laddr] :results [(* UDPConn) error]
+  (switch network
+    (case ["udp" "udp4" "udp6"])
+    (default
+      (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr (.opAddr laddr) :Err (conv UnknownNetworkError network))))))
+
+  (when (== laddr nil)
+    (set! laddr (addr (lit UDPAddr))))
+
+  (let [sl (addr (lit sysListener :network network :address (.String laddr)))
+      (values c err) (.listenUDP sl (context/Background) laddr)]
+    (when (!= err nil)
+      (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr (.opAddr laddr) :Err err))))
+
+    (return c nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 372} (go/func ListenMulticastUDP "ListenMulticastUDP acts like [ListenPacket] for UDP networks but\ntakes a group address on a specific network interface.\n\nThe network must be a UDP network name; see func [Dial] for details.\n\nListenMulticastUDP listens on all available IP addresses of the\nlocal system including the group, multicast IP address.\nIf ifi is nil, ListenMulticastUDP uses the system-assigned\nmulticast interface, although this is not recommended because the\nassignment depends on platforms and sometimes it might require\nrouting configuration.\nIf the Port field of gaddr is 0, a port number is automatically\nchosen.\n\nListenMulticastUDP is just for convenience of simple, small\napplications. There are [golang.org/x/net/ipv4] and\n[golang.org/x/net/ipv6] packages for general purpose uses.\n\nNote that ListenMulticastUDP will set the IP_MULTICAST_LOOP socket option\nto 0 under IPPROTO_IP, to disable loopback of multicast packets.\n" [^string network ^{:tag (* Interface)} ifi ^{:tag (* UDPAddr)} gaddr] :results [(* UDPConn) error]
+  (switch network
+    (case ["udp" "udp4" "udp6"])
+    (default
+      (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr (.opAddr gaddr) :Err (conv UnknownNetworkError network))))))
+
+  (when (or (== gaddr nil) (== (.-IP gaddr) nil))
+    (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr (.opAddr gaddr) :Err errMissingAddress))))
+
+  (let [sl (addr (lit sysListener :network network :address (.String gaddr)))
+      (values c err) (.listenMulticastUDP sl (context/Background) ifi gaddr)]
+    (when (!= err nil)
+      (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr (.opAddr gaddr) :Err err))))
+
+    (return c nil)))

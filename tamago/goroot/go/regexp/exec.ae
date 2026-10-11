@@ -1,0 +1,554 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.regexp) (go/file "exec.go" :imports [
+
+
+    ^{:line 8} [io "io"]
+    ^{:line 9} [syntax "regexp/syntax"]
+    ^{:line 10} [sync "sync"]])
+
+
+
+
+(go/type queue "A queue is a 'sparse array' holding pending threads of execution.\nSee https://research.swtch.com/2008/03/using-uninitialized-memory-for-fun-and.html\n" (struct
+    ^{:line 16 :tag (slice uint32)} sparse
+    ^{:line 17 :tag (slice entry)} dense))
+
+
+
+
+
+
+(go/type entry "An entry is an entry on a queue.\nIt holds both the instruction pc and the actual thread.\nSome queue entries are just place holders so that the machine\nknows it has considered that pc. Such entries have t == nil.\n" (struct
+    ^{:line 25 :tag uint32} pc
+    ^{:line 26 :tag (* thread)} t))
+
+
+
+
+
+(go/type thread "A thread is the state of a single path through the machine:\nan instruction and a corresponding capture array.\nSee https://swtch.com/~rsc/regexp/regexp2.html\n" (struct
+    ^{:line 33 :tag (* syntax/Inst)} inst
+    ^{:line 34 :tag (slice int)} cap))
+
+
+
+(go/type machine "A machine holds all the state during an NFA simulation for p.\n" (struct
+    ^{:line 39 :tag (* Regexp)} re ; corresponding Regexp
+    ^{:line 40 :tag (* syntax/Prog)} p ; compiled program
+    ^{:line 41 :tag queue} q0 ^queue q1 ; two queues for runq, nextq
+    ^{:line 42 :tag (slice (* thread))} pool ; pool of available threads
+    ^{:line 43 :tag bool} matched ; whether a match was found
+    ^{:line 44 :tag (slice int)} matchcap ; capture information for the match
+
+    ^{:line 46 :tag inputs} inputs))
+
+
+(go/type inputs (struct
+
+    ^{:line 51 :tag inputBytes :doc "cached inputs, to avoid allocation\n"} bytes
+    ^{:line 52 :tag inputString} string
+    ^{:line 53 :tag inputReader} reader))
+
+
+^{:go/end 59} (go/method newBytes ^input [^{:tag (* inputs)} i ^{:tag (slice byte)} b]
+  (set! (.-str (.-bytes i)) b)
+  (addr (.-bytes i)))
+
+
+^{:go/end 64} (go/method newString ^input [^{:tag (* inputs)} i ^string s]
+  (set! (.-str (.-string i)) s)
+  (addr (.-string i)))
+
+
+^{:go/end 71} (go/method newReader ^input [^{:tag (* inputs)} i ^io/RuneReader r]
+  (set! (.-r (.-reader i)) r)
+  (set! (.-atEOT (.-reader i)) false)
+  (set! (.-pos (.-reader i)) 0)
+  (addr (.-reader i)))
+
+
+^{:go/end 83} (go/method clear [^{:tag (* inputs)} i]
+  ;; We need to clear 1 of these.
+  ;; Avoid the expense of clearing the others (pointer write barrier).
+  (cond (!= (.-str (.-bytes i)) nil)
+    (set! (.-str (.-bytes i)) nil)
+    (!= (.-r (.-reader i)) nil)
+    (set! (.-r (.-reader i)) nil) :else
+
+    (set! (.-str (.-string i)) "")))
+
+
+
+^{:go/end 93} (go/method init [^{:tag (* inputs)} i ^io/RuneReader r ^{:tag (slice byte)} b ^string s] :results [input int]
+  (when (!= r nil)
+    (return (.newReader i r) 0))
+
+  (when (!= b nil)
+    (return (.newBytes i b) (len b)))
+
+  (return (.newString i s) (len s)))
+
+
+^{:go/end 100} (go/method init [^{:tag (* machine)} m ^int ncap]
+  (range [_ t (.-pool m)]
+    (set! (.-cap t) (subslice (.-cap t) _ ncap)))
+
+  (set! (.-matchcap m) (subslice (.-matchcap m) _ ncap)))
+
+
+
+
+^{:go/end 115} (go/method alloc "alloc allocates a new thread with the given instruction.\nIt uses the free pool if possible.\n" ^{:tag (* thread)} [^{:tag (* machine)} m ^{:tag (* syntax/Inst)} i]
+  (let [^{:tag (* thread)} t (zero (* thread))]
+    (if [n (len (.-pool m))] (> n 0) (do
+        (set! t (aget (.-pool m) (- n 1)))
+        (set! (.-pool m) (subslice (.-pool m) _ (- n 1))))
+      (do
+        (set! t (new thread))
+        (set! (.-cap t) (make (slice int) (len (.-matchcap m)) (cap (.-matchcap m))))))
+
+    (set! (.-inst t) i)
+    ^{:line 114} t))
+
+
+
+
+
+
+
+(go/type lazyFlag "A lazyFlag is a lazily-evaluated syntax.EmptyOp,\nfor checking zero-width flags like ^ $ \\A \\z \\B \\b.\nIt records the pair of relevant runes and does not\ndetermine the implied flags until absolutely necessary\n(most of the time, that means never).\n" uint64)
+
+^{:go/end 126} (go/func newLazyFlag ^lazyFlag [^rune r1 ^rune r2]
+  (conv lazyFlag (bit-or (<< (conv uint64 r1) 32) (conv uint64 (conv uint32 r2)))))
+
+
+^{:go/end 170} (go/method match ^bool [^lazyFlag f ^syntax/EmptyOp op]
+  (when (== op 0)
+    (return true))
+
+  (let [r1 (conv rune (>> f 32))]
+    (when (!= (bit-and op syntax/EmptyBeginLine) 0)
+      (when (and (!= r1 \newline) (>= r1 0))
+        (return false))
+
+      (set! op bit-and-not syntax/EmptyBeginLine))
+
+    (when (!= (bit-and op syntax/EmptyBeginText) 0)
+      (when (>= r1 0)
+        (return false))
+
+      (set! op bit-and-not syntax/EmptyBeginText))
+
+    (when (== op 0)
+      (return true))
+
+    (let [r2 (conv rune f)]
+      (when (!= (bit-and op syntax/EmptyEndLine) 0)
+        (when (and (!= r2 \newline) (>= r2 0))
+          (return false))
+
+        (set! op bit-and-not syntax/EmptyEndLine))
+
+      (when (!= (bit-and op syntax/EmptyEndText) 0)
+        (when (>= r2 0)
+          (return false))
+
+        (set! op bit-and-not syntax/EmptyEndText))
+
+      (when (== op 0)
+        (return true))
+
+      (if (!= (syntax/IsWordChar r1) (syntax/IsWordChar r2))
+        (set! op bit-and-not syntax/EmptyWordBoundary)
+
+        (set! op bit-and-not syntax/EmptyNoWordBoundary))
+
+      (== op 0))))
+
+
+
+
+
+^{:go/end 243} (go/method match "match runs the machine over the input starting at pos.\nIt reports whether a match was found.\nIf so, m.matchcap holds the submatch information.\n" ^bool [^{:tag (* machine)} m ^input i ^int pos]
+  (let [startCond (.-cond (.-re m))]
+    (when (== startCond (bit-not (conv syntax/EmptyOp 0))) ; impossible
+      (return false))
+
+    (set! (.-matched m) false)
+    (range [i (.-matchcap m)]
+      (aset (.-matchcap m) i -1))
+
+    (let [(values runq nextq) (values (addr (.-q0 m)) (addr (.-q1 m)))
+        (values r r1) (values endOfText endOfText)
+        (values width width1) (values 0 0)]
+      (set! (values r width) (.step i pos))
+      (when (!= r endOfText)
+        (set! (values r1 width1) (.step i (+ pos width))))
+
+      (let [^lazyFlag flag (zero lazyFlag)]
+        (if (== pos 0)
+          (set! flag (newLazyFlag -1 r))
+
+          (set! flag (.context i pos)))
+
+        (while true
+          (when (== (len (.-dense runq)) 0)
+            (when (and (!= (bit-and startCond syntax/EmptyBeginText) 0) (!= pos 0))
+              ;; Anchored match, past beginning of text.
+              (break))
+
+            (when (.-matched m)
+              ;; Have match; finished exploring alternatives.
+              (break))
+
+            (when (and (> (len (.-prefix (.-re m))) 0) (!= r1 (.-prefixRune (.-re m))) (.canCheckPrefix i))
+              ;; Match requires literal prefix; fast search for it.
+              (let [advance (.index i (.-re m) pos)]
+                (when (< advance 0)
+                  (break))
+
+                (set! pos + advance)
+                (set! (values r width) (.step i pos))
+                (set! (values r1 width1) (.step i (+ pos width))))))
+
+
+          (when (not (.-matched m))
+            (when (> (len (.-matchcap m)) 0)
+              (aset (.-matchcap m) 0 pos))
+
+            (.add m runq (conv uint32 (.-Start (.-p m))) pos (.-matchcap m) (addr flag) nil))
+
+          (set! flag (newLazyFlag r r1))
+          (.step m runq nextq pos (+ pos width) r (addr flag))
+          (when (== width 0)
+            (break))
+
+          (when (and (== (len (.-matchcap m)) 0) (.-matched m))
+            ;; Found a match and not paying attention
+            ;; to where it is, so any match will do.
+            (break))
+
+          (set! pos + width)
+          (set! (values r width) (values r1 width1))
+          (when (!= r endOfText)
+            (set! (values r1 width1) (.step i (+ pos width))))
+
+          (set! (values runq nextq) (values nextq runq)))
+
+        (.clear m nextq)
+        (.-matched m)))))
+
+
+
+^{:go/end 253} (go/method clear "clear frees all threads on the thread queue.\n" [^{:tag (* machine)} m ^{:tag (* queue)} q]
+  (range [_ d (.-dense q)]
+    (when (!= (.-t d) nil)
+      (set! (.-pool m) (append (.-pool m) (.-t d)))))
+
+
+  (set! (.-dense q) (subslice (.-dense q) _ 0)))
+
+
+
+
+
+
+
+^{:go/end 311} (go/method step "step executes one step of the machine, running each of the threads\non runq and appending new threads to nextq.\nThe step processes the rune c (which may be endOfText),\nwhich starts at position pos and ends at nextPos.\nnextCond gives the setting for the empty-width flags after c.\n" [^{:tag (* machine)} m ^{:tag (* queue)} runq ^{:tag (* queue)} nextq ^int pos ^int nextPos ^rune c ^{:tag (* lazyFlag)} nextCond]
+  (let [longest (.-longest (.-re m))]
+    (for [j 0] (< j (len (.-dense runq))) (inc! j)
+      (let [d (addr (aget (.-dense runq) j))
+          ^{:line 264} t (.-t d)]
+        (when (== t nil)
+          (continue))
+
+        (when (and longest (.-matched m) (> (len (.-cap t)) 0) (< (aget (.-matchcap m) 0) (aget (.-cap t) 0)))
+          (set! (.-pool m) (append (.-pool m) t))
+          (continue))
+
+        (let [i (.-inst t)
+            ^{:line 273} add false]
+          (switch (.-Op i)
+            (default
+              (panic "bad inst"))
+
+            (case [syntax/InstMatch]
+              (when (and (> (len (.-cap t)) 0) ^:go/paren (or (not longest) (not (.-matched m)) (< (aget (.-matchcap m) 1) pos)))
+                (aset (.-cap t) 1 pos)
+                (copy (.-matchcap m) (.-cap t)))
+
+              (when (not longest)
+                ;; First-match mode: cut off all lower-priority threads.
+                (range [_ d (subslice (.-dense runq) (+ j 1))]
+                  (when (!= (.-t d) nil)
+                    (set! (.-pool m) (append (.-pool m) (.-t d)))))
+
+
+                (set! (.-dense runq) (subslice (.-dense runq) _ 0)))
+
+              (set! (.-matched m) true))
+
+            (case [syntax/InstRune]
+              (set! add (.MatchRune i c)))
+            (case [syntax/InstRune1]
+              (set! add (== c (aget (.-Rune i) 0))))
+            (case [syntax/InstRuneAny]
+              (set! add true))
+            (case [syntax/InstRuneAnyNotNL]
+              (set! add (!= c \newline))))
+
+          (when add
+            (set! t (.add m nextq (.-Out i) nextPos (.-cap t) nextCond t)))
+
+          (when (!= t nil)
+            (set! (.-pool m) (append (.-pool m) t))))))
+
+
+    (set! (.-dense runq) (subslice (.-dense runq) _ 0))))
+
+
+
+
+
+
+^{:go/end 374} (go/method add "add adds an entry to q for pc, unless the q already has such an entry.\nIt also recursively adds an entry for all instructions reachable from pc by following\nempty-width conditions satisfied by cond.  pos gives the current position\nin the input.\n" ^{:tag (* thread)} [^{:tag (* machine)} m ^{:tag (* queue)} q ^uint32 pc ^int pos ^{:tag (slice int)} cap ^{:tag (* lazyFlag)} cond ^{:tag (* thread)} t]
+  (label :Again
+    (when (== pc 0)
+      (return t)))
+
+  (when [j (aget (.-sparse q) pc)] (and (< j (conv uint32 (len (.-dense q)))) (== (.-pc (aget (.-dense q) j)) pc))
+    (return t))
+
+
+  (let [j (len (.-dense q))]
+    (set! (.-dense q) (subslice (.-dense q) _ (+ j 1)))
+    (let [d (addr (aget (.-dense q) j))]
+      (set! (.-t d) nil)
+      (set! (.-pc d) pc)
+      (aset (.-sparse q) pc (conv uint32 j))
+
+      (let [i (addr (aget (.-Inst (.-p m)) pc))]
+        (switch (.-Op i)
+          (default
+            (panic "unhandled"))
+          (case [syntax/InstFail])
+          ;; nothing
+          (case [syntax/InstAlt syntax/InstAltMatch]
+            (set! t (.add m q (.-Out i) pos cap cond t))
+            (set! pc (.-Arg i))
+            (goto :Again))
+          (case [syntax/InstEmptyWidth]
+            (when (.match cond (conv syntax/EmptyOp (.-Arg i)))
+              (set! pc (.-Out i))
+              (goto :Again)))
+
+          (case [syntax/InstNop]
+            (set! pc (.-Out i))
+            (goto :Again))
+          (case [syntax/InstCapture]
+            (if (< (conv int (.-Arg i)) (len cap))
+              (let [opos (aget cap (.-Arg i))]
+                (aset cap (.-Arg i) pos)
+                (.add m q (.-Out i) pos cap cond nil)
+                (aset cap (.-Arg i) opos))
+              (do
+                (set! pc (.-Out i))
+                (goto :Again))))
+
+          (case [syntax/InstMatch syntax/InstRune syntax/InstRune1 syntax/InstRuneAny syntax/InstRuneAnyNotNL]
+            (if (== t nil)
+              (set! t (.alloc m i))
+
+              (set! (.-inst t) i))
+
+            (when (and (> (len cap) 0) (!= (addr (aget (.-cap t) 0)) (addr (aget cap 0))))
+              (copy (.-cap t) cap))
+
+            (set! (.-t d) t)
+            (set! t nil)))
+
+        ^{:line 373} t))))
+
+
+(go/type onePassMachine (struct
+    ^{:line 377 :tag inputs} inputs
+    ^{:line 378 :tag (slice int)} matchcap))
+
+
+(go/var ^sync/Pool onePassPool)
+
+^{:go/end 389} (go/func newOnePassMachine ^{:tag (* onePassMachine)} []
+  (let [(values m ok) (assert (* onePassMachine) (.Get onePassPool))]
+    (when (not ok)
+      (set! m (new onePassMachine)))
+
+    ^{:line 388} m))
+
+
+^{:go/end 394} (go/func freeOnePassMachine [^{:tag (* onePassMachine)} m]
+  (.clear (.-inputs m))
+  (.Put onePassPool m))
+
+
+
+^{:go/end 510} (go/method doOnePass "doOnePass implements r.find using the one-pass execution engine.\n" ^{:tag (slice int)} [^{:tag (* Regexp)} re ^io/RuneReader ir ^{:tag (slice byte)} ib ^string is ^int pos ^int ncap ^{:tag (slice int)} dstCap]
+  (let [startCond (.-cond re)]
+    (when (== startCond (bit-not (conv syntax/EmptyOp 0))) ; impossible
+      (return nil))
+
+
+    (let [m (newOnePassMachine)]
+      (if (< (cap (.-matchcap m)) ncap)
+        (set! (.-matchcap m) (make (slice int) ncap))
+
+        (set! (.-matchcap m) (subslice (.-matchcap m) _ ncap)))
+
+
+      (let [matched false]
+        (range [i (.-matchcap m)]
+          (aset (.-matchcap m) i -1))
+
+
+        (let [(values i _) (.init (.-inputs m) ir ib is)
+
+            (values r r1) (values endOfText endOfText)
+            (values width width1) (values 0 0)]
+          (set! (values r width) (.step i pos))
+          (when (!= r endOfText)
+            (set! (values r1 width1) (.step i (+ pos width))))
+
+          (let [^lazyFlag flag (zero lazyFlag)]
+            (if (== pos 0)
+              (set! flag (newLazyFlag -1 r))
+
+              (set! flag (.context i pos)))
+
+            (let [pc (.-Start (.-onepass re))
+                ^{:line 430} inst (addr (aget (.-Inst (.-onepass re)) pc))]
+              ;; If there is a simple literal prefix, skip over it.
+              (when (and (== pos 0) (.match flag (conv syntax/EmptyOp ^{:go/via [Inst]} (.-Arg inst)))
+                  (> (len (.-prefix re)) 0) (.canCheckPrefix i))
+                ;; Match requires literal prefix; fast search for it.
+                (when (not (.hasPrefix i re))
+                  (goto :Return))
+
+                (set! pos + (len (.-prefix re)))
+                (set! (values r width) (.step i pos))
+                (set! (values r1 width1) (.step i (+ pos width)))
+                (set! flag (.context i pos))
+                (set! pc (conv int (.-prefixEnd re))))
+
+              (while true
+                (set! inst (addr (aget (.-Inst (.-onepass re)) pc)))
+                (set! pc (conv int ^{:go/via [Inst]} (.-Out inst)))
+                (switch ^{:go/via [Inst]} (.-Op inst)
+                  (default
+                    (panic "bad inst"))
+                  (case [syntax/InstMatch]
+                    (set! matched true)
+                    (when (> (len (.-matchcap m)) 0)
+                      (aset (.-matchcap m) 0 0)
+                      (aset (.-matchcap m) 1 pos))
+
+                    (goto :Return))
+                  (case [syntax/InstRune]
+                    (when (not ^{:go/via [Inst]} (.MatchRune inst r))
+                      (goto :Return)))
+
+                  (case [syntax/InstRune1]
+                    (when (!= r (aget ^{:go/via [Inst]} (.-Rune inst) 0))
+                      (goto :Return)))
+
+                  (case [syntax/InstRuneAny])
+                  ;; Nothing
+                  (case [syntax/InstRuneAnyNotNL]
+                    (when (== r \newline)
+                      (goto :Return)))
+
+                  ;; peek at the input rune to see which branch of the Alt to take
+                  (case [syntax/InstAlt syntax/InstAltMatch]
+                    (set! pc (conv int (onePassNext inst r)))
+                    (continue))
+                  (case [syntax/InstFail]
+                    (goto :Return))
+                  (case [syntax/InstNop]
+                    (continue))
+                  (case [syntax/InstEmptyWidth]
+                    (when (not (.match flag (conv syntax/EmptyOp ^{:go/via [Inst]} (.-Arg inst))))
+                      (goto :Return))
+
+                    (continue))
+                  (case [syntax/InstCapture]
+                    (when (< (conv int ^{:go/via [Inst]} (.-Arg inst)) (len (.-matchcap m)))
+                      (aset (.-matchcap m) ^{:go/via [Inst]} (.-Arg inst) pos))
+
+                    (continue)))
+
+                (when (== width 0)
+                  (break))
+
+                (set! flag (newLazyFlag r r1))
+                (set! pos + width)
+                (set! (values r width) (values r1 width1))
+                (when (!= r endOfText)
+                  (set! (values r1 width1) (.step i (+ pos width)))))
+
+
+
+              (label :Return
+                (when (not matched)
+                  (freeOnePassMachine m)
+                  (return nil)))
+
+
+              (set! dstCap (append dstCap (spread (.-matchcap m))))
+              (freeOnePassMachine m)
+              ^{:line 509} dstCap)))))))
+
+
+
+^{:go/end 515} (go/method doMatch "doMatch reports whether either r, b or s match the regexp.\n" ^bool [^{:tag (* Regexp)} re ^io/RuneReader r ^{:tag (slice byte)} b ^string s]
+  (!= (.find re r b s 0 0 nil) nil))
+
+
+
+
+
+
+^{:go/end 550} (go/method find "find finds the leftmost match in the input, appends the position\nof its subexpressions to dstCap and returns dstCap.\n\nnil is returned if no matches are found and non-nil if matches are found.\n" ^{:tag (slice int)} [^{:tag (* Regexp)} re ^io/RuneReader r ^{:tag (slice byte)} b ^string s ^int pos ^int ncap ^{:tag (slice int)} dstCap]
+  (when (== dstCap nil)
+    ;; Make sure 'return dstCap' is non-nil.
+    (set! dstCap (subslice arrayNoInts _ 0 0)))
+
+
+  (when (and (== r nil) (< (+ (len b) (len s)) (.-minInputLen re)))
+    (return nil))
+
+
+  (when (!= (.-onepass re) nil)
+    (return (.doOnePass re r b s pos ncap dstCap)))
+
+  (when (and (== r nil) (< (+ (len b) (len s)) (.-maxBitStateLen re)))
+    (return (.backtrack re b s pos ncap dstCap)))
+
+
+  (let [m (.get re)
+      (values i _) (.init (.-inputs m) r b s)]
+
+    (.init m ncap)
+    (when (not (.match m i pos))
+      (.put re m)
+      (return nil))
+
+
+    (set! dstCap (append dstCap (spread (.-matchcap m))))
+    (.put re m)
+    ^{:line 549} dstCap))
+
+
+
+
+(go/var ^{:tag (array 0 int) :doc "arrayNoInts is returned by find match if nil dstCap is passed\nto it with ncap=0.\n"} arrayNoInts)

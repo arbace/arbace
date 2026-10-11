@@ -1,0 +1,172 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace) (go/file "batchcursor.go" :imports [
+
+
+    ^{:line 8} [cmp "cmp"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+
+    ^{:line 12} [tracev2 "internal/trace/tracev2"]])
+
+
+(go/type batchCursor (struct
+    ^{:line 16 :tag ThreadID} m
+    ^{:line 17 :tag Time} lastTs
+    ^{:line 18 :tag int} idx ; next index into []batch
+    ^{:line 19 :tag int} dataOff ; next index into batch.data
+    ^{:line 20 :tag baseEvent} ev)) ; last read event
+
+
+^{:go/end 53} (go/method nextEvent [^{:tag (* batchCursor)} b ^{:tag (slice batch)} batches ^frequency freq] :results [^bool ok ^error err]
+  ;; Batches should generally always have at least one event,
+  ;; but let's be defensive about that and accept empty batches.
+  (while (and (< (.-idx b) (len batches)) (== (len (.-data (aget batches (.-idx b)))) (.-dataOff b)))
+    (inc! (.-idx b))
+    (set! (.-dataOff b) 0)
+    (set! (.-lastTs b) 0))
+
+  ;; Have we reached the end of the batches?
+  (when (== (.-idx b) (len batches))
+    (return false nil))
+
+  ;; Initialize lastTs if it hasn't been yet.
+  (when (== (.-lastTs b) 0)
+    (set! (.-lastTs b) (.mul freq (.-time (aget batches (.-idx b))))))
+
+  ;; Read an event out.
+  (let [(values n tsdiff ^:assign err) (readTimedBaseEvent (subslice (.-data (aget batches (.-idx b))) (.-dataOff b)) (addr (.-ev b)))]
+    (when (!= err nil)
+      (return false err))
+
+    ;; Complete the timestamp from the cursor's last timestamp.
+    (set! (.-time (.-ev b)) (+ (.mul freq tsdiff) (.-lastTs b)))
+
+    ;; Move the cursor's timestamp forward.
+    (set! (.-lastTs b) (.-time (.-ev b)))
+
+    ;; Move the cursor forward.
+    (set! (.-dataOff b) + n)
+    (return true nil)))
+
+
+^{:go/end 57} (go/method compare ^int [^{:tag (* batchCursor)} b ^{:tag (* batchCursor)} a]
+  (^{:inst [Time]} cmp/Compare (.-time (.-ev b)) (.-time (.-ev a))))
+
+
+
+
+
+
+
+
+
+^{:go/end 99} (go/func readTimedBaseEvent "readTimedBaseEvent reads out the raw event data from b\ninto e. It does not try to interpret the arguments\nbut it does validate that the event is a regular\nevent with a timestamp (vs. a structural event).\n\nIt requires that the event its reading be timed, which must\nbe the case for every event in a plain EventBatch.\n" [^{:tag (slice byte)} b ^{:tag (* baseEvent)} e] :results [int timestamp error]
+  ;; Get the event type.
+  (let [typ (conv tracev2/EventType (aget b 0))
+      ^{:line 69} specs (tracev2/Specs)]
+    (when (>= (conv int typ) (len specs))
+      (return 0 0 (fmt/Errorf "found invalid event type: %v" typ)))
+
+    (set! (.-typ e) typ)
+
+    ;; Get spec.
+    (let [spec (addr (aget specs typ))]
+      (when (or (== (len (.-Args spec)) 0) (not (.-IsTimedEvent spec)))
+        (return 0 0 (fmt/Errorf "found event without a timestamp: type=%v" typ)))
+
+      (let [n 1
+
+          ;; Read timestamp diff.
+          (values ts nb) (binary/Uvarint (subslice b n))]
+        (when (<= nb 0)
+          (return 0 0 (fmt/Errorf "found invalid uvarint for timestamp")))
+
+        (set! n + nb)
+
+        ;; Read the rest of the arguments.
+        (for [i 0] (< i (- (len (.-Args spec)) 1)) (inc! i)
+          (let [(values arg nb) (binary/Uvarint (subslice b n))]
+            (when (<= nb 0)
+              (return 0 0 (fmt/Errorf "found invalid uvarint")))
+
+            (aset (.-args e) i arg)
+            (set! n + nb)))
+
+        (return n (conv timestamp ts) nil)))))
+
+
+^{:go/end 108} (go/func heapInsert ^{:tag (slice (* batchCursor))} [^{:tag (slice (* batchCursor))} heap ^{:tag (* batchCursor)} bc]
+  ;; Add the cursor to the end of the heap.
+  (set! heap (append heap bc))
+
+  ;; Sift the new entry up to the right place.
+  (heapSiftUp heap (- (len heap) 1))
+  ^{:line 107} heap)
+
+
+^{:go/end 117} (go/func heapUpdate [^{:tag (slice (* batchCursor))} heap ^int i]
+  ;; Try to sift up.
+  (when (!= (heapSiftUp heap i) i)
+    (return))
+
+  ;; Try to sift down, if sifting up failed.
+  (heapSiftDown heap i))
+
+
+^{:go/end 131} (go/func heapRemove ^{:tag (slice (* batchCursor))} [^{:tag (slice (* batchCursor))} heap ^int i]
+  ;; Sift index i up to the root, ignoring actual values.
+  (while (> i 0)
+    (set! (values (aget heap (/ (- i 1) 2)) (aget heap i)) (values (aget heap i) (aget heap (/ (- i 1) 2))))
+    (set! i (/ (- i 1) 2)))
+
+  ;; Swap the root with the last element, then remove it.
+  (set! (values (aget heap 0) (aget heap (- (len heap) 1))) (values (aget heap (- (len heap) 1)) (aget heap 0)))
+  (set! heap (subslice heap _ (- (len heap) 1)))
+  ;; Sift the root down.
+  (heapSiftDown heap 0)
+  ^{:line 130} heap)
+
+
+^{:go/end 139} (go/func heapSiftUp ^int [^{:tag (slice (* batchCursor))} heap ^int i]
+  (while (and (> i 0) (> (.-time (.-ev (aget heap (/ (- i 1) 2)))) (.-time (.-ev (aget heap i)))))
+    (set! (values (aget heap (/ (- i 1) 2)) (aget heap i)) (values (aget heap i) (aget heap (/ (- i 1) 2))))
+    (set! i (/ (- i 1) 2)))
+
+  ^{:line 138} i)
+
+
+^{:go/end 152} (go/func heapSiftDown ^int [^{:tag (slice (* batchCursor))} heap ^int i]
+  (while true
+    (let [m (min3 heap i (+ (* 2 i) 1) (+ (* 2 i) 2))]
+      (when (== m i)
+        ;; Heap invariant already applies.
+        (break))
+
+      (set! (values (aget heap i) (aget heap m)) (values (aget heap m) (aget heap i)))
+      (set! i m)))
+
+  ^{:line 151} i)
+
+
+^{:go/end 173} (go/func min3 ^int [^{:tag (slice (* batchCursor))} b ^int i0 ^int i1 ^int i2]
+  (let [minIdx i0
+      ^{:line 156} minT maxTime]
+    (when (< i0 (len b))
+      (set! minT (.-time (.-ev (aget b i0)))))
+
+    (when (< i1 (len b))
+      (when [t (.-time (.-ev (aget b i1)))] (< t minT)
+        (set! minT t)
+        (set! minIdx i1)))
+
+
+    (when (< i2 (len b))
+      (when [t (.-time (.-ev (aget b i2)))] (< t minT)
+        (set! minT t)
+        (set! minIdx i2)))
+
+
+    ^{:line 172} minIdx))

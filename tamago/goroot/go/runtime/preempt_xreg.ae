@@ -1,0 +1,162 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+;; This provides common support for architectures that use extended register
+;; state in asynchronous preemption.
+;;
+;; While asynchronous preemption stores general-purpose (GP) registers on the
+;; preempted goroutine's own stack, extended register state can be used to save
+;; non-GP state off the stack. In particular, this is meant for large vector
+;; register files. This memory is conservatively scanned to enable using
+;; non-GP registers for operations that may involve pointers.
+;;
+;; For an architecture to support extended register state, it must provide a Go
+;; definition of an xRegState type for storing the state, and its asyncPreempt
+;; implementation must write this register state to p.xRegs.scratch.
+
+(in-ns 'go.runtime) (go/file "preempt_xreg.go" :build ["//go:build amd64 || arm64 || loong64"] :imports [
+
+
+    ^{:line 23} [abi "internal/abi"]
+    ^{:line 24} [sys "internal/runtime/sys"]
+    ^{:line 25} [unsafe "unsafe"]])
+
+
+
+
+(go/type xRegState "xRegState is long-lived extended register state. It is allocated off-heap and\nmanually managed.\n" (struct
+    ^{:line 31 :tag sys/NotInHeap} _ ; Allocated from xRegAlloc
+    ^{:line 32 :tag xRegs} regs))
+
+
+
+
+
+(go/type xRegPerG "xRegPerG stores extended register state while a goroutine is asynchronously\npreempted. This is nil otherwise, so we can reuse a (likely small) pool of\nxRegState objects.\n" (struct
+    ^{:line 39 :tag (* xRegState)} state))
+
+
+(go/type xRegPerP (struct
+
+
+    ^{:line 45 :tag xRegs :doc "scratch temporary per-P space where [asyncPreempt] saves the register\nstate before entering Go. It's quickly copied to per-G state.\n"} scratch
+
+
+
+
+
+
+
+
+    ^{:line 54 :tag (* xRegState) :doc "cache is a 1-element allocation cache of extended register state used by\nasynchronous preemption. On entry to preemption, this is used as a simple\nallocation cache. On exit from preemption, the G's xRegState is always\nstored here where it can be restored, and later either freed or reused\nfor another preemption. On exit, this serves the dual purpose of\ndelay-freeing the allocated xRegState until after we've definitely\nrestored it.\n"} cache))
+
+
+
+(go/var ^{:tag (struct ^mutex lock ^fixalloc alloc) :doc "xRegAlloc allocates xRegState objects.\n"} xRegAlloc)
+
+
+
+
+^{:go/end 66} (go/func xRegInitAlloc []
+  (lockInit (addr (.-lock xRegAlloc)) lockRankXRegAlloc)
+  (.init (.-alloc xRegAlloc) (unsafe/Sizeof (lit xRegState)) nil nil (addr (.-other_sys memstats))))
+
+
+
+
+
+
+
+^{:go/end 102} (go/func ^:go/systemstack xRegSave "xRegSave saves the extended register state on this P to gp.\n\nThis must run on the system stack because it assumes the P won't change.\n" [^{:tag (* g)} gp]
+  (when (!= (.-state (.-xRegs gp)) nil)
+    ;; Double preempt?
+    (throw "gp.xRegState.p != nil on async preempt"))
+
+
+  ;; Get the place to save the register state.
+  (let [^{:tag (* xRegState)} dest (zero (* xRegState))
+      ^{:line 81} pp (.ptr (.-p (.-m gp)))]
+    (if (!= (.-cache (.-xRegs pp)) nil) (do
+        ;; Use the cached allocation.
+        (set! dest (.-cache (.-xRegs pp)))
+        (set! (.-cache (.-xRegs pp)) nil))
+      (do
+        ;; Allocate a new save block.
+        (lock (addr (.-lock xRegAlloc)))
+        (set! dest (conv (* xRegState) (.alloc (.-alloc xRegAlloc))))
+        (unlock (addr (.-lock xRegAlloc)))))
+
+
+    ;; Copy state saved in the scratchpad to dest.
+    ;;
+    ;; If we ever need to save less state (e.g., avoid saving vector registers
+    ;; that aren't in use), we could have multiple allocation pools for
+    ;; different size states and copy only the registers we need.
+    (set! (.-regs dest) (.-scratch (.-xRegs pp)))
+
+    ;; Save on the G.
+    (set! (.-state (.-xRegs gp)) dest)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 129} (go/func ^:go/nosplit xRegRestore "xRegRestore prepares the extended register state on gp to be restored.\n\nIt moves the state to gp.m.p.xRegs.cache where [asyncPreempt] expects to find\nit. This means nothing else may use the cache between this call and the\nreturn to asyncPreempt. This is not quite symmetric with [xRegSave], which\nuses gp.m.p.xRegs.scratch. By using cache instead, we save a block copy.\n\nThis is called with asyncPreempt on the stack and thus must not grow the\nstack.\n" [^{:tag (* g)} gp]
+  (when (== (.-state (.-xRegs gp)) nil)
+    (throw "gp.xRegState.p == nil on return from async preempt"))
+
+  ;; If the P has a block cached on it, free that so we can replace it.
+  (let [pp (.ptr (.-p (.-m gp)))]
+    (when (!= (.-cache (.-xRegs pp)) nil)
+      ;; Don't grow the G stack.
+      (systemstack ^{:go/end 125} (fn []
+          (.free (.-xRegs pp)))))
+
+
+    (set! (.-cache (.-xRegs pp)) (.-state (.-xRegs gp)))
+    (set! (.-state (.-xRegs gp)) nil)))
+
+
+^{:go/end 138} (go/method free [^{:tag (* xRegPerP)} xRegs]
+  (when (!= (.-cache xRegs) nil)
+    (lock (addr (.-lock xRegAlloc)))
+    (.free (.-alloc xRegAlloc) (conv unsafe/Pointer (.-cache xRegs)))
+    (set! (.-cache xRegs) nil)
+    (unlock (addr (.-lock xRegAlloc)))))
+
+
+
+
+
+
+^{:go/end 164} (go/func xRegScan "xRegScan conservatively scans the extended register state.\n\nThis is supposed to be called only by scanstack when it handles async preemption.\n" [^{:tag (* g)} gp ^{:tag (* gcWork)} gcw ^{:tag (* stackScanState)} state]
+  ;; Regular async preemption always provides the extended register state.
+  (when (== (.-state (.-xRegs gp)) nil)
+    (let [^unwinder u (zero unwinder)]
+      (for [(.init u gp 0)] (.valid u) (.next u)
+        (when (and (.valid (.-fn (.-frame u))) (== ^{:go/via [_func]} (.-funcID (.-fn (.-frame u))) abi/FuncID_debugCallV2))
+          (return)))
+
+
+      (println "runtime: gp=" gp ", goid=" (.-goid gp))
+      (throw "gp.xRegs.state == nil on a scanstack attempt during async preemption")))
+
+  (let [b (conv uintptr (conv unsafe/Pointer (addr (.-regs (.-state (.-xRegs gp))))))
+      ^{:line 156} n (conv uintptr (unsafe/Sizeof (.-regs (.-state (.-xRegs gp)))))]
+    (when debugScanConservative
+      (print "begin scan xRegs of goroutine " (.-goid gp) " at [" (conv hex b) "," (conv hex (+ b n)) ")\n"))
+
+    (scanConservative b n nil gcw state)
+    (when debugScanConservative
+      (print "end scan xRegs of goroutine " (.-goid gp) "\n"))))

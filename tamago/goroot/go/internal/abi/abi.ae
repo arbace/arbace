@@ -1,0 +1,103 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.abi) (go/file "abi.go" :imports [
+
+
+    ^{:line 8} [goarch "internal/goarch"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+(go/type RegArgs "RegArgs is a struct that has space for each argument\nand return value register on the current architecture.\n\nAssembly code knows the layout of the first two fields\nof RegArgs.\n\nRegArgs also contains additional space to hold pointers\nwhen it may not be safe to keep them only in the integer\nregister space otherwise.\n" (struct
+
+
+
+
+
+
+
+
+    ^{:line 30 :tag (array IntArgRegs uintptr) :doc "Values in these slots should be precisely the bit-by-bit\nrepresentation of how they would appear in a register.\n\nThis means that on big endian arches, integer values should\nbe in the top bits of the slot. Floats are usually just\ndirectly represented, but some architectures treat narrow\nwidth floating point values specially (e.g. they're promoted\nfirst, or they need to be NaN-boxed).\n"} Ints ; untyped integer registers
+    ^{:line 31 :tag (array FloatArgRegs uint64)} Floats ; untyped float registers
+
+    ;; Fields above this point are known to assembly.
+
+
+
+
+    ^{:line 38 :tag (array IntArgRegs unsafe/Pointer) :doc "Ptrs is a space that duplicates Ints but with pointer type,\nused to make pointers passed or returned  in registers\nvisible to the GC by making the type unsafe.Pointer.\n"} Ptrs
+
+
+
+
+
+    ^{:line 44 :tag IntArgRegBitmap :doc "ReturnIsPtr is a bitmap that indicates which registers\ncontain or will contain pointers on the return path from\na reflectcall. The i'th bit indicates whether the i'th\nregister contains or will contain a valid Go pointer.\n"} ReturnIsPtr))
+
+
+^{:go/end 63} (go/method Dump [^{:tag (* RegArgs)} r]
+  (print "Ints:")
+  (range [_ x (.-Ints r)]
+    (print " " x))
+
+  (println)
+  (print "Floats:")
+  (range [_ x (.-Floats r)]
+    (print " " x))
+
+  (println)
+  (print "Ptrs:")
+  (range [_ x (.-Ptrs r)]
+    (print " " x))
+
+  (println))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 83} (go/method IntRegArgAddr "IntRegArgAddr returns a pointer inside of r.Ints[reg] that is appropriately\noffset for an argument of size argSize.\n\nargSize must be non-zero, fit in a register, and a power-of-two.\n\nThis method is a helper for dealing with the endianness of different CPU\narchitectures, since sub-word-sized arguments in big endian architectures\nneed to be \"aligned\" to the upper edge of the register to be interpreted\nby the CPU correctly.\n" ^unsafe/Pointer [^{:tag (* RegArgs)} r ^int reg ^uintptr argSize]
+  (when (or (> argSize goarch/PtrSize) (== argSize 0) (!= (bit-and argSize (- argSize 1)) 0))
+    (panic "invalid argSize"))
+
+  (let [offset (conv uintptr 0)]
+    (when goarch/BigEndian
+      (set! offset (- goarch/PtrSize argSize)))
+
+    (conv unsafe/Pointer (+ (conv uintptr (conv unsafe/Pointer (addr (aget (.-Ints r) reg)))) offset))))
+
+
+
+
+(go/type IntArgRegBitmap "IntArgRegBitmap is a bitmap large enough to hold one bit per\ninteger argument/return register.\n" (array (/ (+ IntArgRegs 7) 8) uint8))
+
+
+^{:go/end 92} (go/method Set "Set sets the i'th bit of the bitmap to 1.\n" [^{:tag (* IntArgRegBitmap)} b ^int i]
+  (set! (aget b (/ i 8)) bit-or (<< (conv uint8 1) (% i 8))))
+
+
+
+
+
+
+
+
+^{:go/end 104} (go/method ^:go/nosplit Get "Get returns whether the i'th bit of the bitmap is set.\n\nnosplit because it's called in extremely sensitive contexts, like\non the reflectcall return path.\n" ^bool [^{:tag (* IntArgRegBitmap)} b ^int i]
+  ;; Compute p=&b[i/8], but without a bounds check. We don't have the stack for it.
+  (let [p (conv (* byte) (conv unsafe/Pointer (+ (conv uintptr (conv unsafe/Pointer b)) (conv uintptr (/ i 8)))))]
+    (!= (bit-and @p (<< (conv uint8 1) (% i 8))) 0)))

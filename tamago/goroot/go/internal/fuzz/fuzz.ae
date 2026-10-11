@@ -1,0 +1,1105 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package fuzz provides common fuzzing functionality for tests built with
+;; "go test" and for programs that use fuzzing functionality in the testing
+;; package.
+(in-ns 'go.internal.fuzz) (go/file "fuzz.go" :doc "Package fuzz provides common fuzzing functionality for tests built with\n\"go test\" and for programs that use fuzzing functionality in the testing\npackage.\n" :imports [
+
+
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [context "context"]
+    ^{:line 13} [sha256 "crypto/sha256"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [godebug "internal/godebug"]
+    ^{:line 17} [io "io"]
+    ^{:line 18} [bits "math/bits"]
+    ^{:line 19} [os "os"]
+    ^{:line 20} [filepath "path/filepath"]
+    ^{:line 21} [reflect "reflect"]
+    ^{:line 22} [runtime "runtime"]
+    ^{:line 23} [strings "strings"]
+    ^{:line 24} [time "time"]])
+
+
+
+
+(go/type CoordinateFuzzingOpts "CoordinateFuzzingOpts is a set of arguments for CoordinateFuzzing.\nThe zero value is valid for each field unless specified otherwise.\n" (struct
+
+
+    ^{:line 32 :tag io/Writer :doc "Log is a writer for logging progress messages and warnings.\nIf nil, io.Discard will be used instead.\n"} Log
+
+
+
+    ^{:line 36 :tag time/Duration :doc "Timeout is the amount of wall clock time to spend fuzzing after the corpus\nhas loaded. If zero, there will be no time limit.\n"} Timeout
+
+
+
+    ^{:line 40 :tag int64 :doc "Limit is the number of random values to generate and test. If zero,\nthere will be no limit on the number of generated values.\n"} Limit
+
+
+
+
+
+    ^{:line 46 :tag time/Duration :doc "MinimizeTimeout is the amount of wall clock time to spend minimizing\nafter discovering a crasher. If zero, there will be no time limit. If\nMinimizeTimeout and MinimizeLimit are both zero, then minimization will\nbe disabled.\n"} MinimizeTimeout
+
+
+
+
+
+
+    ^{:line 53 :tag int64 :doc "MinimizeLimit is the maximum number of calls to the fuzz function to be\nmade while minimizing after finding a crash. If zero, there will be no\nlimit. Calls to the fuzz function made when minimizing also count toward\nLimit. If MinimizeTimeout and MinimizeLimit are both zero, then\nminimization will be disabled.\n"} MinimizeLimit
+
+
+
+    ^{:line 57 :tag int :doc "parallel is the number of worker processes to run in parallel. If zero,\nCoordinateFuzzing will run GOMAXPROCS workers.\n"} Parallel
+
+
+
+    ^{:line 61 :tag (slice CorpusEntry) :doc "Seed is a list of seed values added by the fuzz target with testing.F.Add\nand in testdata.\n"} Seed
+
+
+
+    ^{:line 65 :tag (slice reflect/Type) :doc "Types is the list of types which make up a corpus entry.\nTypes must be set and must match values in Seed.\n"} Types
+
+
+
+    ^{:line 69 :tag string :doc "CorpusDir is a directory where files containing values that crash the\ncode being tested may be written. CorpusDir must be set.\n"} CorpusDir
+
+
+
+    ^{:line 73 :tag string :doc "CacheDir is a directory containing additional \"interesting\" values.\nThe fuzzer may derive new values from these, and may write new values here.\n"} CacheDir))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 403} (go/func CoordinateFuzzing "CoordinateFuzzing creates several worker processes and communicates with\nthem to test random inputs that could trigger crashes and expose bugs.\nThe worker processes run the same binary in the same directory with the\nsame environment variables as the coordinator process. Workers also run\nwith the same arguments as the coordinator, except with the -test.fuzzworker\nflag prepended to the argument list.\n\nIf a crash occurs, the function will return an error containing information\nabout the crash, which can be reported to the user.\n" [^context/Context ctx ^CoordinateFuzzingOpts opts] :results [^error err]
+  (when [err (.Err ctx)] (!= err nil)
+    (return err))
+
+  (when (== (.-Log opts) nil)
+    (set! (.-Log opts) io/Discard))
+
+  (when (== (.-Parallel opts) 0)
+    (set! (.-Parallel opts) (runtime/GOMAXPROCS 0)))
+
+  (when (and (> (.-Limit opts) 0) (> (conv int64 (.-Parallel opts)) (.-Limit opts)))
+    ;; Don't start more workers than we need.
+    (set! (.-Parallel opts) (conv int (.-Limit opts))))
+
+
+  (let [(values c ^:assign err) (newCoordinator opts)]
+    (when (!= err nil)
+      (return err))
+
+
+    (when (> (.-Timeout opts) 0)
+      (let [^{:tag (func [])} cancel (zero (func []))]
+        (set! (values ctx cancel) (context/WithTimeout ctx (.-Timeout opts)))
+        (defer (cancel))))
+
+
+    ;; fuzzCtx is used to stop workers, for example, after finding a crasher.
+    (let [(values fuzzCtx cancelWorkers) (context/WithCancel ctx)]
+      (defer (cancelWorkers))
+      (let [doneC (.Done ctx)
+
+          ;; stop is called when a worker encounters a fatal error.
+          ^{:line 117 :tag error} fuzzErr (zero error)
+          ^{:line 118} stopping false
+          ^{:line 119} stop ^{:go/end 148} (fn [^error err]
+            (when (shouldPrintDebugInfo)
+              (let [(values _ file line ok) (runtime/Caller 1)]
+                (if ok
+                  (.debugLogf c "stop called at %s:%d. stopping: %t" file line stopping)
+
+                  (.debugLogf c "stop called at unknown. stopping: %t" stopping))))
+
+
+
+            (when (or (== err (.Err ctx)) (== err (.Err fuzzCtx)) (isInterruptError err))
+              ;; Suppress cancellation errors and terminations due to SIGINT.
+              ;; The messages are not helpful since either the user triggered the error
+              ;; (with ^C) or another more helpful message will be printed (a crasher).
+              ;;
+              ;; Also check ctx.Err() because when ctx's deadline expires, there
+              ;; is a window where ctx.Err() is set but fuzzCtx (a child) has
+              ;; not yet been canceled. See go.dev/issue/75804.
+              (set! err nil))
+
+            (when (and (!= err nil) ^:go/paren (or (== fuzzErr nil) (== fuzzErr (.Err ctx))))
+              (set! fuzzErr err))
+
+            (when stopping
+              (return))
+
+            (set! stopping true)
+            (cancelWorkers)
+            (set! doneC nil))
+
+
+          ;; Ensure that any crash we find is written to the corpus, even if an error
+          ;; or interruption occurs while minimizing it.
+          ^{:line 152} crashWritten false]
+        (defer (^{:go/end 168} (fn []
+              (when (or (== (.-crashMinimizing c) nil) crashWritten)
+                (return))
+
+              (let [werr (writeToCorpus (addr (.-entry (.-crashMinimizing c))) (.-CorpusDir opts))]
+                (when (!= werr nil)
+                  (set! err (fmt/Errorf "%w\n%v" err werr))
+                  (return))
+
+                (when (== err nil)
+                  (set! err (addr ^{:go/breaks [2 4]} (lit crashError
+                        :path (.-Path (.-entry (.-crashMinimizing c)))
+                        :err (errors/New (.-crasherMsg (.-crashMinimizing c)))))))))))
+
+
+
+
+        ;; Start workers.
+        ;; TODO(jayconrod): do we want to support fuzzing different binaries?
+        (let [dir "" ; same as self
+            ^{:line 173} binPath (aget os/Args 0)
+            ^{:line 174} args (append (lit (slice string) "-test.fuzzworker") (spread (subslice os/Args 1)))
+            ^{:line 175} env (os/Environ) ; same as self
+
+            ^{:line 177} errC (make (chan error))
+            ^{:line 178} workers (make (slice (* worker)) (.-Parallel opts))]
+          (range [i workers]
+            (let [^error err (zero error)]
+              (set! (values (aget workers i) err) (newWorker c dir binPath args env))
+              (when (!= err nil)
+                (return err))))
+
+
+          (range [i workers]
+            (let [w (aget workers i)]
+              (go (^{:go/end 198} (fn []
+                    (let [err (.coordinate w fuzzCtx)]
+                      (when (or (!= (.Err fuzzCtx) nil) (isInterruptError err))
+                        (set! err nil))
+
+                      (let [cleanErr (.cleanup w)]
+                        (when (== err nil)
+                          (set! err cleanErr))
+
+                        (>! errC err))))))))
+
+
+
+          ;; Main event loop.
+          ;; Do not return until all workers have terminated. We avoid a deadlock by
+          ;; receiving messages from workers even after ctx is canceled.
+          (let [activeWorkers (len workers)
+              ^{:line 205} statTicker (time/NewTicker (* 3 time/Second))]
+            (defer (.Stop statTicker))
+            (defer (.logStats c))
+
+            (.logStats c)
+            (while true
+              ;; If there is an execution limit, and we've reached it, stop.
+              (when (and (> (.-Limit (.-opts c)) 0) (>= (.-count c) (.-Limit (.-opts c))))
+                (stop nil))
+
+
+              (let [^{:tag (chan fuzzInput)} inputC (zero (chan fuzzInput))
+                  (values input ok) (.peekInput c)]
+                (when (and ok (== (.-crashMinimizing c) nil) (not stopping))
+                  (set! inputC (.-inputC c)))
+
+
+                (let [^{:tag (chan fuzzMinimizeInput)} minimizeC (zero (chan fuzzMinimizeInput))
+                    (values minimizeInput ^:assign ok) (.peekMinimizeInput c)]
+                  (when (and ok (not stopping))
+                    (set! minimizeC (.-minimizeC c)))
+
+
+                  (select
+                    (case (<! doneC)
+                      ;; Interrupted, canceled, or timed out.
+                      ;; stop sets doneC to nil, so we don't busy wait here.
+                      (stop (.Err ctx)))
+
+                    (case [err (<! errC)]
+                      ;; A worker terminated, possibly after encountering a fatal error.
+                      (stop err)
+                      (dec! activeWorkers)
+                      (when (== activeWorkers 0)
+                        (return fuzzErr)))
+
+
+                    (case [result (<! (.-resultC c))]
+                      ;; Received response from worker.
+                      (when stopping
+                        (break))
+
+                      (.updateStats c result)
+
+                      (cond (!= (.-crasherMsg result) "") (do
+                          (when (and (.warmupRun c) (.-IsSeed (.-entry result)))
+                            (let [target (filepath/Base (.-CorpusDir (.-opts c)))]
+                              (fmt/Fprintf (.-Log (.-opts c)) "failure while testing seed corpus entry: %s/%s\n" target (testName (.-Parent (.-entry result))))
+                              (stop (errors/New (.-crasherMsg result)))
+                              (break)))
+
+                          (cond (and (.canMinimize c) (.-canMinimize result)) (do
+                              (when (!= (.-crashMinimizing c) nil)
+                                ;; This crash is not minimized, and another crash is being minimized.
+                                ;; Ignore this one and wait for the other one to finish.
+                                (when (shouldPrintDebugInfo)
+                                  (.debugLogf c "found unminimized crasher, skipping in favor of minimizable crasher"))
+
+                                (break))
+
+                              ;; Found a crasher but haven't yet attempted to minimize it.
+                              ;; Send it back to a worker for minimization. Disable inputC so
+                              ;; other workers don't continue fuzzing.
+                              (set! (.-crashMinimizing c) (addr result))
+                              (fmt/Fprintf (.-Log (.-opts c)) "fuzz: minimizing %d-byte failing input file\n" (len (.-Data (.-entry result))))
+                              (.queueForMinimization c result nil))
+                            (not crashWritten)
+                            ;; Found a crasher that's either minimized or not minimizable.
+                            ;; Write to corpus and stop.
+                            (let [err (writeToCorpus (addr (.-entry result)) (.-CorpusDir opts))]
+                              (when (== err nil)
+                                (set! crashWritten true)
+                                (set! err (addr ^{:go/breaks [2 4]} (lit crashError
+                                      :path (.-Path (.-entry result))
+                                      :err (errors/New (.-crasherMsg result))))))
+
+
+                              (when (shouldPrintDebugInfo)
+                                ^{:go/breaks [2]} (.debugLogf c
+                                  "found crasher, id: %s, parent: %s, gen: %d, size: %d, exec time: %s"
+                                  (.-Path (.-entry result))
+                                  (.-Parent (.-entry result))
+                                  (.-Generation (.-entry result))
+                                  (len (.-Data (.-entry result)))
+                                  (.-entryDuration result)))
+
+
+                              (stop err))))
+
+                        (!= (.-coverageData result) nil)
+                        (if (.warmupRun c) (do
+                            (when (shouldPrintDebugInfo)
+                              ^{:go/breaks [2]} (.debugLogf c
+                                "processed an initial input, id: %s, new bits: %d, size: %d, exec time: %s"
+                                (.-Parent (.-entry result))
+                                (countBits (diffCoverage (.-coverageMask c) (.-coverageData result)))
+                                (len (.-Data (.-entry result)))
+                                (.-entryDuration result)))
+
+
+                            (.updateCoverage c (.-coverageData result))
+                            (dec! (.-warmupInputLeft c))
+                            (when (== (.-warmupInputLeft c) 0)
+                              (fmt/Fprintf (.-Log (.-opts c)) "fuzz: elapsed: %s, gathering baseline coverage: %d/%d completed, now fuzzing with %d workers\n" (.elapsed c) (.-warmupInputCount c) (.-warmupInputCount c) (.-Parallel (.-opts c)))
+                              (when (shouldPrintDebugInfo)
+                                ^{:go/breaks [2]} (.debugLogf c
+                                  "finished processing input corpus, entries: %d, initial coverage bits: %d"
+                                  (len (.-entries (.-corpus c)))
+                                  (countBits (.-coverageMask c))))))
+
+
+
+                          (if [keepCoverage (diffCoverage (.-coverageMask c) (.-coverageData result))] (!= keepCoverage nil)
+                            ;; Found a value that expanded coverage.
+                            ;; It's not a crasher, but we may want to add it to the on-disk
+                            ;; corpus and prioritize it for future fuzzing.
+                            ;; TODO(jayconrod, katiehockman): Prioritize fuzzing these
+                            ;; values which expanded coverage, perhaps based on the
+                            ;; number of new edges that this result expanded.
+                            ;; TODO(jayconrod, katiehockman): Don't write a value that's already
+                            ;; in the corpus.
+                            (if (and (.canMinimize c) (.-canMinimize result) (== (.-crashMinimizing c) nil))
+                              ;; Send back to workers to find a smaller value that preserves
+                              ;; at least one new coverage bit.
+                              (.queueForMinimization c result keepCoverage)
+
+                              ;; Update the coordinator's coverage mask and save the value.
+                              (let [inputSize (len (.-Data (.-entry result)))
+                                  (values entryNew err) (.addCorpusEntries c true (.-entry result))]
+                                (when (!= err nil)
+                                  (stop err)
+                                  (break))
+
+                                (when (not entryNew)
+                                  (when (shouldPrintDebugInfo)
+                                    ^{:go/breaks [2]} (.debugLogf c
+                                      "ignoring duplicate input which increased coverage, id: %s"
+                                      (.-Path (.-entry result))))
+
+
+                                  (break))
+
+                                (.updateCoverage c keepCoverage)
+                                (.enqueue (.-inputQueue c) (.-entry result))
+                                (inc! (.-interestingCount c))
+                                (when (shouldPrintDebugInfo)
+                                  ^{:go/breaks [2]} (.debugLogf c
+                                    "new interesting input, id: %s, parent: %s, gen: %d, new bits: %d, total bits: %d, size: %d, exec time: %s"
+                                    (.-Path (.-entry result))
+                                    (.-Parent (.-entry result))
+                                    (.-Generation (.-entry result))
+                                    (countBits keepCoverage)
+                                    (countBits (.-coverageMask c))
+                                    ^{:line 358} inputSize
+                                    (.-entryDuration result)))))
+
+
+
+                            (do
+                              (when (shouldPrintDebugInfo)
+                                ^{:go/breaks [2]} (.debugLogf c
+                                  "worker reported interesting input that doesn't expand coverage, id: %s, parent: %s, canMinimize: %t"
+                                  (.-Path (.-entry result))
+                                  (.-Parent (.-entry result))
+                                  (.-canMinimize result))))))
+
+
+
+                        (.warmupRun c) (do
+                          ;; No error or coverage data was reported for this input during
+                          ;; warmup, so continue processing results.
+                          (dec! (.-warmupInputLeft c))
+                          (when (== (.-warmupInputLeft c) 0)
+                            (fmt/Fprintf (.-Log (.-opts c)) "fuzz: elapsed: %s, testing seed corpus: %d/%d completed, now fuzzing with %d workers\n" (.elapsed c) (.-warmupInputCount c) (.-warmupInputCount c) (.-Parallel (.-opts c)))
+                            (when (shouldPrintDebugInfo)
+                              ^{:go/breaks [2]} (.debugLogf c
+                                "finished testing-only phase, entries: %d"
+                                (len (.-entries (.-corpus c)))))))))
+
+
+
+
+
+                    (case (>! inputC input)
+                      ;; Sent the next input to a worker.
+                      (.sentInput c input))
+
+                    (case (>! minimizeC minimizeInput)
+                      ;; Sent the next input for minimization to a worker.
+                      (.sentMinimizeInput c minimizeInput))
+
+                    (case (<! (.-C statTicker))
+                      (.logStats c))))))))))))
+
+
+
+;; TODO(jayconrod,katiehockman): if a crasher can't be written to the corpus,
+;; write to the cache instead.
+
+
+
+
+
+(go/type crashError "crashError wraps a crasher written to the seed corpus. It saves the name\nof the file where the input causing the crasher was saved. The testing\nframework uses this to report a command to re-run that specific input.\n" (struct
+    ^{:line 409 :tag string} path
+    ^{:line 410 :tag error} err))
+
+
+^{:go/end 415} (go/method Error ^string [^{:tag (* crashError)} e]
+  (.Error (.-err e)))
+
+
+^{:go/end 419} (go/method Unwrap ^error [^{:tag (* crashError)} e]
+  (.-err e))
+
+
+^{:go/end 423} (go/method CrashPath ^string [^{:tag (* crashError)} e]
+  (.-path e))
+
+
+(go/type corpus (struct
+    ^{:line 426 :tag (slice CorpusEntry)} entries
+    ^{:line 427 :tag (map (array sha256/Size byte) bool)} hashes))
+
+
+
+
+
+
+^{:go/end 459} (go/method addCorpusEntries "addCorpusEntries adds entries to the corpus, and optionally writes the entries\nto the cache directory. If an entry is already in the corpus it is skipped. If\nall of the entries are unique, addCorpusEntries returns true and a nil error,\nif at least one of the entries was a duplicate, it returns false and a nil error.\n" [^{:tag (* coordinator)} c ^bool addToCache & ^{:tag (slice CorpusEntry)} entries] :results [bool error]
+  (let [noDupes true]
+    (range [_ e entries]
+      (let [(values data err) (corpusEntryData e)]
+        (when (!= err nil)
+          (return false err))
+
+        (let [h (sha256/Sum256 data)]
+          (when (aget (.-hashes (.-corpus c)) h)
+            (set! noDupes false)
+            (continue))
+
+          (when addToCache
+            (when [err (writeToCorpus (addr e) (.-CacheDir (.-opts c)))] (!= err nil)
+              (return false err))
+
+            ;; For entries written to disk, we don't hold onto the bytes,
+            ;; since the corpus would consume a significant amount of
+            ;; memory.
+            (set! (.-Data e) nil))
+
+          (aset (.-hashes (.-corpus c)) h true)
+          (set! (.-entries (.-corpus c)) (append (.-entries (.-corpus c)) e)))))
+
+    (return noDupes nil)))
+
+
+
+
+
+
+
+
+(go/type ^:alias CorpusEntry "CorpusEntry represents an individual input for fuzzing.\n\nWe must use an equivalent type in the testing and testing/internal/testdeps\npackages, but testing can't import this package directly, and we don't want\nto export this type from testing. Instead, we use the same struct type and\nuse a type alias (not a defined type) for convenience.\n" (struct
+    ^{:line 468 :tag string} Parent
+
+
+
+
+    ^{:line 473 :tag string :doc "Path is the path of the corpus file, if the entry was loaded from disk.\nFor other entries, including seed values provided by f.Add, Path is the\nname of the test, e.g. seed#0 or its hash.\n"} Path
+
+
+
+
+    ^{:line 478 :tag (slice byte) :doc "Data is the raw input data. Data should only be populated for seed\nvalues. For on-disk corpus files, Data will be nil, as it will be loaded\nfrom disk using Path.\n"} Data
+
+
+    ^{:line 481 :tag (slice any) :doc "Values is the unmarshaled values from a corpus file.\n"} Values
+
+    ^{:line 483 :tag int} Generation
+
+
+    ^{:line 486 :tag bool :doc "IsSeed indicates whether this entry is part of the seed corpus.\n"} IsSeed))
+
+
+
+
+^{:go/end 497} (go/func corpusEntryData "corpusEntryData returns the raw input bytes, either from the data struct\nfield, or from disk.\n" [^CorpusEntry ce] :results [(slice byte) error]
+  (when (!= (.-Data ce) nil)
+    (return (.-Data ce) nil))
+
+
+  (os/ReadFile (.-Path ce)))
+
+
+(go/type fuzzInput (struct
+
+
+    ^{:line 502 :tag CorpusEntry :doc "entry is the value to test initially. The worker will randomly mutate\nvalues from this starting point.\n"} entry
+
+
+
+    ^{:line 506 :tag time/Duration :doc "timeout is the time to spend fuzzing variations of this input,\nnot including starting or cleaning up.\n"} timeout
+
+
+
+
+
+    ^{:line 512 :tag int64 :doc "limit is the maximum number of calls to the fuzz function the worker may\nmake. The worker may make fewer calls, for example, if it finds an\nerror early. If limit is zero, there is no limit on calls to the\nfuzz function.\n"} limit
+
+
+
+    ^{:line 516 :tag bool :doc "warmup indicates whether this is a warmup input before fuzzing begins. If\ntrue, the input should not be fuzzed.\n"} warmup
+
+
+    ^{:line 519 :tag (slice byte) :doc "coverageData reflects the coordinator's current coverageMask.\n"} coverageData))
+
+
+(go/type fuzzResult (struct
+
+    ^{:line 524 :tag CorpusEntry :doc "entry is an interesting value or a crasher.\n"} entry
+
+
+    ^{:line 527 :tag string :doc "crasherMsg is an error message from a crash. It's \"\" if no crash was found.\n"} crasherMsg
+
+
+
+    ^{:line 531 :tag bool :doc "canMinimize is true if the worker should attempt to minimize this result.\nIt may be false because an attempt has already been made.\n"} canMinimize
+
+
+    ^{:line 534 :tag (slice byte) :doc "coverageData is set if the worker found new coverage.\n"} coverageData
+
+
+
+    ^{:line 538 :tag int64 :doc "limit is the number of values the coordinator asked the worker\nto test. 0 if there was no limit.\n"} limit
+
+
+    ^{:line 541 :tag int64 :doc "count is the number of values the worker actually tested.\n"} count
+
+
+    ^{:line 544 :tag time/Duration :doc "totalDuration is the time the worker spent testing inputs.\n"} totalDuration
+
+
+    ^{:line 547 :tag time/Duration :doc "entryDuration is the time the worker spent execution an interesting result\n"} entryDuration))
+
+
+(go/type fuzzMinimizeInput (struct
+
+    ^{:line 552 :tag CorpusEntry :doc "entry is an interesting value or crasher to minimize.\n"} entry
+
+
+
+
+    ^{:line 557 :tag string :doc "crasherMsg is an error message from a crash. It's \"\" if no crash was found.\nIf set, the worker will attempt to find a smaller input that also produces\nan error, though not necessarily the same error.\n"} crasherMsg
+
+
+
+
+    ^{:line 562 :tag int64 :doc "limit is the maximum number of calls to the fuzz function the worker may\nmake. The worker may make fewer calls, for example, if it can't reproduce\nan error. If limit is zero, there is no limit on calls to the fuzz function.\n"} limit
+
+
+
+    ^{:line 566 :tag time/Duration :doc "timeout is the time to spend minimizing this input.\nA zero timeout means no limit.\n"} timeout
+
+
+
+
+
+    ^{:line 572 :tag (slice byte) :doc "keepCoverage is a set of coverage bits that entry found that were not in\nthe coordinator's combined set. When minimizing, the worker should find an\ninput that preserves at least one of these bits. keepCoverage is nil for\ncrashing inputs.\n"} keepCoverage))
+
+
+
+
+(go/type coordinator "coordinator holds channels that workers can use to communicate with\nthe coordinator.\n" (struct
+    ^{:line 578 :tag CoordinateFuzzingOpts} opts
+
+
+
+    ^{:line 582 :tag time/Time :doc "startTime is the time we started the workers after loading the corpus.\nUsed for logging.\n"} startTime
+
+
+
+    ^{:line 586 :tag (chan fuzzInput) :doc "inputC is sent values to fuzz by the coordinator. Any worker may receive\nvalues from this channel. Workers send results to resultC.\n"} inputC
+
+
+
+    ^{:line 590 :tag (chan fuzzMinimizeInput) :doc "minimizeC is sent values to minimize by the coordinator. Any worker may\nreceive values from this channel. Workers send results to resultC.\n"} minimizeC
+
+
+
+    ^{:line 594 :tag (chan fuzzResult) :doc "resultC is sent results of fuzzing by workers. The coordinator\nreceives these. Multiple types of messages are allowed.\n"} resultC
+
+
+    ^{:line 597 :tag int64 :doc "count is the number of values fuzzed so far.\n"} count
+
+
+
+    ^{:line 601 :tag int64 :doc "countLastLog is the number of values fuzzed when the output was last\nlogged.\n"} countLastLog
+
+
+    ^{:line 604 :tag time/Time :doc "timeLastLog is the time at which the output was last logged.\n"} timeLastLog
+
+
+
+    ^{:line 608 :tag int :doc "interestingCount is the number of unique interesting values which have\nbeen found this execution.\n"} interestingCount
+
+
+
+
+
+    ^{:line 614 :tag int :doc "warmupInputCount is the count of all entries in the corpus which will\nneed to be received from workers to run once during warmup, but not fuzz.\nThis could be for coverage data, or only for the purposes of verifying\nthat the seed corpus doesn't have any crashers. See warmupRun.\n"} warmupInputCount
+
+
+
+
+    ^{:line 619 :tag int :doc "warmupInputLeft is the number of entries in the corpus which still need\nto be received from workers to run once during warmup, but not fuzz.\nSee warmupInputLeft.\n"} warmupInputLeft
+
+
+
+    ^{:line 623 :tag time/Duration :doc "duration is the time spent fuzzing inside workers, not counting time\nstarting up or tearing down.\n"} duration
+
+
+
+    ^{:line 627 :tag int64 :doc "countWaiting is the number of fuzzing executions the coordinator is\nwaiting on workers to complete.\n"} countWaiting
+
+
+
+    ^{:line 631 :tag corpus :doc "corpus is a set of interesting values, including the seed corpus and\ngenerated values that workers reported as interesting.\n"} corpus
+
+
+
+    ^{:line 635 :tag bool :doc "minimizationAllowed is true if one or more of the types of fuzz\nfunction's parameters can be minimized.\n"} minimizationAllowed
+
+
+
+
+    ^{:line 640 :tag queue :doc "inputQueue is a queue of inputs that workers should try fuzzing. This is\ninitially populated from the seed corpus and cached inputs. More inputs\nmay be added as new coverage is discovered.\n"} inputQueue
+
+
+
+
+    ^{:line 645 :tag queue :doc "minimizeQueue is a queue of inputs that caused errors or exposed new\ncoverage. Workers should attempt to find smaller inputs that do the\nsame thing.\n"} minimizeQueue
+
+
+    ^{:line 648 :tag (* fuzzResult) :doc "crashMinimizing is the crash that is currently being minimized.\n"} crashMinimizing
+
+
+
+
+
+
+
+    ^{:line 656 :tag (slice byte) :doc "coverageMask aggregates coverage that was found for all inputs in the\ncorpus. Each byte represents a single basic execution block. Each set bit\nwithin the byte indicates that an input has triggered that block at least\n1 << n times, where n is the position of the bit in the byte. For example, a\nvalue of 12 indicates that separate inputs have triggered this block\nbetween 4-7 times and 8-15 times.\n"} coverageMask))
+
+
+^{:go/end 720} (go/func newCoordinator [^CoordinateFuzzingOpts opts] :results [(* coordinator) error]
+  ;; Make sure all the seed corpus has marshaled data.
+  (range [i (.-Seed opts)]
+    (when (and (== (.-Data (aget (.-Seed opts) i)) nil) (!= (.-Values (aget (.-Seed opts) i)) nil))
+      (set! (.-Data (aget (.-Seed opts) i)) (marshalCorpusFile (spread (.-Values (aget (.-Seed opts) i)))))))
+
+
+  (let [c (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit coordinator
+          :opts opts
+          :startTime (time/Now)
+          :inputC (make (chan fuzzInput))
+          :minimizeC (make (chan fuzzMinimizeInput))
+          :resultC (make (chan fuzzResult))
+          :timeLastLog (time/Now)
+          :corpus (lit corpus :hashes (make (map (array sha256/Size byte) bool)))))]
+
+    (when [err (.readCache c)] (!= err nil)
+      (return nil err))
+
+    (when (or (> (.-MinimizeLimit opts) 0) (> (.-MinimizeTimeout opts) 0))
+      (range [_ t (.-Types opts)]
+        (when (isMinimizable t)
+          (set! (.-minimizationAllowed c) true)
+          (break))))
+
+
+
+
+    (let [covSize (len (coverage))]
+      (if (== covSize 0) (do
+          (fmt/Fprintf (.-Log (.-opts c)) "warning: the test binary was not built with coverage instrumentation, so fuzzing will run without coverage guidance and may be inefficient\n")
+          ;; Even though a coverage-only run won't occur, we should still run all
+          ;; of the seed corpus to make sure there are no existing failures before
+          ;; we start fuzzing.
+          (set! (.-warmupInputCount c) (len (.-Seed (.-opts c))))
+          (range [_ e (.-Seed (.-opts c))]
+            (.enqueue (.-inputQueue c) e)))
+
+        (do
+          (set! (.-warmupInputCount c) (len (.-entries (.-corpus c))))
+          (range [_ e (.-entries (.-corpus c))]
+            (.enqueue (.-inputQueue c) e))
+
+          ;; Set c.coverageMask to a clean []byte full of zeros.
+          (set! (.-coverageMask c) (make (slice byte) covSize))))
+
+      (set! (.-warmupInputLeft c) (.-warmupInputCount c))
+
+      (when (== (len (.-entries (.-corpus c))) 0)
+        (fmt/Fprintf (.-Log (.-opts c)) "warning: starting with empty corpus\n")
+        (let [^{:tag (slice any)} vals (zero (slice any))]
+          (range [_ t (.-Types opts)]
+            (set! vals (append vals (zeroValue t))))
+
+          (let [data (marshalCorpusFile (spread vals))
+              ^{:line 714} h (sha256/Sum256 data)
+              ^{:line 715} name (fmt/Sprintf "%x" (subslice h _ 4))]
+            (.addCorpusEntries c false (lit CorpusEntry :Path name :Data data)))))
+
+
+      (return c nil))))
+
+
+^{:go/end 726} (go/method updateStats [^{:tag (* coordinator)} c ^fuzzResult result]
+  (set! (.-count c) + (.-count result))
+  (set! (.-countWaiting c) - (.-limit result))
+  (set! (.-duration c) + (.-totalDuration result)))
+
+
+^{:go/end 750} (go/method logStats [^{:tag (* coordinator)} c]
+  (let [now (time/Now)]
+    (cond (.warmupRun c)
+      (let [runSoFar (- (.-warmupInputCount c) (.-warmupInputLeft c))]
+        (if coverageEnabled
+          (fmt/Fprintf (.-Log (.-opts c)) "fuzz: elapsed: %s, gathering baseline coverage: %d/%d completed\n" (.elapsed c) runSoFar (.-warmupInputCount c))
+
+          (fmt/Fprintf (.-Log (.-opts c)) "fuzz: elapsed: %s, testing seed corpus: %d/%d completed\n" (.elapsed c) runSoFar (.-warmupInputCount c))))
+
+      (!= (.-crashMinimizing c) nil)
+      (fmt/Fprintf (.-Log (.-opts c)) "fuzz: elapsed: %s, minimizing\n" (.elapsed c)) :else
+
+      (let [rate (/ (conv float64 (- (.-count c) (.-countLastLog c))) (.Seconds (.Sub now (.-timeLastLog c))))]
+        (if coverageEnabled
+          (let [total (+ (.-warmupInputCount c) (.-interestingCount c))]
+            (fmt/Fprintf (.-Log (.-opts c)) "fuzz: elapsed: %s, execs: %d (%.0f/sec), new interesting: %d (total: %d)\n" (.elapsed c) (.-count c) rate (.-interestingCount c) total))
+
+          (fmt/Fprintf (.-Log (.-opts c)) "fuzz: elapsed: %s, execs: %d (%.0f/sec)\n" (.elapsed c) (.-count c) rate))))
+
+
+    (set! (.-countLastLog c) (.-count c))
+    (set! (.-timeLastLog c) now)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 807} (go/method peekInput "peekInput returns the next value that should be sent to workers.\nIf the number of executions is limited, the returned value includes\na limit for one worker. If there are no executions left, peekInput returns\na zero value and false.\n\npeekInput doesn't actually remove the input from the queue. The caller\nmust call sentInput after sending the input.\n\nIf the input queue is empty and the coverage/testing-only run has completed,\nqueue refills it from the corpus.\n" [^{:tag (* coordinator)} c] :results [fuzzInput bool]
+  (when (and (> (.-Limit (.-opts c)) 0) (>= (+ (.-count c) (.-countWaiting c)) (.-Limit (.-opts c))))
+    ;; Already making the maximum number of calls to the fuzz function.
+    ;; Don't send more inputs right now.
+    (return (lit fuzzInput) false))
+
+  (when (== (.-len (.-inputQueue c)) 0)
+    (when (.warmupRun c)
+      ;; Wait for coverage/testing-only run to finish before sending more
+      ;; inputs.
+      (return (lit fuzzInput) false))
+
+    (.refillInputQueue c))
+
+
+  (let [(values entry ok) (.peek (.-inputQueue c))]
+    (when (not ok)
+      (panic "input queue empty after refill"))
+
+    (let [input ^{:go/breaks [2 4 6]} (lit fuzzInput
+          :entry (assert CorpusEntry entry)
+          :timeout workerFuzzDuration
+          :warmup (.warmupRun c))]
+
+      (when (!= (.-coverageMask c) nil)
+        (set! (.-coverageData input) (bytes/Clone (.-coverageMask c))))
+
+      (when (.-warmup input)
+        ;; No fuzzing will occur, but it should count toward the limit set by
+        ;; -fuzztime.
+        (set! (.-limit input) 1)
+        (return input true))
+
+
+      (when (> (.-Limit (.-opts c)) 0)
+        (set! (.-limit input) (/ (.-Limit (.-opts c)) (conv int64 (.-Parallel (.-opts c)))))
+        (when (> (% (.-Limit (.-opts c)) (conv int64 (.-Parallel (.-opts c)))) 0)
+          (inc! (.-limit input)))
+
+        (let [remaining (- (.-Limit (.-opts c)) (.-count c) (.-countWaiting c))]
+          (when (> (.-limit input) remaining)
+            (set! (.-limit input) remaining))))
+
+
+      (return input true))))
+
+
+
+^{:go/end 813} (go/method sentInput "sentInput updates internal counters after an input is sent to c.inputC.\n" [^{:tag (* coordinator)} c ^fuzzInput input]
+  (.dequeue (.-inputQueue c))
+  (set! (.-countWaiting c) + (.-limit input)))
+
+
+
+
+^{:go/end 821} (go/method refillInputQueue "refillInputQueue refills the input queue from the corpus after it becomes\nempty.\n" [^{:tag (* coordinator)} c]
+  (range [_ e (.-entries (.-corpus c))]
+    (.enqueue (.-inputQueue c) e)))
+
+
+
+
+
+^{:go/end 845} (go/method queueForMinimization "queueForMinimization creates a fuzzMinimizeInput from result and adds it\nto the minimization queue to be sent to workers.\n" [^{:tag (* coordinator)} c ^fuzzResult result ^{:tag (slice byte)} keepCoverage]
+  (when (shouldPrintDebugInfo)
+    ^{:go/breaks [2]} (.debugLogf c
+      "queueing input for minimization, id: %s, parent: %s, keepCoverage: %t, crasher: %t"
+      (.-Path (.-entry result))
+      (.-Parent (.-entry result))
+      (!= keepCoverage nil)
+      (!= (.-crasherMsg result) "")))
+
+
+  (when (!= (.-crasherMsg result) "")
+    (.clear (.-minimizeQueue c)))
+
+
+  (let [input ^{:go/breaks [2 4 6]} (lit fuzzMinimizeInput
+        :entry (.-entry result)
+        :crasherMsg (.-crasherMsg result)
+        :keepCoverage keepCoverage)]
+
+    (.enqueue (.-minimizeQueue c) input)))
+
+
+
+
+^{:go/end 883} (go/method peekMinimizeInput "peekMinimizeInput returns the next input that should be sent to workers for\nminimization.\n" [^{:tag (* coordinator)} c] :results [fuzzMinimizeInput bool]
+  (when (not (.canMinimize c))
+    ;; Already making the maximum number of calls to the fuzz function.
+    ;; Don't send more inputs right now.
+    (return (lit fuzzMinimizeInput) false))
+
+  (let [(values v ok) (.peek (.-minimizeQueue c))]
+    (when (not ok)
+      (return (lit fuzzMinimizeInput) false))
+
+    (let [input (assert fuzzMinimizeInput v)]
+
+      (when (> (.-MinimizeTimeout (.-opts c)) 0)
+        (set! (.-timeout input) (.-MinimizeTimeout (.-opts c))))
+
+      (cond (> (.-MinimizeLimit (.-opts c)) 0)
+        (set! (.-limit input) (.-MinimizeLimit (.-opts c)))
+        (> (.-Limit (.-opts c)) 0)
+        (if (!= (.-crasherMsg input) "")
+          (set! (.-limit input) (.-Limit (.-opts c)))
+          (do
+            (set! (.-limit input) (/ (.-Limit (.-opts c)) (conv int64 (.-Parallel (.-opts c)))))
+            (when (> (% (.-Limit (.-opts c)) (conv int64 (.-Parallel (.-opts c)))) 0)
+              (inc! (.-limit input))))))
+
+
+
+      (when (> (.-Limit (.-opts c)) 0)
+        (let [remaining (- (.-Limit (.-opts c)) (.-count c) (.-countWaiting c))]
+          (when (> (.-limit input) remaining)
+            (set! (.-limit input) remaining))))
+
+
+      (return input true))))
+
+
+
+
+^{:go/end 890} (go/method sentMinimizeInput "sentMinimizeInput removes an input from the minimization queue after it's\nsent to minimizeC.\n" [^{:tag (* coordinator)} c ^fuzzMinimizeInput input]
+  (.dequeue (.-minimizeQueue c))
+  (set! (.-countWaiting c) + (.-limit input)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 907} (go/method warmupRun "warmupRun returns true while the coordinator is running inputs without\nmutating them as a warmup before fuzzing. This could be to gather baseline\ncoverage data for entries in the corpus, or to test all of the seed corpus\nfor errors before fuzzing begins.\n\nThe coordinator doesn't store coverage data in the cache with each input\nbecause that data would be invalid when counter offsets in the test binary\nchange.\n\nWhen gathering coverage, the coordinator sends each entry to a worker to\ngather coverage for that entry only, without fuzzing or minimizing. This\nphase ends when all workers have finished, and the coordinator has a combined\ncoverage map.\n" ^bool [^{:tag (* coordinator)} c]
+  (> (.-warmupInputLeft c) 0))
+
+
+
+
+
+^{:go/end 923} (go/method updateCoverage "updateCoverage sets bits in c.coverageMask that are set in newCoverage.\nupdateCoverage returns the number of newly set bits. See the comment on\ncoverageMask for the format.\n" ^int [^{:tag (* coordinator)} c ^{:tag (slice byte)} newCoverage]
+  (when (!= (len newCoverage) (len (.-coverageMask c)))
+    (panic (fmt/Sprintf "number of coverage counters changed at runtime: %d, expected %d" (len newCoverage) (len (.-coverageMask c)))))
+
+  (let [newBitCount 0]
+    (range [i newCoverage]
+      (let [diff (bit-and-not (aget newCoverage i) (aget (.-coverageMask c) i))]
+        (set! newBitCount + (bits/OnesCount8 diff))
+        (set! (aget (.-coverageMask c) i) bit-or (aget newCoverage i))))
+
+    ^{:line 922} newBitCount))
+
+
+
+
+^{:go/end 930} (go/method canMinimize "canMinimize returns whether the coordinator should attempt to find smaller\ninputs that reproduce a crash or new coverage.\n" ^bool [^{:tag (* coordinator)} c]
+  (and (.-minimizationAllowed c)
+    ^:go/paren (or (== (.-Limit (.-opts c)) 0) (< (+ (.-count c) (.-countWaiting c)) (.-Limit (.-opts c))))))
+
+
+^{:go/end 934} (go/method elapsed ^time/Duration [^{:tag (* coordinator)} c]
+  (.Round (time/Since (.-startTime c)) (* 1 time/Second)))
+
+
+
+
+
+
+
+^{:go/end 960} (go/method readCache "readCache creates a combined corpus from seed values and values in the cache\n(in GOCACHE/fuzz).\n\nTODO(fuzzing): need a mechanism that can remove values that\naren't useful anymore, for example, because they have the wrong type.\n" ^error [^{:tag (* coordinator)} c]
+  (when [(values _ err) (.addCorpusEntries c false (spread (.-Seed (.-opts c))))] (!= err nil)
+    (return err))
+
+  ^{:go/breaks [[4 959]]} (let [(values entries err) (ReadCorpus (.-CacheDir (.-opts c)) (.-Types (.-opts c)))]
+    (when (!= err nil)
+      (when [(values _ ok) (assert (* MalformedCorpusError) err)] (not ok)
+        ;; It's okay if some files in the cache directory are malformed and
+        ;; are not included in the corpus, but fail if it's an I/O error.
+        (return err)))
+
+    ;; TODO(jayconrod,katiehockman): consider printing some kind of warning
+    ;; indicating the number of files which were skipped because they are
+    ;; malformed.
+
+    (when [(values _ err) (.addCorpusEntries c false (spread entries))] (!= err nil)
+      (return err))
+
+    nil))
+
+
+
+
+
+(go/type MalformedCorpusError "MalformedCorpusError is an error found while reading the corpus from the\nfilesystem. All of the errors are stored in the errs list. The testing\nframework uses this to report malformed files in testdata.\n" (struct
+    ^{:line 966 :tag (slice error)} errs))
+
+
+^{:go/end 975} (go/method Error ^string [^{:tag (* MalformedCorpusError)} e]
+  (let [^{:tag (slice string)} msgs (zero (slice string))]
+    (range [_ s (.-errs e)]
+      (set! msgs (append msgs (.Error s))))
+
+    (strings/Join msgs "\n")))
+
+
+
+
+
+
+^{:go/end 1016} (go/func ReadCorpus "ReadCorpus reads the corpus from the provided dir. The returned corpus\nentries are guaranteed to match the given types. Any malformed files will\nbe saved in a MalformedCorpusError and returned, along with the most recent\nerror.\n" [^string dir ^{:tag (slice reflect/Type)} types] :results [(slice CorpusEntry) error]
+  (let [(values files err) (os/ReadDir dir)]
+    (cond (os/IsNotExist err)
+      (return nil nil) ; No corpus to read
+      (!= err nil)
+      (return nil (fmt/Errorf "reading seed corpus from testdata: %v" err)))
+
+    (let [^{:tag (slice CorpusEntry)} corpus (zero (slice CorpusEntry))
+        ^{:line 989 :tag (slice error)} errs (zero (slice error))]
+      (range [_ file files]
+        ;; TODO(jayconrod,katiehockman): determine when a file is a fuzzing input
+        ;; based on its name. We should only read files created by writeToCorpus.
+        ;; If we read ALL files, we won't be able to change the file format by
+        ;; changing the extension. We also won't be able to add files like
+        ;; README.txt explaining why the directory exists.
+        (when (.IsDir file)
+          (continue))
+
+        (let [filename (filepath/Join dir (.Name file))
+            (values data err) (os/ReadFile filename)]
+          (when (!= err nil)
+            (return nil (fmt/Errorf "failed to read corpus file: %v" err)))
+
+          (let [^{:tag (slice any)} vals (zero (slice any))]
+            (set! (values vals err) (readCorpusData data types))
+            (when (!= err nil)
+              (set! errs (append errs (fmt/Errorf "%q: %v" filename err)))
+              (continue))
+
+            (set! corpus (append corpus (lit CorpusEntry :Path filename :Values vals))))))
+
+      (when (> (len errs) 0)
+        (return corpus (addr (lit MalformedCorpusError :errs errs))))
+
+      (return corpus nil))))
+
+
+^{:go/end 1027} (go/func readCorpusData [^{:tag (slice byte)} data ^{:tag (slice reflect/Type)} types] :results [(slice any) error]
+  (let [(values vals err) (unmarshalCorpusFile data)]
+    (when (!= err nil)
+      (return nil (fmt/Errorf "unmarshal: %v" err)))
+
+    (when [(set! err (CheckCorpus vals types))] (!= err nil)
+      (return nil err))
+
+    (return vals nil)))
+
+
+
+
+^{:go/end 1045} (go/func CheckCorpus "CheckCorpus verifies that the types in vals match the expected types\nprovided.\n" ^error [^{:tag (slice any)} vals ^{:tag (slice reflect/Type)} types]
+  (when (!= (len vals) (len types))
+    (return (fmt/Errorf "wrong number of values in corpus entry: %d, want %d" (len vals) (len types))))
+
+  ^{:go/breaks [[4 1044]]} (let [valsT (make (slice reflect/Type) (len vals))]
+    (range [valsI v vals]
+      (aset valsT valsI (reflect/TypeOf v)))
+
+    (range [i types]
+      (when (!= (aget valsT i) (aget types i))
+        (return (fmt/Errorf "mismatched types in corpus entry: %v, want %v" valsT types))))
+
+
+    nil))
+
+
+
+
+
+
+^{:go/end 1062} (go/func writeToCorpus "writeToCorpus atomically writes the given bytes to a new file in testdata. If\nthe directory does not exist, it will create one. If the file already exists,\nwriteToCorpus will not rewrite it. writeToCorpus sets entry.Path to the new\nfile that was just written or an error if it failed.\n" [^{:tag (* CorpusEntry)} entry ^string dir] :results [^error err]
+  ^{:go/breaks [[5 1061]]} (let [sum (subslice (fmt/Sprintf "%x" (sha256/Sum256 (.-Data entry))) _ 16)]
+    (set! (.-Path entry) (filepath/Join dir sum))
+    (when [err (os/MkdirAll dir 0777)] (!= err nil)
+      (return err))
+
+    (when [err (os/WriteFile (.-Path entry) (.-Data entry) 0666)] (!= err nil)
+      (os/Remove (.-Path entry)) ; remove partially written file
+      (return err))
+
+    nil))
+
+
+^{:go/end 1066} (go/func testName ^string [^string path]
+  (filepath/Base path))
+
+
+^{:go/end 1075} (go/func zeroValue ^any [^reflect/Type t]
+  (range [_ v zeroVals]
+    (when (== (reflect/TypeOf v) t)
+      (return v)))
+
+
+  (panic (fmt/Sprintf "unsupported type: %v" t)))
+
+
+(go/var ^{:tag (slice any)} zeroVals ^{:go/breaks [4]} (lit (slice any)
+    (conv (slice byte) "")
+    (conv string "")
+    false
+    (conv byte 0)
+    (conv rune 0)
+    (conv float32 0)
+    (conv float64 0)
+    (conv int 0)
+    (conv int8 0)
+    (conv int16 0)
+    (conv int32 0)
+    (conv int64 0)
+    (conv uint 0)
+    (conv uint8 0)
+    (conv uint16 0)
+    (conv uint32 0)
+    (conv uint64 0)))
+
+
+(go/var debugInfo (== (.Value (godebug/New "#fuzzdebug")) "1"))
+
+^{:go/end 1101} (go/func shouldPrintDebugInfo ^bool []
+  ^{:line 1100} debugInfo)
+
+
+^{:go/end 1106} (go/method debugLogf [^{:tag (* coordinator)} c ^string format & ^{:tag (slice any)} args]
+  (let [t (.Format (time/Now) "2006-01-02 15:04:05.999999999")]
+    (fmt/Fprintf (.-Log (.-opts c)) (+ t " DEBUG " format "\n") (spread args))))

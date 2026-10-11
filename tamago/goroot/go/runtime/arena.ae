@@ -1,0 +1,1129 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Implementation of (safe) user arenas.
+;;
+;; This file contains the implementation of user arenas wherein Go values can
+;; be manually allocated and freed in bulk. The act of manually freeing memory,
+;; potentially before a GC cycle, means that a garbage collection cycle can be
+;; delayed, improving efficiency by reducing GC cycle frequency. There are other
+;; potential efficiency benefits, such as improved locality and access to a more
+;; efficient allocation strategy.
+;;
+;; What makes the arenas here safe is that once they are freed, accessing the
+;; arena's memory will cause an explicit program fault, and the arena's address
+;; space will not be reused until no more pointers into it are found. There's one
+;; exception to this: if an arena allocated memory that isn't exhausted, it's placed
+;; back into a pool for reuse. This means that a crash is not always guaranteed.
+;;
+;; While this may seem unsafe, it still prevents memory corruption, and is in fact
+;; necessary in order to make new(T) a valid implementation of arenas. Such a property
+;; is desirable to allow for a trivial implementation. (It also avoids complexities
+;; that arise from synchronization with the GC when trying to set the arena chunks to
+;; fault while the GC is active.)
+;;
+;; The implementation works in layers. At the bottom, arenas are managed in chunks.
+;; Each chunk must be a multiple of the heap arena size, or the heap arena size must
+;; be divisible by the arena chunks. The address space for each chunk, and each
+;; corresponding heapArena for that address space, are eternally reserved for use as
+;; arena chunks. That is, they can never be used for the general heap. Each chunk
+;; is also represented by a single mspan, and is modeled as a single large heap
+;; allocation. It must be, because each chunk contains ordinary Go values that may
+;; point into the heap, so it must be scanned just like any other object. Any
+;; pointer into a chunk will therefore always cause the whole chunk to be scanned
+;; while its corresponding arena is still live.
+;;
+;; Chunks may be allocated either from new memory mapped by the OS on our behalf,
+;; or by reusing old freed chunks. When chunks are freed, their underlying memory
+;; is returned to the OS, set to fault on access, and may not be reused until the
+;; program doesn't point into the chunk anymore (the code refers to this state as
+;; "quarantined"), a property checked by the GC.
+;;
+;; The sweeper handles moving chunks out of this quarantine state to be ready for
+;; reuse. When the chunk is placed into the quarantine state, its corresponding
+;; span is marked as noscan so that the GC doesn't try to scan memory that would
+;; cause a fault.
+;;
+;; At the next layer are the user arenas themselves. They consist of a single
+;; active chunk which new Go values are bump-allocated into and a list of chunks
+;; that were exhausted when allocating into the arena. Once the arena is freed,
+;; it frees all full chunks it references, and places the active one onto a reuse
+;; list for a future arena to use. Each arena keeps its list of referenced chunks
+;; explicitly live until it is freed. Each user arena also maps to an object which
+;; has a finalizer attached that ensures the arena's chunks are all freed even if
+;; the arena itself is never explicitly freed.
+;;
+;; Pointer-ful memory is bump-allocated from low addresses to high addresses in each
+;; chunk, while pointer-free memory is bump-allocated from high address to low
+;; addresses. The reason for this is to take advantage of a GC optimization wherein
+;; the GC will stop scanning an object when there are no more pointers in it, which
+;; also allows us to elide clearing the heap bitmap for pointer-free Go values
+;; allocated into arenas.
+;;
+;; Note that arenas are not safe to use concurrently.
+;;
+;; In summary, there are 2 resources: arenas, and arena chunks. They exist in the
+;; following lifecycle:
+;;
+;; (1) A new arena is created via newArena.
+;; (2) Chunks are allocated to hold memory allocated into the arena with new or slice.
+;;    (a) Chunks are first allocated from the reuse list of partially-used chunks.
+;;    (b) If there are no such chunks, then chunks on the ready list are taken.
+;;    (c) Failing all the above, memory for a new chunk is mapped.
+;; (3) The arena is freed, or all references to it are dropped, triggering its finalizer.
+;;    (a) If the GC is not active, exhausted chunks are set to fault and placed on a
+;;        quarantine list.
+;;    (b) If the GC is active, exhausted chunks are placed on a fault list and will
+;;        go through step (a) at a later point in time.
+;;    (c) Any remaining partially-used chunk is placed on a reuse list.
+;; (4) Once no more pointers are found into quarantined arena chunks, the sweeper
+;;     takes these chunks out of quarantine and places them on the ready list.
+
+(in-ns 'go.runtime) (go/file "arena.go" :imports [
+
+
+    ^{:line 86} [abi "internal/abi"]
+    ^{:line 87} [goarch "internal/goarch"]
+    ^{:line 88} [atomic "internal/runtime/atomic"]
+    ^{:line 89} [math "internal/runtime/math"]
+    ^{:line 90} [sys "internal/runtime/sys"]
+    ^{:line 91} [unsafe "unsafe"]])
+
+
+;; Functions starting with arena_ are meant to be exported to downstream users
+;; of arenas. They should wrap these functions in a higher-lever API.
+;;
+;; The underlying arena and its resources are managed through an opaque unsafe.Pointer.
+
+
+
+
+^{:go/end 104} (go/func ^{:go/linkname "arena_newArena arena.runtime_arena_newArena"} arena_newArena "arena_newArena is a wrapper around newUserArena.\n" ^unsafe/Pointer []
+  (conv unsafe/Pointer (newUserArena)))
+
+
+
+
+
+
+
+
+^{:go/end 124} (go/func ^{:go/linkname "arena_arena_New arena.runtime_arena_arena_New"} arena_arena_New "arena_arena_New is a wrapper around (*userArena).new, except that typ\nis an any (must be a *_type, still) and typ must be a type descriptor\nfor a pointer to the type to actually be allocated, i.e. pass a *T\nto allocate a T. This is necessary because this function returns a *T.\n" ^any [^unsafe/Pointer arena ^any typ]
+  (let [t (conv (* _type) (.-data (efaceOf (addr typ))))]
+    (when (!= (.Kind t) abi/Pointer)
+      (throw "arena_New: non-pointer type"))
+
+    (let [te (.-Elem (conv (* ptrtype) (conv unsafe/Pointer t)))
+        ^{:line 118} x (.new (conv (* userArena) arena) te)
+        ^{:line 119 :tag any} result (zero any)
+        ^{:line 120} e (efaceOf (addr result))]
+      (set! (.-_type e) t)
+      (set! (.-data e) x)
+      ^{:line 123} result)))
+
+
+
+
+
+^{:go/end 131} (go/func ^{:go/linkname "arena_arena_Slice arena.runtime_arena_arena_Slice"} arena_arena_Slice "arena_arena_Slice is a wrapper around (*userArena).slice.\n" [^unsafe/Pointer arena ^any slice ^int cap]
+  (.slice (conv (* userArena) arena) slice cap))
+
+
+
+
+
+^{:go/end 138} (go/func ^{:go/linkname "arena_arena_Free arena.runtime_arena_arena_Free"} arena_arena_Free "arena_arena_Free is a wrapper around (*userArena).free.\n" [^unsafe/Pointer arena]
+  (.free (conv (* userArena) arena)))
+
+
+
+
+
+
+^{:go/end 188} (go/func ^{:go/linkname "arena_heapify arena.runtime_arena_heapify"} arena_heapify "arena_heapify takes a value that lives in an arena and makes a copy\nof it on the heap. Values that don't live in an arena are returned unmodified.\n" ^any [^any s]
+  (let [^unsafe/Pointer v (zero unsafe/Pointer)
+      ^{:line 146} e (efaceOf (addr s))
+      ^{:line 147} t (.-_type e)]
+    (switch (.Kind t)
+      (case [abi/String]
+        (set! v (.-str (stringStructOf (conv (* string) (.-data e))))))
+      (case [abi/Slice]
+        (set! v (.-array (conv (* slice) (.-data e)))))
+      (case [abi/Pointer]
+        (set! v (.-data e)))
+      (default
+        (panic "arena: Clone only supports pointers, slices, and strings")))
+
+    (let [span (spanOf (conv uintptr v))]
+      (when (or (== span nil) (not (.-isUserArenaChunk span)))
+        ;; Not stored in a user arena chunk.
+        (return s))
+
+      ;; Heap-allocate storage for a copy.
+      (let [^any x (zero any)]
+        (switch (.Kind t)
+          (case [abi/String]
+            (let [s1 (assert string s)
+                (values s2 b) (rawstring (len s1))]
+              (copy b s1)
+              (set! x s2)))
+          (case [abi/Slice]
+            (let [len (.-len (conv (* slice) (.-data e)))
+                ^{:line 173} et (.-Elem (conv (* slicetype) (conv unsafe/Pointer t)))
+                ^{:line 174} sl (new slice)]
+              (set! @sl (lit slice (makeslicecopy et len len (.-array (conv (* slice) (.-data e)))) len len))
+              (let [xe (efaceOf (addr x))]
+                (set! (.-_type xe) t)
+                (set! (.-data xe) (conv unsafe/Pointer sl)))))
+          (case [abi/Pointer]
+            (let [et (.-Elem (conv (* ptrtype) (conv unsafe/Pointer t)))
+                ^{:line 181} e2 (newobject et)]
+              (typedmemmove et e2 (.-data e))
+              (let [xe (efaceOf (addr x))]
+                (set! (.-_type xe) t)
+                (set! (.-data xe) e2)))))
+
+        ^{:line 187} x))))
+
+
+(go/const
+
+  ^{:line 192} [^{:val 8388608 :doc "userArenaChunkBytes is the size of a user arena chunk.\n"} userArenaChunkBytesMax (<< 8 20)]
+  ^{:line 193} [^{:val 4194304} userArenaChunkBytes (conv uintptr (+ (bit-and (conv int64 (- userArenaChunkBytesMax heapArenaBytes)) (>> (conv int64 (- userArenaChunkBytesMax heapArenaBytes)) 63)) heapArenaBytes))] ; min(userArenaChunkBytesMax, heapArenaBytes)
+
+
+  ^{:line 196} [^{:val 512 :doc "userArenaChunkPages is the number of pages a user arena chunk uses.\n"} userArenaChunkPages (/ userArenaChunkBytes pageSize)]
+
+
+
+
+
+  ^{:line 202} [^{:val 1048576 :doc "userArenaChunkMaxAllocBytes is the maximum size of an object that can\nbe allocated from an arena. This number is chosen to cap worst-case\nfragmentation of user arenas to 25%. Larger allocations are redirected\nto the heap.\n"} userArenaChunkMaxAllocBytes (/ userArenaChunkBytes 4)])
+
+
+^{:go/end 222} (go/func init []
+  (when (!= (* userArenaChunkPages pageSize) userArenaChunkBytes)
+    (throw "user arena chunk size is not a multiple of the page size"))
+
+  (when (!= (% userArenaChunkBytes physPageSize) 0)
+    (throw "user arena chunk size is not a multiple of the physical page size"))
+
+  (if (< userArenaChunkBytes heapArenaBytes)
+    (when (!= (% heapArenaBytes userArenaChunkBytes) 0)
+      (throw "user arena chunk size is smaller than a heap arena, but doesn't divide it"))
+
+    (do
+      (when (!= (% userArenaChunkBytes heapArenaBytes) 0)
+        (throw "user arena chunks size is larger than a heap arena, but not a multiple"))))
+
+
+  (lockInit (addr (.-lock userArenaState)) lockRankUserArenaState))
+
+
+
+
+^{:go/end 232} (go/func userArenaChunkReserveBytes "userArenaChunkReserveBytes returns the amount of additional bytes to reserve for\nheap metadata.\n" ^uintptr []
+  ;; In the allocation headers experiment, we reserve the end of the chunk for
+  ;; a pointer/scalar bitmap. We also reserve space for a dummy _type that
+  ;; refers to the bitmap. The PtrBytes field of the dummy _type indicates how
+  ;; many of those bits are valid.
+  (+ (/ userArenaChunkBytes goarch/PtrSize 8) (unsafe/Sizeof (lit _type))))
+
+
+(go/type userArena (struct
+
+
+
+
+    ^{:line 239 :tag (* mspan) :doc "fullList is a list of full chunks that have not enough free memory left, and\nthat we'll free once this user arena is freed.\n\nCan't use mSpanList here because it's not-in-heap.\n"} fullList
+
+
+    ^{:line 242 :tag (* mspan) :doc "active is the user arena chunk we're currently allocating into.\n"} active
+
+
+
+
+
+
+
+
+
+    ^{:line 252 :tag (slice unsafe/Pointer) :doc "refs is a set of references to the arena chunks so that they're kept alive.\n\nThe last reference in the list always refers to active, while the rest of\nthem correspond to fullList. Specifically, the head of fullList is the\nsecond-to-last one, fullList.next is the third-to-last, and so on.\n\nIn other words, every time a new chunk becomes active, its appended to this\nlist.\n"} refs
+
+
+
+
+
+    ^{:line 258 :tag atomic/Bool :doc "defunct is true if free has been called on this arena.\n\nThis is just a best-effort way to discover a concurrent allocation\nand free. Also used to detect a double-free.\n"} defunct))
+
+
+
+^{:go/end 272} (go/func newUserArena "newUserArena creates a new userArena ready to be used.\n" ^{:tag (* userArena)} []
+  (let [a (new userArena)]
+    (SetFinalizer a ^{:go/end 269} (fn [^{:tag (* userArena)} a]
+        ;; If arena handle is dropped without being freed, then call
+        ;; free on the arena, so the arena chunks are never reclaimed
+        ;; by the garbage collector.
+        (.free a)))
+
+    (.refill a)
+    ^{:line 271} a))
+
+
+
+
+
+
+
+^{:go/end 281} (go/method new "new allocates a new object of the provided type into the arena, and returns\nits pointer.\n\nThis operation is not safe to call concurrently with other operations on the\nsame arena.\n" ^unsafe/Pointer [^{:tag (* userArena)} a ^{:tag (* _type)} typ]
+  (.alloc a typ -1))
+
+
+
+
+
+
+
+
+
+^{:go/end 307} (go/method slice "slice allocates a new slice backing store. slice must be a pointer to a slice\n(i.e. *[]T), because userArenaSlice will update the slice directly.\n\ncap determines the capacity of the slice backing store and must be non-negative.\n\nThis operation is not safe to call concurrently with other operations on the\nsame arena.\n" [^{:tag (* userArena)} a ^any sl ^int cap]
+  (when (< cap 0)
+    (panic "userArena.slice: negative cap"))
+
+  (let [i (efaceOf (addr sl))
+      ^{:line 295} typ (.-_type i)]
+    (when (!= (.Kind typ) abi/Pointer)
+      (panic "slice result of non-ptr type"))
+
+    (set! typ (.-Elem (conv (* ptrtype) (conv unsafe/Pointer typ))))
+    (when (!= (.Kind typ) abi/Slice)
+      (panic "slice of non-ptr-to-slice type"))
+
+    (set! typ (.-Elem (conv (* slicetype) (conv unsafe/Pointer typ))))
+    ;; t is now the element type of the slice we want to allocate.
+
+    (set! @(conv (* slice) (.-data i)) (lit slice (.alloc a typ cap) cap cap))))
+
+
+
+
+
+
+
+
+^{:go/end 361} (go/method free "free returns the userArena's chunks back to mheap and marks it as defunct.\n\nMust be called at most once for any given arena.\n\nThis operation is not safe to call concurrently with other operations on the\nsame arena.\n" [^{:tag (* userArena)} a]
+  ;; Check for a double-free.
+  (when (.Load (.-defunct a))
+    (panic "arena double free"))
+
+
+  ;; Mark ourselves as defunct.
+  (.Store (.-defunct a) true)
+  (SetFinalizer a nil)
+
+  ;; Free all the full arenas.
+  ;;
+  ;; The refs on this list are in reverse order from the second-to-last.
+  (let [s (.-fullList a)
+      ^{:line 329} i (- (len (.-refs a)) 2)]
+    (while (!= s nil)
+      (set! (.-fullList a) (.-next s))
+      (set! (.-next s) nil)
+      (freeUserArenaChunk s (aget (.-refs a) i))
+      (set! s (.-fullList a))
+      (dec! i))
+
+    (when (or (!= (.-fullList a) nil) (>= i 0))
+      ;; There's still something left on the full list, or we
+      ;; failed to actually iterate over the entire refs list.
+      (throw "full list doesn't match refs list in length"))
+
+
+    ;; Put the active chunk onto the reuse list.
+    ;;
+    ;; Note that active's reference is always the last reference in refs.
+    (set! s (.-active a))
+    (when (!= s nil)
+      (if (or raceenabled msanenabled asanenabled)
+        ;; Don't reuse arenas with sanitizers enabled. We want to catch
+        ;; any use-after-free errors aggressively.
+        (freeUserArenaChunk s (aget (.-refs a) (- (len (.-refs a)) 1)))
+        (do
+          (lock (addr (.-lock userArenaState)))
+          (set! (.-reuse userArenaState) (append (.-reuse userArenaState) (lit liveUserArenaChunk s (aget (.-refs a) (- (len (.-refs a)) 1)))))
+          (unlock (addr (.-lock userArenaState))))))
+
+
+    ;; nil out a.active so that a race with freeing will more likely cause a crash.
+    (set! (.-active a) nil)
+    (set! (.-refs a) nil)))
+
+
+
+
+
+
+^{:go/end 378} (go/method alloc "alloc reserves space in the current chunk or calls refill and reserves space\nin a new chunk. If cap is negative, the type will be taken literally, otherwise\nit will be considered as an element type for a slice backing store with capacity\ncap.\n" ^unsafe/Pointer [^{:tag (* userArena)} a ^{:tag (* _type)} typ ^int cap]
+  (let [s (.-active a)
+      ^{:line 369 :tag unsafe/Pointer} x (zero unsafe/Pointer)]
+    (while true
+      (set! x (.userArenaNextFree s typ cap))
+      (when (!= x nil)
+        (break))
+
+      (set! s (.refill a)))
+
+    ^{:line 377} x))
+
+
+
+
+^{:go/end 422} (go/method refill "refill inserts the current arena chunk onto the full list and obtains a new\none, either from the partial list or allocating a new one, both from mheap.\n" ^{:tag (* mspan)} [^{:tag (* userArena)} a]
+  ;; If there's an active chunk, assume it's full.
+  (let [s (.-active a)]
+    (when (!= s nil)
+      (when (> (.size (.-userArenaChunkFree s)) userArenaChunkMaxAllocBytes)
+        ;; It's difficult to tell when we're actually out of memory
+        ;; in a chunk because the allocation that failed may still leave
+        ;; some free space available. However, that amount of free space
+        ;; should never exceed the maximum allocation size.
+        (throw "wasted too much memory in an arena chunk"))
+
+      (set! (.-next s) (.-fullList a))
+      (set! (.-fullList a) s)
+      (set! (.-active a) nil)
+      (set! s nil))
+
+    (let [^unsafe/Pointer x (zero unsafe/Pointer)]
+
+      ;; Check the partially-used list.
+      (lock (addr (.-lock userArenaState)))
+      (when (> (len (.-reuse userArenaState)) 0)
+        ;; Pick off the last arena chunk from the list.
+        (let [n (- (len (.-reuse userArenaState)) 1)]
+          (set! x (.-x (aget (.-reuse userArenaState) n)))
+          (set! s (.-mspan (aget (.-reuse userArenaState) n)))
+          (set! (.-x (aget (.-reuse userArenaState) n)) nil)
+          (set! (.-mspan (aget (.-reuse userArenaState) n)) nil)
+          (set! (.-reuse userArenaState) (subslice (.-reuse userArenaState) _ n))))
+
+      (unlock (addr (.-lock userArenaState)))
+      (when (== s nil)
+        ;; Allocate a new one.
+        (set! (values x s) (newUserArenaChunk))
+        (when (== s nil)
+          (throw "out of memory")))
+
+
+      (set! (.-refs a) (append (.-refs a) x))
+      (set! (.-active a) s)
+      ^{:line 421} s)))
+
+
+(go/type liveUserArenaChunk (struct
+    (* mspan) ; Must represent a user arena chunk.
+
+
+    ^{:line 428 :tag unsafe/Pointer :doc "Reference to mspan.base() to keep the chunk alive.\n"} x))
+
+
+(go/var ^{:tag (struct ^mutex lock ^{:tag (slice liveUserArenaChunk) :doc "reuse contains a list of partially-used and already-live\nuser arena chunks that can be quickly reused for another\narena.\n\nProtected by lock.\n"} reuse ^{:tag (slice liveUserArenaChunk) :doc "fault contains full user arena chunks that need to be faulted.\n\nProtected by lock.\n"} fault)} userArenaState)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 534} (go/method userArenaNextFree "userArenaNextFree reserves space in the user arena for an item of the specified\ntype. If cap is not -1, this is for an array of cap elements of type t.\n" ^unsafe/Pointer [^{:tag (* mspan)} s ^{:tag (* _type)} typ ^int cap]
+  (let [size (.-Size_ typ)]
+    (when (> cap 0)
+      (when (> size (/ (bit-not (conv uintptr 0)) (conv uintptr cap)))
+        ;; Overflow.
+        (throw "out of memory"))
+
+      (set! size * (conv uintptr cap)))
+
+    (when (or (== size 0) (== cap 0))
+      (return (conv unsafe/Pointer (addr zerobase))))
+
+    (when (> size userArenaChunkMaxAllocBytes)
+      ;; Redirect allocations that don't fit into a chunk well directly
+      ;; from the heap.
+      (when (>= cap 0)
+        (return (newarray typ cap)))
+
+      (return (newobject typ)))
+
+
+    ;; Prevent preemption as we set up the space for a new object.
+    ;;
+    ;; Act like we're allocating.
+    (let [mp (acquirem)]
+      (when (!= (.-mallocing mp) 0)
+        (throw "malloc deadlock"))
+
+      (when (== (.-gsignal mp) (getg))
+        (throw "malloc during signal"))
+
+      (set! (.-mallocing mp) 1)
+
+      (let [^unsafe/Pointer ptr (zero unsafe/Pointer)]
+        (if (not (.Pointers typ))
+          ;; Allocate pointer-less objects from the tail end of the chunk.
+          (let [(values v ok) (.takeFromBack (.-userArenaChunkFree s) size (.-Align_ typ))]
+            (when ok
+              (set! ptr (conv unsafe/Pointer v))))
+
+
+          (let [(values v ok) (.takeFromFront (.-userArenaChunkFree s) size (.-Align_ typ))]
+            (when ok
+              (set! ptr (conv unsafe/Pointer v)))))
+
+
+        (when (== ptr nil)
+          ;; Failed to allocate.
+          (set! (.-mallocing mp) 0)
+          (releasem mp)
+          (return nil))
+
+        (when (!= (.-needzero s) 0)
+          (throw "arena chunk needs zeroing, but should already be zeroed"))
+
+        ;; Set up heap bitmap and do extra accounting.
+        (when (.Pointers typ)
+          (if (>= cap 0)
+            (userArenaHeapBitsSetSliceType typ cap ptr s)
+
+            (userArenaHeapBitsSetType typ ptr s))
+
+          (let [c (getMCache mp)]
+            (when (== c nil)
+              (throw "mallocgc called without a P or outside bootstrapping"))
+
+            (if (> cap 0)
+              (set! (.-scanAlloc c) + (- size (- (.-Size_ typ) (.-PtrBytes typ))))
+
+              (set! (.-scanAlloc c) + (.-PtrBytes typ)))))
+
+
+
+        ;; Ensure that the stores above that initialize x to
+        ;; type-safe memory and set the heap bits occur before
+        ;; the caller can make ptr observable to the garbage
+        ;; collector. Otherwise, on weakly ordered machines,
+        ;; the garbage collector could follow a pointer to x,
+        ;; but see uninitialized memory or stale heap bits.
+        (publicationBarrier)
+
+        (set! (.-mallocing mp) 0)
+        (releasem mp)
+
+        ^{:line 533} ptr))))
+
+
+
+
+
+^{:go/end 547} (go/func userArenaHeapBitsSetSliceType "userArenaHeapBitsSetSliceType is the equivalent of heapBitsSetType but for\nGo slice backing store values allocated in a user arena chunk. It sets up the\nheap bitmap for n consecutive values with type typ allocated at address ptr.\n" [^{:tag (* _type)} typ ^int n ^unsafe/Pointer ptr ^{:tag (* mspan)} s]
+  (let [(values mem overflow) (math/MulUintptr (.-Size_ typ) (conv uintptr n))]
+    (when (or overflow (< n 0) (> mem maxAlloc))
+      (panic (conv plainError "runtime: allocation size out of range")))
+
+    (for [i 0] (< i n) (inc! i)
+      (userArenaHeapBitsSetType typ (add ptr (* (conv uintptr i) (.-Size_ typ))) s))))
+
+
+
+
+
+
+
+^{:go/end 591} (go/func userArenaHeapBitsSetType "userArenaHeapBitsSetType is the equivalent of heapSetType but for\nnon-slice-backing-store Go values allocated in a user arena chunk. It\nsets up the type metadata for the value with type typ allocated at address ptr.\nbase is the base address of the arena chunk.\n" [^{:tag (* _type)} typ ^unsafe/Pointer ptr ^{:tag (* mspan)} s]
+  (let [base (.base s)
+      ^{:line 555} h (.writeUserArenaHeapBits s (conv uintptr ptr))
+
+      ^{:line 557} p (getGCMask typ) ; start of 1-bit pointer mask
+      ^{:line 558} nb (/ (.-PtrBytes typ) goarch/PtrSize)]
+
+    (for [i (conv uintptr 0)] (< i nb) (set! i + ptrBits)
+      (let [k (- nb i)]
+        (when (> k ptrBits)
+          (set! k ptrBits))
+
+        ;; N.B. On big endian platforms we byte swap the data that we
+        ;; read from GCData, which is always stored in little-endian order
+        ;; by the compiler. writeUserArenaHeapBits handles data in
+        ;; a platform-ordered way for efficiency, but stores back the
+        ;; data in little endian order, since we expose the bitmap through
+        ;; a dummy type.
+        (set! h (.write h s (readUintptr (addb p (/ i 8))) k))))
+
+    ;; Note: we call pad here to ensure we emit explicit 0 bits
+    ;; for the pointerless tail of the object. This ensures that
+    ;; there's only a single noMorePtrs mark for the next object
+    ;; to clear. We don't need to do this to clear stale noMorePtrs
+    ;; markers from previous uses because arena chunk pointer bitmaps
+    ;; are always fully cleared when reused.
+    (set! h (.pad h s (- (.-Size_ typ) (.-PtrBytes typ))))
+    (.flush h s (conv uintptr ptr) (.-Size_ typ))
+
+    ;; Update the PtrBytes value in the type information. After this
+    ;; point, the GC will observe the new bitmap.
+    (set! (.-PtrBytes (.-largeType s)) (+ (- (conv uintptr ptr) base) (.-PtrBytes typ)))
+
+    ;; Double-check that the bitmap was written out correctly.
+    (let [^:const ^{:val false} doubleCheck false]
+      (when doubleCheck
+        (doubleCheckHeapPointersInterior (conv uintptr ptr) (conv uintptr ptr) (.-Size_ typ) (.-Size_ typ) typ (addr (.-largeType s)) s)))))
+
+
+
+(go/type writeUserArenaHeapBits (struct
+    ^{:line 594 :tag uintptr} offset ; offset in span that the low bit of mask represents the pointer state of.
+    ^{:line 595 :tag uintptr} mask ; some pointer bits starting at the address addr.
+    ^{:line 596 :tag uintptr} valid ; number of bits in buf that are valid (including low)
+    ^{:line 597 :tag uintptr} low)) ; number of low-order bits to not overwrite
+
+
+^{:go/end 616} (go/method writeUserArenaHeapBits [^{:tag (* mspan)} s ^uintptr addr] :results [^writeUserArenaHeapBits h]
+  (let [offset (- addr (.base s))]
+
+    ;; We start writing bits maybe in the middle of a heap bitmap word.
+    ;; Remember how many bits into the word we started, so we can be sure
+    ;; not to overwrite the previous bits.
+    (set! (.-low h) (% (/ offset goarch/PtrSize) ptrBits))
+
+    ;; round down to heap word that starts the bitmap word.
+    (set! (.-offset h) (- offset (* (.-low h) goarch/PtrSize)))
+
+    ;; We don't have any bits yet.
+    (set! (.-mask h) 0)
+    (set! (.-valid h) (.-low h))
+
+    (return)))
+
+
+
+
+^{:go/end 648} (go/method write "write appends the pointerness of the next valid pointer slots\nusing the low valid bits of bits. 1=pointer, 0=scalar.\n" ^writeUserArenaHeapBits [^writeUserArenaHeapBits h ^{:tag (* mspan)} s ^uintptr bits ^uintptr valid]
+  (when (<= (+ (.-valid h) valid) ptrBits)
+    ;; Fast path - just accumulate the bits.
+    (set! (.-mask h) bit-or (<< bits (.-valid h)))
+    (set! (.-valid h) + valid)
+    (return h))
+
+  ;; Too many bits to fit in this word. Write the current word
+  ;; out and move on to the next word.
+
+  (let [data (bit-or (.-mask h) (<< bits (.-valid h)))] ; mask for this word
+    (set! (.-mask h) (>> bits (- ptrBits (.-valid h)))) ; leftover for next word
+    (set! (.-valid h) + (- valid ptrBits)) ; have h.valid+valid bits, writing ptrBits of them
+
+    ;; Flush mask to the memory bitmap.
+    (let [idx (/ (.-offset h) (* ptrBits goarch/PtrSize))
+        ^{:line 636} m (- (<< (conv uintptr 1) (.-low h)) 1)
+        ^{:line 637} bitmap (.heapBits s)]
+      (aset bitmap idx (bswapIfBigEndian (bit-or (bit-and (bswapIfBigEndian (aget bitmap idx)) m) data)))
+      ;; Note: no synchronization required for this write because
+      ;; the allocator has exclusive access to the page, and the bitmap
+      ;; entries are all for a single page. Also, visibility of these
+      ;; writes is guaranteed by the publication barrier in mallocgc.
+
+      ;; Move to next word of bitmap.
+      (set! (.-offset h) + (* ptrBits goarch/PtrSize))
+      (set! (.-low h) 0)
+      ^{:line 647} h)))
+
+
+
+^{:go/end 661} (go/method pad "Add padding of size bytes.\n" ^writeUserArenaHeapBits [^writeUserArenaHeapBits h ^{:tag (* mspan)} s ^uintptr size]
+  (when (== size 0)
+    (return h))
+
+  (let [words (/ size goarch/PtrSize)]
+    (while (> words ptrBits)
+      (set! h (.write h s 0 ptrBits))
+      (set! words - ptrBits))
+
+    (.write h s 0 words)))
+
+
+
+
+^{:go/end 720} (go/method flush "Flush the bits that have been written, and add zeros as needed\nto cover the full object [addr, addr+size).\n" [^writeUserArenaHeapBits h ^{:tag (* mspan)} s ^uintptr addr ^uintptr size]
+  (let [offset (- addr (.base s))
+
+      ;; zeros counts the number of bits needed to represent the object minus the
+      ;; number of bits we've already written. This is the number of 0 bits
+      ;; that need to be added.
+      ^{:line 671} zeros (- (/ (- (+ offset size) (.-offset h)) goarch/PtrSize) (.-valid h))]
+
+    ;; Add zero bits up to the bitmap word boundary
+    (when (> zeros 0)
+      (let [z (- ptrBits (.-valid h))]
+        (when (> z zeros)
+          (set! z zeros))
+
+        (set! (.-valid h) + z)
+        (set! zeros - z)))
+
+
+    ;; Find word in bitmap that we're going to write.
+    (let [bitmap (.heapBits s)
+        ^{:line 685} idx (/ (.-offset h) (* ptrBits goarch/PtrSize))]
+
+      ;; Write remaining bits.
+      (when (!= (.-valid h) (.-low h))
+        (let [m (- (<< (conv uintptr 1) (.-low h)) 1)] ; don't clear existing bits below "low"
+          (set! m bit-or (bit-not (- (<< (conv uintptr 1) (.-valid h)) 1))) ; don't clear existing bits above "valid"
+          (aset bitmap idx (bswapIfBigEndian (bit-or (bit-and (bswapIfBigEndian (aget bitmap idx)) m) (.-mask h))))))
+
+      (when (== zeros 0)
+        (return))
+
+
+      ;; Advance to next bitmap word.
+      (set! (.-offset h) + (* ptrBits goarch/PtrSize))
+
+      ;; Continue on writing zeros for the rest of the object.
+      ;; For standard use of the ptr bits this is not required, as
+      ;; the bits are read from the beginning of the object. Some uses,
+      ;; like noscan spans, oblets, bulk write barriers, and cgocheck, might
+      ;; start mid-object, so these writes are still required.
+      (while true
+        ;; Write zero bits.
+        (let [idx (/ (.-offset h) (* ptrBits goarch/PtrSize))]
+          (cond (< zeros ptrBits) (do
+              (aset bitmap idx (bswapIfBigEndian (bit-and-not (bswapIfBigEndian (aget bitmap idx)) (- (<< (conv uintptr 1) zeros) 1))))
+              (break))
+            (== zeros ptrBits) (do
+              (aset bitmap idx 0)
+              (break)) :else
+            (do
+              (aset bitmap idx 0)
+              (set! zeros - ptrBits)))
+
+          (set! (.-offset h) + (* ptrBits goarch/PtrSize)))))))
+
+
+
+
+
+^{:go/end 732} (go/func bswapIfBigEndian "bswapIfBigEndian swaps the byte order of the uintptr on goarch.BigEndian platforms,\nand leaves it alone elsewhere.\n" ^uintptr [^uintptr x]
+  (when goarch/BigEndian
+    (when (== goarch/PtrSize 8)
+      (return (conv uintptr (sys/Bswap64 (conv uint64 x)))))
+
+    (return (conv uintptr (sys/Bswap32 (conv uint32 x)))))
+
+  ^{:line 731} x)
+
+
+
+
+
+^{:go/end 834} (go/func newUserArenaChunk "newUserArenaChunk allocates a user arena chunk, which maps to a single\nheap arena and single span. Returns a pointer to the base of the chunk\n(this is really important: we need to keep the chunk alive) and the span.\n" [] :results [unsafe/Pointer (* mspan)]
+  (when (== gcphase _GCmarktermination)
+    (throw "newUserArenaChunk called with gcphase == _GCmarktermination"))
+
+
+  ;; Deduct assist credit. Because user arena chunks are modeled as one
+  ;; giant heap object which counts toward heapLive, we're obligated to
+  ;; assist the GC proportionally (and it's worth noting that the arena
+  ;; does represent additional work for the GC, but we also have no idea
+  ;; what that looks like until we actually allocate things into the
+  ;; arena).
+  (when (!= gcBlackenEnabled 0)
+    (deductAssistCredit userArenaChunkBytes))
+
+
+  ;; Set mp.mallocing to keep from being preempted by GC.
+  (let [mp (acquirem)]
+    (when (!= (.-mallocing mp) 0)
+      (throw "malloc deadlock"))
+
+    (when (== (.-gsignal mp) (getg))
+      (throw "malloc during signal"))
+
+    (set! (.-mallocing mp) 1)
+
+    ;; Allocate a new user arena.
+    (let [^{:tag (* mspan)} span (zero (* mspan))]
+      (systemstack ^{:go/end 766} (fn []
+          (set! span (.allocUserArenaChunk mheap_))))
+
+      (when (== span nil)
+        (throw "out of memory"))
+
+      (let [x (conv unsafe/Pointer (.base span))]
+
+        ;; Allocate black during GC.
+        ;; All slots hold nil so no scanning is needed.
+        ;; This may be racing with GC so do it atomically if there can be
+        ;; a race marking the bit.
+        (when (!= gcphase _GCoff)
+          (gcmarknewobject span (.base span)))
+
+
+        (when raceenabled
+          ;; TODO(mknyszek): Track individual objects.
+          (racemalloc (conv unsafe/Pointer (.base span)) (.-elemsize span)))
+
+
+        (when msanenabled
+          ;; TODO(mknyszek): Track individual objects.
+          (msanmalloc (conv unsafe/Pointer (.base span)) (.-elemsize span)))
+
+
+        (when asanenabled
+          ;; TODO(mknyszek): Track individual objects.
+          ;; N.B. span.elemsize includes a redzone already.
+          (let [rzStart (+ (.base span) (.-elemsize span))]
+            (asanpoison (conv unsafe/Pointer rzStart) (- (.-limit span) rzStart))
+            (asanunpoison (conv unsafe/Pointer (.base span)) (.-elemsize span))))
+
+
+        (when [rate MemProfileRate] (> rate 0)
+          (let [c (getMCache mp)]
+            (when (== c nil)
+              (throw "newUserArenaChunk called without a P or outside bootstrapping"))
+
+            ;; Note cache c only valid while m acquired; see #47302
+            (if (and (!= rate 1) (< (conv int64 userArenaChunkBytes) (.-nextSample c)))
+              (set! (.-nextSample c) - (conv int64 userArenaChunkBytes))
+
+              (profilealloc mp (conv unsafe/Pointer (.base span)) userArenaChunkBytes))))
+
+
+        (set! (.-mallocing mp) 0)
+        (releasem mp)
+
+        ;; Again, because this chunk counts toward heapLive, potentially trigger a GC.
+        (when [t (lit gcTrigger :kind gcTriggerHeap)] (.test t)
+          (gcStart t))
+
+
+        (when (.-malloc debug)
+          (when (and (.-active inittrace) (== (.-id inittrace) (.-goid (getg))))
+            ;; Init functions are executed sequentially in a single goroutine.
+            (set! (.-bytes inittrace) + (conv uint64 userArenaChunkBytes))))
+
+
+
+        ;; Double-check it's aligned to the physical page size. Based on the current
+        ;; implementation this is trivially true, but it need not be in the future.
+        ;; However, if it's not aligned to the physical page size then we can't properly
+        ;; set it to fault later.
+        (when (!= (% (conv uintptr x) physPageSize) 0)
+          (throw "user arena chunk is not aligned to the physical page size"))
+
+
+        (return x span)))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 848} (go/method isUnusedUserArenaChunk "isUnusedUserArenaChunk indicates that the arena chunk has been set to fault\nand doesn't contain any scannable memory anymore. However, it might still be\nmSpanInUse as it sits on the quarantine list, since it needs to be swept.\n\nThis is not safe to execute unless the caller has ownership of the mspan or\nthe world is stopped (preemption is prevented while the relevant state changes).\n\nThis is really only meant to be used by accounting tests in the runtime to\ndistinguish when a span shouldn't be counted (since mSpanInUse might not be\nenough).\n" ^bool [^{:tag (* mspan)} s]
+  (and (.-isUserArenaChunk s) (== (.-spanclass s) (makeSpanClass 0 true))))
+
+
+
+
+
+
+
+^{:go/end 918} (go/method setUserArenaChunkToFault "setUserArenaChunkToFault sets the address space for the user arena chunk to fault\nand releases any underlying memory resources.\n\nMust be in a non-preemptible state to ensure the consistency of statistics\nexported to MemStats.\n" [^{:tag (* mspan)} s]
+  (when (not (.-isUserArenaChunk s))
+    (throw "invalid span in heapArena for user arena"))
+
+  (when (!= (* (.-npages s) pageSize) userArenaChunkBytes)
+    (throw "span on userArena.faultList has invalid size"))
+
+
+  ;; Update the span class to be noscan. What we want to happen is that
+  ;; any pointer into the span keeps it from getting recycled, so we want
+  ;; the mark bit to get set, but we're about to set the address space to fault,
+  ;; so we have to prevent the GC from scanning this memory.
+  ;;
+  ;; It's OK to set it here because (1) a GC isn't in progress, so the scanning code
+  ;; won't make a bad decision, (2) we're currently non-preemptible and in the runtime,
+  ;; so a GC is blocked from starting. We might race with sweeping, which could
+  ;; put it on the "wrong" sweep list, but really don't care because the chunk is
+  ;; treated as a large object span and there's no meaningful difference between scan
+  ;; and noscan large objects in the sweeper. The STW at the start of the GC acts as a
+  ;; barrier for this update.
+  (set! (.-spanclass s) (makeSpanClass 0 true))
+
+  ;; Actually set the arena chunk to fault, so we'll get dangling pointer errors.
+  ;; sysFault currently uses a method on each OS that forces it to evacuate all
+  ;; memory backing the chunk.
+  (sysFault (conv unsafe/Pointer (.base s)) (* (.-npages s) pageSize))
+
+  ;; Everything on the list is counted as in-use, however sysFault transitions to
+  ;; Reserved, not Prepared, so we skip updating heapFree or heapReleased and just
+  ;; remove the memory from the total altogether; it's just address space now.
+  (.add (.-heapInUse gcController) (- (conv int64 (* (.-npages s) pageSize))))
+
+  ;; Count this as a free of an object right now as opposed to when
+  ;; the span gets off the quarantine list. The main reason is so that the
+  ;; amount of bytes allocated doesn't exceed how much is counted as
+  ;; "mapped ready," which could cause a deadlock in the pacer.
+  (.Add (.-totalFree gcController) (conv int64 (.-elemsize s)))
+
+  ;; Update consistent stats to match.
+  ;;
+  ;; We're non-preemptible, so it's safe to update consistent stats (our P
+  ;; won't change out from under us).
+  (let [stats (.acquire (.-heapStats memstats))]
+    (atomic/Xaddint64 (addr (.-committed stats)) (- (conv int64 (* (.-npages s) pageSize))))
+    (atomic/Xaddint64 (addr (.-inHeap stats)) (- (conv int64 (* (.-npages s) pageSize))))
+    (atomic/Xadd64 (addr (.-largeFreeCount stats)) 1)
+    (atomic/Xadd64 (addr (.-largeFree stats)) (conv int64 (.-elemsize s)))
+    (.release (.-heapStats memstats))
+
+    ;; This counts as a free, so update heapLive.
+    (.update gcController (- (conv int64 (.-elemsize s))) 0)
+
+    ;; Mark it as free for the race detector.
+    (when raceenabled
+      (racefree (conv unsafe/Pointer (.base s)) (.-elemsize s)))
+
+
+    (systemstack ^{:go/end 917} (fn []
+        ;; Add the user arena to the quarantine list.
+        (lock (addr (.-lock mheap_)))
+        (.insert (.-quarantineList (.-userArena mheap_)) s)
+        (unlock (addr (.-lock mheap_)))))))
+
+
+
+
+^{:go/end 927} (go/func inUserArenaChunk "inUserArenaChunk returns true if p points to a user arena chunk.\n" ^bool [^uintptr p]
+  (let [s (spanOf p)]
+    (when (== s nil)
+      (return false))
+
+    (.-isUserArenaChunk s)))
+
+
+
+
+
+
+
+
+
+^{:go/end 986} (go/func freeUserArenaChunk "freeUserArenaChunk releases the user arena represented by s back to the runtime.\n\nx must be a live pointer within s.\n\nThe runtime will set the user arena to fault once it's safe (the GC is no longer running)\nand then once the user arena is no longer referenced by the application, will allow it to\nbe reused.\n" [^{:tag (* mspan)} s ^unsafe/Pointer x]
+  (when (not (.-isUserArenaChunk s))
+    (throw "span is not for a user arena"))
+
+  (when (!= (* (.-npages s) pageSize) userArenaChunkBytes)
+    (throw "invalid user arena span size"))
+
+
+  ;; Mark the region as free to various sanitizers immediately instead
+  ;; of handling them at sweep time.
+  (when raceenabled
+    (racefree (conv unsafe/Pointer (.base s)) (.-elemsize s)))
+
+  (when msanenabled
+    (msanfree (conv unsafe/Pointer (.base s)) (.-elemsize s)))
+
+  (when asanenabled
+    (asanpoison (conv unsafe/Pointer (.base s)) (.-elemsize s)))
+
+  (when valgrindenabled
+    (valgrindFree (conv unsafe/Pointer (.base s))))
+
+
+  ;; Make ourselves non-preemptible as we manipulate state and statistics.
+  ;;
+  ;; Also required by setUserArenaChunksToFault.
+  (let [mp (acquirem)]
+
+    ;; We can only set user arenas to fault if we're in the _GCoff phase.
+    (if (== gcphase _GCoff) (do
+        (lock (addr (.-lock userArenaState)))
+        (let [faultList (.-fault userArenaState)]
+          (set! (.-fault userArenaState) nil)
+          (unlock (addr (.-lock userArenaState)))
+
+          (.setUserArenaChunkToFault s)
+          (range [_ lc faultList]
+            (.setUserArenaChunkToFault (.-mspan lc)))
+
+
+          ;; Until the chunks are set to fault, keep them alive via the fault list.
+          (KeepAlive x)
+          (KeepAlive faultList)))
+      (do
+        ;; Put the user arena on the fault list.
+        (lock (addr (.-lock userArenaState)))
+        (set! (.-fault userArenaState) (append (.-fault userArenaState) (lit liveUserArenaChunk s x)))
+        (unlock (addr (.-lock userArenaState)))))
+
+    (releasem mp)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1130} (go/method ^:go/systemstack allocUserArenaChunk "allocUserArenaChunk attempts to reuse a free user arena chunk represented\nas a span.\n\nMust be in a non-preemptible state to ensure the consistency of statistics\nexported to MemStats.\n\nAcquires the heap lock. Must run on the system stack for that reason.\n" ^{:tag (* mspan)} [^{:tag (* mheap)} h]
+  (let [^{:tag (* mspan)} s (zero (* mspan))
+      ^{:line 999 :tag uintptr} base (zero uintptr)]
+
+    ;; First check the free list.
+    (lock (addr (.-lock h)))
+    (if (not (.isEmpty (.-readyList (.-userArena h)))) (do
+        (set! s (.-first (.-readyList (.-userArena h))))
+        (.remove (.-readyList (.-userArena h)) s)
+        (set! base (.base s)))
+
+      ;; Free list was empty, so allocate a new arena.
+      (let [hintList (addr (.-arenaHints (.-userArena h)))]
+        (when raceenabled
+          ;; In race mode just use the regular heap hints. We might fragment
+          ;; the address space, but the race detector requires that the heap
+          ;; is mapped contiguously.
+          (set! hintList (addr (.-arenaHints h))))
+
+        (let [(values v size) (.sysAlloc h userArenaChunkBytes hintList (addr (.-userArenaArenas mheap_)))]
+          (when (!= (% size userArenaChunkBytes) 0)
+            (throw "sysAlloc size is not divisible by userArenaChunkBytes"))
+
+          (when (> size userArenaChunkBytes)
+            ;; We got more than we asked for. This can happen if
+            ;; heapArenaSize > userArenaChunkSize, or if sysAlloc just returns
+            ;; some extra as a result of trying to find an aligned region.
+            ;;
+            ;; Divide it up and put it on the ready list.
+            (for [i userArenaChunkBytes] (< i size) (set! i + userArenaChunkBytes)
+              (let [s (.allocMSpanLocked h)]
+                (.init s (+ (conv uintptr v) i) userArenaChunkPages)
+                (.insertBack (.-readyList (.-userArena h)) s)))
+
+            (set! size userArenaChunkBytes))
+
+          (set! base (conv uintptr v))
+          (when (== base 0)
+            ;; Out of memory.
+            (unlock (addr (.-lock h)))
+            (return nil))
+
+          (set! s (.allocMSpanLocked h)))))
+
+    (unlock (addr (.-lock h)))
+
+    ;; sysAlloc returns Reserved address space, and any span we're
+    ;; reusing is set to fault (so, also Reserved), so transition
+    ;; it to Prepared and then Ready.
+    ;;
+    ;; Unlike (*mheap).grow, just map in everything that we
+    ;; asked for. We're likely going to use it all.
+    (sysMap (conv unsafe/Pointer base) userArenaChunkBytes (addr (.-heapReleased gcController)) "user arena chunk")
+    (sysUsed (conv unsafe/Pointer base) userArenaChunkBytes userArenaChunkBytes)
+
+    ;; Model the user arena as a heap span for a large object.
+    (let [spc (makeSpanClass 0 false)]
+      ;; A user arena chunk is always fresh from the OS. It's either newly allocated
+      ;; via sysAlloc() or reused from the readyList after a sysFault(). The memory is
+      ;; then re-mapped via sysMap(), so we can safely treat it as scavenged; the
+      ;; kernel guarantees it will be zero-filled on its next use.
+      (.initSpan h s spanAllocHeap spc base userArenaChunkPages userArenaChunkBytes)
+      (set! (.-isUserArenaChunk s) true)
+      (set! (.-elemsize s) - (userArenaChunkReserveBytes))
+      (set! (.-freeindex s) 1)
+      (set! (.-allocCount s) 1)
+
+      ;; Adjust s.limit down to the object-containing part of the span.
+      ;;
+      ;; This is just to create a slightly tighter bound on the limit.
+      ;; It's totally OK if the garbage collector, in particular
+      ;; conservative scanning, can temporarily observes an inflated
+      ;; limit. It will simply mark the whole chunk or just skip it
+      ;; since we're in the mark phase anyway.
+      (set! (.-limit s) (+ (.base s) (.-elemsize s)))
+
+      ;; Adjust size to include redzone.
+      (when asanenabled
+        (set! (.-elemsize s) - (redZoneSize (.-elemsize s))))
+
+
+      ;; Account for this new arena chunk memory.
+      (.add (.-heapInUse gcController) (conv int64 userArenaChunkBytes))
+      (.add (.-heapReleased gcController) (- (conv int64 userArenaChunkBytes)))
+
+      (let [stats (.acquire (.-heapStats memstats))]
+        (atomic/Xaddint64 (addr (.-inHeap stats)) (conv int64 userArenaChunkBytes))
+        (atomic/Xaddint64 (addr (.-committed stats)) (conv int64 userArenaChunkBytes))
+
+        ;; Model the arena as a single large malloc.
+        (atomic/Xadd64 (addr (.-largeAlloc stats)) (conv int64 (.-elemsize s)))
+        (atomic/Xadd64 (addr (.-largeAllocCount stats)) 1)
+        (.release (.-heapStats memstats))
+
+        ;; Count the alloc in inconsistent, internal stats.
+        (.Add (.-totalAlloc gcController) (conv int64 (.-elemsize s)))
+
+        ;; Update heapLive.
+        (.update gcController (conv int64 (.-elemsize s)) 0)
+
+        ;; This must clear the entire heap bitmap so that it's safe
+        ;; to allocate noscan data without writing anything out.
+        (.initHeapBits s)
+
+        ;; Clear the span preemptively. It's an arena chunk, so let's assume
+        ;; everything is going to be used.
+        ;;
+        ;; This also seems to make a massive difference as to whether or
+        ;; not Linux decides to back this memory with transparent huge
+        ;; pages. There's latency involved in this zeroing, but the hugepage
+        ;; gains are almost always worth it. Note: it's important that we
+        ;; clear even if it's freshly mapped and we know there's no point
+        ;; to zeroing as *that* is the critical signal to use huge pages.
+        (memclrNoHeapPointers (conv unsafe/Pointer (.base s)) (.-elemsize s))
+        (set! (.-needzero s) 0)
+
+        (set! (.-freeIndexForScan s) 1)
+
+        ;; Set up the range for allocation.
+        (set! (.-userArenaChunkFree s) (makeAddrRange base (+ base (.-elemsize s))))
+
+        ;; Put the large span in the mcentral swept list so that it's
+        ;; visible to the background sweeper.
+        (.push (.fullSwept (.-mcentral (aget (.-central h) spc)) (.-sweepgen h)) s)
+
+        ;; Set up an allocation header. Avoid write barriers here because this type
+        ;; is not a real type, and it exists in an invalid location.
+        (set! @(conv (* uintptr) (conv unsafe/Pointer (addr (.-largeType s)))) (conv uintptr (conv unsafe/Pointer (.-limit s))))
+        (set! @(conv (* uintptr) (conv unsafe/Pointer (addr (.-GCData (.-largeType s))))) (+ (.-limit s) (unsafe/Sizeof (lit _type))))
+        (set! (.-PtrBytes (.-largeType s)) 0)
+        (set! (.-Size_ (.-largeType s)) (.-elemsize s))
+
+        ^{:line 1129} s))))

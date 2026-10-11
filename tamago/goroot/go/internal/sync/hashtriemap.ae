@@ -1,0 +1,724 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.sync) (go/file "hashtriemap.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goarch "internal/goarch"]
+    ^{:line 10} [atomic "sync/atomic"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+(go/type HashTrieMap "HashTrieMap is an implementation of a concurrent hash-trie. The implementation\nis designed around frequent loads, but offers decent performance for stores\nand deletes as well, especially if the map is larger. Its primary use-case is\nthe unique package, but can be used elsewhere as well.\n\nThe zero HashTrieMap is empty and ready to use.\nIt must not be copied after first use.\n" :type-params [^comparable K V] (struct
+    ^{:line 22 :tag atomic/Uint32} inited
+    ^{:line 23 :tag Mutex} initMu
+    ^{:line 24 :tag (atomic/Pointer (indirect K V))} root
+    ^{:line 25 :tag hashFunc} keyHash
+    ^{:line 26 :tag equalFunc} valEqual
+    ^{:line 27 :tag uintptr} seed))
+
+
+^{:go/end 34} (go/method init [^{:tag (* (HashTrieMap K V))} ht]
+  (when (== (.Load (.-inited ht)) 0)
+    (.initSlow ht)))
+
+
+
+
+^{:go/end 56} (go/method ^:go/noinline initSlow [^{:tag (* (HashTrieMap K V))} ht]
+  (.Lock (.-initMu ht))
+  (defer (.Unlock (.-initMu ht)))
+
+  (when (!= (.Load (.-inited ht)) 0)
+    ;; Someone got to it while we were waiting.
+    (return))
+
+
+  ;; Set up root node, derive the hash function for the key, and the
+  ;; equal function for the value, if any.
+  (let [^{:tag (map K V)} m (zero (map K V))
+      ^{:line 49} mapType (.MapType (abi/TypeOf m))]
+    (.Store (.-root ht) ((inst newIndirectNode K V) nil))
+    (set! (.-keyHash ht) (.-Hasher mapType))
+    (set! (.-valEqual ht) (.-Equal (.-Elem mapType)))
+    (set! (.-seed ht) (conv uintptr (runtime_rand)))
+
+    (.Store (.-inited ht) 1)))
+
+
+(go/type hashFunc (func [unsafe/Pointer uintptr] [uintptr]))
+(go/type equalFunc (func [unsafe/Pointer unsafe/Pointer] [bool]))
+
+
+
+
+^{:go/end 83} (go/method Load "Load returns the value stored in the map for a key, or nil if no\nvalue is present.\nThe ok result indicates whether value was found in the map.\n" [^{:tag (* (HashTrieMap K V))} ht ^K key] :results [^V value ^bool ok]
+  (.init ht)
+  (let [hash ((.-keyHash ht) (abi/NoEscape (conv unsafe/Pointer (addr key))) (.-seed ht))
+
+      ^{:line 68} i (.Load (.-root ht))
+      ^{:line 69} hashShift (* 8 goarch/PtrSize)]
+    (while (!= hashShift 0)
+      (set! hashShift - nChildrenLog2)
+
+      (let [n (.Load (aget (.-children i) (bit-and (>> hash hashShift) nChildrenMask)))]
+        (when (== n nil)
+          (return @(new V) false))
+
+        (when (.-isEntry n)
+          (return (.lookup (.entry n) key)))
+
+        (set! i (.indirect n))))
+
+    (panic "internal/sync.HashTrieMap: ran out of hash bits while iterating")))
+
+
+
+
+
+^{:go/end 163} (go/method LoadOrStore "LoadOrStore returns the existing value for the key if present.\nOtherwise, it stores and returns the given value.\nThe loaded result is true if the value was loaded, false if stored.\n" [^{:tag (* (HashTrieMap K V))} ht ^K key ^V value] :results [^V result ^bool loaded]
+  (.init ht)
+  (let [hash ((.-keyHash ht) (abi/NoEscape (conv unsafe/Pointer (addr key))) (.-seed ht))
+      ^{:line 91 :tag (* (indirect K V))} i (zero (* (indirect K V)))
+      ^{:line 92 :tag uint} hashShift (zero uint)
+      ^{:line 93 :tag (* (atomic/Pointer (node K V)))} slot (zero (* (atomic/Pointer (node K V))))
+      ^{:line 94 :tag (* (node K V))} n (zero (* (node K V)))]
+    (while true
+      ;; Find the key or a candidate location for insertion.
+      (set! i (.Load (.-root ht)))
+      (set! hashShift (* 8 goarch/PtrSize))
+      (let [haveInsertPoint false]
+        (while (!= hashShift 0)
+          (set! hashShift - nChildrenLog2)
+
+          (set! slot (addr (aget (.-children i) (bit-and (>> hash hashShift) nChildrenMask))))
+          (set! n (.Load slot))
+          (when (== n nil)
+            ;; We found a nil slot which is a candidate for insertion.
+            (set! haveInsertPoint true)
+            (break))
+
+          (when (.-isEntry n)
+            ;; We found an existing entry, which is as far as we can go.
+            ;; If it stays this way, we'll have to replace it with an
+            ;; indirect node.
+            (when [(values v ok) (.lookup (.entry n) key)] ok
+              (return v true))
+
+            (set! haveInsertPoint true)
+            (break))
+
+          (set! i (.indirect n)))
+
+        (when (not haveInsertPoint)
+          (panic "internal/sync.HashTrieMap: ran out of hash bits while iterating"))
+
+
+        ;; Grab the lock and double-check what we saw.
+        (.Lock (.-mu i))
+        (set! n (.Load slot))
+        (when (and ^:go/paren (or (== n nil) (.-isEntry n)) (not (.Load (.-dead i))))
+          ;; What we saw is still true, so we can continue with the insert.
+          (break))
+
+        ;; We have to start over.
+        (.Unlock (.-mu i))))
+
+    ;; N.B. This lock is held from when we broke out of the outer loop above.
+    ;; We specifically break this out so that we can use defer here safely.
+    ;; One option is to break this out into a new function instead, but
+    ;; there's so much local iteration state used below that this turns out
+    ;; to be cleaner.
+    (defer (.Unlock (.-mu i)))
+
+    (let [^{:tag (* (entry K V))} oldEntry (zero (* (entry K V)))]
+      (when (!= n nil)
+        (set! oldEntry (.entry n))
+        (when [(values v ok) (.lookup oldEntry key)] ok
+          ;; Easy case: by loading again, it turns out exactly what we wanted is here!
+          (return v true)))
+
+
+      (let [newEntry (^{:inst [K V]} newEntryNode key value)]
+        (if (== oldEntry nil)
+          ;; Easy case: create a new entry and store it.
+          (.Store slot (addr (.-node newEntry)))
+
+          ;; We possibly need to expand the entry already there into one or more new nodes.
+          ;;
+          ;; Publish the node last, which will make both oldEntry and newEntry visible. We
+          ;; don't want readers to be able to observe that oldEntry isn't in the tree.
+          (.Store slot (.expand ht oldEntry newEntry hash hashShift i)))
+
+        (return value false)))))
+
+
+
+
+^{:go/end 196} (go/method expand "expand takes oldEntry and newEntry whose hashes conflict from bit 64 down to hashShift and\nproduces a subtree of indirect nodes to hold the two new entries.\n" ^{:tag (* (node K V))} [^{:tag (* (HashTrieMap K V))} ht ^{:tag (* (entry K V))} oldEntry ^:go/grouped ^{:tag (* (entry K V))} newEntry ^uintptr newHash ^uint hashShift ^{:tag (* (indirect K V))} parent]
+  ;; Check for a hash collision.
+  (let [oldHash ((.-keyHash ht) (conv unsafe/Pointer (addr (.-key oldEntry))) (.-seed ht))]
+    (when (== oldHash newHash)
+      ;; Store the old entry in the new entry's overflow list, then store
+      ;; the new entry.
+      (.Store (.-overflow newEntry) oldEntry)
+      (return (addr (.-node newEntry))))
+
+    ;; We have to add an indirect node. Worse still, we may need to add more than one.
+    (let [newIndirect (^{:inst [K V]} newIndirectNode parent)
+        ^{:line 178} top newIndirect]
+      (while true
+        (when (== hashShift 0)
+          (panic "internal/sync.HashTrieMap: ran out of hash bits while inserting (incorrect use of unsafe or cgo, or data race?)"))
+
+        (set! hashShift - nChildrenLog2) ; hashShift is for the level parent is at. We need to go deeper.
+        (let [oi (bit-and (>> oldHash hashShift) nChildrenMask)
+            ^{:line 185} ni (bit-and (>> newHash hashShift) nChildrenMask)]
+          (when (!= oi ni)
+            (.Store (aget (.-children newIndirect) oi) (addr (.-node oldEntry)))
+            (.Store (aget (.-children newIndirect) ni) (addr (.-node newEntry)))
+            (break))
+
+          (let [nextIndirect (^{:inst [K V]} newIndirectNode newIndirect)]
+            (.Store (aget (.-children newIndirect) oi) (addr (.-node nextIndirect)))
+            (set! newIndirect nextIndirect))))
+
+      (addr (.-node top)))))
+
+
+
+^{:go/end 201} (go/method Store "Store sets the value for a key.\n" [^{:tag (* (HashTrieMap K V))} ht ^K key ^V new]
+  (set! (values _ _) (.Swap ht key new)))
+
+
+
+
+^{:go/end 275} (go/method Swap "Swap swaps the value for a key and returns the previous value if any.\nThe loaded result reports whether the key was present.\n" [^{:tag (* (HashTrieMap K V))} ht ^K key ^V new] :results [^V previous ^bool loaded]
+  (.init ht)
+  (let [hash ((.-keyHash ht) (abi/NoEscape (conv unsafe/Pointer (addr key))) (.-seed ht))
+      ^{:line 208 :tag (* (indirect K V))} i (zero (* (indirect K V)))
+      ^{:line 209 :tag uint} hashShift (zero uint)
+      ^{:line 210 :tag (* (atomic/Pointer (node K V)))} slot (zero (* (atomic/Pointer (node K V))))
+      ^{:line 211 :tag (* (node K V))} n (zero (* (node K V)))]
+    (while true
+      ;; Find the key or a candidate location for insertion.
+      (set! i (.Load (.-root ht)))
+      (set! hashShift (* 8 goarch/PtrSize))
+      (let [haveInsertPoint false]
+        (while (!= hashShift 0)
+          (set! hashShift - nChildrenLog2)
+
+          (set! slot (addr (aget (.-children i) (bit-and (>> hash hashShift) nChildrenMask))))
+          (set! n (.Load slot))
+          (when (or (== n nil) (.-isEntry n))
+            ;; We found a nil slot which is a candidate for insertion,
+            ;; or an existing entry that we'll replace.
+            (set! haveInsertPoint true)
+            (break))
+
+          (set! i (.indirect n)))
+
+        (when (not haveInsertPoint)
+          (panic "internal/sync.HashTrieMap: ran out of hash bits while iterating"))
+
+
+        ;; Grab the lock and double-check what we saw.
+        (.Lock (.-mu i))
+        (set! n (.Load slot))
+        (when (and ^:go/paren (or (== n nil) (.-isEntry n)) (not (.Load (.-dead i))))
+          ;; What we saw is still true, so we can continue with the insert.
+          (break))
+
+        ;; We have to start over.
+        (.Unlock (.-mu i))))
+
+    ;; N.B. This lock is held from when we broke out of the outer loop above.
+    ;; We specifically break this out so that we can use defer here safely.
+    ;; One option is to break this out into a new function instead, but
+    ;; there's so much local iteration state used below that this turns out
+    ;; to be cleaner.
+    (defer (.Unlock (.-mu i)))
+
+    (let [^V zero (zero V)
+        ^{:line 252 :tag (* (entry K V))} oldEntry (zero (* (entry K V)))]
+      (when (!= n nil)
+        ;; Swap if the keys compare.
+        (set! oldEntry (.entry n))
+        (let [(values newEntry old swapped) (.swap oldEntry key new)]
+          (when swapped
+            (.Store slot (addr (.-node newEntry)))
+            (return old true))))
+
+
+      ;; The keys didn't compare, so we're doing an insertion.
+      (let [newEntry (^{:inst [K V]} newEntryNode key new)]
+        (if (== oldEntry nil)
+          ;; Easy case: create a new entry and store it.
+          (.Store slot (addr (.-node newEntry)))
+
+          ;; We possibly need to expand the entry already there into one or more new nodes.
+          ;;
+          ;; Publish the node last, which will make both oldEntry and newEntry visible. We
+          ;; don't want readers to be able to observe that oldEntry isn't in the tree.
+          (.Store slot (.expand ht oldEntry newEntry hash hashShift i)))
+
+        (return zero false)))))
+
+
+
+
+
+^{:go/end 305} (go/method CompareAndSwap "CompareAndSwap swaps the old and new values for key\nif the value stored in the map is equal to old.\nThe value type must be of a comparable type, otherwise CompareAndSwap will panic.\n" [^{:tag (* (HashTrieMap K V))} ht ^K key ^V old ^:go/grouped ^V new] :results [^bool swapped]
+  (.init ht)
+  (when (== (.-valEqual ht) nil)
+    (panic "called CompareAndSwap when value is not of comparable type"))
+
+  (let [hash ((.-keyHash ht) (abi/NoEscape (conv unsafe/Pointer (addr key))) (.-seed ht))
+
+      ;; Find a node with the key and compare with it. n != nil if we found the node.
+      (values i _ slot n) (.find ht key hash (.-valEqual ht) old)]
+    (when (!= i nil)
+      (defer (.Unlock (.-mu i))))
+
+    (when (== n nil)
+      (return false))
+
+
+    ;; Try to swap the entry.
+    ^{:go/breaks [4]} (let [(values e ^:assign swapped) (.compareAndSwap (.entry n) key old new (.-valEqual ht))]
+      (when (not swapped)
+        ;; Nothing was actually swapped, which means the node is no longer there.
+        (return false))
+
+      ;; Store the entry back because it changed.
+      (.Store slot (addr (.-node e)))
+      true)))
+
+
+
+
+^{:go/end 356} (go/method LoadAndDelete "LoadAndDelete deletes the value for a key, returning the previous value if any.\nThe loaded result reports whether the key was present.\n" [^{:tag (* (HashTrieMap K V))} ht ^K key] :results [^V value ^bool loaded]
+  (.init ht)
+  (let [hash ((.-keyHash ht) (abi/NoEscape (conv unsafe/Pointer (addr key))) (.-seed ht))
+
+      ;; Find a node with the key and compare with it. n != nil if we found the node.
+      (values i hashShift slot n) (.find ht key hash nil @(new V))]
+    (when (== n nil)
+      (when (!= i nil)
+        (.Unlock (.-mu i)))
+
+      (return @(new V) false))
+
+
+    ;; Try to delete the entry.
+    (let [(values v e ^:assign loaded) (.loadAndDelete (.entry n) key)]
+      (when (not loaded)
+        ;; Nothing was actually deleted, which means the node is no longer there.
+        (.Unlock (.-mu i))
+        (return @(new V) false))
+
+      (when (!= e nil)
+        ;; We didn't actually delete the whole entry, just one entry in the chain.
+        ;; Nothing else to do, since the parent is definitely not empty.
+        (.Store slot (addr (.-node e)))
+        (.Unlock (.-mu i))
+        (return v true))
+
+      ;; Delete the entry.
+      (.Store slot nil)
+
+      ;; Check if the node is now empty (and isn't the root), and delete it if able.
+      (while (and (!= (.-parent i) nil) (.empty i))
+        (when (== hashShift (* 8 goarch/PtrSize))
+          (panic "internal/sync.HashTrieMap: ran out of hash bits while iterating"))
+
+        (set! hashShift + nChildrenLog2)
+
+        ;; Delete the current node in the parent.
+        (let [parent (.-parent i)]
+          (.Lock (.-mu parent))
+          (.Store (.-dead i) true)
+          (.Store (aget (.-children parent) (bit-and (>> hash hashShift) nChildrenMask)) nil)
+          (.Unlock (.-mu i))
+          (set! i parent)))
+
+      (.Unlock (.-mu i))
+      (return v true))))
+
+
+
+^{:go/end 361} (go/method Delete "Delete deletes the value for a key.\n" [^{:tag (* (HashTrieMap K V))} ht ^K key]
+  (set! (values _ _) (.LoadAndDelete ht key)))
+
+
+
+
+
+
+
+^{:go/end 418} (go/method CompareAndDelete "CompareAndDelete deletes the entry for key if its value is equal to old.\nThe value type must be comparable, otherwise this CompareAndDelete will panic.\n\nIf there is no current value for key in the map, CompareAndDelete returns false\n(even if the old value is the nil interface value).\n" [^{:tag (* (HashTrieMap K V))} ht ^K key ^V old] :results [^bool deleted]
+  (.init ht)
+  (when (== (.-valEqual ht) nil)
+    (panic "called CompareAndDelete when value is not of comparable type"))
+
+  (let [hash ((.-keyHash ht) (abi/NoEscape (conv unsafe/Pointer (addr key))) (.-seed ht))
+
+      ;; Find a node with the key. n != nil if we found the node.
+      (values i hashShift slot n) (.find ht key hash nil @(new V))]
+    (when (== n nil)
+      (when (!= i nil)
+        (.Unlock (.-mu i)))
+
+      (return false))
+
+
+    ;; Try to delete the entry.
+    ^{:go/breaks [7]} (let [(values e ^:assign deleted) (.compareAndDelete (.entry n) key old (.-valEqual ht))]
+      (when (not deleted)
+        ;; Nothing was actually deleted, which means the node is no longer there.
+        (.Unlock (.-mu i))
+        (return false))
+
+      (when (!= e nil)
+        ;; We didn't actually delete the whole entry, just one entry in the chain.
+        ;; Nothing else to do, since the parent is definitely not empty.
+        (.Store slot (addr (.-node e)))
+        (.Unlock (.-mu i))
+        (return true))
+
+      ;; Delete the entry.
+      (.Store slot nil)
+
+      ;; Check if the node is now empty (and isn't the root), and delete it if able.
+      (while (and (!= (.-parent i) nil) (.empty i))
+        (when (== hashShift (* 8 goarch/PtrSize))
+          (panic "internal/sync.HashTrieMap: ran out of hash bits while iterating"))
+
+        (set! hashShift + nChildrenLog2)
+
+        ;; Delete the current node in the parent.
+        (let [parent (.-parent i)]
+          (.Lock (.-mu parent))
+          (.Store (.-dead i) true)
+          (.Store (aget (.-children parent) (bit-and (>> hash hashShift) nChildrenMask)) nil)
+          (.Unlock (.-mu i))
+          (set! i parent)))
+
+      (.Unlock (.-mu i))
+      true)))
+
+
+
+
+
+
+
+
+^{:go/end 471} (go/method find "find searches the tree for a node that contains key (hash must be the hash of key).\nIf valEqual != nil, then it will also enforce that the values are equal as well.\n\nReturns a non-nil node, which will always be an entry, if found.\n\nIf i != nil then i.mu is locked, and it is the caller's responsibility to unlock it.\n" [^{:tag (* (HashTrieMap K V))} ht ^K key ^uintptr hash ^equalFunc valEqual ^V value] :results [^{:tag (* (indirect K V))} i ^uint hashShift ^{:tag (* (atomic/Pointer (node K V)))} slot ^{:tag (* (node K V))} n]
+  (while true
+    ;; Find the key or return if it's not there.
+    (set! i (.Load (.-root ht)))
+    (set! hashShift (* 8 goarch/PtrSize))
+    (let [found false]
+      (while (!= hashShift 0)
+        (set! hashShift - nChildrenLog2)
+
+        (set! slot (addr (aget (.-children i) (bit-and (>> hash hashShift) nChildrenMask))))
+        (set! n (.Load slot))
+        (when (== n nil)
+          ;; Nothing to compare with. Give up.
+          (set! i nil)
+          (return))
+
+        (when (.-isEntry n)
+          ;; We found an entry. Check if it matches.
+          (when [(values _ ok) (.lookupWithValue (.entry n) key value valEqual)] (not ok)
+            ;; No match, comparison failed.
+            (set! i nil)
+            (set! n nil)
+            (return))
+
+          ;; We've got a match. Prepare to perform an operation on the key.
+          (set! found true)
+          (break))
+
+        (set! i (.indirect n)))
+
+      (when (not found)
+        (panic "internal/sync.HashTrieMap: ran out of hash bits while iterating"))
+
+
+      ;; Grab the lock and double-check what we saw.
+      (.Lock (.-mu i))
+      (set! n (.Load slot))
+      (when (and (not (.Load (.-dead i))) ^:go/paren (or (== n nil) (.-isEntry n)))
+        ;; Either we've got a valid node or the node is now nil under the lock.
+        ;; In either case, we're done here.
+        (return))
+
+      ;; We have to start over.
+      (.Unlock (.-mu i)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 486} (go/method All "All returns an iterator over each key and value present in the map.\n\nThe iterator does not necessarily correspond to any consistent snapshot of the\nHashTrieMap's contents: no key will be visited more than once, but if the value\nfor any key is stored or deleted concurrently (including by yield), the iterator\nmay reflect any mapping for that key from any point during iteration. The iterator\ndoes not block other methods on the receiver; even yield itself may call any\nmethod on the HashTrieMap.\n" ^{:tag (func [^{:tag (func [K V] [bool])} yield])} [^{:tag (* (HashTrieMap K V))} ht]
+  (.init ht)
+  ^{:go/end 485} (fn [^{:tag (func [^K key ^V value] [bool])} yield]
+    (.iter ht (.Load (.-root ht)) yield)))
+
+
+
+
+
+
+
+
+^{:go/end 496} (go/method Range "Range calls f sequentially for each key and value present in the map.\nIf f returns false, range stops the iteration.\n\nThis exists for compatibility with sync.Map; All should be preferred.\nIt provides the same guarantees as sync.Map, and All.\n" [^{:tag (* (HashTrieMap K V))} ht ^{:tag (func [K V] [bool])} yield]
+  (.init ht)
+  (.iter ht (.Load (.-root ht)) yield))
+
+
+^{:go/breaks [[4 518]] :go/end 519} (go/method iter ^bool [^{:tag (* (HashTrieMap K V))} ht ^{:tag (* (indirect K V))} i ^{:tag (func [^K key ^V value] [bool])} yield]
+  (range [j (.-children i)]
+    (let [n (.Load (aget (.-children i) j))]
+      (when (== n nil)
+        (continue))
+
+      (when (not (.-isEntry n))
+        (when (not (.iter ht (.indirect n) yield))
+          (return false))
+
+        (continue))
+
+      (let [e (.entry n)]
+        (while (!= e nil)
+          (when (not (yield (.-key e) (.-value e)))
+            (return false))
+
+          (set! e (.Load (.-overflow e)))))))
+
+
+  true)
+
+
+
+^{:go/end 528} (go/method Clear "Clear deletes all the entries, resulting in an empty HashTrieMap.\n" [^{:tag (* (HashTrieMap K V))} ht]
+  (.init ht)
+
+  ;; It's sufficient to just drop the root on the floor, but the root
+  ;; must always be non-nil.
+  (.Store (.-root ht) ((inst newIndirectNode K V) nil)))
+
+
+(go/const
+
+
+
+
+  ^{:line 535} [^{:val 4 :doc "16 children. This seems to be the sweet spot for\nload performance: any smaller and we lose out on\n50% or more in CPU performance. Any larger and the\nreturns are minuscule (~1% improvement for 32 children).\n"} nChildrenLog2 4]
+  ^{:line 536} [^{:val 16} nChildren (<< 1 nChildrenLog2)]
+  ^{:line 537} [^{:val 15} nChildrenMask (- nChildren 1)])
+
+
+
+(go/type indirect "indirect is an internal node in the hash-trie.\n" :type-params [^comparable K V] (struct
+    (node K V)
+    ^{:line 543 :tag atomic/Bool} dead
+    ^{:line 544 :tag Mutex} mu ; Protects mutation to children and any children that are entry nodes.
+    ^{:line 545 :tag (* (indirect K V))} parent
+    ^{:line 546 :tag (array nChildren (atomic/Pointer (node K V)))} children))
+
+
+^{:go/end 551} (go/func newIndirectNode :type-params [^comparable K V] ^{:tag (* (indirect K V))} [^{:tag (* (indirect K V))} parent]
+  (addr (lit (indirect K V) :node (lit (node K V) :isEntry false) :parent parent)))
+
+
+^{:go/end 561} (go/method empty ^bool [^{:tag (* (indirect K V))} i]
+  (let [nc 0]
+    (range [j (.-children i)]
+      (when (!= (.Load (aget (.-children i) j)) nil)
+        (inc! nc)))
+
+
+    (== nc 0)))
+
+
+
+(go/type entry "entry is a leaf node in the hash-trie.\n" :type-params [^comparable K V] (struct
+    (node K V)
+    ^{:line 566 :tag (atomic/Pointer (entry K V))} overflow ; Overflow for hash collisions.
+    ^{:line 567 :tag K} key
+    ^{:line 568 :tag V} value))
+
+
+^{:go/end 577} (go/func newEntryNode :type-params [^comparable K V] ^{:tag (* (entry K V))} [^K key ^V value]
+  (addr ^{:go/breaks [2 4 6]} (lit (entry K V)
+      :node (lit (node K V) :isEntry true)
+      :key key
+      :value value)))
+
+
+
+^{:go/end 587} (go/method lookup [^{:tag (* (entry K V))} e ^K key] :results [V bool]
+  (while (!= e nil)
+    (when (== (.-key e) key)
+      (return (.-value e) true))
+
+    (set! e (.Load (.-overflow e))))
+
+  (return @(new V) false))
+
+
+^{:go/end 597} (go/method lookupWithValue [^{:tag (* (entry K V))} e ^K key ^V value ^equalFunc valEqual] :results [V bool]
+  (while (!= e nil)
+    (when (and (== (.-key e) key) ^:go/paren (or (== valEqual nil) (valEqual (conv unsafe/Pointer (addr (.-value e))) (abi/NoEscape (conv unsafe/Pointer (addr value))))))
+      (return (.-value e) true))
+
+    (set! e (.Load (.-overflow e))))
+
+  (return @(new V) false))
+
+
+
+
+
+
+^{:go/end 626} (go/method swap "swap replaces an entry in the overflow chain if keys compare equal. Returns the new entry chain,\nthe old value, and whether or not anything was swapped.\n\nswap must be called under the mutex of the indirect node which e is a child of.\n" [^{:tag (* (entry K V))} head ^K key ^V new] :results [(* (entry K V)) V bool]
+  (when (== (.-key head) key)
+    ;; Return the new head of the list.
+    (let [e (^{:inst [K V]} newEntryNode key new)]
+      (when [chain (.Load (.-overflow head))] (!= chain nil)
+        (.Store (.-overflow e) chain))
+
+      (return e (.-value head) true)))
+
+  (let [i (addr (.-overflow head))
+      ^{:line 613} e (.Load i)]
+    (while (!= e nil)
+      (when (== (.-key e) key)
+        (let [eNew (^{:inst [K V]} newEntryNode key new)]
+          (.Store (.-overflow eNew) (.Load (.-overflow e)))
+          (.Store i eNew)
+          (return head (.-value e) true)))
+
+      (set! i (addr (.-overflow e)))
+      (set! e (.Load (.-overflow e))))
+
+    (let [^V zero (zero V)]
+      (return head zero false))))
+
+
+
+
+
+
+^{:go/end 654} (go/method compareAndSwap "compareAndSwap replaces an entry in the overflow chain if both the key and value compare\nequal. Returns the new entry chain and whether or not anything was swapped.\n\ncompareAndSwap must be called under the mutex of the indirect node which e is a child of.\n" [^{:tag (* (entry K V))} head ^K key ^V old ^:go/grouped ^V new ^equalFunc valEqual] :results [(* (entry K V)) bool]
+  (when (and (== (.-key head) key) (valEqual (conv unsafe/Pointer (addr (.-value head))) (abi/NoEscape (conv unsafe/Pointer (addr old)))))
+    ;; Return the new head of the list.
+    (let [e (^{:inst [K V]} newEntryNode key new)]
+      (when [chain (.Load (.-overflow head))] (!= chain nil)
+        (.Store (.-overflow e) chain))
+
+      (return e true)))
+
+  (let [i (addr (.-overflow head))
+      ^{:line 642} e (.Load i)]
+    (while (!= e nil)
+      (when (and (== (.-key e) key) (valEqual (conv unsafe/Pointer (addr (.-value e))) (abi/NoEscape (conv unsafe/Pointer (addr old)))))
+        (let [eNew (^{:inst [K V]} newEntryNode key new)]
+          (.Store (.-overflow eNew) (.Load (.-overflow e)))
+          (.Store i eNew)
+          (return head true)))
+
+      (set! i (addr (.-overflow e)))
+      (set! e (.Load (.-overflow e))))
+
+    (return head false)))
+
+
+
+
+
+
+^{:go/end 676} (go/method loadAndDelete "loadAndDelete deletes an entry in the overflow chain by key. Returns the value for the key, the new\nentry chain and whether or not anything was loaded (and deleted).\n\nloadAndDelete must be called under the mutex of the indirect node which e is a child of.\n" [^{:tag (* (entry K V))} head ^K key] :results [V (* (entry K V)) bool]
+  (when (== (.-key head) key)
+    ;; Drop the head of the list.
+    (return (.-value head) (.Load (.-overflow head)) true))
+
+  (let [i (addr (.-overflow head))
+      ^{:line 666} e (.Load i)]
+    (while (!= e nil)
+      (when (== (.-key e) key)
+        (.Store i (.Load (.-overflow e)))
+        (return (.-value e) head true))
+
+      (set! i (addr (.-overflow e)))
+      (set! e (.Load (.-overflow e))))
+
+    (return @(new V) head false)))
+
+
+
+
+
+
+^{:go/end 698} (go/method compareAndDelete "compareAndDelete deletes an entry in the overflow chain if both the key and value compare\nequal. Returns the new entry chain and whether or not anything was deleted.\n\ncompareAndDelete must be called under the mutex of the indirect node which e is a child of.\n" [^{:tag (* (entry K V))} head ^K key ^V value ^equalFunc valEqual] :results [(* (entry K V)) bool]
+  (when (and (== (.-key head) key) (valEqual (conv unsafe/Pointer (addr (.-value head))) (abi/NoEscape (conv unsafe/Pointer (addr value)))))
+    ;; Drop the head of the list.
+    (return (.Load (.-overflow head)) true))
+
+  (let [i (addr (.-overflow head))
+      ^{:line 688} e (.Load i)]
+    (while (!= e nil)
+      (when (and (== (.-key e) key) (valEqual (conv unsafe/Pointer (addr (.-value e))) (abi/NoEscape (conv unsafe/Pointer (addr value)))))
+        (.Store i (.Load (.-overflow e)))
+        (return head true))
+
+      (set! i (addr (.-overflow e)))
+      (set! e (.Load (.-overflow e))))
+
+    (return head false)))
+
+
+
+
+(go/type node "node is the header for a node. It's polymorphic and\nis actually either an entry or an indirect.\n" :type-params [^comparable K V] (struct
+    ^{:line 703 :tag bool} isEntry))
+
+
+^{:go/end 711} (go/method entry ^{:tag (* (entry K V))} [^{:tag (* (node K V))} n]
+  (when (not (.-isEntry n))
+    (panic "called entry on non-entry node"))
+
+  (conv (* (entry K V)) (conv unsafe/Pointer n)))
+
+
+^{:go/end 718} (go/method indirect ^{:tag (* (indirect K V))} [^{:tag (* (node K V))} n]
+  (when (.-isEntry n)
+    (panic "called indirect on entry node"))
+
+  (conv (* (indirect K V)) (conv unsafe/Pointer n)))
+
+
+
+
+
+
+(go/func ^:extern ^{:go/linkname "runtime_rand runtime.rand"} runtime_rand "Pull in runtime.rand so that we don't need to take a dependency\non math/rand/v2.\n" ^uint64 [])

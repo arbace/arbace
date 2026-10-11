@@ -1,0 +1,200 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.trace) (go/file "subscribe.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [tracev2 "internal/trace/tracev2"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [runtime "runtime"]
+    ^{:line 12} [sync "sync"]
+    ^{:line 13} [atomic "sync/atomic"]
+    ^{:line 14} [_ "unsafe"]])
+
+
+(go/var ^traceMultiplexer tracing)
+
+(go/type traceMultiplexer (struct
+    ^{:line 20} sync/Mutex
+    ^{:line 21 :tag atomic/Bool} enabled
+    ^{:line 22 :tag int} subscribers
+
+    ^{:line 24 :tag sync/Mutex} subscribersMu
+    ^{:line 25 :tag io/Writer} traceStartWriter
+    ^{:line 26 :tag (* recorder)} flightRecorder))
+
+
+^{:go/breaks [[10 47]] :go/end 48} (go/method subscribeFlightRecorder ^error [^{:tag (* traceMultiplexer)} t ^{:tag (* recorder)} r]
+  ^{:go/via [Mutex]} (.Lock t)
+  (defer ^{:go/via [Mutex]} (.Unlock t))
+
+  (.Lock (.-subscribersMu t))
+  (when (!= (.-flightRecorder t) nil)
+    (.Unlock (.-subscribersMu t))
+    (return (fmt/Errorf "flight recorder already enabled")))
+
+  (set! (.-flightRecorder t) r)
+  (.Unlock (.-subscribersMu t))
+
+  (when [err (.addedSubscriber t)] (!= err nil)
+    (.Lock (.-subscribersMu t))
+    (set! (.-flightRecorder t) nil)
+    (.Unlock (.-subscribersMu t))
+    (return err))
+
+  nil)
+
+
+^{:go/breaks [11] :go/end 66} (go/method unsubscribeFlightRecorder ^error [^{:tag (* traceMultiplexer)} t]
+  ^{:go/via [Mutex]} (.Lock t)
+  (defer ^{:go/via [Mutex]} (.Unlock t))
+
+  (.removingSubscriber t)
+
+  (.Lock (.-subscribersMu t))
+  (when (== (.-flightRecorder t) nil)
+    (.Unlock (.-subscribersMu t))
+    (return (fmt/Errorf "attempt to unsubscribe missing flight recorder")))
+
+  (set! (.-flightRecorder t) nil)
+  (.Unlock (.-subscribersMu t))
+
+  (.removedSubscriber t)
+  nil)
+
+
+^{:go/breaks [[10 86]] :go/end 87} (go/method subscribeTraceStartWriter ^error [^{:tag (* traceMultiplexer)} t ^io/Writer w]
+  ^{:go/via [Mutex]} (.Lock t)
+  (defer ^{:go/via [Mutex]} (.Unlock t))
+
+  (.Lock (.-subscribersMu t))
+  (when (!= (.-traceStartWriter t) nil)
+    (.Unlock (.-subscribersMu t))
+    (return (fmt/Errorf "execution tracer already enabled")))
+
+  (set! (.-traceStartWriter t) w)
+  (.Unlock (.-subscribersMu t))
+
+  (when [err (.addedSubscriber t)] (!= err nil)
+    (.Lock (.-subscribersMu t))
+    (set! (.-traceStartWriter t) nil)
+    (.Unlock (.-subscribersMu t))
+    (return err))
+
+  nil)
+
+
+^{:go/end 105} (go/method unsubscribeTraceStartWriter [^{:tag (* traceMultiplexer)} t]
+  ^{:go/via [Mutex]} (.Lock t)
+  (defer ^{:go/via [Mutex]} (.Unlock t))
+
+  (.removingSubscriber t)
+
+  (.Lock (.-subscribersMu t))
+  (when (== (.-traceStartWriter t) nil)
+    (.Unlock (.-subscribersMu t))
+    (return))
+
+  (set! (.-traceStartWriter t) nil)
+  (.Unlock (.-subscribersMu t))
+
+  (.removedSubscriber t)
+  (return))
+
+
+^{:go/breaks [5] :go/end 118} (go/method addedSubscriber ^error [^{:tag (* traceMultiplexer)} t]
+  (if (.Load (.-enabled t))
+    ;; This is necessary for the trace reader goroutine to pick up on the new subscriber.
+    (runtime_traceAdvance false)
+    (do
+      (when [err (.startLocked t)] (!= err nil)
+        (return err))))
+
+
+  (inc! (.-subscribers t))
+  nil)
+
+
+^{:go/end 132} (go/method removingSubscriber [^{:tag (* traceMultiplexer)} t]
+  (when (== (.-subscribers t) 0)
+    (return))
+
+  (dec! (.-subscribers t))
+  (if (== (.-subscribers t) 0) (do
+      (runtime/StopTrace)
+      (.Store (.-enabled t) false))
+
+    ;; This is necessary to avoid missing trace data when the system is under high load.
+    (runtime_traceAdvance false)))
+
+
+
+^{:go/end 139} (go/method removedSubscriber [^{:tag (* traceMultiplexer)} t]
+  (when (> (.-subscribers t) 0)
+    ;; This is necessary for the trace reader goroutine to pick up on the new subscriber.
+    (runtime_traceAdvance false)))
+
+
+
+^{:go/end 201} (go/method startLocked ^error [^{:tag (* traceMultiplexer)} t]
+  (when [err (runtime/StartTrace)] (!= err nil)
+    (return err))
+
+
+  ;; Grab the trace reader goroutine's subscribers.
+  ;;
+  ;; We only update our subscribers if we see an end-of-generation
+  ;; signal from the runtime after this, so any new subscriptions
+  ;; or unsubscriptions must call traceAdvance to ensure the reader
+  ;; goroutine sees an end-of-generation signal.
+  (.Lock (.-subscribersMu t))
+  ^{:go/breaks [5]} (let [flightRecorder (.-flightRecorder t)
+      ^{:line 154} traceStartWriter (.-traceStartWriter t)]
+    (.Unlock (.-subscribersMu t))
+
+    (go (^{:go/end 198} (fn []
+          (let [header (runtime/ReadTrace)]
+            (when (!= traceStartWriter nil)
+              (.Write traceStartWriter header))
+
+            (when (!= flightRecorder nil)
+              (.Write flightRecorder header))
+
+
+            (while true
+              (let [data (runtime/ReadTrace)]
+                (when (== data nil)
+                  (break))
+
+                (when (!= traceStartWriter nil)
+                  (.Write traceStartWriter data))
+
+                (when (!= flightRecorder nil)
+                  (.Write flightRecorder data))
+
+                (when (and (== (len data) 1) (== (conv tracev2/EventType (aget data 0)) tracev2/EvEndOfGeneration))
+                  (when (!= flightRecorder nil)
+                    (.endGeneration flightRecorder))
+
+
+                  ;; Pick up any changes.
+                  (.Lock (.-subscribersMu t))
+                  (let [frIsNew (and (!= flightRecorder (.-flightRecorder t)) (!= (.-flightRecorder t) nil))
+                      ^{:line 185} trIsNew (and (!= traceStartWriter (.-traceStartWriter t)) (!= (.-traceStartWriter t) nil))]
+                    (set! flightRecorder (.-flightRecorder t))
+                    (set! traceStartWriter (.-traceStartWriter t))
+                    (.Unlock (.-subscribersMu t))
+
+                    (when trIsNew
+                      (.Write traceStartWriter header))
+
+                    (when frIsNew
+                      (.Write flightRecorder header))))))))))
+
+
+
+
+    (.Store (.-enabled t) true)
+    nil))

@@ -1,0 +1,137 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.math.big.internal.asmgen) (go/file "func.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [slices "slices"]
+    ^{:line 10} [strings "strings"]])
+
+
+;; Note: Exported fields and methods are expected to be used
+;; by function generators (like the ones in add.go and so on).
+;; Unexported fields and methods should not be.
+
+
+(go/type Func "A Func represents a single assembly function.\n" (struct
+    ^{:line 19 :tag string} Name
+    ^{:line 20 :tag (* Asm)} Asm
+    ^{:line 21 :tag (slice string)} inputs ; name of input slices (not beginning with z)
+    ^{:line 22 :tag (slice string)} outputs ; names of output slices (beginning with z)
+    ^{:line 23 :tag (map string int)} args)) ; offsets of args, results on stack
+
+
+
+^{:go/end 94} (go/method Func "Func starts a new function in the assembly output.\n" ^{:tag (* Func)} [^{:tag (* Asm)} a ^string decl]
+  (let [(values d ok) (strings/CutPrefix decl "func ")]
+    (when (not ok)
+      (.Fatalf a "func decl does not begin with 'func '"))
+
+    (let [(values name ^:assign d ^:assign ok) (strings/Cut d "(")]
+      (when (not ok)
+        (.Fatalf a "func decl does not have func arg list"))
+
+      (let [f (addr ^{:go/breaks [2 4 6]} (lit Func
+              :Name name
+              :Asm a
+              :args (make (map string int))))]
+
+        (.FreeAll a)
+
+        ;; Parse argument names and types. Quick and dirty.
+        ;; Convert (args) (results) into args, results.
+        (set! d (strings/ReplaceAll d ") (" ", "))
+        (set! d (strings/TrimSuffix d ")"))
+        (let [args (strings/Split d ",")
+
+            ;; Assign implicit types to all arguments (x, y int -> x int, y int).
+            ^{:line 50} typ ""]
+          (range [i arg (^{:inst [(slice string) string]} slices/Backward args)]
+            (set! arg (strings/TrimSpace arg))
+            (if (not (strings/Contains arg " ")) (do
+                (when (== typ "")
+                  (.Fatalf a "missing argument type"))
+
+                (set! arg + (+ " " typ)))
+
+              (set! (values _ typ _) (strings/Cut arg " ")))
+
+            (aset args i arg))
+
+
+          ;; Record mapping from names to offsets.
+          (let [off 0]
+            (range [_ arg args]
+              (let [(values name typ _) (strings/Cut arg " ")]
+                (switch typ
+                  (default
+                    (.Fatalf a "unknown type %s" typ))
+                  (case ["Word" "uint" "int"]
+                    (aset (.-args f) name off)
+                    (set! off + (.-WordBytes (.-Arch a))))
+                  (case ["[]Word"]
+                    (if (strings/HasPrefix name "z")
+                      (set! (.-outputs f) (append (.-outputs f) name))
+
+                      (set! (.-inputs f) (append (.-inputs f) name)))
+
+                    (aset (.-args f) (+ name "_base") off)
+                    (aset (.-args f) (+ name "_len") (+ off (.-WordBytes (.-Arch a))))
+                    (aset (.-args f) (+ name "_cap") (+ off (* 2 (.-WordBytes (.-Arch a)))))
+                    (set! off + (* 3 (.-WordBytes (.-Arch a))))))))
+
+
+
+            (.Printf a "\n")
+            (.Printf a "// %s\n" decl)
+            (.Printf a "TEXT ·%s(SB), NOSPLIT, $0\n" name)
+            (when (!= (.-setup (.-Arch a)) nil)
+              ((.-setup (.-Arch a)) f))
+
+            ^{:line 93} f))))))
+
+
+
+
+^{:go/end 100} (go/method Arg "Arg allocates a new register, copies the named argument (or result) into it,\nand returns that register.\n" ^Reg [^{:tag (* Func)} f ^string name]
+  (.ArgHint f name HintNone))
+
+
+
+^{:go/end 115} (go/method ArgHint "ArgHint is like Arg but uses a register allocation hint.\n" ^Reg [^{:tag (* Func)} f ^string name ^Hint hint]
+  (let [(values off ok) (aget (.-args f) name)]
+    (when (not ok)
+      (.Fatalf (.-Asm f) "unknown argument %s" name))
+
+    (let [mem (lit Reg (fmt/Sprintf "%s+%d(FP)" name off))]
+      (when (and (== hint HintMemOK) (.-memOK (.-Arch (.-Asm f))))
+        (return mem))
+
+      (let [r (.RegHint (.-Asm f) hint)]
+        (.Mov (.-Asm f) mem r)
+        ^{:line 114} r))))
+
+
+
+^{:go/end 120} (go/method ArgPtr "ArgPtr is like Arg but returns a RegPtr.\n" ^RegPtr [^{:tag (* Func)} f ^string name]
+  (conv RegPtr (.Arg f name)))
+
+
+
+^{:go/end 138} (go/method StoreArg "StoreArg stores src into the named argument (or result).\n" [^{:tag (* Func)} f ^Reg src ^string name]
+  (let [(values off ok) (aget (.-args f) name)]
+    (when (not ok)
+      (.Fatalf (.-Asm f) "unknown argument %s" name))
+
+    (let [a (.-Asm f)
+        ^{:line 129} mem (lit Reg (fmt/Sprintf "%s+%d(FP)" name off))]
+      (when (and (.IsImm src) (not (.-memOK (.-Arch a))))
+        (let [r (.Reg a)]
+          (.Mov a src r)
+          (.Mov a r mem)
+          (.Free a r)
+          (return)))
+
+      (.Mov a src mem))))

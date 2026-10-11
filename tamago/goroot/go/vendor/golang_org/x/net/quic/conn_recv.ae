@@ -1,0 +1,630 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "conn_recv.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [time "time"]])
+
+
+^{:go/end 85} (go/method handleDatagram [^{:tag (* Conn)} c ^time/Time now ^{:tag (* datagram)} dgram] :results [^bool handled]
+  (when (not (.IsValid (.-localAddr c)))
+    ;; We don't have any way to tell in the general case what address we're
+    ;; sending packets from. Set our address from the destination address of
+    ;; the first packet received from the peer.
+    (set! (.-localAddr c) (.-localAddr dgram)))
+
+  (when (and (.IsValid (.-peerAddr dgram)) (!= (.-peerAddr dgram) (.-peerAddr c)))
+    (when (== (.-side c) clientSide)
+      ;; "If a client receives packets from an unknown server address,
+      ;; the client MUST discard these packets."
+      ;; https://www.rfc-editor.org/rfc/rfc9000#section-9-6
+      (return false))
+
+    ;; We currently don't support connection migration,
+    ;; so for now the server also drops packets from an unknown address.
+    (return false))
+
+  ^{:go/breaks [[5 84]]} (let [buf (.-b dgram)]
+    (.datagramReceived (.-loss c) now (len buf))
+    (when (.isDraining c)
+      (return false))
+
+    (while (> (len buf) 0)
+      (let [^int n (zero int)
+          ^{:line 39} ptype (getPacketType buf)]
+        (switch ptype
+          (case [packetTypeInitial]
+            (when (and (== (.-side c) serverSide) (< (len (.-b dgram)) paddedInitialDatagramSize))
+              ;; Discard client-sent Initial packets in too-short datagrams.
+              ;; https://www.rfc-editor.org/rfc/rfc9000#section-14.1-4
+              (return false))
+
+            (set! n (.handleLongHeader c now dgram ptype initialSpace (.-r (.-keysInitial c)) buf)))
+          (case [packetTypeHandshake]
+            (set! n (.handleLongHeader c now dgram ptype handshakeSpace (.-r (.-keysHandshake c)) buf)))
+          (case [packetType1RTT]
+            (set! n (.handle1RTT c now dgram buf)))
+          (case [packetTypeRetry]
+            (.handleRetry c now buf)
+            (return true))
+          (case [packetTypeVersionNegotiation]
+            (.handleVersionNegotiation c now buf)
+            (return true))
+          (default
+            (set! n -1)))
+
+        (when (<= n 0)
+          ;; We don't expect to get a stateless reset with a valid
+          ;; destination connection ID, since the sender of a stateless
+          ;; reset doesn't know what the connection ID is.
+          ;;
+          ;; We're required to perform this check anyway.
+          ;;
+          ;; "[...] the comparison MUST be performed when the first packet
+          ;; in an incoming datagram [...] cannot be decrypted."
+          ;; https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1-2
+          (when (and (== (len buf) (len (.-b dgram))) (> (len buf) statelessResetTokenLen))
+            (let [^statelessResetToken token (zero statelessResetToken)]
+              (copy (subslice token) (subslice buf (- (len buf) (len token))))
+              (when (.handleStatelessReset c now token)
+                (return true))))
+
+
+          ;; Invalid data at the end of a datagram is ignored.
+          (return false))
+
+        (.idleHandlePacketReceived c now)
+        (set! buf (subslice buf n))))
+
+    true))
+
+
+^{:go/end 137} (go/method handleLongHeader ^int [^{:tag (* Conn)} c ^time/Time now ^{:tag (* datagram)} dgram ^packetType ptype ^numberSpace space ^fixedKeys k ^{:tag (slice byte)} buf]
+  (when (not (.isSet k))
+    (return (skipLongHeaderPacket buf)))
+
+
+  (let [pnumMax (.largestSeen (aget (.-acks c) space))
+      (values p n) (parseLongHeaderPacket buf k pnumMax)]
+    (when (< n 0)
+      (return -1))
+
+    (when (!= (bit-and (aget buf 0) reservedLongBits) 0)
+      ;; Reserved header bits must be 0.
+      ;; https://www.rfc-editor.org/rfc/rfc9000#section-17.2-8.2.1
+      (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+          :code errProtocolViolation
+          :reason "reserved header bits are not zero"))
+
+      (return -1))
+
+    (when (!= (.-version p) quicVersion1)
+      ;; The peer has changed versions on us mid-handshake?
+      (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+          :code errProtocolViolation
+          :reason "protocol version changed during handshake"))
+
+      (return -1))
+
+
+    (when (not (.shouldProcess (aget (.-acks c) space) (.-num p)))
+      (return n))
+
+
+    (when logPackets
+      (logInboundLongPacket c p))
+
+    (when (.logEnabled c QLogLevelPacket)
+      (.logLongPacketReceived c p (subslice buf _ n)))
+
+    (.handlePacket (.-connIDState c) c (.-ptype p) (.-srcConnID p))
+    (let [ackEliciting (.handleFrames c now dgram ptype space (.-payload p))]
+      (.receive (aget (.-acks c) space) now space (.-num p) ackEliciting (.-ecn dgram))
+      (when (and (== (.-ptype p) packetTypeHandshake) (== (.-side c) serverSide))
+        (.validateClientAddress (.-loss c))
+
+        ;; "[...] a server MUST discard Initial keys when it first successfully
+        ;; processes a Handshake packet [...]"
+        ;; https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1-2
+        (.discardKeys c now initialSpace))
+
+      ^{:line 136} n)))
+
+
+^{:go/end 179} (go/method handle1RTT ^int [^{:tag (* Conn)} c ^time/Time now ^{:tag (* datagram)} dgram ^{:tag (slice byte)} buf]
+  (when (not (.canRead (.-keysAppData c)))
+    ;; 1-RTT packets extend to the end of the datagram,
+    ;; so skip the remainder of the datagram if we can't parse this.
+    (return (len buf)))
+
+
+  (let [pnumMax (.largestSeen (aget (.-acks c) appDataSpace))
+      (values p err) (parse1RTTPacket buf (addr (.-keysAppData c)) connIDLen pnumMax)]
+    (when (!= err nil)
+      ;; A localTransportError terminates the connection.
+      ;; Other errors indicate an unparsable packet, but otherwise may be ignored.
+      (when [(values _ ok) (assert localTransportError err)] ok
+        (.abort c now err))
+
+      (return -1))
+
+    (when (!= (bit-and (aget buf 0) reserved1RTTBits) 0)
+      ;; Reserved header bits must be 0.
+      ;; https://www.rfc-editor.org/rfc/rfc9000#section-17.3.1-4.8.1
+      (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+          :code errProtocolViolation
+          :reason "reserved header bits are not zero"))
+
+      (return -1))
+
+
+    (when (not (.shouldProcess (aget (.-acks c) appDataSpace) (.-num p)))
+      (return (len buf)))
+
+
+    (when logPackets
+      (logInboundShortPacket c p))
+
+    (when (.logEnabled c QLogLevelPacket)
+      (.log1RTTPacketReceived c p buf))
+
+    (let [ackEliciting (.handleFrames c now dgram packetType1RTT appDataSpace (.-payload p))]
+      (.receive (aget (.-acks c) appDataSpace) now appDataSpace (.-num p) ackEliciting (.-ecn dgram))
+      (len buf))))
+
+
+^{:go/end 219} (go/method handleRetry [^{:tag (* Conn)} c ^time/Time now ^{:tag (slice byte)} pkt]
+  (when (!= (.-side c) clientSide)
+    (return)) ; clients don't send Retry packets
+
+  ;; "After the client has received and processed an Initial or Retry packet
+  ;; from the server, it MUST discard any subsequent Retry packets that it receives."
+  ;; https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2-1
+  (when (not (.canRead (.-keysInitial c)))
+    (return)) ; discarded Initial keys, connection is already established
+
+  (when (!= (.numRanges (.-seen (aget (.-acks c) initialSpace))) 0)
+    (return)) ; processed at least one packet
+
+  (when (!= (.-retryToken c) nil)
+    (return)) ; received a Retry already
+
+  ;; "Clients MUST discard Retry packets that have a Retry Integrity Tag
+  ;; that cannot be validated."
+  ;; https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2-2
+  (let [(values p ok) (parseRetryPacket pkt (.-originalDstConnID (.-connIDState c)))]
+    (when (not ok)
+      (return))
+
+    ;; "A client MUST discard a Retry packet with a zero-length Retry Token field."
+    ;; https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2-2
+    (when (== (len (.-token p)) 0)
+      (return))
+
+    (set! (.-retryToken c) (cloneBytes (.-token p)))
+    (.handleRetryPacket (.-connIDState c) (.-srcConnID p))
+    (set! (.-keysInitial c) (initialKeys (.-srcConnID p) (.-side c)))
+    ;; We need to resend any data we've already sent in Initial packets.
+    ;; We must not reuse already sent packet numbers.
+    (.discardPackets (.-loss c) initialSpace (.-log c) (.-handleAckOrLoss c))
+    ;; TODO: Discard 0-RTT packets as well, once we support 0-RTT.
+    (when (!= (.-testHooks c) nil)
+      (.init (.-testHooks c) false))))
+
+
+
+(go/var errVersionNegotiation (errors/New "server does not support QUIC version 1"))
+
+^{:go/end 255} (go/method handleVersionNegotiation [^{:tag (* Conn)} c ^time/Time now ^{:tag (slice byte)} pkt]
+  (when (!= (.-side c) clientSide)
+    (return)) ; servers don't handle Version Negotiation packets
+
+  ;; "A client MUST discard any Version Negotiation packet if it has
+  ;; received and successfully processed any other packet [...]"
+  ;; https://www.rfc-editor.org/rfc/rfc9000#section-6.2-2
+  (when (not (.canRead (.-keysInitial c)))
+    (return)) ; discarded Initial keys, connection is already established
+
+  (when (!= (.numRanges (.-seen (aget (.-acks c) initialSpace))) 0)
+    (return)) ; processed at least one packet
+
+  (let [(values _ srcConnID versions) (parseVersionNegotiation pkt)]
+    (when (or (< (len (.-remote (.-connIDState c))) 1) (not (bytes/Equal ^{:go/via [connID]} (.-cid (aget (.-remote (.-connIDState c)) 0)) srcConnID)))
+      (return)) ; Source Connection ID doesn't match what we sent
+
+    (while (>= (len versions) 4)
+      (let [ver (.Uint32 binary/BigEndian versions)]
+        (when (== ver 1)
+          ;; "A client MUST discard a Version Negotiation packet that lists
+          ;; the QUIC version selected by the client."
+          ;; https://www.rfc-editor.org/rfc/rfc9000#section-6.2-2
+          (return))
+
+        (set! versions (subslice versions 4))))
+
+    ;; "A client that supports only this version of QUIC MUST
+    ;; abandon the current connection attempt if it receives
+    ;; a Version Negotiation packet, [with the two exceptions handled above]."
+    ;; https://www.rfc-editor.org/rfc/rfc9000#section-6.2-2
+    (.abortImmediately c now errVersionNegotiation)))
+
+
+^{:go/end 423} (go/method handleFrames [^{:tag (* Conn)} c ^time/Time now ^{:tag (* datagram)} dgram ^packetType ptype ^numberSpace space ^{:tag (slice byte)} payload] :results [^bool ackEliciting]
+  (when (== (len payload) 0)
+    ;; "An endpoint MUST treat receipt of a packet containing no frames
+    ;; as a connection error of type PROTOCOL_VIOLATION."
+    ;; https://www.rfc-editor.org/rfc/rfc9000#section-12.4-3
+    (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+        :code errProtocolViolation
+        :reason "packet contains no frames"))
+
+    (return false))
+
+  ;; frameOK verifies that ptype is one of the packets in mask.
+  (let [frameOK ^{:go/breaks [[5 281]] :go/end 282} (fn [^{:tag (* Conn)} c ^packetType ptype ^packetType mask] :results [^bool ok]
+        (when (== (bit-and ptype mask) 0)
+          ;; "An endpoint MUST treat receipt of a frame in a packet type
+          ;; that is not permitted as a connection error of type
+          ;; PROTOCOL_VIOLATION."
+          ;; https://www.rfc-editor.org/rfc/rfc9000#section-12.4-3
+          (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+              :code errProtocolViolation
+              :reason "frame not allowed in packet"))
+
+          (return false))
+
+        true)
+
+      ;; Packet masks from RFC 9000 Table 3.
+      ;; https://www.rfc-editor.org/rfc/rfc9000#table-3
+
+      ^:const ^{:line 286 :val 7} IH_1 (bit-or packetTypeInitial packetTypeHandshake packetType1RTT)
+      ^:const ^:go/grouped ^{:line 287 :val 7} __01 (bit-or packetType0RTT packetType1RTT)
+      ^:const ^:go/grouped ^{:line 288 :val 5} ___1 packetType1RTT
+
+      ^{:line 290} hasCrypto false]
+    (while (> (len payload) 0)
+      (switch (aget payload 0)
+        (case [frameTypePadding frameTypeAck frameTypeAckECN
+            ^{:line 294} frameTypeConnectionCloseTransport frameTypeConnectionCloseApplication])
+        (default
+          (set! ackEliciting true)))
+
+      (let [n -1]
+        (switch (aget payload 0)
+          (case [frameTypePadding]
+            ;; PADDING is OK in all spaces.
+            (set! n 1))
+          (case [frameTypePing]
+            ;; PING is OK in all spaces.
+            ;;
+            ;; A PING frame causes us to respond with an ACK by virtue of being
+            ;; an ack-eliciting frame, but requires no other action.
+            (set! n 1))
+          (case [frameTypeAck frameTypeAckECN]
+            (when (not (frameOK c ptype IH_1))
+              (return))
+
+            (set! n (.handleAckFrame c now space payload)))
+          (case [frameTypeResetStream]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handleResetStreamFrame c now space payload)))
+          (case [frameTypeStopSending]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handleStopSendingFrame c now space payload)))
+          (case [frameTypeCrypto]
+            (when (not (frameOK c ptype IH_1))
+              (return))
+
+            (set! hasCrypto true)
+            (set! n (.handleCryptoFrame c now space payload)))
+          (case [frameTypeNewToken]
+            (when (not (frameOK c ptype ___1))
+              (return))
+
+            (set! (values _ n) (consumeNewTokenFrame payload)))
+          (case [0x08 0x09 0x0a 0x0b 0x0c 0x0d 0x0e 0x0f] ; STREAM
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handleStreamFrame c now space payload)))
+          (case [frameTypeMaxData]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handleMaxDataFrame c now payload)))
+          (case [frameTypeMaxStreamData]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handleMaxStreamDataFrame c now payload)))
+          (case [frameTypeMaxStreamsBidi frameTypeMaxStreamsUni]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handleMaxStreamsFrame c now payload)))
+          (case [frameTypeDataBlocked]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! (values _ n) (consumeDataBlockedFrame payload)))
+          (case [frameTypeStreamsBlockedBidi frameTypeStreamsBlockedUni]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! (values _ _ n) (consumeStreamsBlockedFrame payload)))
+          (case [frameTypeStreamDataBlocked]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! (values _ _ n) (consumeStreamDataBlockedFrame payload)))
+          (case [frameTypeNewConnectionID]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handleNewConnectionIDFrame c now space payload)))
+          (case [frameTypeRetireConnectionID]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handleRetireConnectionIDFrame c now space payload)))
+          (case [frameTypePathChallenge]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handlePathChallengeFrame c now dgram space payload)))
+          (case [frameTypePathResponse]
+            (when (not (frameOK c ptype ___1))
+              (return))
+
+            (set! n (.handlePathResponseFrame c now space payload)))
+          (case [frameTypeConnectionCloseTransport]
+            ;; Transport CONNECTION_CLOSE is OK in all spaces.
+            (set! n (.handleConnectionCloseTransportFrame c now payload)))
+          (case [frameTypeConnectionCloseApplication]
+            (when (not (frameOK c ptype __01))
+              (return))
+
+            (set! n (.handleConnectionCloseApplicationFrame c now payload)))
+          (case [frameTypeHandshakeDone]
+            (when (not (frameOK c ptype ___1))
+              (return))
+
+            (set! n (.handleHandshakeDoneFrame c now space payload))))
+
+        (when (< n 0)
+          (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+              :code errFrameEncoding
+              :reason "frame encoding error"))
+
+          (return false))
+
+        (set! payload (subslice payload n))))
+
+    (when hasCrypto
+      ;; Process TLS events after handling all frames in a packet.
+      ;; TLS events can cause us to drop state for a number space,
+      ;; so do that last, to avoid handling frames differently
+      ;; depending on whether they come before or after a CRYPTO frame.
+      (when [err (.handleTLSEvents c now)] (!= err nil)
+        (.abort c now err)))
+
+
+    ^{:line 422} ackEliciting))
+
+
+^{:go/end 465} (go/method handleAckFrame ^int [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^{:tag (slice byte)} payload]
+  (.receiveAckStart (.-loss c))
+  (let [(values largest ackDelay ecn n) (consumeAckFrame payload ^{:go/end 432} (fn [^int rangeIndex ^packetNumber start ^packetNumber end]
+          (when [err (.receiveAckRange (.-loss c) now space rangeIndex start end (.-handleAckOrLoss c))] (!= err nil)
+            (.abort c now err)
+            (return))))]
+
+
+    ;; TODO: Make use of ECN feedback.
+    ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3.2
+    (set! _ ecn)
+    ;; Prior to receiving the peer's transport parameters, we cannot
+    ;; interpret the ACK Delay field because we don't know the ack_delay_exponent
+    ;; to apply.
+    ;;
+    ;; For servers, we should always know the ack_delay_exponent because the
+    ;; client's transport parameters are carried in its Initial packets and we
+    ;; won't send an ack-eliciting Initial packet until after receiving the last
+    ;; client Initial packet.
+    ;;
+    ;; For clients, we won't receive the server's transport parameters until handling
+    ;; its Handshake flight, which will probably happen after reading its ACK for our
+    ;; Initial packet(s). However, the peer's acknowledgement delay cannot reduce our
+    ;; adjusted RTT sample below min_rtt, and min_rtt is generally going to be set
+    ;; by the packet containing the ACK for our Initial flight. Therefore, the
+    ;; ACK Delay for an ACK in the Initial space is likely to be ignored anyway.
+    ;;
+    ;; Long story short, setting the delay to 0 prior to reading transport parameters
+    ;; is usually going to have no effect, will have only a minor effect in the rare
+    ;; cases when it happens, and there aren't any good alternatives anyway since we
+    ;; can't interpret the ACK Delay field without knowing the exponent.
+    (let [^time/Duration delay (zero time/Duration)]
+      (when (>= (.-peerAckDelayExponent c) 0)
+        (set! delay (.Duration ackDelay (conv uint8 (.-peerAckDelayExponent c)))))
+
+      (.receiveAckEnd (.-loss c) now (.-log c) space delay (.-handleAckOrLoss c))
+      (when (== space appDataSpace)
+        (.handleAckFor (.-keysAppData c) largest))
+
+      ^{:line 464} n)))
+
+
+^{:go/end 474} (go/method handleMaxDataFrame ^int [^{:tag (* Conn)} c ^time/Time now ^{:tag (slice byte)} payload]
+  (let [(values maxData n) (consumeMaxDataFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (.setMaxData (.-outflow (.-streams c)) maxData)
+    ^{:line 473} n))
+
+
+^{:go/end 488} (go/method handleMaxStreamDataFrame ^int [^{:tag (* Conn)} c ^time/Time now ^{:tag (slice byte)} payload]
+  (let [(values id maxStreamData n) (consumeMaxStreamDataFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (when [s (.streamForFrame c now id sendStream)] (!= s nil)
+      (when [err (.handleMaxStreamData s maxStreamData)] (!= err nil)
+        (.abort c now err)
+        (return -1)))
+
+
+    ^{:line 487} n))
+
+
+^{:go/end 497} (go/method handleMaxStreamsFrame ^int [^{:tag (* Conn)} c ^time/Time now ^{:tag (slice byte)} payload]
+  (let [(values styp max n) (consumeMaxStreamsFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (.setMax (aget (.-localLimit (.-streams c)) styp) max)
+    ^{:line 496} n))
+
+
+^{:go/end 510} (go/method handleResetStreamFrame ^int [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^{:tag (slice byte)} payload]
+  (let [(values id code finalSize n) (consumeResetStreamFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (when [s (.streamForFrame c now id recvStream)] (!= s nil)
+      (when [err (.handleReset s code finalSize)] (!= err nil)
+        (.abort c now err)))
+
+
+    ^{:line 509} n))
+
+
+^{:go/end 523} (go/method handleStopSendingFrame ^int [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^{:tag (slice byte)} payload]
+  (let [(values id code n) (consumeStopSendingFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (when [s (.streamForFrame c now id sendStream)] (!= s nil)
+      (when [err (.handleStopSending s code)] (!= err nil)
+        (.abort c now err)))
+
+
+    ^{:line 522} n))
+
+
+^{:go/end 533} (go/method handleCryptoFrame ^int [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^{:tag (slice byte)} payload]
+  (let [(values off data n) (consumeCryptoFrame payload)
+      ^{:line 527} err (.handleCrypto c now space off data)]
+    (when (!= err nil)
+      (.abort c now err)
+      (return -1))
+
+    ^{:line 532} n))
+
+
+^{:go/end 546} (go/method handleStreamFrame ^int [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^{:tag (slice byte)} payload]
+  (let [(values id off fin b n) (consumeStreamFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (when [s (.streamForFrame c now id recvStream)] (!= s nil)
+      (when [err (.handleData s off b fin)] (!= err nil)
+        (.abort c now err)))
+
+
+    ^{:line 545} n))
+
+
+^{:go/end 557} (go/method handleNewConnectionIDFrame ^int [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^{:tag (slice byte)} payload]
+  (let [(values seq retire connID resetToken n) (consumeNewConnectionIDFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (when [err (.handleNewConnID (.-connIDState c) c seq retire connID resetToken)] (!= err nil)
+      (.abort c now err))
+
+    ^{:line 556} n))
+
+
+^{:go/end 568} (go/method handleRetireConnectionIDFrame ^int [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^{:tag (slice byte)} payload]
+  (let [(values seq n) (consumeRetireConnectionIDFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (when [err (.handleRetireConnID (.-connIDState c) c seq)] (!= err nil)
+      (.abort c now err))
+
+    ^{:line 567} n))
+
+
+^{:go/end 577} (go/method handlePathChallengeFrame ^int [^{:tag (* Conn)} c ^time/Time now ^{:tag (* datagram)} dgram ^numberSpace space ^{:tag (slice byte)} payload]
+  (let [(values data n) (consumePathChallengeFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (.handlePathChallenge c now dgram data)
+    ^{:line 576} n))
+
+
+^{:go/end 586} (go/method handlePathResponseFrame ^int [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^{:tag (slice byte)} payload]
+  (let [(values data n) (consumePathResponseFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (.handlePathResponse c now data)
+    ^{:line 585} n))
+
+
+^{:go/end 595} (go/method handleConnectionCloseTransportFrame ^int [^{:tag (* Conn)} c ^time/Time now ^{:tag (slice byte)} payload]
+  (let [(values code _ reason n) (consumeConnectionCloseTransportFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (.handlePeerConnectionClose c now (lit peerTransportError :code code :reason reason))
+    ^{:line 594} n))
+
+
+^{:go/end 604} (go/method handleConnectionCloseApplicationFrame ^int [^{:tag (* Conn)} c ^time/Time now ^{:tag (slice byte)} payload]
+  (let [(values code reason n) (consumeConnectionCloseApplicationFrame payload)]
+    (when (< n 0)
+      (return -1))
+
+    (.handlePeerConnectionClose c now (addr (lit ApplicationError :Code code :Reason reason)))
+    ^{:line 603} n))
+
+
+^{:go/breaks [[5 619]] :go/end 620} (go/method handleHandshakeDoneFrame ^int [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^{:tag (slice byte)} payload]
+  (when (== (.-side c) serverSide)
+    ;; Clients should never send HANDSHAKE_DONE.
+    ;; https://www.rfc-editor.org/rfc/rfc9000#section-19.20-4
+    (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+        :code errProtocolViolation
+        :reason "client sent HANDSHAKE_DONE"))
+
+    (return -1))
+
+  (when (.isAlive c)
+    (.confirmHandshake c now))
+
+  1)
+
+
+(go/var errStatelessReset (errors/New "received stateless reset"))
+
+^{:go/breaks [8] :go/end 631} (go/method handleStatelessReset [^{:tag (* Conn)} c ^time/Time now ^statelessResetToken resetToken] :results [^bool valid]
+  (when (not (.isValidStatelessResetToken (.-connIDState c) resetToken))
+    (return false))
+
+  (.setFinalError c errStatelessReset)
+  (.enterDraining c now)
+  true)

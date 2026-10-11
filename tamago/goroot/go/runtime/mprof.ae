@@ -1,0 +1,1722 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Malloc profiling.
+;; Patterned after tcmalloc's algorithms; shorter code.
+
+(in-ns 'go.runtime) (go/file "mprof.go" :imports [
+
+
+    ^{:line 11} [abi "internal/abi"]
+    ^{:line 12} [goarch "internal/goarch"]
+    ^{:line 13} [profilerecord "internal/profilerecord"]
+    ^{:line 14} [atomic "internal/runtime/atomic"]
+    ^{:line 15} [sys "internal/runtime/sys"]
+    ^{:line 16} [unsafe "unsafe"]])
+
+
+
+(go/var "NOTE(rsc): Everything here could use cas if contention became an issue.\n"
+
+  ^{:line 22} [^{:tag mutex :doc "profInsertLock protects changes to the start of all *bucket linked lists\n"} profInsertLock]
+
+  ^{:line 24} [^{:tag mutex :doc "profBlockLock protects the contents of every blockRecord struct\n"} profBlockLock]
+
+  ^{:line 26} [^{:tag mutex :doc "profMemActiveLock protects the active field of every memRecord struct\n"} profMemActiveLock]
+
+
+  ^{:line 29} [^{:tag (array (len (.-future (lit memRecord))) mutex) :doc "profMemFutureLock is a set of locks that protect the respective elements\nof the future array of every memRecord struct\n"} profMemFutureLock])
+
+
+;; All memory allocations are local and do not escape outside of the profiler.
+;; The profiler is forbidden from referring to garbage-collected memory.
+
+(go/const
+
+  ^{:line 37} [^{:tag bucketType :val 1 :doc "profile types\n"} memProfile (+ 1 iota)]
+  ^{:line 38} [^{:val 2} blockProfile]
+  ^{:line 39} [^{:val 3} mutexProfile]
+
+
+  ^{:line 42} [^{:val 179999 :doc "size of bucket hash table\n"} buckHashSize 179999]
+
+
+
+
+
+
+
+
+
+  ^{:line 52} [^{:val 6 :doc "maxSkip is to account for deferred inline expansion\nwhen using frame pointer unwinding. We record the stack\nwith \"physical\" frame pointers but handle skipping \"logical\"\nframes at some point after collecting the stack. So\nwe need extra space in order to avoid getting fewer than the\ndesired maximum number of frames after expansion.\nThis should be at least as large as the largest skip value\nused for profiling; otherwise stacks may be truncated inconsistently\n"} maxSkip 6]
+
+
+
+
+  ^{:line 57} [^{:val 1024 :doc "maxProfStackDepth is the highest valid value for debug.profstackdepth.\nIt's used for the bucket.stk func.\nTODO(fg): can we get rid of this?\n"} maxProfStackDepth 1024])
+
+
+(go/type bucketType int)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type bucket "A bucket holds per-call-stack profiling information.\nThe representation is a bit sleazy, inherited from C.\nThis struct defines the bucket header. It is followed in\nmemory by the stack words and then the actual record\ndata, either a memRecord or a blockRecord.\n\nPer-call-stack profiling information.\nLookup by hashing call stack into a linked-list hash table.\n\nNone of the fields in this bucket header are modified after\ncreation, including its next and allnext links.\n\nNo heap pointers.\n" (struct
+    ^{:line 76 :tag sys/NotInHeap} _
+    ^{:line 77 :tag (* bucket)} next
+    ^{:line 78 :tag (* bucket)} allnext
+    ^{:line 79 :tag bucketType} typ ; memBucket or blockBucket (includes mutexProfile)
+    ^{:line 80 :tag uintptr} hash
+    ^{:line 81 :tag uintptr} size
+    ^{:line 82 :tag uintptr} nstk))
+
+
+
+
+(go/type memRecord "A memRecord is the bucket data for a bucket of type memProfile,\npart of the memory profile.\n" (struct
+    ;; The following complex 3-stage scheme of stats accumulation
+    ;; is required to obtain a consistent picture of mallocs and frees
+    ;; for some point in time.
+    ;; The problem is that mallocs come in real time, while frees
+    ;; come only after a GC during concurrent sweeping. So if we would
+    ;; naively count them, we would get a skew toward mallocs.
+    ;;
+    ;; Hence, we delay information to get consistent snapshots as
+    ;; of mark termination. Allocations count toward the next mark
+    ;; termination's snapshot, while sweep frees count toward the
+    ;; previous mark termination's snapshot:
+    ;;
+    ;;              MT          MT          MT          MT
+    ;;             .·|         .·|         .·|         .·|
+    ;;          .·˙  |      .·˙  |      .·˙  |      .·˙  |
+    ;;       .·˙     |   .·˙     |   .·˙     |   .·˙     |
+    ;;    .·˙        |.·˙        |.·˙        |.·˙        |
+    ;;
+    ;;       alloc → ▲ ← free
+    ;;               ┠┅┅┅┅┅┅┅┅┅┅┅P
+    ;;       C+2     →    C+1    →  C
+    ;;
+    ;;                   alloc → ▲ ← free
+    ;;                           ┠┅┅┅┅┅┅┅┅┅┅┅P
+    ;;                   C+2     →    C+1    →  C
+    ;;
+    ;; Since we can't publish a consistent snapshot until all of
+    ;; the sweep frees are accounted for, we wait until the next
+    ;; mark termination ("MT" above) to publish the previous mark
+    ;; termination's snapshot ("P" above). To do this, allocation
+    ;; and free events are accounted to *future* heap profile
+    ;; cycles ("C+n" above) and we only publish a cycle once all
+    ;; of the events from that cycle must be done. Specifically:
+    ;;
+    ;; Mallocs are accounted to cycle C+2.
+    ;; GC frees (done during sweeping) are accounted to cycle C+1.
+    ;;
+    ;; After mark termination, we increment the global heap
+    ;; profile cycle counter and accumulate the stats from cycle C
+    ;; into the active profile.
+
+
+
+    ^{:line 131 :tag memRecordCycle :doc "active is the currently published profile. A profiling\ncycle can be accumulated into active once its complete.\n"} active
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 143 :tag (array 3 memRecordCycle) :doc "future records the profile events we're counting for cycles\nthat have not yet been published. This is ring buffer\nindexed by the global heap profile cycle C and stores\ncycles C, C+1, and C+2. Unlike active, these counts are\nonly for a single cycle; they are not cumulative across\ncycles.\n\nWe store cycle C here because there's a window between when\nC becomes the active cycle and when we've flushed it to\nactive.\n"} future))
+
+
+
+(go/type memRecordCycle "memRecordCycle\n" (struct
+    ^{:line 148 :tag uintptr} allocs ^uintptr frees))
+
+
+
+^{:go/end 155} (go/method add "add accumulates b into a. It does not zero b.\n" [^{:tag (* memRecordCycle)} a ^{:tag (* memRecordCycle)} b]
+  (set! (.-allocs a) + (.-allocs b))
+  (set! (.-frees a) + (.-frees b)))
+
+
+
+
+(go/type blockRecord "A blockRecord is the bucket data for a bucket of type blockProfile,\nwhich is used in blocking and mutex profiles.\n" (struct
+    ^{:line 160 :tag float64} count
+    ^{:line 161 :tag int64} cycles))
+
+
+(go/var
+  ^{:line 165} [^atomic/UnsafePointer mbuckets] ; *bucket, memory profile buckets
+  ^{:line 166} [^atomic/UnsafePointer bbuckets] ; *bucket, blocking profile buckets
+  ^{:line 167} [^atomic/UnsafePointer xbuckets] ; *bucket, mutex profile buckets
+  ^{:line 168} [^atomic/UnsafePointer buckhash] ; *buckhashArray
+
+  ^{:line 170} [^mProfCycleHolder mProfCycle])
+
+
+(go/type buckhashArray (array buckHashSize atomic/UnsafePointer)) ; *bucket
+
+(go/const ^{:val 100663296} mProfCycleWrap (* (conv uint32 (len (.-future (lit memRecord)))) (<< 2 24)))
+
+
+
+
+
+(go/type mProfCycleHolder "mProfCycleHolder holds the global heap profile cycle number (wrapped at\nmProfCycleWrap, stored starting at bit 1), and a flag (stored at bit 0) to\nindicate whether future[cycle] in all buckets has been queued to flush into\nthe active profile.\n" (struct
+    ^{:line 182 :tag atomic/Uint32} value))
+
+
+
+^{:go/end 190} (go/method read "read returns the current cycle count.\n" [^{:tag (* mProfCycleHolder)} c] :results [^uint32 cycle]
+  (let [v (.Load (.-value c))]
+    (set! cycle (>> v 1))
+    ^{:line 189} cycle))
+
+
+
+
+^{:go/end 204} (go/method setFlushed "setFlushed sets the flushed flag. It returns the current cycle count and the\nprevious value of the flushed flag.\n" [^{:tag (* mProfCycleHolder)} c] :results [^uint32 cycle ^bool alreadyFlushed]
+  (while true
+    (let [prev (.Load (.-value c))]
+      (set! cycle (>> prev 1))
+      (set! alreadyFlushed (!= (bit-and prev 0x1) 0))
+      (let [next (bit-or prev 0x1)]
+        (when (.CompareAndSwap (.-value c) prev next)
+          (return cycle alreadyFlushed))))))
+
+
+
+
+
+
+^{:go/end 221} (go/method increment "increment increases the cycle count by one, wrapping the value at\nmProfCycleWrap. It clears the flushed flag.\n" [^{:tag (* mProfCycleHolder)} c]
+  ;; We explicitly wrap mProfCycle rather than depending on
+  ;; uint wraparound because the memRecord.future ring does not
+  ;; itself wrap at a power of two.
+  (while true
+    (let [prev (.Load (.-value c))
+        ^{:line 214} cycle (>> prev 1)]
+      (set! cycle (% (+ cycle 1) mProfCycleWrap))
+      (let [next (<< cycle 1)]
+        (when (.CompareAndSwap (.-value c) prev next)
+          (break))))))
+
+
+
+
+
+^{:go/end 239} (go/func newBucket "newBucket allocates a bucket with the given type and number of stack entries.\n" ^{:tag (* bucket)} [^bucketType typ ^int nstk]
+  (let [size (+ (unsafe/Sizeof (lit bucket)) (* (conv uintptr nstk) (unsafe/Sizeof (conv uintptr 0))))]
+    (switch typ
+      (default
+        (throw "invalid profile bucket type"))
+      (case [memProfile]
+        (set! size + (unsafe/Sizeof (lit memRecord))))
+      (case [blockProfile mutexProfile]
+        (set! size + (unsafe/Sizeof (lit blockRecord)))))
+
+
+    (let [b (conv (* bucket) (persistentalloc size 0 (addr (.-buckhash_sys memstats))))]
+      (set! (.-typ b) typ)
+      (set! (.-nstk b) (conv uintptr nstk))
+      ^{:line 238} b)))
+
+
+
+
+^{:go/end 250} (go/method stk "stk returns the slice in b holding the stack. The caller can assume that the\nbacking array is immutable.\n" ^{:tag (slice uintptr)} [^{:tag (* bucket)} b]
+  (let [stk (conv (* (array maxProfStackDepth uintptr)) (add (conv unsafe/Pointer b) (unsafe/Sizeof @b)))]
+    (when (> (.-nstk b) maxProfStackDepth)
+      ;; prove that slicing works; otherwise a failure requires a P
+      (throw "bad profile stack count"))
+
+    (subslice stk _ (.-nstk b) (.-nstk b))))
+
+
+
+^{:go/end 259} (go/method mp "mp returns the memRecord associated with the memProfile bucket b.\n" ^{:tag (* memRecord)} [^{:tag (* bucket)} b]
+  (when (!= (.-typ b) memProfile)
+    (throw "bad use of bucket.mp"))
+
+  (let [data (add (conv unsafe/Pointer b) (+ (unsafe/Sizeof @b) (* (.-nstk b) (unsafe/Sizeof (conv uintptr 0)))))]
+    (conv (* memRecord) data)))
+
+
+
+^{:go/end 268} (go/method bp "bp returns the blockRecord associated with the blockProfile bucket b.\n" ^{:tag (* blockRecord)} [^{:tag (* bucket)} b]
+  (when (and (!= (.-typ b) blockProfile) (!= (.-typ b) mutexProfile))
+    (throw "bad use of bucket.bp"))
+
+  (let [data (add (conv unsafe/Pointer b) (+ (unsafe/Sizeof @b) (* (.-nstk b) (unsafe/Sizeof (conv uintptr 0)))))]
+    (conv (* blockRecord) data)))
+
+
+
+^{:go/end 346} (go/func stkbucket "Return the bucket for stk[0:nstk], allocating new bucket if needed.\n" ^{:tag (* bucket)} [^bucketType typ ^uintptr size ^{:tag (slice uintptr)} stk ^bool alloc]
+  (let [bh (conv (* buckhashArray) (.Load buckhash))]
+    (when (== bh nil)
+      (lock (addr profInsertLock))
+      ;; check again under the lock
+      (set! bh (conv (* buckhashArray) (.Load buckhash)))
+      (when (== bh nil)
+        (set! bh (conv (* buckhashArray) (sysAlloc (unsafe/Sizeof (lit buckhashArray)) (addr (.-buckhash_sys memstats)) "profiler hash buckets")))
+        (when (== bh nil)
+          (throw "runtime: cannot allocate memory"))
+
+        (.StoreNoWB buckhash (conv unsafe/Pointer bh)))
+
+      (unlock (addr profInsertLock)))
+
+
+    ;; Hash stack.
+    (let [^uintptr h (zero uintptr)]
+      (range [_ pc stk]
+        (set! h + pc)
+        (set! h + (<< h 10))
+        (set! h bit-xor (>> h 6)))
+
+      ;; hash in size
+      (set! h + size)
+      (set! h + (<< h 10))
+      (set! h bit-xor (>> h 6))
+      ;; finalize
+      (set! h + (<< h 3))
+      (set! h bit-xor (>> h 11))
+
+      (let [i (conv int (% h buckHashSize))]
+        ;; first check optimistically, without the lock
+        (for [b (conv (* bucket) (.Load (aget bh i)))] (!= b nil) (set! b (.-next b))
+          (when (and (== (.-typ b) typ) (== (.-hash b) h) (== (.-size b) size) (eqslice (.stk b) stk))
+            (return b)))
+
+
+
+        (when (not alloc)
+          (return nil))
+
+
+        (lock (addr profInsertLock))
+        ;; check again under the insertion lock
+        (for [b (conv (* bucket) (.Load (aget bh i)))] (!= b nil) (set! b (.-next b))
+          (when (and (== (.-typ b) typ) (== (.-hash b) h) (== (.-size b) size) (eqslice (.stk b) stk))
+            (unlock (addr profInsertLock))
+            (return b)))
+
+
+
+        ;; Create new bucket.
+        (let [b (newBucket typ (len stk))]
+          (copy (.stk b) stk)
+          (set! (.-hash b) h)
+          (set! (.-size b) size)
+
+          (let [^{:tag (* atomic/UnsafePointer)} allnext (zero (* atomic/UnsafePointer))]
+            (cond (== typ memProfile)
+              (set! allnext (addr mbuckets))
+              (== typ mutexProfile)
+              (set! allnext (addr xbuckets)) :else
+
+              (set! allnext (addr bbuckets)))
+
+
+            (set! (.-next b) (conv (* bucket) (.Load (aget bh i))))
+            (set! (.-allnext b) (conv (* bucket) (.Load allnext)))
+
+            (.StoreNoWB (aget bh i) (conv unsafe/Pointer b))
+            (.StoreNoWB allnext (conv unsafe/Pointer b))
+
+            (unlock (addr profInsertLock))
+            ^{:line 345} b))))))
+
+
+^{:go/breaks [[5 357]] :go/end 358} (go/func eqslice ^bool [^{:tag (slice uintptr)} x ^{:tag (slice uintptr)} y]
+  (when (!= (len x) (len y))
+    (return false))
+
+  (range [i xi x]
+    (when (!= xi (aget y i))
+      (return false)))
+
+
+  true)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 370} (go/func mProf_NextCycle "mProf_NextCycle publishes the next heap profile cycle and creates a\nfresh heap profile cycle. This operation is fast and can be done\nduring STW. The caller must call mProf_Flush before calling\nmProf_NextCycle again.\n\nThis is called by mark termination during STW so allocations and\nfrees after the world is started again count towards a new heap\nprofiling cycle.\n" []
+  (.increment mProfCycle))
+
+
+
+
+
+
+
+
+
+^{:go/end 391} (go/func mProf_Flush "mProf_Flush flushes the events from the current heap profiling\ncycle into the active profile. After this it is safe to start a new\nheap profiling cycle with mProf_NextCycle.\n\nThis is called by GC after mark termination starts the world. In\ncontrast with mProf_NextCycle, this is somewhat expensive, but safe\nto do concurrently.\n" []
+  (let [(values cycle alreadyFlushed) (.setFlushed mProfCycle)]
+    (when alreadyFlushed
+      (return))
+
+
+    (let [index (% cycle (conv uint32 (len (.-future (lit memRecord)))))]
+      (lock (addr profMemActiveLock))
+      (lock (addr (aget profMemFutureLock index)))
+      (mProf_FlushLocked index)
+      (unlock (addr (aget profMemFutureLock index)))
+      (unlock (addr profMemActiveLock)))))
+
+
+
+
+
+
+^{:go/end 410} (go/func mProf_FlushLocked "mProf_FlushLocked flushes the events from the heap profiling cycle at index\ninto the active profile. The caller must hold the lock for the active profile\n(profMemActiveLock) and for the profiling cycle at index\n(profMemFutureLock[index]).\n" [^uint32 index]
+  (assertLockHeld (addr profMemActiveLock))
+  (assertLockHeld (addr (aget profMemFutureLock index)))
+  (let [head (conv (* bucket) (.Load mbuckets))]
+    (for [b head] (!= b nil) (set! b (.-allnext b))
+      (let [mp (.mp b)
+
+          ;; Flush cycle C into the published profile and clear
+          ;; it for reuse.
+          ^{:line 406} mpc (addr (aget (.-future mp) index))]
+        (.add (.-active mp) mpc)
+        (set! @mpc (lit memRecordCycle))))))
+
+
+
+
+
+
+
+^{:go/end 430} (go/func mProf_PostSweep "mProf_PostSweep records that all sweep frees for this GC cycle have\ncompleted. This has the effect of publishing the heap profile\nsnapshot as of the last mark termination without advancing the heap\nprofile cycle.\n" []
+  ;; Flush cycle C+1 to the active profile so everything as of
+  ;; the last mark termination becomes visible. *Don't* advance
+  ;; the cycle, since we're still accumulating allocs in cycle
+  ;; C+2, which have to become C+1 in the next mark termination
+  ;; and so on.
+  (let [cycle (+ (.read mProfCycle) 1)
+
+      ^{:line 424} index (% cycle (conv uint32 (len (.-future (lit memRecord)))))]
+    (lock (addr profMemActiveLock))
+    (lock (addr (aget profMemFutureLock index)))
+    (mProf_FlushLocked index)
+    (unlock (addr (aget profMemFutureLock index)))
+    (unlock (addr profMemActiveLock))))
+
+
+
+^{:go/end 461} (go/func mProf_Malloc "Called by malloc to record a profiled block.\n" [^{:tag (* m)} mp ^unsafe/Pointer p ^uintptr size]
+  (when (== (.-profStack mp) nil)
+    ;; mp.profStack is nil if we happen to sample an allocation during the
+    ;; initialization of mp. This case is rare, so we just ignore such
+    ;; allocations. Change MemProfileRate to 1 if you need to reproduce such
+    ;; cases for testing purposes.
+    (return))
+
+  ;; Only use the part of mp.profStack we need and ignore the extra space
+  ;; reserved for delayed inline expansion with frame pointer unwinding.
+  (let [nstk (callers 3 (subslice (.-profStack mp) _ (+ (.-profstackdepth debug) 2)))
+      ^{:line 444} index (% (+ (.read mProfCycle) 2) (conv uint32 (len (.-future (lit memRecord)))))
+
+      ^{:line 446} b (stkbucket memProfile size (subslice (.-profStack mp) _ nstk) true)
+      ^{:line 447} mr (.mp b)
+      ^{:line 448} mpc (addr (aget (.-future mr) index))]
+
+    (lock (addr (aget profMemFutureLock index)))
+    (inc! (.-allocs mpc))
+    (unlock (addr (aget profMemFutureLock index)))
+
+    ;; Setprofilebucket locks a bunch of other mutexes, so we call it outside of
+    ;; the profiler locks. This reduces potential contention and chances of
+    ;; deadlocks. Since the object must be alive during the call to
+    ;; mProf_Malloc, it's fine to do this non-atomically.
+    (systemstack ^{:go/end 460} (fn []
+        (setprofilebucket p b)))))
+
+
+
+
+^{:go/end 473} (go/func mProf_Free "Called when freeing a profiled block.\n" [^{:tag (* bucket)} b]
+  (let [index (% (+ (.read mProfCycle) 1) (conv uint32 (len (.-future (lit memRecord)))))
+
+      ^{:line 467} mp (.mp b)
+      ^{:line 468} mpc (addr (aget (.-future mp) index))]
+
+    (lock (addr (aget profMemFutureLock index)))
+    (inc! (.-frees mpc))
+    (unlock (addr (aget profMemFutureLock index)))))
+
+
+(go/var ^uint64 blockprofilerate) ; in CPU ticks
+
+
+
+
+
+
+
+^{:go/end 498} (go/func SetBlockProfileRate "SetBlockProfileRate controls the fraction of goroutine blocking events\nthat are reported in the blocking profile. The profiler aims to sample\nan average of one blocking event per rate nanoseconds spent blocked.\n\nTo include every blocking event in the profile, pass rate = 1.\nTo turn off profiling entirely, pass rate <= 0.\n" [^int rate]
+  (let [^int64 r (zero int64)]
+    (cond (<= rate 0)
+      (set! r 0) ; disable profiling
+      (== rate 1)
+      (set! r 1) :else ; profile everything
+      (do
+        ;; convert ns to cycles, use float64 to prevent overflow during multiplication
+        (set! r (conv int64 (/ (* (conv float64 rate) (conv float64 (ticksPerSecond))) (* 1000 1000 1000))))
+        (when (== r 0)
+          (set! r 1))))
+
+
+
+    (atomic/Store64 (addr blockprofilerate) (conv uint64 r))))
+
+
+^{:go/end 509} (go/func blockevent [^int64 cycles ^int skip]
+  (when (<= cycles 0)
+    (set! cycles 1))
+
+
+  (let [rate (conv int64 (atomic/Load64 (addr blockprofilerate)))]
+    (when (blocksampled cycles rate)
+      (saveblockevent cycles rate (+ skip 1) blockProfile))))
+
+
+
+
+
+^{:go/breaks [[5 517]] :go/end 518} (go/func blocksampled "blocksampled returns true for all events where cycles >= rate. Shorter\nevents have a cycles/rate random chance of returning true.\n" ^bool [^int64 cycles ^int64 rate]
+  (when (or (<= rate 0) ^:go/paren (and (> rate cycles) (> (% (cheaprand64) rate) cycles)))
+    (return false))
+
+  true)
+
+
+
+
+
+
+
+
+
+^{:go/end 566} (go/func saveblockevent "saveblockevent records a profile event of the type specified by which.\ncycles is the quantity associated with this event and rate is the sampling rate,\nused to adjust the cycles value in the manner determined by the profile type.\nskip is the number of frames to omit from the traceback associated with the event.\nThe traceback will be recorded from the stack of the goroutine associated with the current m.\nskip should be positive if this event is recorded from the current stack\n(e.g. when this is not called from a system stack)\n" [^int64 cycles ^int64 rate ^int skip ^bucketType which]
+  (when (== (.-profstackdepth debug) 0)
+    ;; profstackdepth is set to 0 by the user, so mp.profStack is nil and we
+    ;; can't record a stack trace.
+    (return))
+
+  (when (> skip maxSkip)
+    (print "requested skip=" skip)
+    (throw "invalid skip value"))
+
+  (let [gp (getg)
+      ^{:line 538} mp (acquirem) ; we must not be preempted while accessing profstack
+
+      ^{:line 540 :tag int} nstk (zero int)]
+    (if (or (tracefpunwindoff) (.hasCgoOnStack (.-m gp)))
+      (if (or (== (.-curg (.-m gp)) nil) (== (.-curg (.-m gp)) gp))
+        (set! nstk (callers skip (.-profStack mp)))
+
+        (set! nstk (gcallers (.-curg (.-m gp)) skip (.-profStack mp))))
+
+      (do
+        (if (or (== (.-curg (.-m gp)) nil) (== (.-curg (.-m gp)) gp)) (do
+            (when (> skip 0)
+              ;; We skip one fewer frame than the provided value for frame
+              ;; pointer unwinding because the skip value includes the current
+              ;; frame, whereas the saved frame pointer will give us the
+              ;; caller's return address first (so, not including
+              ;; saveblockevent)
+              (set! skip - 1))
+
+            (set! nstk (fpTracebackPartialExpand skip (conv unsafe/Pointer (getfp)) (.-profStack mp))))
+          (do
+            (aset (.-profStack mp) 0 (.-pc (.-sched (.-curg (.-m gp)))))
+            (set! nstk (+ 1 (fpTracebackPartialExpand skip (conv unsafe/Pointer (.-bp (.-sched (.-curg (.-m gp))))) (subslice (.-profStack mp) 1))))))))
+
+
+
+    (saveBlockEventStack cycles rate (subslice (.-profStack mp) _ nstk) which)
+    (releasem mp)))
+
+
+
+
+
+
+^{:go/end 612} (go/func fpTracebackPartialExpand "fpTracebackPartialExpand records a call stack obtained starting from fp.\nThis function will skip the given number of frames, properly accounting for\ninlining, and save remaining frames as \"physical\" return addresses. The\nconsumer should later use CallersFrames or similar to expand inline frames.\n" ^int [^int skip ^unsafe/Pointer fp ^{:tag (slice uintptr)} pcBuf]
+  (let [^int n (zero int)
+      ^{:line 574} lastFuncID abi/FuncIDNormal
+      ^{:line 575} skipOrAdd ^{:go/end 583} (fn ^bool [^uintptr retPC]
+        (cond (> skip 0)
+          (dec! skip)
+          (< n (len pcBuf)) (do
+            (aset pcBuf n retPC)
+            (inc! n)))
+
+        (< n (len pcBuf)))]
+
+    (while (and (< n (len pcBuf)) (!= fp nil))
+      ;; return addr sits one word above the frame pointer
+      (let [pc @(conv (* uintptr) (conv unsafe/Pointer (+ (conv uintptr fp) goarch/PtrSize)))]
+
+        (if (> skip 0)
+          (let [callPC (- pc 1)
+              ^{:line 590} fi (findfunc callPC)
+              (values u uf) (newInlineUnwinder fi callPC)]
+            (for [] (.valid uf) (set! uf (.next u uf))
+              (let [sf (.srcFunc u uf)]
+                (if (and (== (.-funcID sf) abi/FuncIDWrapper) (elideWrapperCalling lastFuncID)) (do)
+                  ;; ignore wrappers
+                  (when [more (skipOrAdd (+ (.-pc uf) 1))] (not more)
+                    (return n)))
+
+                (set! lastFuncID (.-funcID sf)))))
+
+          (do
+            ;; We've skipped the desired number of frames, so no need
+            ;; to perform further inline expansion now.
+            (aset pcBuf n pc)
+            (inc! n)))
+
+
+        ;; follow the frame pointer to the next one
+        (set! fp (conv unsafe/Pointer @(conv (* uintptr) fp)))))
+
+    ^{:line 611} n))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type mLockProfile "mLockProfile holds information about the runtime-internal lock contention\nexperienced and caused by this M, to report in metrics and profiles.\n\nThese measurements are subject to some notable constraints: First, the fast\npath for lock and unlock must remain very fast, with a minimal critical\nsection. Second, the critical section during contention has to remain small\ntoo, so low levels of contention are less likely to snowball into large ones.\nThe reporting code cannot acquire new locks until the M has released all\nother locks, which means no memory allocations and encourages use of\n(temporary) M-local storage.\n\nThe M has space for storing one call stack that caused contention, and the\nmagnitude of that contention. It also has space to store the magnitude of\nadditional contention the M caused, since it might encounter several\ncontention events before it releases all of its locks and is thus able to\ntransfer the locally buffered call stack and magnitude into the profile.\n\nThe M collects the call stack when it unlocks the contended lock. The\ntraceback takes place outside of the lock's critical section.\n\nThe profile for contention on sync.Mutex blames the caller of Unlock for the\namount of contention experienced by the callers of Lock which had to wait.\nWhen there are several critical sections, this allows identifying which of\nthem is responsible. We must match that reporting behavior for contention on\nruntime-internal locks.\n\nWhen the M unlocks its last mutex, it transfers the locally buffered call\nstack and magnitude into the profile. As part of that step, it also transfers\nany \"additional contention\" time to the profile. Any lock contention that it\nexperiences while adding samples to the profile will be recorded later as\n\"additional contention\" and not include a call stack, to avoid an echo.\n" (struct
+    ^{:line 646 :tag atomic/Int64} waitTime ; (nanotime) total time this M has spent waiting in runtime.lockWithRank. Read by runtime/metrics.
+    ^{:line 647 :tag (slice uintptr)} stack ; call stack at the point of this M's unlock call, when other Ms had to wait
+    ^{:line 648 :tag int64} cycles ; (cputicks) cycles attributable to "stack"
+    ^{:line 649 :tag int64} cyclesLost ; (cputicks) contention for which we weren't able to record a call stack
+    ^{:line 650 :tag bool} haveStack ; stack and cycles are to be added to the mutex profile (even if cycles is 0)
+    ^{:line 651 :tag bool} disabled)) ; attribute all time to "lost"
+
+
+^{:go/breaks [[4 658]] :go/end 659} (go/method start ^int64 [^{:tag (* mLockProfile)} prof]
+  (when (== (cheaprandn gTrackingPeriod) 0)
+    (return (nanotime)))
+
+  0)
+
+
+^{:go/end 665} (go/method end [^{:tag (* mLockProfile)} prof ^int64 start]
+  (when (!= start 0)
+    (.Add (.-waitTime prof) (* (- (nanotime) start) gTrackingPeriod))))
+
+
+
+
+
+
+
+
+
+^{:go/end 704} (go/method ^:go/nowritebarrierrec recordUnlock "recordUnlock prepares data for later addition to the mutex contention\nprofile. The M may hold arbitrary locks during this call.\n\nFrom unlock2, we might not be holding a p in this code.\n" [^{:tag (* mLockProfile)} prof ^int64 cycles]
+  (when (< cycles 0)
+    (set! cycles 0))
+
+
+  (when (.-disabled prof)
+    ;; We're experiencing contention while attempting to report contention.
+    ;; Make a note of its magnitude, but don't allow it to be the sole cause
+    ;; of another contention report.
+    (set! (.-cyclesLost prof) + cycles)
+    (return))
+
+
+  (when [prev (.-cycles prof)] (> prev 0)
+    ;; We can only store one call stack for runtime-internal lock contention
+    ;; on this M, and we've already got one. Decide which should stay, and
+    ;; add the other to the report for runtime._LostContendedRuntimeLock.
+    (when (== cycles 0)
+      (return))
+
+    (let [prevScore (% (cheaprandu64) (conv uint64 prev))
+        ^{:line 694} thisScore (% (cheaprandu64) (conv uint64 cycles))]
+      (if (> prevScore thisScore) (do
+          (set! (.-cyclesLost prof) + cycles)
+          (return))
+
+        (set! (.-cyclesLost prof) + prev))))
+
+
+  (.captureStack prof)
+  (set! (.-cycles prof) cycles))
+
+
+^{:go/end 740} (go/method captureStack [^{:tag (* mLockProfile)} prof]
+  (when (== (.-profstackdepth debug) 0)
+    ;; profstackdepth is set to 0 by the user, so mp.profStack is nil and we
+    ;; can't record a stack trace.
+    (return))
+
+
+  (let [skip 4] ; runtime.(*mLockProfile).recordUnlock runtime.unlock2Wake runtime.unlock2 runtime.unlockWithRank
+    (when staticLockRanking
+      ;; When static lock ranking is enabled, we'll always be on the system
+      ;; stack at this point. There will be a runtime.unlockWithRank.func1
+      ;; frame, and if the call to runtime.unlock took place on a user stack
+      ;; then there'll also be a runtime.systemstack frame. To keep stack
+      ;; traces somewhat consistent whether or not static lock ranking is
+      ;; enabled, we'd like to skip those. But it's hard to tell how long
+      ;; we've been on the system stack so accept an extra frame in that case,
+      ;; with a leaf of "runtime.unlockWithRank runtime.unlock" instead of
+      ;; "runtime.unlock".
+      (set! skip + 1)) ; runtime.unlockWithRank.func1
+
+    (set! (.-haveStack prof) true)
+
+    (let [^int nstk (zero int)
+        ^{:line 729} gp (getg)
+        ^{:line 730} sp (sys/GetCallerSP)
+        ^{:line 731} pc (sys/GetCallerPC)]
+      (systemstack ^{:go/end 736} (fn []
+          (let [^unwinder u (zero unwinder)]
+            (.initAt u pc sp 0 gp (bit-or unwindSilentErrors unwindJumpStack))
+            (set! nstk (tracebackPCs (addr u) skip (.-stack prof))))))
+
+      (when (< nstk (len (.-stack prof)))
+        (aset (.-stack prof) nstk 0)))))
+
+
+
+
+
+
+
+
+^{:go/end 751} (go/method ^:go/nowritebarrierrec store "store adds the M's local record to the mutex contention profile.\n\nFrom unlock2, we might not be holding a p in this code.\n" [^{:tag (* mLockProfile)} prof]
+  (when [gp (getg)] (and (== (/ (.-locks (.-m gp)) mutexMLocksDelta) 1) (.-haveStack (.-mLockProfile (.-m gp))))
+    (.storeSlow prof)))
+
+
+
+^{:go/end 784} (go/method storeSlow [^{:tag (* mLockProfile)} prof]
+  ;; Report any contention we experience within this function as "lost"; it's
+  ;; important that the act of reporting a contention event not lead to a
+  ;; reportable contention event. This also means we can use prof.stack
+  ;; without copying, since it won't change during this function.
+  (let [mp (acquirem)]
+    (set! (.-disabled prof) true)
+
+    (let [nstk (conv int (.-profstackdepth debug))]
+      (for [i 0] (< i nstk) (inc! i)
+        (when [pc (aget (.-stack prof) i)] (== pc 0)
+          (set! nstk i)
+          (break)))
+
+
+
+      (let [(values cycles lost) (values (.-cycles prof) (.-cyclesLost prof))]
+        (set! (values (.-cycles prof) (.-cyclesLost prof)) (values 0 0))
+        (set! (.-haveStack prof) false)
+
+        (let [rate (conv int64 (atomic/Load64 (addr mutexprofilerate)))]
+          (saveBlockEventStack cycles rate (subslice (.-stack prof) _ nstk) mutexProfile)
+          (when (> lost 0)
+            (let [lostStk (lit (array ... uintptr)
+                  (+ (abi/FuncPCABIInternal _LostContendedRuntimeLock) sys/PCQuantum))]
+
+              (saveBlockEventStack lost rate (subslice lostStk) mutexProfile)))
+
+
+          (set! (.-disabled prof) false)
+          (releasem mp))))))
+
+
+^{:go/end 808} (go/func saveBlockEventStack [^int64 cycles ^int64 rate ^{:tag (slice uintptr)} stk ^bucketType which]
+  (let [b (stkbucket which 0 stk true)
+      ^{:line 788} bp (.bp b)]
+
+    (lock (addr profBlockLock))
+    ;; We want to up-scale the count and cycles according to the
+    ;; probability that the event was sampled. For block profile events,
+    ;; the sample probability is 1 if cycles >= rate, and cycles / rate
+    ;; otherwise. For mutex profile events, the sample probability is 1 / rate.
+    ;; We scale the events by 1 / (probability the event was sampled).
+    (cond (and (== which blockProfile) (< cycles rate)) (do
+        ;; Remove sampling bias, see discussion on http://golang.org/cl/299991.
+        (set! (.-count bp) + (/ (conv float64 rate) (conv float64 cycles)))
+        (set! (.-cycles bp) + rate))
+      (== which mutexProfile) (do
+        (set! (.-count bp) + (conv float64 rate))
+        (set! (.-cycles bp) + (* rate cycles))) :else
+      (do
+        (inc! (.-count bp))
+        (set! (.-cycles bp) + cycles)))
+
+    (unlock (addr profBlockLock))))
+
+
+(go/var ^uint64 mutexprofilerate) ; fraction sampled
+
+
+
+
+
+
+
+
+^{:go/end 826} (go/func SetMutexProfileFraction "SetMutexProfileFraction controls the fraction of mutex contention events\nthat are reported in the mutex profile. On average 1/rate events are\nreported. The previous rate is returned.\n\nTo turn off profiling entirely, pass rate 0.\nTo just read the current rate, pass rate < 0.\n(For n>1 the details of sampling may change.)\n" ^int [^int rate]
+  (when (< rate 0)
+    (return (conv int mutexprofilerate)))
+
+  (let [old mutexprofilerate]
+    (atomic/Store64 (addr mutexprofilerate) (conv uint64 rate))
+    (conv int old)))
+
+
+^{:go/end 836} (go/func mutexevent [^int64 cycles ^int skip]
+  (when (< cycles 0)
+    (set! cycles 0))
+
+  (let [rate (conv int64 (atomic/Load64 (addr mutexprofilerate)))]
+    (when (and (> rate 0) (== (% (cheaprand64) rate) 0))
+      (saveblockevent cycles rate (+ skip 1) mutexProfile))))
+
+
+
+;; Go interface to profile data.
+
+
+(go/type StackRecord "A StackRecord describes a single execution stack.\n" (struct
+    ^{:line 842 :tag (array 32 uintptr)} Stack0)) ; stack trace for this record; ends at first 0 entry
+
+
+
+
+^{:go/end 854} (go/method Stack "Stack returns the stack trace associated with the record,\na prefix of r.Stack0.\n" ^{:tag (slice uintptr)} [^{:tag (* StackRecord)} r]
+  (range [i v (.-Stack0 r)]
+    (when (== v 0)
+      (return (subslice (.-Stack0 r) 0 i))))
+
+
+  (subslice (.-Stack0 r) 0))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag int :doc "MemProfileRate controls the fraction of memory allocations\nthat are recorded and reported in the memory profile.\nThe profiler aims to sample an average of\none allocation per MemProfileRate bytes allocated.\n\nTo include every allocated block in the profile, set MemProfileRate to 1.\nTo turn off profiling entirely, set MemProfileRate to 0.\n\nThe tools that process the memory profiles assume that the\nprofile rate is constant across the lifetime of the program\nand equal to the current value. Programs that change the\nmemory profiling rate should do so just once, as early as\npossible in the execution of the program (for example,\nat the beginning of main).\n"} MemProfileRate (* 512 1024))
+
+
+
+
+
+(go/var ^{:tag bool :doc "disableMemoryProfiling is set by the linker if memory profiling\nis not used and the link type guarantees nobody else could use it\nelsewhere.\nWe check if the runtime.memProfileInternal symbol is present.\n"} disableMemoryProfiling)
+
+
+
+(go/type MemProfileRecord "A MemProfileRecord describes the live objects allocated\nby a particular call sequence (stack trace).\n" (struct
+    ^{:line 881 :tag int64} AllocBytes ^int64 FreeBytes ; number of bytes allocated, freed
+    ^{:line 882 :tag int64} AllocObjects ^int64 FreeObjects ; number of objects allocated, freed
+    ^{:line 883 :tag (array 32 uintptr)} Stack0)) ; stack trace for this record; ends at first 0 entry
+
+
+
+^{:go/end 887} (go/method InUseBytes "InUseBytes returns the number of bytes in use (AllocBytes - FreeBytes).\n" ^int64 [^{:tag (* MemProfileRecord)} r] (- (.-AllocBytes r) (.-FreeBytes r)))
+
+
+^{:go/end 892} (go/method InUseObjects "InUseObjects returns the number of objects in use (AllocObjects - FreeObjects).\n" ^int64 [^{:tag (* MemProfileRecord)} r]
+  (- (.-AllocObjects r) (.-FreeObjects r)))
+
+
+
+
+^{:go/end 903} (go/method Stack "Stack returns the stack trace associated with the record,\na prefix of r.Stack0.\n" ^{:tag (slice uintptr)} [^{:tag (* MemProfileRecord)} r]
+  (range [i v (.-Stack0 r)]
+    (when (== v 0)
+      (return (subslice (.-Stack0 r) 0 i))))
+
+
+  (subslice (.-Stack0 r) 0))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 931} (go/func MemProfile "MemProfile returns a profile of memory allocated and freed per allocation\nsite.\n\nMemProfile returns n, the number of records in the current memory profile.\nIf len(p) >= n, MemProfile copies the profile into p and returns n, true.\nIf len(p) < n, MemProfile does not change p and returns n, false.\n\nIf inuseZero is true, the profile includes allocation records\nwhere r.AllocBytes > 0 but r.AllocBytes == r.FreeBytes.\nThese are sites where memory was allocated, but it has all\nbeen released back to the runtime.\n\nThe returned profile may be up to two garbage collection cycles old.\nThis is to avoid skewing the profile toward allocations; because\nallocations happen in real time but frees are delayed until the garbage\ncollector performs sweeping, the profile only accounts for allocations\nthat have had a chance to be freed by the garbage collector.\n\nMost clients should use the runtime/pprof package or\nthe testing package's -test.memprofile flag instead\nof calling MemProfile directly.\n" [^{:tag (slice MemProfileRecord)} p ^bool inuseZero] :results [^int n ^bool ok]
+  (memProfileInternal (len p) inuseZero ^{:go/end 930} (fn [^profilerecord/MemProfileRecord r]
+      (copyMemProfileRecord (addr (aget p 0)) r)
+      (set! p (subslice p 1)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1000} (go/func ^:go/noinline memProfileInternal "memProfileInternal returns the number of records n in the profile. If there\nare less than size records, copyFn is invoked for each record, and ok returns\ntrue.\n\nThe linker set disableMemoryProfiling to true to disable memory profiling\nif this function is not reachable. Mark it noinline to ensure the symbol exists.\n(This function is big and normally not inlined anyway.)\nSee also disableMemoryProfiling above and cmd/link/internal/ld/lib.go:linksetup.\n" [^int size ^bool inuseZero ^{:tag (func [profilerecord/MemProfileRecord])} copyFn] :results [^int n ^bool ok]
+  (let [cycle (.read mProfCycle)
+      ;; If we're between mProf_NextCycle and mProf_Flush, take care
+      ;; of flushing to the active profile so we only have to look
+      ;; at the active profile below.
+      ^{:line 948} index (% cycle (conv uint32 (len (.-future (lit memRecord)))))]
+    (lock (addr profMemActiveLock))
+    (lock (addr (aget profMemFutureLock index)))
+    (mProf_FlushLocked index)
+    (unlock (addr (aget profMemFutureLock index)))
+    (let [clear true
+        ^{:line 954} head (conv (* bucket) (.Load mbuckets))]
+      (for [b head] (!= b nil) (set! b (.-allnext b))
+        (let [mp (.mp b)]
+          (when (or inuseZero (!= (.-allocs (.-active mp)) (.-frees (.-active mp))))
+            (inc! n))
+
+          (when (or (!= (.-allocs (.-active mp)) 0) (!= (.-frees (.-active mp)) 0))
+            (set! clear false))))
+
+
+      (when clear
+        ;; Absolutely no data, suggesting that a garbage collection
+        ;; has not yet happened. In order to allow profiling when
+        ;; garbage collection is disabled from the beginning of execution,
+        ;; accumulate all of the cycles, and recount buckets.
+        (set! n 0)
+        (for [b head] (!= b nil) (set! b (.-allnext b))
+          (let [mp (.mp b)]
+            (range [c (.-future mp)]
+              (lock (addr (aget profMemFutureLock c)))
+              (.add (.-active mp) (addr (aget (.-future mp) c)))
+              (aset (.-future mp) c (lit memRecordCycle))
+              (unlock (addr (aget profMemFutureLock c))))
+
+            (when (or inuseZero (!= (.-allocs (.-active mp)) (.-frees (.-active mp))))
+              (inc! n)))))
+
+
+
+      (when (<= n size)
+        (set! ok true)
+        (for [b head] (!= b nil) (set! b (.-allnext b))
+          (let [mp (.mp b)]
+            (when (or inuseZero (!= (.-allocs (.-active mp)) (.-frees (.-active mp))))
+              (let [r ^{:go/breaks [2 4 6 8]} (lit profilerecord/MemProfileRecord
+                    :ObjectSize (conv int64 (.-size b))
+                    :AllocObjects (conv int64 (.-allocs (.-active mp)))
+                    :FreeObjects (conv int64 (.-frees (.-active mp)))
+                    :Stack (.stk b))]
+
+                (copyFn r))))))
+
+
+
+      (unlock (addr profMemActiveLock))
+      (return))))
+
+
+^{:go/end 1018} (go/func copyMemProfileRecord [^{:tag (* MemProfileRecord)} dst ^profilerecord/MemProfileRecord src]
+  (set! (.-AllocBytes dst) (* (.-AllocObjects src) (.-ObjectSize src)))
+  (set! (.-FreeBytes dst) (* (.-FreeObjects src) (.-ObjectSize src)))
+  (set! (.-AllocObjects dst) (.-AllocObjects src))
+  (set! (.-FreeObjects dst) (.-FreeObjects src))
+  (when raceenabled
+    (racewriterangepc (conv unsafe/Pointer (addr (aget (.-Stack0 dst) 0))) (unsafe/Sizeof (.-Stack0 dst)) (sys/GetCallerPC) (abi/FuncPCABIInternal MemProfile)))
+
+  (when msanenabled
+    (msanwrite (conv unsafe/Pointer (addr (aget (.-Stack0 dst) 0))) (unsafe/Sizeof (.-Stack0 dst))))
+
+  (when asanenabled
+    (asanwrite (conv unsafe/Pointer (addr (aget (.-Stack0 dst) 0))) (unsafe/Sizeof (.-Stack0 dst))))
+
+  (let [i (copy (subslice (.-Stack0 dst)) (.-Stack src))]
+    (clear (subslice (.-Stack0 dst) i))))
+
+
+
+^{:go/end 1026} (go/func ^{:go/linkname "pprof_memProfileInternal"} pprof_memProfileInternal [^{:tag (slice profilerecord/MemProfileRecord)} p ^bool inuseZero] :results [^int n ^bool ok]
+  (memProfileInternal (len p) inuseZero ^{:go/end 1025} (fn [^profilerecord/MemProfileRecord r]
+      (aset p 0 r)
+      (set! p (subslice p 1)))))
+
+
+
+^{:go/end 1036} (go/func iterate_memprof [^{:tag (func [(* bucket) uintptr (* uintptr) uintptr uintptr uintptr])} fn]
+  (lock (addr profMemActiveLock))
+  (let [head (conv (* bucket) (.Load mbuckets))]
+    (for [b head] (!= b nil) (set! b (.-allnext b))
+      (let [mp (.mp b)]
+        (go/call fn b (.-nstk b) (addr (aget (.stk b) 0)) (.-size b) (.-allocs (.-active mp)) (.-frees (.-active mp)))))
+
+    (unlock (addr profMemActiveLock))))
+
+
+
+
+(go/type BlockProfileRecord "BlockProfileRecord describes blocking events originated\nat a particular call sequence (stack trace).\n" (struct
+    ^{:line 1041 :tag int64} Count
+    ^{:line 1042 :tag int64} Cycles
+    ^{:line 1043} StackRecord))
+
+
+
+
+
+
+
+
+
+^{:go/end 1063} (go/func BlockProfile "BlockProfile returns n, the number of records in the current blocking profile.\nIf len(p) >= n, BlockProfile copies the profile into p and returns n, true.\nIf len(p) < n, BlockProfile does not change p and returns n, false.\n\nMost clients should use the [runtime/pprof] package or\nthe [testing] package's -test.blockprofile flag instead\nof calling BlockProfile directly.\n" [^{:tag (slice BlockProfileRecord)} p] :results [^int n ^bool ok]
+  (let [^int m (zero int)]
+    (set! (values n ok) (blockProfileInternal (len p) ^{:go/end 1058} (fn [^profilerecord/BlockProfileRecord r]
+          (copyBlockProfileRecord (addr (aget p m)) r)
+          (inc! m))))
+
+    (when ok
+      (expandFrames (subslice p _ n)))
+
+    (return)))
+
+
+^{:go/end 1083} (go/func expandFrames [^{:tag (slice BlockProfileRecord)} p]
+  (let [expandedStack (makeProfStack)]
+    (range [i p]
+      (let [cf (CallersFrames ^{:go/via [StackRecord]} (.Stack (aget p i)))
+          ^{:line 1069} j 0]
+        (while (< j (len expandedStack))
+          (let [(values f more) (.Next cf)]
+            ;; f.PC is a "call PC", but later consumers will expect
+            ;; "return PCs"
+            (aset expandedStack j (+ (.-PC f) 1))
+            (inc! j)
+            (when (not more)
+              (break))))
+
+
+        (let [k (copy (subslice ^{:go/via [StackRecord]} (.-Stack0 (aget p i))) (subslice expandedStack _ j))]
+          (clear (subslice ^{:go/via [StackRecord]} (.-Stack0 (aget p i)) k)))))))
+
+
+
+
+
+
+^{:go/end 1113} (go/func blockProfileInternal "blockProfileInternal returns the number of records n in the profile. If there\nare less than size records, copyFn is invoked for each record, and ok returns\ntrue.\n" [^int size ^{:tag (func [profilerecord/BlockProfileRecord])} copyFn] :results [^int n ^bool ok]
+  (lock (addr profBlockLock))
+  (let [head (conv (* bucket) (.Load bbuckets))]
+    (for [b head] (!= b nil) (set! b (.-allnext b))
+      (inc! n))
+
+    (when (<= n size)
+      (set! ok true)
+      (for [b head] (!= b nil) (set! b (.-allnext b))
+        (let [bp (.bp b)
+            ^{:line 1098} r ^{:go/breaks [2 4 6]} (lit profilerecord/BlockProfileRecord
+              :Count (conv int64 (.-count bp))
+              :Cycles (.-cycles bp)
+              :Stack (.stk b))]
+
+          ;; Prevent callers from having to worry about division by zero errors.
+          ;; See discussion on http://golang.org/cl/299991.
+          (when (== (.-Count r) 0)
+            (set! (.-Count r) 1))
+
+          (copyFn r))))
+
+
+    (unlock (addr profBlockLock))
+    (return)))
+
+
+
+
+
+^{:go/end 1136} (go/func copyBlockProfileRecord "copyBlockProfileRecord copies the sample values and call stack from src to dst.\nThe call stack is copied as-is. The caller is responsible for handling inline\nexpansion, needed when the call stack was collected with frame pointer unwinding.\n" [^{:tag (* BlockProfileRecord)} dst ^profilerecord/BlockProfileRecord src]
+  (set! (.-Count dst) (.-Count src))
+  (set! (.-Cycles dst) (.-Cycles src))
+  (when raceenabled
+    (racewriterangepc (conv unsafe/Pointer (addr (aget ^{:go/via [StackRecord]} (.-Stack0 dst) 0))) (unsafe/Sizeof ^{:go/via [StackRecord]} (.-Stack0 dst)) (sys/GetCallerPC) (abi/FuncPCABIInternal BlockProfile)))
+
+  (when msanenabled
+    (msanwrite (conv unsafe/Pointer (addr (aget ^{:go/via [StackRecord]} (.-Stack0 dst) 0))) (unsafe/Sizeof ^{:go/via [StackRecord]} (.-Stack0 dst))))
+
+  (when asanenabled
+    (asanwrite (conv unsafe/Pointer (addr (aget ^{:go/via [StackRecord]} (.-Stack0 dst) 0))) (unsafe/Sizeof ^{:go/via [StackRecord]} (.-Stack0 dst))))
+
+  ;; We just copy the stack here without inline expansion
+  ;; (needed if frame pointer unwinding is used)
+  ;; since this function is called under the profile lock,
+  ;; and doing something that might allocate can violate lock ordering.
+  (let [i (copy (subslice ^{:go/via [StackRecord]} (.-Stack0 dst)) (.-Stack src))]
+    (clear (subslice ^{:go/via [StackRecord]} (.-Stack0 dst) i))))
+
+
+
+^{:go/end 1144} (go/func ^{:go/linkname "pprof_blockProfileInternal"} pprof_blockProfileInternal [^{:tag (slice profilerecord/BlockProfileRecord)} p] :results [^int n ^bool ok]
+  (blockProfileInternal (len p) ^{:go/end 1143} (fn [^profilerecord/BlockProfileRecord r]
+      (aset p 0 r)
+      (set! p (subslice p 1)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1162} (go/func MutexProfile "MutexProfile returns n, the number of records in the current mutex profile.\nIf len(p) >= n, MutexProfile copies the profile into p and returns n, true.\nOtherwise, MutexProfile does not change p, and returns n, false.\n\nMost clients should use the [runtime/pprof] package\ninstead of calling MutexProfile directly.\n" [^{:tag (slice BlockProfileRecord)} p] :results [^int n ^bool ok]
+  (let [^int m (zero int)]
+    (set! (values n ok) (mutexProfileInternal (len p) ^{:go/end 1157} (fn [^profilerecord/BlockProfileRecord r]
+          (copyBlockProfileRecord (addr (aget p m)) r)
+          (inc! m))))
+
+    (when ok
+      (expandFrames (subslice p _ n)))
+
+    (return)))
+
+
+
+
+
+^{:go/end 1187} (go/func mutexProfileInternal "mutexProfileInternal returns the number of records n in the profile. If there\nare less than size records, copyFn is invoked for each record, and ok returns\ntrue.\n" [^int size ^{:tag (func [profilerecord/BlockProfileRecord])} copyFn] :results [^int n ^bool ok]
+  (lock (addr profBlockLock))
+  (let [head (conv (* bucket) (.Load xbuckets))]
+    (for [b head] (!= b nil) (set! b (.-allnext b))
+      (inc! n))
+
+    (when (<= n size)
+      (set! ok true)
+      (for [b head] (!= b nil) (set! b (.-allnext b))
+        (let [bp (.bp b)
+            ^{:line 1177} r ^{:go/breaks [2 4 6]} (lit profilerecord/BlockProfileRecord
+              :Count (conv int64 (.-count bp))
+              :Cycles (.-cycles bp)
+              :Stack (.stk b))]
+
+          (copyFn r))))
+
+
+    (unlock (addr profBlockLock))
+    (return)))
+
+
+
+^{:go/end 1195} (go/func ^{:go/linkname "pprof_mutexProfileInternal"} pprof_mutexProfileInternal [^{:tag (slice profilerecord/BlockProfileRecord)} p] :results [^int n ^bool ok]
+  (mutexProfileInternal (len p) ^{:go/end 1194} (fn [^profilerecord/BlockProfileRecord r]
+      (aset p 0 r)
+      (set! p (subslice p 1)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1209} (go/func ThreadCreateProfile "ThreadCreateProfile returns n, the number of records in the thread creation profile.\nIf len(p) >= n, ThreadCreateProfile copies the profile into p and returns n, true.\nIf len(p) < n, ThreadCreateProfile does not change p and returns n, false.\n\nMost clients should use the runtime/pprof package instead\nof calling ThreadCreateProfile directly.\n" [^{:tag (slice StackRecord)} p] :results [^int n ^bool ok]
+  (threadCreateProfileInternal (len p) ^{:go/end 1208} (fn [^profilerecord/StackRecord r]
+      (let [i (copy (subslice (.-Stack0 (aget p 0))) (.-Stack r))]
+        (clear (subslice (.-Stack0 (aget p 0)) i))
+        (set! p (subslice p 1))))))
+
+
+
+
+
+
+^{:go/end 1227} (go/func threadCreateProfileInternal "threadCreateProfileInternal returns the number of records n in the profile.\nIf there are less than size records, copyFn is invoked for each record, and\nok returns true.\n" [^int size ^{:tag (func [profilerecord/StackRecord])} copyFn] :results [^int n ^bool ok]
+  (let [first (conv (* m) (atomic/Loadp (conv unsafe/Pointer (addr allm))))]
+    (for [mp first] (!= mp nil) (set! mp (.-alllink mp))
+      (inc! n))
+
+    (when (<= n size)
+      (set! ok true)
+      (for [mp first] (!= mp nil) (set! mp (.-alllink mp))
+        (let [r (lit profilerecord/StackRecord :Stack (subslice (.-createstack mp)))]
+          (copyFn r))))
+
+
+    (return)))
+
+
+
+^{:go/end 1235} (go/func ^{:go/linkname "pprof_threadCreateInternal"} pprof_threadCreateInternal [^{:tag (slice profilerecord/StackRecord)} p] :results [^int n ^bool ok]
+  (threadCreateProfileInternal (len p) ^{:go/end 1234} (fn [^profilerecord/StackRecord r]
+      (aset p 0 r)
+      (set! p (subslice p 1)))))
+
+
+
+
+^{:go/end 1240} (go/func ^{:go/linkname "pprof_goroutineProfileWithLabels"} pprof_goroutineProfileWithLabels [^{:tag (slice profilerecord/StackRecord)} p ^{:tag (slice unsafe/Pointer)} labels] :results [^int n ^bool ok]
+  (goroutineProfileWithLabels p labels))
+
+
+
+^{:go/end 1249} (go/func goroutineProfileWithLabels "labels may be nil. If labels is non-nil, it must have the same length as p.\n" [^{:tag (slice profilerecord/StackRecord)} p ^{:tag (slice unsafe/Pointer)} labels] :results [^int n ^bool ok]
+  (when (and (!= labels nil) (!= (len labels) (len p)))
+    (set! labels nil))
+
+
+  (goroutineProfileWithLabelsConcurrent p labels))
+
+
+
+^{:go/end 1254} (go/func ^{:go/linkname "pprof_goroutineLeakProfileWithLabels"} pprof_goroutineLeakProfileWithLabels [^{:tag (slice profilerecord/StackRecord)} p ^{:tag (slice unsafe/Pointer)} labels] :results [^int n ^bool ok]
+  (goroutineLeakProfileWithLabels p labels))
+
+
+
+^{:go/end 1263} (go/func goroutineLeakProfileWithLabels "labels may be nil. If labels is non-nil, it must have the same length as p.\n" [^{:tag (slice profilerecord/StackRecord)} p ^{:tag (slice unsafe/Pointer)} labels] :results [^int n ^bool ok]
+  (when (and (!= labels nil) (!= (len labels) (len p)))
+    (set! labels nil))
+
+
+  (goroutineLeakProfileWithLabelsConcurrent p labels))
+
+
+(go/var goroutineProfile ^{:go/breaks [[2 1272]]} (lit (struct
+      ^{:line 1266 :tag uint32} sema
+      ^{:line 1267 :tag bool} active
+      ^{:line 1268 :tag atomic/Int64} offset
+      ^{:line 1269 :tag (slice profilerecord/StackRecord)} records
+      ^{:line 1270 :tag (slice unsafe/Pointer)} labels)
+
+    :sema 1))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type goroutineProfileState "goroutineProfileState indicates the status of a goroutine's stack for the\ncurrent in-progress goroutine profile. Goroutines' stacks are initially\n\"Absent\" from the profile, and end up \"Satisfied\" by the time the profile is\ncomplete. While a goroutine's stack is being captured, its\ngoroutineProfileState will be \"InProgress\" and it will not be able to run\nuntil the capture completes and the state moves to \"Satisfied\".\n\nSome goroutines (the finalizer goroutine, which at various times can be\neither a \"system\" or a \"user\" goroutine, and the goroutine that is\ncoordinating the profile, any goroutines created during the profile) move\ndirectly to the \"Satisfied\" state.\n" uint32)
+
+(go/const
+  ^{:line 1289} [^{:tag goroutineProfileState :val 0} goroutineProfileAbsent iota]
+  ^{:line 1290} [^{:val 1} goroutineProfileInProgress]
+  ^{:line 1291} [^{:val 2} goroutineProfileSatisfied])
+
+
+(go/type goroutineProfileStateHolder atomic/Uint32)
+
+^{:go/end 1298} (go/method Load ^goroutineProfileState [^{:tag (* goroutineProfileStateHolder)} p]
+  (conv goroutineProfileState (.Load (conv (* atomic/Uint32) p))))
+
+
+^{:go/end 1302} (go/method Store [^{:tag (* goroutineProfileStateHolder)} p ^goroutineProfileState value]
+  (.Store (conv (* atomic/Uint32) p) (conv uint32 value)))
+
+
+^{:go/end 1306} (go/method CompareAndSwap ^bool [^{:tag (* goroutineProfileStateHolder)} p ^goroutineProfileState old ^goroutineProfileState new]
+  (.CompareAndSwap (conv (* atomic/Uint32) p) (conv uint32 old) (conv uint32 new)))
+
+
+^{:go/end 1343} (go/func goroutineLeakProfileWithLabelsConcurrent [^{:tag (slice profilerecord/StackRecord)} p ^{:tag (slice unsafe/Pointer)} labels] :results [^int n ^bool ok]
+  (when (== (len p) 0)
+    ;; An empty slice is obviously too small. Return a rough
+    ;; allocation estimate.
+    (return (.-count (.-goroutineLeak work)) false))
+
+
+  (let [pcbuf (makeProfStack)] ; see saveg() for explanation
+
+    ;; Prepare a profile large enough to store all leaked goroutines.
+    (set! n (.-count (.-goroutineLeak work)))
+
+    (when (> n (len p))
+      ;; There's not enough space in p to store the whole profile, so
+      ;; we're not allowed to write to p at all and must return n, false.
+      (return n false))
+
+
+    ;; Visit each leaked goroutine and try to record its stack.
+    (let [^int offset (zero int)]
+      (forEachGRace ^{:go/end 1336} (fn [^{:tag (* g)} gp1]
+          (when (== (bit-and-not (readgstatus gp1) _Gscan) _Gleaked)
+            (systemstack ^{:go/end 1330} (fn [] (saveg (bit-not (conv uintptr 0)) (bit-not (conv uintptr 0)) gp1 (addr (aget p offset)) pcbuf)))
+            (when (!= labels nil)
+              (aset labels offset (.-labels gp1)))
+
+            (inc! offset))))
+
+
+
+      (when raceenabled
+        (raceacquire (conv unsafe/Pointer (addr labelSync))))
+
+
+      (return n true))))
+
+
+^{:go/end 1450} (go/func goroutineProfileWithLabelsConcurrent [^{:tag (slice profilerecord/StackRecord)} p ^{:tag (slice unsafe/Pointer)} labels] :results [^int n ^bool ok]
+  (when (== (len p) 0)
+    ;; An empty slice is obviously too small. Return a rough
+    ;; allocation estimate without bothering to STW. As long as
+    ;; this is close, then we'll only need to STW once (on the next
+    ;; call).
+    (return (conv int (gcount false)) false))
+
+
+  (semacquire (addr (.-sema goroutineProfile)))
+
+  (let [ourg (getg)
+
+      ^{:line 1358} pcbuf (makeProfStack) ; see saveg() for explanation
+      ^{:line 1359} stw (stopTheWorld stwGoroutineProfile)]
+    ;; Using gcount while the world is stopped should give us a consistent view
+    ;; of the number of live goroutines, minus the number of goroutines that are
+    ;; alive and permanently marked as "system". But to make this count agree
+    ;; with what we'd get from isSystemGoroutine, we need special handling for
+    ;; goroutines that can vary between user and system to ensure that the count
+    ;; doesn't change during the collection. So, check the finalizer goroutine
+    ;; and cleanup goroutines in particular.
+    (set! n (conv int (gcount false)))
+    (when (!= (bit-and (.Load fingStatus) fingRunningFinalizer) 0)
+      (inc! n))
+
+    (set! n + (conv int (.Load (.-running gcCleanups))))
+
+    (when (> n (len p))
+      ;; There's not enough space in p to store the whole profile, so (per the
+      ;; contract of runtime.GoroutineProfile) we're not allowed to write to p
+      ;; at all and must return n, false.
+      (startTheWorld stw)
+      (semrelease (addr (.-sema goroutineProfile)))
+      (return n false))
+
+
+    ;; Save current goroutine.
+    (let [sp (sys/GetCallerSP)
+        ^{:line 1384} pc (sys/GetCallerPC)]
+      (systemstack ^{:go/end 1387} (fn []
+          (saveg pc sp ourg (addr (aget p 0)) pcbuf)))
+
+      (when (!= labels nil)
+        (aset labels 0 (.-labels ourg)))
+
+      (.Store (.-goroutineProfiled ourg) goroutineProfileSatisfied)
+      (.Store (.-offset goroutineProfile) 1)
+
+      ;; Prepare for all other goroutines to enter the profile. Aside from ourg,
+      ;; every goroutine struct in the allgs list has its goroutineProfiled field
+      ;; cleared. Any goroutine created from this point on (while
+      ;; goroutineProfile.active is set) will start with its goroutineProfiled
+      ;; field set to goroutineProfileSatisfied.
+      (set! (.-active goroutineProfile) true)
+      (set! (.-records goroutineProfile) p)
+      (set! (.-labels goroutineProfile) labels)
+      (startTheWorld stw)
+
+      ;; Visit each goroutine that existed as of the startTheWorld call above.
+      ;;
+      ;; New goroutines may not be in this list, but we didn't want to know about
+      ;; them anyway. If they do appear in this list (via reusing a dead goroutine
+      ;; struct, or racing to launch between the world restarting and us getting
+      ;; the list), they will already have their goroutineProfiled field set to
+      ;; goroutineProfileSatisfied before their state transitions out of _Gdead.
+      ;;
+      ;; Any goroutine that the scheduler tries to execute concurrently with this
+      ;; call will start by adding itself to the profile (before the act of
+      ;; executing can cause any changes in its stack).
+      (forEachGRace ^{:go/end 1417} (fn [^{:tag (* g)} gp1]
+          (tryRecordGoroutineProfile gp1 pcbuf Gosched)))
+
+
+      (set! stw (stopTheWorld stwGoroutineProfileCleanup))
+      (let [endOffset (.Swap (.-offset goroutineProfile) 0)]
+        (set! (.-active goroutineProfile) false)
+        (set! (.-records goroutineProfile) nil)
+        (set! (.-labels goroutineProfile) nil)
+        (startTheWorld stw)
+
+        ;; Restore the invariant that every goroutine struct in allgs has its
+        ;; goroutineProfiled field cleared.
+        (forEachGRace ^{:go/end 1430} (fn [^{:tag (* g)} gp1]
+            (.Store (.-goroutineProfiled gp1) goroutineProfileAbsent)))
+
+
+        (when raceenabled
+          (raceacquire (conv unsafe/Pointer (addr labelSync))))
+
+
+        (when (!= n (conv int endOffset)))
+        ;; It's a big surprise that the number of goroutines changed while we
+        ;; were collecting the profile. But probably better to return a
+        ;; truncated profile than to crash the whole process.
+        ;;
+        ;; For instance, needm moves a goroutine out of the _Gdeadextra state and so
+        ;; might be able to change the goroutine count without interacting with
+        ;; the scheduler. For code like that, the race windows are small and the
+        ;; combination of features is uncommon, so it's hard to be (and remain)
+        ;; sure we've caught them all.
+
+
+        (semrelease (addr (.-sema goroutineProfile)))
+        (return n true)))))
+
+
+
+
+
+
+^{:go/end 1461} (go/func ^:go/yeswritebarrierrec tryRecordGoroutineProfileWB "tryRecordGoroutineProfileWB asserts that write barriers are allowed and calls\ntryRecordGoroutineProfile.\n" [^{:tag (* g)} gp1]
+  (when (== (.ptr (.-p (.-m (getg)))) nil)
+    (throw "no P available, write barriers are forbidden"))
+
+  (tryRecordGoroutineProfile gp1 nil osyield))
+
+
+
+
+
+^{:go/end 1501} (go/func tryRecordGoroutineProfile "tryRecordGoroutineProfile ensures that gp1 has the appropriate representation\nin the current goroutine profile: either that it should not be profiled, or\nthat a snapshot of its call stack and labels are now in the profile.\n" [^{:tag (* g)} gp1 ^{:tag (slice uintptr)} pcbuf ^{:tag (func [])} yield]
+  (when [status (readgstatus gp1)] (or (== status _Gdead) (== status _Gdeadextra))
+    ;; Dead goroutines should not appear in the profile. Goroutines that
+    ;; start while profile collection is active will get goroutineProfiled
+    ;; set to goroutineProfileSatisfied before transitioning out of _Gdead,
+    ;; so here we check _Gdead first.
+    (return))
+
+
+  (while true
+    (let [prev (.Load (.-goroutineProfiled gp1))]
+      (when (== prev goroutineProfileSatisfied)
+        ;; This goroutine is already in the profile (or is new since the
+        ;; start of collection, so shouldn't appear in the profile).
+        (break))
+
+      (when (== prev goroutineProfileInProgress)
+        ;; Something else is adding gp1 to the goroutine profile right now.
+        ;; Give that a moment to finish.
+        (yield)
+        (continue))
+
+
+      ;; While we have gp1.goroutineProfiled set to
+      ;; goroutineProfileInProgress, gp1 may appear _Grunnable but will not
+      ;; actually be able to run. Disable preemption for ourselves, to make
+      ;; sure we finish profiling gp1 right away instead of leaving it stuck
+      ;; in this limbo.
+      (let [mp (acquirem)]
+        (when (.CompareAndSwap (.-goroutineProfiled gp1) goroutineProfileAbsent goroutineProfileInProgress)
+          (doRecordGoroutineProfile gp1 pcbuf)
+          (.Store (.-goroutineProfiled gp1) goroutineProfileSatisfied))
+
+        (releasem mp)))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1560} (go/func doRecordGoroutineProfile "doRecordGoroutineProfile writes gp1's call stack and labels to an in-progress\ngoroutine profile. Preemption is disabled.\n\nThis may be called via tryRecordGoroutineProfile in two ways: by the\ngoroutine that is coordinating the goroutine profile (running on its own\nstack), or from the scheduler in preparation to execute gp1 (running on the\nsystem stack).\n" [^{:tag (* g)} gp1 ^{:tag (slice uintptr)} pcbuf]
+  (when (isSystemGoroutine gp1 false)
+    ;; System goroutines should not appear in the profile.
+    ;; Check this here and not in tryRecordGoroutineProfile because isSystemGoroutine
+    ;; may change on a goroutine while it is executing, so while the scheduler might
+    ;; see a system goroutine, goroutineProfileWithLabelsConcurrent might not, and
+    ;; this inconsistency could cause invariants to be violated, such as trying to
+    ;; record the stack of a running goroutine below. In short, we still want system
+    ;; goroutines to participate in the same state machine on gp1.goroutineProfiled as
+    ;; everything else, we just don't record the stack in the profile.
+    (return))
+
+  ;; Double-check that we didn't make a grave mistake. If the G is running then in
+  ;; general, we cannot safely read its stack.
+  ;;
+  ;; However, there is one case where it's OK. There's a small window of time in
+  ;; exitsyscall where a goroutine could be in _Grunning as it's exiting a syscall.
+  ;; This is OK because goroutine will not exit the syscall until it passes through
+  ;; a call to tryRecordGoroutineProfile. (An explicit one on the fast path, an
+  ;; implicit one via the scheduler on the slow path.)
+  ;;
+  ;; This is also why it's safe to check syscallsp here. The syscall path mutates
+  ;; syscallsp only after passing through tryRecordGoroutineProfile.
+  (when (and (== (readgstatus gp1) _Grunning) (== (.-syscallsp gp1) 0))
+    (print "doRecordGoroutineProfile gp1=" (.-goid gp1) "\n")
+    (throw "cannot read stack of running goroutine"))
+
+
+  (let [offset (- (conv int (.Add (.-offset goroutineProfile) 1)) 1)]
+
+    (when (>= offset (len (.-records goroutineProfile)))
+      ;; Should be impossible, but better to return a truncated profile than
+      ;; to crash the entire process at this point. Instead, deal with it in
+      ;; goroutineProfileWithLabelsConcurrent where we have more context.
+      (return))
+
+
+    ;; saveg calls gentraceback, which may call cgo traceback functions. When
+    ;; called from the scheduler, this is on the system stack already so
+    ;; traceback.go:cgoContextPCs will avoid calling back into the scheduler.
+    ;;
+    ;; When called from the goroutine coordinating the profile, we still have
+    ;; set gp1.goroutineProfiled to goroutineProfileInProgress and so are still
+    ;; preventing it from being truly _Grunnable. So we'll use the system stack
+    ;; to avoid schedule delays.
+    (systemstack ^{:go/end 1555} (fn [] (saveg (bit-not (conv uintptr 0)) (bit-not (conv uintptr 0)) gp1 (addr (aget (.-records goroutineProfile) offset)) pcbuf)))
+
+    (when (!= (.-labels goroutineProfile) nil)
+      (aset (.-labels goroutineProfile) offset (.-labels gp1)))))
+
+
+
+^{:go/end 1639} (go/func goroutineProfileWithLabelsSync [^{:tag (slice profilerecord/StackRecord)} p ^{:tag (slice unsafe/Pointer)} labels] :results [^int n ^bool ok]
+  (let [gp (getg)
+
+      ^{:line 1565} isOK ^{:go/breaks [[5 1577]] :go/end 1578} (fn ^bool [^{:tag (* g)} gp1]
+        ;; Checking isSystemGoroutine here makes GoroutineProfile
+        ;; consistent with both NumGoroutine and Stack.
+        (when (== gp1 gp)
+          (return false))
+
+        (when [status (readgstatus gp1)] (or (== status _Gdead) (== status _Gdeadextra))
+          (return false))
+
+        (when (isSystemGoroutine gp1 false)
+          (return false))
+
+        true)
+
+
+      ^{:line 1580} pcbuf (makeProfStack) ; see saveg() for explanation
+      ^{:line 1581} stw (stopTheWorld stwGoroutineProfile)]
+
+    ;; World is stopped, no locking required.
+    (set! n 1)
+    (forEachGRace ^{:go/end 1589} (fn [^{:tag (* g)} gp1]
+        (when (isOK gp1)
+          (inc! n))))
+
+
+
+    (when (<= n (len p))
+      (set! ok true)
+      (let [(values r lbl) (values p labels)
+
+          ;; Save current goroutine.
+          ^{:line 1596} sp (sys/GetCallerSP)
+          ^{:line 1597} pc (sys/GetCallerPC)]
+        (systemstack ^{:go/end 1600} (fn []
+            (saveg pc sp gp (addr (aget r 0)) pcbuf)))
+
+        (set! r (subslice r 1))
+
+        ;; If we have a place to put our goroutine labelmap, insert it there.
+        (when (!= labels nil)
+          (aset lbl 0 (.-labels gp))
+          (set! lbl (subslice lbl 1)))
+
+
+        ;; Save other goroutines.
+        (forEachGRace ^{:go/end 1630} (fn [^{:tag (* g)} gp1]
+            (when (not (isOK gp1))
+              (return))
+
+
+            (when (== (len r) 0)
+              ;; Should be impossible, but better to return a
+              ;; truncated profile than to crash the entire process.
+              (return))
+
+            ;; saveg calls gentraceback, which may call cgo traceback functions.
+            ;; The world is stopped, so it cannot use cgocall (which will be
+            ;; blocked at exitsyscall). Do it on the system stack so it won't
+            ;; call into the schedular (see traceback.go:cgoContextPCs).
+            (systemstack ^{:go/end 1624} (fn [] (saveg (bit-not (conv uintptr 0)) (bit-not (conv uintptr 0)) gp1 (addr (aget r 0)) pcbuf)))
+            (when (!= labels nil)
+              (aset lbl 0 (.-labels gp1))
+              (set! lbl (subslice lbl 1)))
+
+            (set! r (subslice r 1))))))
+
+
+
+    (when raceenabled
+      (raceacquire (conv unsafe/Pointer (addr labelSync))))
+
+
+    (startTheWorld stw)
+    (return n ok)))
+
+
+
+
+
+
+
+
+^{:go/end 1658} (go/func GoroutineProfile "GoroutineProfile returns n, the number of records in the active goroutine stack profile.\nIf len(p) >= n, GoroutineProfile copies the profile into p and returns n, true.\nIf len(p) < n, GoroutineProfile does not change p and returns n, false.\n\nMost clients should use the [runtime/pprof] package instead\nof calling GoroutineProfile directly.\n" [^{:tag (slice StackRecord)} p] :results [^int n ^bool ok]
+  (let [records (make (slice profilerecord/StackRecord) (len p))]
+    (set! (values n ok) (goroutineProfileInternal records))
+    (when (not ok)
+      (return))
+
+    (range [i mr (subslice records 0 n)]
+      (let [l (copy (subslice (.-Stack0 (aget p i))) (.-Stack mr))]
+        (clear (subslice (.-Stack0 (aget p i)) l))))
+
+    (return)))
+
+
+^{:go/end 1662} (go/func goroutineProfileInternal [^{:tag (slice profilerecord/StackRecord)} p] :results [^int n ^bool ok]
+  (goroutineProfileWithLabels p nil))
+
+
+^{:go/end 1684} (go/func saveg [^uintptr pc ^uintptr sp ^{:tag (* g)} gp ^{:tag (* profilerecord/StackRecord)} r ^{:tag (slice uintptr)} pcbuf]
+  ;; To reduce memory usage, we want to allocate a r.Stack that is just big
+  ;; enough to hold gp's stack trace. Naively we might achieve this by
+  ;; recording our stack trace into mp.profStack, and then allocating a
+  ;; r.Stack of the right size. However, mp.profStack is also used for
+  ;; allocation profiling, so it could get overwritten if the slice allocation
+  ;; gets profiled. So instead we record the stack trace into a temporary
+  ;; pcbuf which is usually given to us by our caller. When it's not, we have
+  ;; to allocate one here. This will only happen for goroutines that were in a
+  ;; syscall when the goroutine profile started or for goroutines that manage
+  ;; to execute before we finish iterating over all the goroutines.
+  (when (== pcbuf nil)
+    (set! pcbuf (makeProfStack)))
+
+
+  (let [^unwinder u (zero unwinder)]
+    (.initAt u pc sp 0 gp unwindSilentErrors)
+    (let [n (tracebackPCs (addr u) 0 pcbuf)]
+      (set! (.-Stack r) (make (slice uintptr) n))
+      (copy (.-Stack r) pcbuf))))
+
+
+
+
+
+
+^{:go/end 1723} (go/func Stack "Stack formats a stack trace of the calling goroutine into buf\nand returns the number of bytes written to buf.\nIf all is true, Stack formats stack traces of all other goroutines\ninto buf after the trace for the current goroutine.\n" ^int [^{:tag (slice byte)} buf ^bool all]
+  (let [^worldStop stw (zero worldStop)]
+    (when all
+      (set! stw (stopTheWorld stwAllGoroutinesStack)))
+
+
+    (let [n 0]
+      (when (> (len buf) 0)
+        (let [gp (getg)
+            ^{:line 1699} sp (sys/GetCallerSP)
+            ^{:line 1700} pc (sys/GetCallerPC)]
+          (systemstack ^{:go/end 1716} (fn []
+              (let [g0 (getg)]
+                ;; Force traceback=1 to override GOTRACEBACK setting,
+                ;; so that Stack's results are consistent.
+                ;; GOTRACEBACK is only about crash dumps.
+                (set! (.-traceback (.-m g0)) 1)
+                (set! (.-writebuf g0) (subslice buf 0 0 (len buf)))
+                (goroutineheader gp)
+                (traceback pc sp 0 gp)
+                (when all
+                  (tracebackothers gp))
+
+                (set! (.-traceback (.-m g0)) 0)
+                (set! n (len (.-writebuf g0)))
+                (set! (.-writebuf g0) nil))))))
+
+
+
+      (when all
+        (startTheWorld stw))
+
+      ^{:line 1722} n)))

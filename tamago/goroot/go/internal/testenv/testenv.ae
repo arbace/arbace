@@ -1,0 +1,571 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package testenv provides information about what functionality
+;; is available in different testing environments run by the Go team.
+;;
+;; It is an internal package because these details are specific
+;; to the Go team's test setup (on build.golang.org) and not
+;; fundamental to tests in general.
+(in-ns 'go.internal.testenv) (go/file "testenv.go" :doc "Package testenv provides information about what functionality\nis available in different testing environments run by the Go team.\n\nIt is an internal package because these details are specific\nto the Go team's test setup (on build.golang.org) and not\nfundamental to tests in general.\n" :imports [
+
+
+    ^{:line 14} [bytes "bytes"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [flag "flag"]
+    ^{:line 17} [fmt "fmt"]
+    ^{:line 18} [cfg "internal/cfg"]
+    ^{:line 19} [goarch "internal/goarch"]
+    ^{:line 20} [platform "internal/platform"]
+    ^{:line 21} [os "os"]
+    ^{:line 22} [exec "os/exec"]
+    ^{:line 23} [filepath "path/filepath"]
+    ^{:line 24} [runtime "runtime"]
+    ^{:line 25} [strconv "strconv"]
+    ^{:line 26} [strings "strings"]
+    ^{:line 27} [sync "sync"]
+    ^{:line 28} [testing "testing"]])
+
+
+
+
+
+
+(go/var ^{:doc "Save the original environment during init for use in checks. A test\nbinary may modify its environment before calling HasExec to change its\nbehavior (such as mimicking a command-line tool), and that modified\nenvironment might cause environment checks to behave erratically.\n"} origEnv (os/Environ))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 48} (go/func Builder "Builder reports the name of the builder running this test. For example,\n\"gotip-linux-amd64_avx512-test_only\" or \"go1.24-windows-arm64\" on LUCI,\nor \"linux-amd64\" on our old infrastructure. Prefer using runtime.GOOS,\nruntime.GOARCH, race.Enabled, reading the OS version, checking CPU\nfeature flags with internal/cpu, etc. over parsing builder names when\npossible. When matching builder names, prefer a fuzzy match instead\nof a strict comparison.\nIf the test is not running on the build infrastructure,\nBuilder returns the empty string.\n" ^string []
+  (os/Getenv "GO_BUILDER_NAME"))
+
+
+
+
+^{:go/end 62} (go/func HasGoBuild "HasGoBuild reports whether the current system can build programs with “go build”\nand then run them with os.StartProcess or exec.Command.\n" ^bool []
+  (when (!= (os/Getenv "GO_GCFLAGS") "")
+    ;; It's too much work to require every caller of the go command
+    ;; to pass along "-gcflags="+os.Getenv("GO_GCFLAGS").
+    ;; For now, if $GO_GCFLAGS is set, report that we simply can't
+    ;; run go build.
+    (return false))
+
+
+  (== (tryGoBuild) nil))
+
+
+(go/var tryGoBuild (^{:inst [error]} sync/OnceValue ^{:go/end 113} (fn ^error []
+      ;; To run 'go build', we need to be able to exec a 'go' command.
+      ;; We somewhat arbitrarily choose to exec 'go tool -n compile' because that
+      ;; also confirms that cmd/go can find the compiler. (Before CL 472096,
+      ;; we sometimes ended up with cmd/go installed in the test environment
+      ;; without a cmd/compile it could use to actually build things.)
+      (let [(values goTool err) (goTool)]
+        (when (!= err nil)
+          (return err))
+
+        (let [cmd (exec/Command goTool "tool" "-n" "compile")]
+          (set! (.-Env cmd) origEnv)
+          ^{:go/breaks [[7 112]]} (let [(values out ^:assign err) (.Output cmd)]
+            (when (!= err nil)
+              (return (fmt/Errorf "%v: %w" cmd err)))
+
+            (set! out (bytes/TrimSpace out))
+            (when (== (len out) 0)
+              (return (fmt/Errorf "%v: no tool reported" cmd)))
+
+            (when [(values _ err) (exec/LookPath (conv string out))] (!= err nil)
+              (return err))
+
+
+            (when (platform/MustLinkExternal runtime/GOOS runtime/GOARCH false)
+              ;; We can assume that we always have a complete Go toolchain available.
+              ;; However, this platform requires a C linker to build even pure Go
+              ;; programs, including tests. Do we have one in the test environment?
+              ;; (On Android, for example, the device running the test might not have a
+              ;; C toolchain installed.)
+              ;;
+              ;; If CC is set explicitly, assume that we do. Otherwise, use 'go env CC'
+              ;; to determine which toolchain it would use by default.
+              (when (== (os/Getenv "CC") "")
+                (let [cmd (exec/Command goTool "env" "CC")]
+                  (set! (.-Env cmd) origEnv)
+                  (let [(values out err) (.Output cmd)]
+                    (when (!= err nil)
+                      (return (fmt/Errorf "%v: %w" cmd err)))
+
+                    (set! out (bytes/TrimSpace out))
+                    (when (== (len out) 0)
+                      (return (fmt/Errorf "%v: no CC reported" cmd)))
+
+                    (set! (values _ err) (exec/LookPath (conv string out)))
+                    (return err)))))
+
+
+            nil))))))
+
+
+
+
+
+^{:go/end 127} (go/func MustHaveGoBuild "MustHaveGoBuild checks that the current system can build programs with “go build”\nand then run them with os.StartProcess or exec.Command.\nIf not, MustHaveGoBuild calls t.Skip with an explanation.\n" [^testing/TB t]
+  (when (!= (os/Getenv "GO_GCFLAGS") "")
+    (.Helper t)
+    (.Skipf t "skipping test: 'go build' not compatible with setting $GO_GCFLAGS"))
+
+  (when (not (HasGoBuild))
+    (.Helper t)
+    (.Skipf t "skipping test: 'go build' unavailable: %v" (tryGoBuild))))
+
+
+
+
+^{:go/end 133} (go/func HasGoRun "HasGoRun reports whether the current system can run programs with “go run”.\n" ^bool []
+  ;; For now, having go run and having go build are the same.
+  (HasGoBuild))
+
+
+
+
+^{:go/end 142} (go/func MustHaveGoRun "MustHaveGoRun checks that the current system can run programs with “go run”.\nIf not, MustHaveGoRun calls t.Skip with an explanation.\n" [^testing/TB t]
+  (when (not (HasGoRun))
+    (.Helper t)
+    (.Skipf t "skipping test: 'go run' not available on %s/%s" runtime/GOOS runtime/GOARCH)))
+
+
+
+
+
+
+^{:go/breaks [[5 152]] :go/end 153} (go/func HasParallelism "HasParallelism reports whether the current system can execute multiple\nthreads in parallel.\nThere is a copy of this function in cmd/dist/test.go.\n" ^bool []
+  (switch runtime/GOOS
+    (case ["js" "wasip1" "tamago"]
+      (return false)))
+
+  true)
+
+
+
+
+^{:go/end 162} (go/func MustHaveParallelism "MustHaveParallelism checks that the current system can execute multiple\nthreads in parallel. If not, MustHaveParallelism calls t.Skip with an explanation.\n" [^testing/TB t]
+  (when (not (HasParallelism))
+    (.Helper t)
+    (.Skipf t "skipping test: no parallelism available on %s/%s" runtime/GOOS runtime/GOARCH)))
+
+
+
+
+
+
+
+^{:go/end 181} (go/func GoToolPath "GoToolPath reports the path to the Go tool.\nIt is a convenience wrapper around GoTool.\nIf the tool is unavailable GoToolPath calls t.Skip.\nIf the tool should be available and isn't, GoToolPath calls t.Fatal.\n" ^string [^testing/TB t]
+  (MustHaveGoBuild t)
+  (let [(values path err) (GoTool)]
+    (when (!= err nil)
+      (.Fatal t err))
+
+    ;; Add all environment variables that affect the Go command to test metadata.
+    ;; Cached test results will be invalidate when these variables change.
+    ;; See golang.org/issue/32285.
+    (range [_ envVar (strings/Fields cfg/KnownEnv)]
+      (os/Getenv envVar))
+
+    ^{:line 180} path))
+
+
+(go/var findGOROOT (^{:inst [string error]} sync/OnceValues ^{:go/end 243} (fn [] :results [^string path ^error err]
+      (when [path (runtime/GOROOT)] (!= path "")
+        ;; If runtime.GOROOT() is non-empty, assume that it is valid.
+        ;;
+        ;; (It might not be: for example, the user may have explicitly set GOROOT
+        ;; to the wrong directory. But this case is
+        ;; rare, and if that happens the user can fix what they broke.)
+        (return path nil))
+
+
+      ;; runtime.GOROOT doesn't know where GOROOT is (perhaps because the test
+      ;; binary was built with -trimpath).
+      ;;
+      ;; Since this is internal/testenv, we can cheat and assume that the caller
+      ;; is a test of some package in a subdirectory of GOROOT/src. ('go test'
+      ;; runs the test in the directory containing the packaged under test.) That
+      ;; means that if we start walking up the tree, we should eventually find
+      ;; GOROOT/src/go.mod, and we can report the parent directory of that.
+      ;;
+      ;; Notably, this works even if we can't run 'go env GOROOT' as a
+      ;; subprocess.
+
+      (let [(values cwd ^:assign err) (os/Getwd)]
+        (when (!= err nil)
+          (return "" (fmt/Errorf "finding GOROOT: %w" err)))
+
+
+        (let [dir cwd]
+          (while true
+            (let [parent (filepath/Dir dir)]
+              (when (== parent dir)
+                ;; dir is either "." or only a volume name.
+                (return "" (fmt/Errorf "failed to locate GOROOT/src in any parent directory")))
+
+
+              (when [base (filepath/Base dir)] (!= base "src")
+                (set! dir parent)
+                (continue)) ; dir cannot be GOROOT/src if it doesn't end in "src".
+
+
+              (let [(values b err) (os/ReadFile (filepath/Join dir "go.mod"))]
+                (when (!= err nil)
+                  (when (os/IsNotExist err)
+                    (set! dir parent)
+                    (continue))
+
+                  (return "" (fmt/Errorf "finding GOROOT: %w" err)))
+
+                (let [goMod (conv string b)]
+
+                  (while (!= goMod "")
+                    (let [^string line (zero string)]
+                      (set! (values line goMod _) (strings/Cut goMod "\n"))
+                      (let [fields (strings/Fields line)]
+                        (when (and (>= (len fields) 2) (== (aget fields 0) "module") (== (aget fields 1) "std"))
+                          ;; Found "module std", which is the module declaration in GOROOT/src!
+                          (return parent nil))))))))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 262} (go/func GOROOT "GOROOT reports the path to the directory containing the root of the Go\nproject source tree. This is normally equivalent to runtime.GOROOT, but\nworks even if the test binary was built with -trimpath and cannot exec\n'go env GOROOT'.\n\nIf GOROOT cannot be found, GOROOT skips t if t is non-nil,\nor panics otherwise.\n" ^string [^testing/TB t]
+  (let [(values path err) (findGOROOT)]
+    (when (!= err nil)
+      (when (== t nil)
+        (panic err))
+
+      (.Helper t)
+      (.Skip t err))
+
+    ^{:line 261} path))
+
+
+
+^{:go/end 270} (go/func GoTool "GoTool reports the path to the Go tool.\n" [] :results [string error]
+  (when (not (HasGoBuild))
+    (return "" (errors/New "platform cannot run go tool")))
+
+  (goTool))
+
+
+(go/var goTool (^{:inst [string error]} sync/OnceValues ^{:go/end 274} (fn [] :results [string error]
+      (exec/LookPath "go"))))
+
+
+
+
+
+
+^{:go/end 301} (go/func MustHaveSource "MustHaveSource checks that the entire source tree is available under GOROOT.\nIf not, it calls t.Skip with an explanation.\n\nThis is needed when reading files from GOROOT that are not in ./testdata.\n" [^testing/TB t]
+  (.Helper t)
+  (switch runtime/GOOS
+    (case ["ios" "tamago"]
+      (.Helper t)
+      (.Skip t (+ "skipping test: no source tree on " runtime/GOOS))))
+
+  (when (!= (Builder) "")
+    ;; The builders have the source tree available, and if they don't the
+    ;; tests should error out.
+    (return))
+
+  ;; If not running on the builders, the test binary might have been copied to
+  ;; a target machine where the source tree isn't available.
+  (let [(values goroot err) (findGOROOT)]
+    (when (!= err nil)
+      (.Skipf t "skipping test: cannot locate GOROOT: %v" err))
+
+    (when [(values _ err) (os/Stat (filepath/Join goroot "src" "go.mod"))] (!= err nil)
+      (.Skipf t "skipping test: GOROOT/src not available: %v" err))))
+
+
+
+
+
+^{:go/end 307} (go/func HasExternalNetwork "HasExternalNetwork reports whether the current system can use\nexternal (non-localhost) networks.\n" ^bool []
+  (and (not (testing/Short)) (!= runtime/GOOS "js") (!= runtime/GOOS "wasip1") (!= runtime/GOOS "tamago")))
+
+
+
+
+
+^{:go/end 321} (go/func MustHaveExternalNetwork "MustHaveExternalNetwork checks that the current system can use\nexternal (non-localhost) networks.\nIf not, MustHaveExternalNetwork calls t.Skip with an explanation.\n" [^testing/TB t]
+  (when (or (== runtime/GOOS "js") (== runtime/GOOS "wasip1") (== runtime/GOOS "tamago"))
+    (.Helper t)
+    (.Skipf t "skipping test: no external network on %s" runtime/GOOS))
+
+  (when (testing/Short)
+    (.Helper t)
+    (.Skipf t "skipping test: no external network in -short mode")))
+
+
+
+
+^{:go/end 326} (go/func HasCGO "HasCGO reports whether the current system can use cgo.\n" ^bool []
+  (hasCgo))
+
+
+(go/var hasCgo (^{:inst [bool]} sync/OnceValue ^{:go/end 344} (fn ^bool []
+      (let [(values goTool err) (goTool)]
+        (when (!= err nil)
+          (return false))
+
+        (let [cmd (exec/Command goTool "env" "CGO_ENABLED")]
+          (set! (.-Env cmd) origEnv)
+          (let [(values out ^:assign err) (.Output cmd)]
+            (when (!= err nil)
+              (panic (fmt/Sprintf "%v: %v" cmd out)))
+
+            (let [(values ok ^:assign err) (strconv/ParseBool (conv string (bytes/TrimSpace out)))]
+              (when (!= err nil)
+                (panic (fmt/Sprintf "%v: non-boolean output %q" cmd out)))
+
+              ^{:line 343} ok)))))))
+
+
+
+^{:go/end 352} (go/func MustHaveCGO "MustHaveCGO calls t.Skip if cgo is not available.\n" [^testing/TB t]
+  (when (not (HasCGO))
+    (.Helper t)
+    (.Skipf t "skipping test: no cgo")))
+
+
+
+
+
+^{:go/end 358} (go/func CanInternalLink "CanInternalLink reports whether the current system can link programs with\ninternal linking.\n" ^bool [^bool withCgo]
+  (not (platform/MustLinkExternal runtime/GOOS runtime/GOARCH withCgo)))
+
+
+
+(go/type SpecialBuildTypes "SpecialBuildTypes are interesting build types that may affect linking.\n" (struct
+    ^{:line 362 :tag bool} Cgo
+    ^{:line 363 :tag bool} Asan
+    ^{:line 364 :tag bool} Msan
+    ^{:line 365 :tag bool} Race))
+
+
+
+(go/var ^{:tag SpecialBuildTypes :doc "NoSpecialBuildTypes indicates a standard, no cgo go build.\n"} NoSpecialBuildTypes)
+
+
+
+
+^{:go/end 385} (go/func MustInternalLink "MustInternalLink checks that the current system can link programs with internal\nlinking.\nIf not, MustInternalLink calls t.Skip with an explanation.\n" [^testing/TB t ^SpecialBuildTypes with]
+  (when (or (.-Asan with) (.-Msan with) (.-Race with))
+    (.Skipf t "skipping test: internal linking with sanitizers is not supported"))
+
+  (when (not (CanInternalLink (.-Cgo with)))
+    (.Helper t)
+    (when (and (.-Cgo with) (CanInternalLink false))
+      (.Skipf t "skipping test: internal linking on %s/%s is not supported with cgo" runtime/GOOS runtime/GOARCH))
+
+    (.Skipf t "skipping test: internal linking on %s/%s is not supported" runtime/GOOS runtime/GOARCH)))
+
+
+
+
+
+
+^{:go/end 395} (go/func MustInternalLinkPIE "MustInternalLinkPIE checks whether the current system can link PIE binary using\ninternal linking.\nIf not, MustInternalLinkPIE calls t.Skip with an explanation.\n" [^testing/TB t]
+  (when (not (platform/InternalLinkPIESupported runtime/GOOS runtime/GOARCH))
+    (.Helper t)
+    (.Skipf t "skipping test: internal linking for buildmode=pie on %s/%s is not supported" runtime/GOOS runtime/GOARCH)))
+
+
+
+
+
+
+^{:go/end 405} (go/func MustHaveBuildMode "MustHaveBuildMode reports whether the current system can build programs in\nthe given build mode.\nIf not, MustHaveBuildMode calls t.Skip with an explanation.\n" [^testing/TB t ^string buildmode]
+  (when (not (platform/BuildModeSupported runtime/Compiler buildmode runtime/GOOS runtime/GOARCH))
+    (.Helper t)
+    (.Skipf t "skipping test: build mode %s on %s/%s is not supported by the %s compiler" buildmode runtime/GOOS runtime/GOARCH runtime/Compiler)))
+
+
+
+
+^{:go/end 411} (go/func HasSymlink "HasSymlink reports whether the current system can use os.Symlink.\n" ^bool []
+  (let [(values ok _) (hasSymlink)]
+    ^{:line 410} ok))
+
+
+
+
+^{:go/end 421} (go/func MustHaveSymlink "MustHaveSymlink reports whether the current system can use os.Symlink.\nIf not, MustHaveSymlink calls t.Skip with an explanation.\n" [^testing/TB t]
+  (let [(values ok reason) (hasSymlink)]
+    (when (not ok)
+      (.Helper t)
+      (.Skipf t "skipping test: cannot make symlinks on %s/%s: %s" runtime/GOOS runtime/GOARCH reason))))
+
+
+
+
+^{:go/end 429} (go/func HasLink "HasLink reports whether the current system can use os.Link.\n" ^bool []
+  ;; From Android release M (Marshmallow), hard linking files is blocked
+  ;; and an attempt to call link() on a file will return EACCES.
+  ;; - https://code.google.com/p/android-developer-preview/issues/detail?id=3150
+  (and (!= runtime/GOOS "plan9") (!= runtime/GOOS "android") (!= runtime/GOOS "tamago")))
+
+
+
+
+^{:go/end 438} (go/func MustHaveLink "MustHaveLink reports whether the current system can use os.Link.\nIf not, MustHaveLink calls t.Skip with an explanation.\n" [^testing/TB t]
+  (when (not (HasLink))
+    (.Helper t)
+    (.Skipf t "skipping test: hardlinks are not supported on %s/%s" runtime/GOOS runtime/GOARCH)))
+
+
+
+(go/var flaky (flag/Bool "flaky" false "run known-flaky tests too"))
+
+^{:go/end 447} (go/func SkipFlaky [^testing/TB t ^int issue]
+  (when (not @flaky)
+    (.Helper t)
+    (.Skipf t "skipping known flaky test without the -flaky flag; see golang.org/issue/%d" issue)))
+
+
+
+^{:go/end 454} (go/func SkipFlakyNet [^testing/TB t]
+  (when [(values v _) (strconv/ParseBool (os/Getenv "GO_BUILDER_FLAKY_NET"))] v
+    (.Helper t)
+    (.Skip t "skipping test on builder known to have frequent network failures")))
+
+
+
+
+^{:go/breaks [[5 462]] :go/end 463} (go/func CPUIsSlow "CPUIsSlow reports whether the CPU running the test is suspected to be slow.\n" ^bool []
+  (switch runtime/GOARCH
+    (case ["arm" "mips" "mipsle" "mips64" "mips64le" "wasm"]
+      (return true)))
+
+  false)
+
+
+
+
+
+
+^{:go/end 474} (go/func SkipIfShortAndSlow "SkipIfShortAndSlow skips t if -short is set and the CPU running the test is\nsuspected to be slow.\n\n(This is useful for CPU-intensive tests that otherwise complete quickly.)\n" [^testing/TB t]
+  (when (and (testing/Short) (CPUIsSlow))
+    (.Helper t)
+    (.Skipf t "skipping test in -short mode on %s" runtime/GOARCH)))
+
+
+
+
+^{:go/end 482} (go/func SkipIfOptimizationOff "SkipIfOptimizationOff skips t if optimization is disabled.\n" [^testing/TB t]
+  (when (OptimizationOff)
+    (.Helper t)
+    (.Skip t "skipping test with optimization disabled")))
+
+
+
+
+
+
+
+
+
+^{:go/end 526} (go/func WriteImportcfg "WriteImportcfg writes an importcfg file used by the compiler or linker to\ndstPath containing entries for the file mappings in packageFiles, as well\nas for the packages transitively imported by the package(s) in pkgs.\n\npkgs may include any package pattern that is valid to pass to 'go list',\nso it may also be a list of Go source files all in the same directory.\n" [^testing/TB t ^string dstPath ^{:tag (map string string)} packageFiles & ^{:tag (slice string)} pkgs]
+  (.Helper t)
+
+  (let [icfg (new bytes/Buffer)]
+    (.WriteString icfg "# import config\n")
+    (range [k v packageFiles]
+      (fmt/Fprintf icfg "packagefile %s=%s\n" k v))
+
+
+    (when (> (len pkgs) 0)
+      ;; Use 'go list' to resolve any missing packages and rewrite the import map.
+      (let [cmd (Command t (GoToolPath t) "list" "-export" "-deps" "-f" "{{if ne .ImportPath \"command-line-arguments\"}}{{if .Export}}{{.ImportPath}}={{.Export}}{{end}}{{end}}")]
+        (set! (.-Args cmd) (append (.-Args cmd) (spread pkgs)))
+        (set! (.-Stderr cmd) (new strings/Builder))
+        (let [(values out err) (.Output cmd)]
+          (when (!= err nil)
+            (.Fatalf t "%v: %v\n%s" cmd err (.-Stderr cmd)))
+
+
+          (range [line (strings/SplitSeq (conv string out) "\n")]
+            (when (== line "")
+              (continue))
+
+            (let [(values importPath export ok) (strings/Cut line "=")]
+              (when (not ok)
+                (.Fatalf t "invalid line in output from %v:\n%s" cmd line))
+
+              (when (== (aget packageFiles importPath) "")
+                (fmt/Fprintf icfg "packagefile %s=%s\n" importPath export)))))))
+
+
+
+
+    (when [err (os/WriteFile dstPath (.Bytes icfg) 0666)] (!= err nil)
+      (.Fatal t err))))
+
+
+
+
+
+^{:go/end 532} (go/func SyscallIsNotSupported "SyscallIsNotSupported reports whether err may indicate that a system call is\nnot supported by the current platform or execution environment.\n" ^bool [^error err]
+  (syscallIsNotSupported err))
+
+
+
+
+
+^{:go/end 542} (go/func ParallelOn64Bit "ParallelOn64Bit calls t.Parallel() unless there is a case that cannot be parallel.\nThis function should be used when it is necessary to avoid t.Parallel on\n32-bit machines, typically because the test uses lots of memory.\n" [^{:tag (* testing/T)} t]
+  (when (== goarch/PtrSize 4)
+    (return))
+
+  (.Parallel t))
+
+
+
+
+^{:go/breaks [[5 564]] :go/end 565} (go/func CPUProfilingBroken "CPUProfilingBroken returns true if CPU profiling has known issues on this\nplatform.\n" ^bool []
+  (switch runtime/GOOS
+    (case ["plan9"]
+      ;; Profiling unimplemented.
+      (return true))
+    (case ["aix"]
+      ;; See https://golang.org/issue/45170.
+      (return true))
+    (case ["ios" "dragonfly" "netbsd" "illumos" "solaris"]
+      ;; See https://golang.org/issue/13841.
+      (return true))
+    (case ["openbsd"]
+      (when (or (== runtime/GOARCH "arm") (== runtime/GOARCH "arm64"))
+        ;; See https://golang.org/issue/13841.
+        (return true))))
+
+
+
+  false)
+
+
+
+
+^{:go/end 572} (go/func SetGODEBUG "SetGODEBUG appends v to the GODEBUG environment variable for the\nduration of the test.\n" [^testing/TB t ^string v]
+  (.Helper t)
+  (.Setenv t "GODEBUG" (+ (os/Getenv "GODEBUG") "," v)))

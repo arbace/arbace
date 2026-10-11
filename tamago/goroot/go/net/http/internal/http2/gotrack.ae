@@ -1,0 +1,180 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Defensive debug-only utility to track that functions run on the
+;; goroutine that they're supposed to.
+
+(in-ns 'go.net.http.internal.http2) (go/file "gotrack.go" :imports [
+
+
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [runtime "runtime"]
+    ^{:line 16} [strconv "strconv"]
+    ^{:line 17} [sync "sync"]
+    ^{:line 18} [atomic "sync/atomic"]])
+
+
+(go/var DebugGoroutines (== (os/Getenv "DEBUG_HTTP2_GOROUTINES") "1"))
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag atomic/Bool :doc "Setting DebugGoroutines to false during a test to disable goroutine debugging\nresults in race detector complaints when a test leaves goroutines running before\nreturning. Tests shouldn't do this, of course, but when they do it generally shows\nup as infrequent, hard-to-debug flakes. (See #66519.)\n\nDisable goroutine debugging during individual tests with an atomic bool.\n(Note that it's safe to enable/disable debugging mid-test, so the actual race condition\nhere is harmless.)\n"} disableDebugGoroutines)
+
+(go/type goroutineLock uint64)
+
+^{:go/end 40} (go/func newGoroutineLock ^goroutineLock []
+  (when (or (not DebugGoroutines) (.Load disableDebugGoroutines))
+    (return 0))
+
+  (conv goroutineLock (curGoroutineID)))
+
+
+^{:go/end 49} (go/method check [^goroutineLock g]
+  (when (or (not DebugGoroutines) (.Load disableDebugGoroutines))
+    (return))
+
+  (when (!= (curGoroutineID) (conv uint64 g))
+    (panic "running on the wrong goroutine")))
+
+
+
+^{:go/end 58} (go/method checkNotOn [^goroutineLock g]
+  (when (or (not DebugGoroutines) (.Load disableDebugGoroutines))
+    (return))
+
+  (when (== (curGoroutineID) (conv uint64 g))
+    (panic "running on the wrong goroutine")))
+
+
+
+(go/var goroutineSpace (conv (slice byte) "goroutine "))
+
+^{:go/end 79} (go/func curGoroutineID ^uint64 []
+  (let [bp (assert (* (slice byte)) (.Get littleBuf))]
+    (defer (.Put littleBuf bp))
+    (let [b @bp]
+      (set! b (subslice b _ (runtime/Stack b false)))
+      ;; Parse the 4707 out of "goroutine 4707 ["
+      (set! b (bytes/TrimPrefix b goroutineSpace))
+      (let [i (bytes/IndexByte b \space)]
+        (when (< i 0)
+          (panic (fmt/Sprintf "No space found in %q" b)))
+
+        (set! b (subslice b _ i))
+        (let [(values n err) (parseUintBytes b 10 64)]
+          (when (!= err nil)
+            (panic (fmt/Sprintf "Failed to parse goroutine ID out of %q: %v" b err)))
+
+          ^{:line 78} n)))))
+
+
+(go/var littleBuf ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 85} (fn ^any []
+      (let [buf (make (slice byte) 64)]
+        (addr buf)))))
+
+
+
+
+^{:go/end 173} (go/func parseUintBytes "parseUintBytes is like strconv.ParseUint, but using a []byte.\n" [^{:tag (slice byte)} s ^int base ^int bitSize] :results [^uint64 n ^error err]
+  (let [(values ^uint64 cutoff ^uint64 maxVal) (zero uint64)]
+
+    (when (== bitSize 0)
+      (set! bitSize (conv int strconv/IntSize)))
+
+
+    (let [s0 s]
+      (switch
+        (case [(< (len s) 1)]
+          (set! err strconv/ErrSyntax)
+          (goto :Error))
+
+        (case [(and (<= 2 base) (<= base 36))])
+        ;; valid base; nothing to do
+
+        (case [(== base 0)]
+          ;; Look for octal, hex prefix.
+          (switch
+            (case [(and (== (aget s 0) \0) (> (len s) 1) ^:go/paren (or (== (aget s 1) \x) (== (aget s 1) \X)))]
+              (set! base 16)
+              (set! s (subslice s 2))
+              (when (< (len s) 1)
+                (set! err strconv/ErrSyntax)
+                (goto :Error)))
+
+            (case [(== (aget s 0) \0)]
+              (set! base 8))
+            (default
+              (set! base 10))))
+
+
+        (default
+          (set! err (errors/New (+ "invalid base " (strconv/Itoa base))))
+          (goto :Error)))
+
+
+      (set! n 0)
+      (set! cutoff (cutoff64 base))
+      (set! maxVal (- ^uint64 (<< 1 (conv uint bitSize)) 1))
+
+      (for [i 0] (< i (len s)) (inc! i)
+        (let [^byte v (zero byte)
+            ^{:line 132} d (aget s i)]
+          (switch
+            (case [(and (<= \0 d) (<= d \9))]
+              (set! v (- d \0)))
+            (case [(and (<= \a d) (<= d \z))]
+              (set! v (+ (- d \a) 10)))
+            (case [(and (<= \A d) (<= d \Z))]
+              (set! v (+ (- d \A) 10)))
+            (default
+              (set! n 0)
+              (set! err strconv/ErrSyntax)
+              (goto :Error)))
+
+          (when (>= (conv int v) base)
+            (set! n 0)
+            (set! err strconv/ErrSyntax)
+            (goto :Error))
+
+
+          (when (>= n cutoff)
+            ;; n*base overflows
+            (set! n (- (<< 1 64) 1))
+            (set! err strconv/ErrRange)
+            (goto :Error))
+
+          (set! n * (conv uint64 base))
+
+          (let [n1 (+ n (conv uint64 v))]
+            (when (or (< n1 n) (> n1 maxVal))
+              ;; n+v overflows
+              (set! n (- (<< 1 64) 1))
+              (set! err strconv/ErrRange)
+              (goto :Error))
+
+            (set! n n1))))
+
+
+      (return n nil)
+
+      (label :Error
+        (return n (addr (lit strconv/NumError :Func "ParseUint" :Num (conv string s0) :Err err)))))))
+
+
+
+^{:go/end 181} (go/func cutoff64 "Return the first number n such that n*base >= 1<<64.\n" ^uint64 [^int base]
+  (when (< base 2)
+    (return 0))
+
+  (+ (/ (- (<< 1 64) 1) (conv uint64 base)) 1))

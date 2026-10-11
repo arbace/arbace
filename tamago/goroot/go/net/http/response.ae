@@ -1,0 +1,374 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; HTTP Response reading and parsing.
+
+(in-ns 'go.net.http) (go/file "response.go" :imports [
+
+
+    ^{:line 10} [bufio "bufio"]
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [tls "crypto/tls"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [io "io"]
+    ^{:line 16} [math "math"]
+    ^{:line 17} [textproto "net/textproto"]
+    ^{:line 18} [url "net/url"]
+    ^{:line 19} [strconv "strconv"]
+    ^{:line 20} [strings "strings"]
+
+    ^{:line 22} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+(go/var respExcludeHeader (lit (map string bool)
+    ^{:line 26} ["Content-Length" true]
+    ^{:line 27} ["Transfer-Encoding" true]
+    ^{:line 28} ["Trailer" true]))
+
+
+
+
+
+
+
+(go/type Response "Response represents the response from an HTTP request.\n\nThe [Client] and [Transport] return Responses from servers once\nthe response headers have been received. The response body\nis streamed on demand as the Body field is read.\n" (struct
+    ^{:line 37 :tag string} Status ; e.g. "200 OK"
+    ^{:line 38 :tag int} StatusCode ; e.g. 200
+    ^{:line 39 :tag string} Proto ; e.g. "HTTP/1.0"
+    ^{:line 40 :tag int} ProtoMajor ; e.g. 1
+    ^{:line 41 :tag int} ProtoMinor ; e.g. 0
+
+
+
+
+
+
+
+
+
+
+    ^{:line 52 :tag Header :doc "Header maps header keys to values. If the response had multiple\nheaders with the same key, they may be concatenated, with comma\ndelimiters.  (RFC 7230, section 3.2.2 requires that multiple headers\nbe semantically equivalent to a comma-delimited sequence.) When\nHeader values are duplicated by other fields in this struct (e.g.,\nContentLength, TransferEncoding, Trailer), the field values are\nauthoritative.\n\nKeys in the map are canonicalized (see CanonicalHeaderKey).\n"} Header
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 76 :tag io/ReadCloser :doc "Body represents the response body.\n\nThe response body is streamed on demand as the Body field\nis read. If the network connection fails or the server\nterminates the response, Body.Read calls return an error.\n\nThe http Client and Transport guarantee that Body is always\nnon-nil, even on responses without a body or responses with\na zero-length body. It is the caller's responsibility to\nclose Body. The default HTTP client's Transport may not\nreuse HTTP/1.x \"keep-alive\" TCP connections if the Body is\nnot read to completion and closed; however, manually reading\nthe body to completion should not be needed in most cases,\nas closing the body will also cause the body to be read to\ncompletion asynchronously, up to a conservative limit.\n\nThe Body is automatically dechunked if the server replied\nwith a \"chunked\" Transfer-Encoding.\n\nAs of Go 1.12, the Body will also implement io.Writer\non a successful \"101 Switching Protocols\" response,\nas used by WebSockets and HTTP/2's \"h2c\" mode.\n"} Body
+
+
+
+
+
+    ^{:line 82 :tag int64 :doc "ContentLength records the length of the associated content. The\nvalue -1 indicates that the length is unknown. Unless Request.Method\nis \"HEAD\", values >= 0 indicate that the given number of bytes may\nbe read from Body.\n"} ContentLength
+
+
+
+    ^{:line 86 :tag (slice string) :doc "Contains transfer encodings from outer-most to inner-most. Value is\nnil, means that \"identity\" encoding is used.\n"} TransferEncoding
+
+
+
+
+    ^{:line 91 :tag bool :doc "Close records whether the header directed that the connection be\nclosed after reading Body. The value is advice for clients: neither\nReadResponse nor Response.Write ever closes a connection.\n"} Close
+
+
+
+
+
+
+
+
+    ^{:line 100 :tag bool :doc "Uncompressed reports whether the response was sent compressed but\nwas decompressed by the http package. When true, reading from\nBody yields the uncompressed content instead of the compressed\ncontent actually set from the server, ContentLength is set to -1,\nand the \"Content-Length\" and \"Content-Encoding\" fields are deleted\nfrom the responseHeader. To get the original response from\nthe server, set Transport.DisableCompression to true.\n"} Uncompressed
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 114 :tag Header :doc "Trailer maps trailer keys to values in the same\nformat as Header.\n\nThe Trailer initially contains only nil values, one for\neach key specified in the server's \"Trailer\" header\nvalue. Those values are not added to Header.\n\nTrailer must not be accessed concurrently with Read calls\non the Body.\n\nAfter Body.Read has returned io.EOF, Trailer will contain\nany trailer values sent by the server.\n"} Trailer
+
+
+
+
+    ^{:line 119 :tag (* Request) :doc "Request is the request that was sent to obtain this Response.\nRequest's Body is nil (having already been consumed).\nThis is only populated for Client requests.\n"} Request
+
+
+
+
+
+    ^{:line 125 :tag (* tls/ConnectionState) :doc "TLS contains information about the TLS connection on which the\nresponse was received. It is nil for unencrypted responses.\nThe pointer is shared between responses and should not be\nmodified.\n"} TLS))
+
+
+
+^{:go/end 131} (go/method Cookies "Cookies parses and returns the cookies set in the Set-Cookie headers.\n" ^{:tag (slice (* Cookie))} [^{:tag (* Response)} r]
+  (readSetCookies (.-Header r)))
+
+
+
+
+(go/var ^{:doc "ErrNoLocation is returned by the [Response.Location] method\nwhen no Location header is present.\n"} ErrNoLocation (errors/New "http: no Location header in response"))
+
+
+
+
+
+^{:go/end 150} (go/method Location "Location returns the URL of the response's \"Location\" header,\nif present. Relative redirects are resolved relative to\n[Response.Request]. [ErrNoLocation] is returned if no\nLocation header is present.\n" [^{:tag (* Response)} r] :results [(* url/URL) error]
+  (let [lv (.Get (.-Header r) "Location")]
+    (when (== lv "")
+      (return nil ErrNoLocation))
+
+    (when (and (!= (.-Request r) nil) (!= (.-URL (.-Request r)) nil))
+      (return (.Parse (.-URL (.-Request r)) lv)))
+
+    (url/Parse lv)))
+
+
+
+
+
+
+
+
+^{:go/end 209} (go/func ReadResponse "ReadResponse reads and returns an HTTP response from r.\nThe req parameter optionally specifies the [Request] that corresponds\nto this [Response]. If nil, a GET request is assumed.\nClients must call resp.Body.Close when finished reading resp.Body.\nAfter that call, clients can inspect resp.Trailer to find key/value\npairs included in the response trailer.\n" [^{:tag (* bufio/Reader)} r ^{:tag (* Request)} req] :results [(* Response) error]
+  (let [tp (textproto/NewReader r)
+      ^{:line 160} resp (addr ^{:go/breaks [2]} (lit Response
+          :Request req))
+
+
+      ;; Parse the first line of the response.
+      (values line err) (.ReadLine tp)]
+    (when (!= err nil)
+      (when (== err io/EOF)
+        (set! err io/ErrUnexpectedEOF))
+
+      (return nil err))
+
+    (let [(values proto status ok) (strings/Cut line " ")]
+      (when (not ok)
+        (return nil (badStringError "malformed HTTP response" line)))
+
+      (set! (.-Proto resp) proto)
+      (set! (.-Status resp) (strings/TrimLeft status " "))
+
+      (let [(values statusCode _ _) (strings/Cut (.-Status resp) " ")]
+        (when (!= (len statusCode) 3)
+          (return nil (badStringError "malformed HTTP status code" statusCode)))
+
+        (set! (values (.-StatusCode resp) err) (strconv/Atoi statusCode))
+        (when (or (!= err nil) (< (.-StatusCode resp) 0))
+          (return nil (badStringError "malformed HTTP status code" statusCode)))
+
+        (when [(set! (values (.-ProtoMajor resp) (.-ProtoMinor resp) ok) (ParseHTTPVersion (.-Proto resp)))] (not ok)
+          (return nil (badStringError "malformed HTTP version" (.-Proto resp))))
+
+
+        ;; Parse the response headers.
+        (let [(values mimeHeader ^:assign err) (.ReadMIMEHeader tp)]
+          (when (!= err nil)
+            (when (== err io/EOF)
+              (set! err io/ErrUnexpectedEOF))
+
+            (return nil err))
+
+          (set! (.-Header resp) (conv Header mimeHeader))
+
+          (fixPragmaCacheControl (.-Header resp))
+
+          (set! err (readTransfer resp r math/MaxInt64))
+          (when (!= err nil)
+            (return nil err))
+
+
+          (return resp nil))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 224} (go/func fixPragmaCacheControl "RFC 7234, section 5.4: Should treat\n\n\tPragma: no-cache\n\nlike\n\n\tCache-Control: no-cache\n" [^Header header]
+  (when [(values hp ok) (aget header "Pragma")] (and ok (> (len hp) 0) (== (aget hp 0) "no-cache"))
+    (when [(values _ presentcc) (aget header "Cache-Control")] (not presentcc)
+      (aset header "Cache-Control" (lit (slice string) "no-cache")))))
+
+
+
+
+
+
+^{:go/end 231} (go/method ProtoAtLeast "ProtoAtLeast reports whether the HTTP protocol used\nin the response is at least major.minor.\n" ^bool [^{:tag (* Response)} r ^int major ^int minor]
+  (or (> (.-ProtoMajor r) major)
+    (and (== (.-ProtoMajor r) major) (>= (.-ProtoMinor r) minor))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 338} (go/method Write "Write writes r to w in the HTTP/1.x server response format,\nincluding the status line, headers, body, and optional trailer.\n\nThis method consults the following fields of the response r:\n\n\tStatusCode\n\tProtoMajor\n\tProtoMinor\n\tRequest.Method\n\tTransferEncoding\n\tTrailer\n\tBody\n\tContentLength\n\tHeader, values for non-canonical keys will have unpredictable behavior\n\nThe Response Body is closed after it is sent.\n" ^error [^{:tag (* Response)} r ^io/Writer w]
+  ;; Status line
+  (let [text (.-Status r)]
+    (if (== text "") (do
+        (set! text (StatusText (.-StatusCode r)))
+        (when (== text "")
+          (set! text (+ "status code " (strconv/Itoa (.-StatusCode r))))))
+
+
+      ;; Just to reduce stutter, if user set r.Status to "200 OK" and StatusCode to 200.
+      ;; Not important.
+      (set! text (strings/TrimPrefix text (+ (strconv/Itoa (.-StatusCode r)) " "))))
+
+
+    (when [(values _ err) (fmt/Fprintf w "HTTP/%d.%d %03d %s\r\n" (.-ProtoMajor r) (.-ProtoMinor r) (.-StatusCode r) text)] (!= err nil)
+      (return err))
+
+
+    ;; Clone it, so we can modify r1 as needed.
+    (let [r1 (new Response)]
+      (set! @r1 @r)
+      (when (and (== (.-ContentLength r1) 0) (!= (.-Body r1) nil))
+        ;; Is it actually 0 length? Or just unknown?
+        (let [^{:tag (array 1 byte)} buf (zero (array 1 byte))
+            (values n err) (.Read (.-Body r1) (subslice buf))]
+          (when (and (!= err nil) (!= err io/EOF))
+            (return err))
+
+          (if (== n 0)
+            ;; Reset it to a known zero reader, in case underlying one
+            ;; is unhappy being read repeatedly.
+            (set! (.-Body r1) NoBody)
+            (do
+              (set! (.-ContentLength r1) -1)
+              (set! (.-Body r1) (lit (struct
+                    ^{:line 284} io/Reader
+                    ^{:line 285} io/Closer)
+
+                  (io/MultiReader (bytes/NewReader (subslice buf _ 1)) (.-Body r))
+                  (.-Body r)))))))
+
+
+
+      ;; If we're sending a non-chunked HTTP/1.1 response without a
+      ;; content-length, the only way to do that is the old HTTP/1.0
+      ;; way, by noting the EOF with a connection close, so we need
+      ;; to set Close.
+      (when (and (== (.-ContentLength r1) -1) (not (.-Close r1)) (.ProtoAtLeast r1 1 1) (not (chunked (.-TransferEncoding r1))) (not (.-Uncompressed r1)))
+        (set! (.-Close r1) true))
+
+
+      ;; Process Body,ContentLength,Close,Trailer
+      (let [(values tw err) (newTransferWriter r1)]
+        (when (!= err nil)
+          (return err))
+
+        (set! err (.writeHeader tw w nil))
+        (when (!= err nil)
+          (return err))
+
+
+        ;; Rest of header
+        (set! err (.WriteSubset (.-Header r) w respExcludeHeader))
+        (when (!= err nil)
+          (return err))
+
+
+        ;; contentLengthAlreadySent may have been already sent for
+        ;; POST/PUT requests, even if zero length. See Issue 8180.
+        ^{:go/breaks [[6 337]]} (let [contentLengthAlreadySent (.shouldSendContentLength tw)]
+          (when (and (== (.-ContentLength r1) 0) (not (chunked (.-TransferEncoding r1))) (not contentLengthAlreadySent) (bodyAllowedForStatus (.-StatusCode r)))
+            (when [(values _ err) (io/WriteString w "Content-Length: 0\r\n")] (!= err nil)
+              (return err)))
+
+
+
+          ;; End-of-header
+          (when [(values _ err) (io/WriteString w "\r\n")] (!= err nil)
+            (return err))
+
+
+          ;; Write body and trailer
+          (set! err (.writeBody tw w))
+          (when (!= err nil)
+            (return err))
+
+
+          ;; Success
+          nil)))))
+
+
+^{:go/end 344} (go/method closeBody [^{:tag (* Response)} r]
+  (when (!= (.-Body r) nil)
+    (.Close (.-Body r))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 356} (go/method bodyIsWritable "bodyIsWritable reports whether the Body supports writing. The\nTransport returns Writable bodies for 101 Switching Protocols\nresponses.\nThe Transport uses this method to determine whether a persistent\nconnection is done being managed from its perspective. Once we\nreturn a writable response body to a user, the net/http package is\ndone managing that connection.\n" ^bool [^{:tag (* Response)} r]
+  (let [(values _ ok) (assert io/Writer (.-Body r))]
+    ^{:line 355} ok))
+
+
+
+
+^{:go/end 362} (go/method isProtocolSwitch "isProtocolSwitch reports whether the response code and header\nindicate a successful protocol upgrade response.\n" ^bool [^{:tag (* Response)} r]
+  (isProtocolSwitchResponse (.-StatusCode r) (.-Header r)))
+
+
+
+
+^{:go/end 368} (go/func isProtocolSwitchResponse "isProtocolSwitchResponse reports whether the response code and\nresponse header indicate a successful protocol upgrade response.\n" ^bool [^int code ^Header h]
+  (and (== code StatusSwitchingProtocols) (isProtocolSwitchHeader h)))
+
+
+
+
+^{:go/end 375} (go/func isProtocolSwitchHeader "isProtocolSwitchHeader reports whether the request or response header\nis for a protocol switch.\n" ^bool [^Header h]
+  (and (!= (.Get h "Upgrade") "")
+    (httpguts/HeaderValuesContainsToken (aget h "Connection") "Upgrade")))

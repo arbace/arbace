@@ -1,0 +1,74 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace.raw) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [io "io"]
+
+    ^{:line 12} [tracev2 "internal/trace/tracev2"]
+    ^{:line 13} [version "internal/trace/version"]])
+
+
+
+
+
+
+
+
+(go/type Writer "Writer emits the wire format of a trace.\n\nIt may not produce a byte-for-byte compatible trace from what is\nproduced by the runtime, because it may be missing extra padding\nin the LEB128 encoding that the runtime adds but isn't necessary\nwhen you know the data up-front.\n" (struct
+    ^{:line 23 :tag io/Writer} w
+    ^{:line 24 :tag (slice byte)} buf
+    ^{:line 25 :tag version/Version} v
+    ^{:line 26 :tag (slice tracev2/EventSpec)} specs))
+
+
+
+^{:go/end 33} (go/func NewWriter "NewWriter creates a new byte format writer.\n" [^io/Writer w ^version/Version v] :results [(* Writer) error]
+  (let [(values _ err) (version/WriteHeader w v)]
+    (return (addr (lit Writer :w w :v v :specs (.Specs v))) err)))
+
+
+
+^{:go/end 75} (go/method WriteEvent "WriteEvent writes a single event to the trace wire format stream.\n" ^error [^{:tag (* Writer)} w ^Event e]
+  ;; Check version.
+  (when (!= (.-Version e) (.-v w))
+    (return (fmt/Errorf "mismatched version between writer (go 1.%d) and event (go 1.%d)" (.-v w) (.-Version e))))
+
+
+  ;; Write event header byte.
+  (set! (.-buf w) (append (.-buf w) (conv uint8 (.-Ev e))))
+
+  ;; Write out all arguments.
+  (let [spec (aget (.-specs w) (.-Ev e))]
+    (range [_ arg (subslice (.-Args e) _ (len (.-Args spec)))]
+      (set! (.-buf w) (binary/AppendUvarint (.-buf w) arg)))
+
+    (when (.-IsStack spec)
+      (let [frameArgs (subslice (.-Args e) (len (.-Args spec)))]
+        (for [i 0] (< i (len frameArgs)) (inc! i)
+          (set! (.-buf w) (binary/AppendUvarint (.-buf w) (aget frameArgs i))))))
+
+
+
+    ;; Write out the length of the data.
+    (when (.-HasData spec)
+      (set! (.-buf w) (binary/AppendUvarint (.-buf w) (conv uint64 (len (.-Data e))))))
+
+
+    ;; Write out varint events.
+    ^{:go/breaks [[5 74]]} (let [(values _ err) (.Write (.-w w) (.-buf w))]
+      (set! (.-buf w) (subslice (.-buf w) _ 0))
+      (when (!= err nil)
+        (return err))
+
+
+      ;; Write out data.
+      (when (.-HasData spec)
+        (let [(values _ err) (.Write (.-w w) (.-Data e))]
+          (return err)))
+
+      nil)))

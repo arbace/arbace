@@ -1,0 +1,311 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file provides the generic implementation of Sum and MAC. Other files
+;; might provide optimized assembly implementations of some of this code.
+
+(in-ns 'go.vendor.golang_org.x.crypto.internal.poly1305) (go/file "sum_generic.go" :imports [
+
+
+    ^{:line 11} [binary "encoding/binary"]
+    ^{:line 12} [bits "math/bits"]])
+
+
+;; Poly1305 [RFC 7539] is a relatively simple algorithm: the authentication tag
+;; for a 64 bytes message is approximately
+;;
+;;     s + m[0:16] * r⁴ + m[16:32] * r³ + m[32:48] * r² + m[48:64] * r  mod  2¹³⁰ - 5
+;;
+;; for some secret r and s. It can be computed sequentially like
+;;
+;;     for len(msg) > 0:
+;;         h += read(msg, 16)
+;;         h *= r
+;;         h %= 2¹³⁰ - 5
+;;     return h + s
+;;
+;; All the complexity is about doing performant constant-time math on numbers
+;; larger than any available numeric type.
+
+^{:go/end 35} (go/func sumGeneric [^{:tag (* (array TagSize byte))} out ^{:tag (slice byte)} msg ^{:tag (* (array 32 byte))} key]
+  (let [h (newMACGeneric key)]
+    (.Write h msg)
+    (.Sum h out)))
+
+
+^{:go/end 41} (go/func newMACGeneric ^macGeneric [^{:tag (* (array 32 byte))} key]
+  (let [m (lit macGeneric)]
+    (initialize key (addr (.-macState m)))
+    ^{:line 40} m))
+
+
+
+
+(go/type macState "macState holds numbers in saturated 64-bit little-endian limbs. That is,\nthe value of [x0, x1, x2] is x[0] + x[1] * 2⁶⁴ + x[2] * 2¹²⁸.\n" (struct
+
+
+
+    ^{:line 49 :tag (array 3 uint64) :doc "h is the main accumulator. It is to be interpreted modulo 2¹³⁰ - 5, but\ncan grow larger during and after rounds. It must, however, remain below\n2 * (2¹³⁰ - 5).\n"} h
+
+    ^{:line 51 :tag (array 2 uint64) :doc "r and s are the private key components.\n"} r
+    ^{:line 52 :tag (array 2 uint64)} s))
+
+
+(go/type macGeneric (struct
+    ^{:line 56} macState
+
+    ^{:line 58 :tag (array TagSize byte)} buffer
+    ^{:line 59 :tag int} offset))
+
+
+
+
+^{:go/end 84} (go/method Write "Write splits the incoming message into TagSize chunks, and passes them to\nupdate. It buffers incomplete chunks.\n" [^{:tag (* macGeneric)} h ^{:tag (slice byte)} p] :results [int error]
+  (let [nn (len p)]
+    (when (> (.-offset h) 0)
+      (let [n (copy (subslice (.-buffer h) (.-offset h)) p)]
+        (when (< (+ (.-offset h) n) TagSize)
+          (set! (.-offset h) + n)
+          (return nn nil))
+
+        (set! p (subslice p n))
+        (set! (.-offset h) 0)
+        (updateGeneric (addr (.-macState h)) (subslice (.-buffer h)))))
+
+    (when [n (- (len p) (% (len p) TagSize))] (> n 0)
+      (updateGeneric (addr (.-macState h)) (subslice p _ n))
+      (set! p (subslice p n)))
+
+    (when (> (len p) 0)
+      (set! (.-offset h) + (copy (subslice (.-buffer h) (.-offset h)) p)))
+
+    (return nn nil)))
+
+
+
+
+
+^{:go/end 95} (go/method Sum "Sum flushes the last incomplete chunk from the buffer, if any, and generates\nthe MAC output. It does not modify its state, in order to allow for multiple\ncalls to Sum, even if no Write is allowed after Sum.\n" [^{:tag (* macGeneric)} h ^{:tag (* (array TagSize byte))} out]
+  (let [state (.-macState h)]
+    (when (> (.-offset h) 0)
+      (updateGeneric (addr state) (subslice (.-buffer h) _ (.-offset h))))
+
+    (finalize out (addr (.-h state)) (addr (.-s state)))))
+
+
+
+
+
+(go/const "[rMask0, rMask1] is the specified Poly1305 clamping mask in little-endian. It\nclears some bits of the secret coefficient to make it possible to implement\nmultiplication more efficiently.\n"
+  ^{:line 101} [^{:val 1152921487695413247} rMask0 0x0FFFFFFC0FFFFFFF]
+  ^{:line 102} [^{:val 1152921487695413244} rMask1 0x0FFFFFFC0FFFFFFC])
+
+
+
+^{:go/end 111} (go/func initialize "initialize loads the 256-bit key into the two 128-bit secret values r and s.\n" [^{:tag (* (array 32 byte))} key ^{:tag (* macState)} m]
+  (aset (.-r m) 0 (bit-and (.Uint64 binary/LittleEndian (subslice key 0 8)) rMask0))
+  (aset (.-r m) 1 (bit-and (.Uint64 binary/LittleEndian (subslice key 8 16)) rMask1))
+  (aset (.-s m) 0 (.Uint64 binary/LittleEndian (subslice key 16 24)))
+  (aset (.-s m) 1 (.Uint64 binary/LittleEndian (subslice key 24 32))))
+
+
+
+
+(go/type uint128 "uint128 holds a 128-bit number as two 64-bit limbs, for use with the\nbits.Mul64 and bits.Add64 intrinsics.\n" (struct
+    ^{:line 116 :tag uint64} lo ^uint64 hi))
+
+
+^{:go/end 122} (go/func mul64 ^uint128 [^uint64 a ^uint64 b]
+  (let [(values hi lo) (bits/Mul64 a b)]
+    (lit uint128 lo hi)))
+
+
+^{:go/end 131} (go/func add128 ^uint128 [^uint128 a ^uint128 b]
+  (let [(values lo c) (bits/Add64 (.-lo a) (.-lo b) 0)
+      (values hi ^:assign c) (bits/Add64 (.-hi a) (.-hi b) c)]
+    (when (!= c 0)
+      (panic "poly1305: unexpected overflow"))
+
+    (lit uint128 lo hi)))
+
+
+^{:go/end 137} (go/func shiftRightBy2 ^uint128 [^uint128 a]
+  (set! (.-lo a) (bit-or (>> (.-lo a) 2) (<< (bit-and (.-hi a) 3) 62)))
+  (set! (.-hi a) (>> (.-hi a) 2))
+  ^{:line 136} a)
+
+
+
+
+
+
+
+
+
+^{:go/end 265} (go/func updateGeneric "updateGeneric absorbs msg into the state.h accumulator. For each chunk m of\n128 bits of message, it computes\n\n\th₊ = (h + m) * r  mod  2¹³⁰ - 5\n\nIf the msg length is not a multiple of TagSize, it assumes the last\nincomplete chunk is the final one.\n" [^{:tag (* macState)} state ^{:tag (slice byte)} msg]
+  (let [(values h0 h1 h2) (values (aget (.-h state) 0) (aget (.-h state) 1) (aget (.-h state) 2))
+      (values r0 r1) (values (aget (.-r state) 0) (aget (.-r state) 1))]
+
+    (while (> (len msg) 0)
+      (let [^uint64 c (zero uint64)]
+
+        ;; For the first step, h + m, we use a chain of bits.Add64 intrinsics.
+        ;; The resulting value of h might exceed 2¹³⁰ - 5, but will be partially
+        ;; reduced at the end of the multiplication below.
+        ;;
+        ;; The spec requires us to set a bit just above the message size, not to
+        ;; hide leading zeroes. For full chunks, that's 1 << 128, so we can just
+        ;; add 1 to the most significant (2¹²⁸) limb, h2.
+        (if (>= (len msg) TagSize) (do
+            (set! (values h0 c) (bits/Add64 h0 (.Uint64 binary/LittleEndian (subslice msg 0 8)) 0))
+            (set! (values h1 c) (bits/Add64 h1 (.Uint64 binary/LittleEndian (subslice msg 8 16)) c))
+            (set! h2 + (+ c 1))
+
+            (set! msg (subslice msg TagSize)))
+
+          (let [^{:tag (array TagSize byte)} buf (zero (array TagSize byte))]
+            (copy (subslice buf) msg)
+            (aset buf (len msg) 1)
+
+            (set! (values h0 c) (bits/Add64 h0 (.Uint64 binary/LittleEndian (subslice buf 0 8)) 0))
+            (set! (values h1 c) (bits/Add64 h1 (.Uint64 binary/LittleEndian (subslice buf 8 16)) c))
+            (set! h2 + c)
+
+            (set! msg nil)))
+
+
+        ;; Multiplication of big number limbs is similar to elementary school
+        ;; columnar multiplication. Instead of digits, there are 64-bit limbs.
+        ;;
+        ;; We are multiplying a 3 limbs number, h, by a 2 limbs number, r.
+        ;;
+        ;;                        h2    h1    h0  x
+        ;;                              r1    r0  =
+        ;;                       ----------------
+        ;;                      h2r0  h1r0  h0r0     <-- individual 128-bit products
+        ;;            +   h2r1  h1r1  h0r1
+        ;;               ------------------------
+        ;;                 m3    m2    m1    m0      <-- result in 128-bit overlapping limbs
+        ;;               ------------------------
+        ;;         m3.hi m2.hi m1.hi m0.hi           <-- carry propagation
+        ;;     +         m3.lo m2.lo m1.lo m0.lo
+        ;;        -------------------------------
+        ;;           t4    t3    t2    t1    t0      <-- final result in 64-bit limbs
+        ;;
+        ;; The main difference from pen-and-paper multiplication is that we do
+        ;; carry propagation in a separate step, as if we wrote two digit sums
+        ;; at first (the 128-bit limbs), and then carried the tens all at once.
+
+        (let [h0r0 (mul64 h0 r0)
+            ^{:line 201} h1r0 (mul64 h1 r0)
+            ^{:line 202} h2r0 (mul64 h2 r0)
+            ^{:line 203} h0r1 (mul64 h0 r1)
+            ^{:line 204} h1r1 (mul64 h1 r1)
+            ^{:line 205} h2r1 (mul64 h2 r1)]
+
+          ;; Since h2 is known to be at most 7 (5 + 1 + 1), and r0 and r1 have their
+          ;; top 4 bits cleared by rMask{0,1}, we know that their product is not going
+          ;; to overflow 64 bits, so we can ignore the high part of the products.
+          ;;
+          ;; This also means that the product doesn't have a fifth limb (t4).
+          (when (!= (.-hi h2r0) 0)
+            (panic "poly1305: unexpected overflow"))
+
+          (when (!= (.-hi h2r1) 0)
+            (panic "poly1305: unexpected overflow"))
+
+
+          (let [m0 h0r0
+              ^{:line 220} m1 (add128 h1r0 h0r1) ; These two additions don't overflow thanks again
+              ^{:line 221} m2 (add128 h2r0 h1r1) ; to the 4 masked bits at the top of r0 and r1.
+              ^{:line 222} m3 h2r1
+
+              ^{:line 224} t0 (.-lo m0)
+              (values t1 ^:assign c) (bits/Add64 (.-lo m1) (.-hi m0) 0)
+              (values t2 ^:assign c) (bits/Add64 (.-lo m2) (.-hi m1) c)
+              (values t3 _) (bits/Add64 (.-lo m3) (.-hi m2) c)]
+
+            ;; Now we have the result as 4 64-bit limbs, and we need to reduce it
+            ;; modulo 2¹³⁰ - 5. The special shape of this Crandall prime lets us do
+            ;; a cheap partial reduction according to the reduction identity
+            ;;
+            ;;     c * 2¹³⁰ + n  =  c * 5 + n  mod  2¹³⁰ - 5
+            ;;
+            ;; because 2¹³⁰ = 5 mod 2¹³⁰ - 5. Partial reduction since the result is
+            ;; likely to be larger than 2¹³⁰ - 5, but still small enough to fit the
+            ;; assumptions we make about h in the rest of the code.
+            ;;
+            ;; See also https://speakerdeck.com/gtank/engineering-prime-numbers?slide=23
+
+            ;; We split the final result at the 2¹³⁰ mark into h and cc, the carry.
+            ;; Note that the carry bits are effectively shifted left by 2, in other
+            ;; words, cc = c * 4 for the c in the reduction identity.
+            (set! (values h0 h1 h2) (values t0 t1 (bit-and t2 maskLow2Bits)))
+            (let [cc (lit uint128 (bit-and t2 maskNotLow2Bits) t3)]
+
+              ;; To add c * 5 to h, we first add cc = c * 4, and then add (cc >> 2) = c.
+
+              (set! (values h0 c) (bits/Add64 h0 (.-lo cc) 0))
+              (set! (values h1 c) (bits/Add64 h1 (.-hi cc) c))
+              (set! h2 + c)
+
+              (set! cc (shiftRightBy2 cc))
+
+              (set! (values h0 c) (bits/Add64 h0 (.-lo cc) 0))
+              (set! (values h1 c) (bits/Add64 h1 (.-hi cc) c))
+              (set! h2 + c))))))
+
+    ;; h2 is at most 3 + 1 + 1 = 5, making the whole of h at most
+    ;;
+    ;;     5 * 2¹²⁸ + (2¹²⁸ - 1) = 6 * 2¹²⁸ - 1
+
+
+    (set! (values (aget (.-h state) 0) (aget (.-h state) 1) (aget (.-h state) 2)) (values h0 h1 h2))))
+
+
+(go/const
+  ^{:line 268} [^{:tag uint64 :val 3} maskLow2Bits 0x0000000000000003]
+  ^{:line 269} [^{:tag uint64 :val 18446744073709551612N} maskNotLow2Bits (bit-not maskLow2Bits)])
+
+
+
+^{:go/end 273} (go/func select64 "select64 returns x if v == 1 and y if v == 0, in constant time.\n" ^uint64 [^uint64 v ^uint64 x ^uint64 y] (bit-or (bit-and (bit-not (- v 1)) x) (bit-and (- v 1) y)))
+
+
+(go/const "[p0, p1, p2] is 2¹³⁰ - 5 in little endian order.\n"
+  ^{:line 277} [^{:val 18446744073709551611N} p0 0xFFFFFFFFFFFFFFFB]
+  ^{:line 278} [^{:val 18446744073709551615N} p1 0xFFFFFFFFFFFFFFFF]
+  ^{:line 279} [^{:val 3} p2 0x0000000000000003])
+
+
+
+
+
+^{:go/end 312} (go/func finalize "finalize completes the modular reduction of h and computes\n\n\tout = h + s  mod  2¹²⁸\n" [^{:tag (* (array TagSize byte))} out ^{:tag (* (array 3 uint64))} h ^{:tag (* (array 2 uint64))} s]
+  (let [(values h0 h1 h2) (values (aget h 0) (aget h 1) (aget h 2))
+
+      ;; After the partial reduction in updateGeneric, h might be more than
+      ;; 2¹³⁰ - 5, but will be less than 2 * (2¹³⁰ - 5). To complete the reduction
+      ;; in constant time, we compute t = h - (2¹³⁰ - 5), and select h as the
+      ;; result if the subtraction underflows, and t otherwise.
+
+      (values hMinusP0 b) (bits/Sub64 h0 p0 0)
+      (values hMinusP1 ^:assign b) (bits/Sub64 h1 p1 b)]
+    (set! (values _ b) (bits/Sub64 h2 p2 b))
+
+    ;; h = h if h < p else h - p
+    (set! h0 (select64 b h0 hMinusP0))
+    (set! h1 (select64 b h1 hMinusP1))
+
+    ;; Finally, we compute the last Poly1305 step
+    ;;
+    ;;     tag = h + s  mod  2¹²⁸
+    ;;
+    ;; by just doing a wide addition with the 128 low bits of h and discarding
+    ;; the overflow.
+    (let [(values ^:assign h0 c) (bits/Add64 h0 (aget s 0) 0)]
+      (set! (values h1 _) (bits/Add64 h1 (aget s 1) c))
+
+      (.PutUint64 binary/LittleEndian (subslice out 0 8) h0)
+      (.PutUint64 binary/LittleEndian (subslice out 8 16) h1))))

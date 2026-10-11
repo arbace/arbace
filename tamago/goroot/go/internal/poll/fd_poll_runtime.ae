@@ -1,0 +1,179 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.internal.poll) (go/file "fd_poll_runtime.go" :build ["//go:build unix || windows || wasip1 || tamago"] :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [sync "sync"]
+    ^{:line 12} [syscall "syscall"]
+    ^{:line 13} [time "time"]
+    ^{:line 14} [_ "unsafe"]]) ; for go:linkname
+
+
+
+
+
+(go/func ^:extern ^{:go/linkname "runtimeNano runtime.nanotime"} runtimeNano "runtimeNano returns the current value of the runtime clock in nanoseconds.\n" ^int64 [])
+
+(go/func ^:extern runtime_pollServerInit [])
+(go/func ^:extern runtime_pollOpen [^uintptr fd] :results [uintptr int])
+(go/func ^:extern runtime_pollClose [^uintptr ctx])
+(go/func ^:extern runtime_pollWait ^int [^uintptr ctx ^int mode])
+(go/func ^:extern runtime_pollWaitCanceled [^uintptr ctx ^int mode])
+(go/func ^:extern runtime_pollReset ^int [^uintptr ctx ^int mode])
+(go/func ^:extern runtime_pollSetDeadline [^uintptr ctx ^int64 d ^int mode])
+(go/func ^:extern runtime_pollUnblock [^uintptr ctx])
+(go/func ^:extern runtime_isPollServerDescriptor ^bool [^uintptr fd])
+
+(go/type pollDesc (struct
+    ^{:line 33 :tag uintptr} runtimeCtx))
+
+
+(go/var ^sync/Once serverInit)
+
+^{:go/end 46} (go/method init ^error [^{:tag (* pollDesc)} pd ^{:tag (* FD)} fd]
+  (.Do serverInit runtime_pollServerInit)
+  ^{:go/breaks [4]} (let [(values ctx errno) (runtime_pollOpen (conv uintptr (.-Sysfd fd)))]
+    (when (!= errno 0)
+      (return (errnoErr (conv syscall/Errno errno))))
+
+    (set! (.-runtimeCtx pd) ctx)
+    nil))
+
+
+^{:go/end 54} (go/method close [^{:tag (* pollDesc)} pd]
+  (when (== (.-runtimeCtx pd) 0)
+    (return))
+
+  (runtime_pollClose (.-runtimeCtx pd))
+  (set! (.-runtimeCtx pd) 0))
+
+
+
+^{:go/end 62} (go/method evict "Evict evicts fd from the pending list, unblocking any I/O running on fd.\n" [^{:tag (* pollDesc)} pd]
+  (when (== (.-runtimeCtx pd) 0)
+    (return))
+
+  (runtime_pollUnblock (.-runtimeCtx pd)))
+
+
+^{:go/end 70} (go/method prepare ^error [^{:tag (* pollDesc)} pd ^int mode ^bool isFile]
+  (when (== (.-runtimeCtx pd) 0)
+    (return nil))
+
+  (let [res (runtime_pollReset (.-runtimeCtx pd) mode)]
+    (convertErr res isFile)))
+
+
+^{:go/end 74} (go/method prepareRead ^error [^{:tag (* pollDesc)} pd ^bool isFile]
+  (.prepare pd \r isFile))
+
+
+^{:go/end 78} (go/method prepareWrite ^error [^{:tag (* pollDesc)} pd ^bool isFile]
+  (.prepare pd \w isFile))
+
+
+^{:go/end 86} (go/method wait ^error [^{:tag (* pollDesc)} pd ^int mode ^bool isFile]
+  (when (== (.-runtimeCtx pd) 0)
+    (return (errors/New "waiting for unsupported file type")))
+
+  (let [res (runtime_pollWait (.-runtimeCtx pd) mode)]
+    (convertErr res isFile)))
+
+
+^{:go/end 90} (go/method waitRead ^error [^{:tag (* pollDesc)} pd ^bool isFile]
+  (.wait pd \r isFile))
+
+
+^{:go/end 94} (go/method waitWrite ^error [^{:tag (* pollDesc)} pd ^bool isFile]
+  (.wait pd \w isFile))
+
+
+^{:go/end 101} (go/method waitCanceled [^{:tag (* pollDesc)} pd ^int mode]
+  (when (== (.-runtimeCtx pd) 0)
+    (return))
+
+  (runtime_pollWaitCanceled (.-runtimeCtx pd) mode))
+
+
+^{:go/end 105} (go/method pollable ^bool [^{:tag (* pollDesc)} pd]
+  (!= (.-runtimeCtx pd) 0))
+
+
+
+
+(go/const "Error values returned by runtime_pollReset and runtime_pollWait.\nThese must match the values in runtime/netpoll.go.\n"
+  ^{:line 110} [^{:val 0} pollNoError 0]
+  ^{:line 111} [^{:val 1} pollErrClosing 1]
+  ^{:line 112} [^{:val 2} pollErrTimeout 2]
+  ^{:line 113} [^{:val 3} pollErrNotPollable 3])
+
+
+^{:go/end 129} (go/func convertErr ^error [^int res ^bool isFile]
+  (switch res
+    (case [pollNoError]
+      (return nil))
+    (case [pollErrClosing]
+      (return (errClosing isFile)))
+    (case [pollErrTimeout]
+      (return ErrDeadlineExceeded))
+    (case [pollErrNotPollable]
+      (return ErrNotPollable)))
+
+  (println "unreachable: " res)
+  (panic "unreachable"))
+
+
+
+^{:go/end 134} (go/method SetDeadline "SetDeadline sets the read and write deadlines associated with fd.\n" ^error [^{:tag (* FD)} fd ^time/Time t]
+  (setDeadlineImpl fd t (+ \r \w)))
+
+
+
+^{:go/end 139} (go/method SetReadDeadline "SetReadDeadline sets the read deadline associated with fd.\n" ^error [^{:tag (* FD)} fd ^time/Time t]
+  (setDeadlineImpl fd t \r))
+
+
+
+^{:go/end 144} (go/method SetWriteDeadline "SetWriteDeadline sets the write deadline associated with fd.\n" ^error [^{:tag (* FD)} fd ^time/Time t]
+  (setDeadlineImpl fd t \w))
+
+
+^{:go/end 164} (go/func setDeadlineImpl ^error [^{:tag (* FD)} fd ^time/Time t ^int mode]
+  ^{:go/breaks [7]} (let [^int64 d (zero int64)]
+    (when (not (.IsZero t))
+      (set! d (conv int64 (time/Until t)))
+      (when (== d 0)
+        (set! d -1))) ; don't confuse deadline right now with no deadline
+
+
+    (when [err (.incref fd)] (!= err nil)
+      (return err))
+
+    (defer (.decref fd))
+
+    (when (== (.-runtimeCtx (.-pd fd)) 0)
+      (return ErrNoDeadline))
+
+    (runtime_pollSetDeadline (.-runtimeCtx (.-pd fd)) d mode)
+    nil))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 180} (go/func ^{:go/linkname "IsPollDescriptor"} IsPollDescriptor "IsPollDescriptor reports whether fd is the descriptor being used by the poller.\nThis is only used for testing.\n\nIsPollDescriptor should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/opencontainers/runc\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^bool [^uintptr fd]
+  (runtime_isPollServerDescriptor fd))

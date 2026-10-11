@@ -1,0 +1,561 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "slice.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goarch "internal/goarch"]
+    ^{:line 10} [goexperiment "internal/goexperiment"]
+    ^{:line 11} [math "internal/runtime/math"]
+    ^{:line 12} [sys "internal/runtime/sys"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+(go/type slice (struct
+    ^{:line 17 :tag unsafe/Pointer} array
+    ^{:line 18 :tag int} len
+    ^{:line 19 :tag int} cap))
+
+
+
+(go/type notInHeapSlice "A notInHeapSlice is a slice backed by internal/runtime/sys.NotInHeap memory.\n" (struct
+    ^{:line 24 :tag (* notInHeap)} array
+    ^{:line 25 :tag int} len
+    ^{:line 26 :tag int} cap))
+
+
+^{:go/end 31} (go/func panicmakeslicelen []
+  (panic (conv errorString "makeslice: len out of range")))
+
+
+^{:go/end 35} (go/func panicmakeslicecap []
+  (panic (conv errorString "makeslice: cap out of range")))
+
+
+
+
+^{:go/end 91} (go/func makeslicecopy "makeslicecopy allocates a slice of \"tolen\" elements of type \"et\",\nthen copies \"fromlen\" elements of type \"et\" into that new allocation from \"from\".\n" ^unsafe/Pointer [^{:tag (* _type)} et ^int tolen ^int fromlen ^unsafe/Pointer from]
+  (let [(values ^uintptr tomem ^uintptr copymem) (zero uintptr)]
+    (if (> (conv uintptr tolen) (conv uintptr fromlen))
+      (let [^bool overflow (zero bool)]
+        (set! (values tomem overflow) (math/MulUintptr (.-Size_ et) (conv uintptr tolen)))
+        (when (or overflow (> tomem maxAlloc) (< tolen 0))
+          (panicmakeslicelen))
+
+        (set! copymem (* (.-Size_ et) (conv uintptr fromlen))))
+      (do
+        ;; fromlen is a known good length providing and equal or greater than tolen,
+        ;; thereby making tolen a good slice length too as from and to slices have the
+        ;; same element width.
+        (set! tomem (* (.-Size_ et) (conv uintptr tolen)))
+        (set! copymem tomem)))
+
+
+    (let [^unsafe/Pointer to (zero unsafe/Pointer)]
+      (if (not (.Pointers et)) (do
+          (set! to (mallocgc tomem nil false))
+          (when (< copymem tomem)
+            (memclrNoHeapPointers (add to copymem) (- tomem copymem))))
+
+        (do
+          ;; Note: can't use rawmem (which avoids zeroing of memory), because then GC can scan uninitialized memory.
+          (set! to (mallocgc tomem et true))
+          (when (and (> copymem 0) (.-enabled writeBarrier))
+            ;; Only shade the pointers in old.array since we know the destination slice to
+            ;; only contains nil pointers because it has been cleared during alloc.
+            ;;
+            ;; It's safe to pass a type to this function as an optimization because
+            ;; from and to only ever refer to memory representing whole values of
+            ;; type et. See the comment on bulkBarrierPreWrite.
+            (bulkBarrierPreWriteSrcOnly (conv uintptr to) (conv uintptr from) copymem et))))
+
+
+
+      (when raceenabled
+        (let [callerpc (sys/GetCallerPC)
+            ^{:line 78} pc (abi/FuncPCABIInternal makeslicecopy)]
+          (racereadrangepc from copymem callerpc pc)))
+
+      (when msanenabled
+        (msanread from copymem))
+
+      (when asanenabled
+        (asanread from copymem))
+
+
+      (memmove to from copymem)
+
+      ^{:line 90} to)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 118} (go/func ^{:go/linkname "makeslice"} makeslice "makeslice should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bytedance/sonic\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^unsafe/Pointer [^{:tag (* _type)} et ^int len ^int cap]
+  (let [(values mem overflow) (math/MulUintptr (.-Size_ et) (conv uintptr cap))]
+    (when (or overflow (> mem maxAlloc) (< len 0) (> len cap))
+      ;; NOTE: Produce a 'len out of range' error instead of a
+      ;; 'cap out of range' error when someone does make([]T, bignumber).
+      ;; 'cap out of range' is true too, but since the cap is only being
+      ;; supplied implicitly, saying len is clearer.
+      ;; See golang.org/issue/4085.
+      (let [(values mem overflow) (math/MulUintptr (.-Size_ et) (conv uintptr len))]
+        (when (or overflow (> mem maxAlloc) (< len 0))
+          (panicmakeslicelen))
+
+        (panicmakeslicecap)))
+
+
+    (mallocgc mem et true)))
+
+
+^{:go/end 132} (go/func makeslice64 ^unsafe/Pointer [^{:tag (* _type)} et ^int64 len64 ^int64 cap64]
+  (let [len (conv int len64)]
+    (when (!= (conv int64 len) len64)
+      (panicmakeslicelen))
+
+
+    (let [cap (conv int cap64)]
+      (when (!= (conv int64 cap) cap64)
+        (panicmakeslicecap))
+
+
+      (makeslice et len cap))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 287} (go/func ^{:go/linkname "growslice"} growslice "growslice allocates new backing store for a slice.\n\narguments:\n\n\toldPtr = pointer to the slice's backing array\n\tnewLen = new length (= oldLen + num)\n\toldCap = original slice's capacity.\n\t   num = number of elements being added\n\t    et = element type\n\nreturn values:\n\n\tnewPtr = pointer to the new backing store\n\tnewLen = same value as the argument\n\tnewCap = capacity of the new backing store\n\nRequires that uint(newLen) > uint(oldCap).\nAssumes the original slice length is newLen - num\n\nA new backing store is allocated with space for at least newLen elements.\nExisting entries [0, oldLen) are copied over to the new backing store.\nAdded entries [oldLen, newLen) are not initialized by growslice\n(although for pointer-containing element types, they are zeroed). They\nmust be initialized by the caller.\nTrailing entries [newLen, newCap) are zeroed.\n\ngrowslice's odd calling convention makes the generated code that calls\nthis function simpler. In particular, it accepts and returns the\nnew length so that the old length is not live (does not need to be\nspilled/restored) and the new length is returned (also does not need\nto be spilled/restored).\n\ngrowslice should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bytedance/sonic\n  - github.com/chenzhuoyu/iasm\n  - github.com/cloudwego/dynamicgo\n  - github.com/ugorji/go/codec\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^slice [^unsafe/Pointer oldPtr ^int newLen ^int oldCap ^int num ^{:tag (* _type)} et]
+  (let [oldLen (- newLen num)]
+    (when raceenabled
+      (let [callerpc (sys/GetCallerPC)]
+        (racereadrangepc oldPtr (conv uintptr (* oldLen (conv int (.-Size_ et)))) callerpc (abi/FuncPCABIInternal growslice))))
+
+    (when msanenabled
+      (msanread oldPtr (conv uintptr (* oldLen (conv int (.-Size_ et))))))
+
+    (when asanenabled
+      (asanread oldPtr (conv uintptr (* oldLen (conv int (.-Size_ et))))))
+
+
+    (when (< newLen 0)
+      (panic (conv errorString "growslice: len out of range")))
+
+
+    (when (== (.-Size_ et) 0)
+      ;; append should not create a slice with nil pointer but non-zero len.
+      ;; We assume that append doesn't need to preserve oldPtr in this case.
+      (return (lit slice (conv unsafe/Pointer (addr zerobase)) newLen newLen)))
+
+
+    (let [newcap (nextslicecap newLen oldCap)
+
+        ^{:line 203 :tag bool} overflow (zero bool)
+        (values ^uintptr lenmem ^uintptr newlenmem ^uintptr capmem) (zero uintptr)
+        ;; Specialize for common values of et.Size.
+        ;; For 1 we don't need any division/multiplication.
+        ;; For goarch.PtrSize, compiler will optimize division/multiplication into a shift by a constant.
+        ;; For powers of 2, use a variable shift.
+        ^{:line 209} noscan (not (.Pointers et))]
+      (switch
+        (case [(== (.-Size_ et) 1)]
+          (set! lenmem (conv uintptr oldLen))
+          (set! newlenmem (conv uintptr newLen))
+          (set! capmem (roundupsize (conv uintptr newcap) noscan))
+          (set! overflow (> (conv uintptr newcap) maxAlloc))
+          (set! newcap (conv int capmem)))
+        (case [(== (.-Size_ et) goarch/PtrSize)]
+          (set! lenmem (* (conv uintptr oldLen) goarch/PtrSize))
+          (set! newlenmem (* (conv uintptr newLen) goarch/PtrSize))
+          (set! capmem (roundupsize (* (conv uintptr newcap) goarch/PtrSize) noscan))
+          (set! overflow (> (conv uintptr newcap) (/ maxAlloc goarch/PtrSize)))
+          (set! newcap (conv int (/ capmem goarch/PtrSize))))
+        (case [(isPowerOfTwo (.-Size_ et))]
+          (let [^uintptr shift (zero uintptr)]
+            (if (== goarch/PtrSize 8)
+              ;; Mask shift for better code generation.
+              (set! shift (bit-and (conv uintptr (sys/TrailingZeros64 (conv uint64 (.-Size_ et)))) 63))
+
+              (set! shift (bit-and (conv uintptr (sys/TrailingZeros32 (conv uint32 (.-Size_ et)))) 31)))
+
+            (set! lenmem (<< (conv uintptr oldLen) shift))
+            (set! newlenmem (<< (conv uintptr newLen) shift))
+            (set! capmem (roundupsize (<< (conv uintptr newcap) shift) noscan))
+            (set! overflow (> (conv uintptr newcap) ^uintptr (>> maxAlloc shift)))
+            (set! newcap (conv int (>> capmem shift)))
+            (set! capmem (<< (conv uintptr newcap) shift))))
+        (default
+          (set! lenmem (* (conv uintptr oldLen) (.-Size_ et)))
+          (set! newlenmem (* (conv uintptr newLen) (.-Size_ et)))
+          (set! (values capmem overflow) (math/MulUintptr (.-Size_ et) (conv uintptr newcap)))
+          (set! capmem (roundupsize capmem noscan))
+          (set! newcap (conv int (/ capmem (.-Size_ et))))
+          (set! capmem (* (conv uintptr newcap) (.-Size_ et)))))
+
+
+      ;; The check of overflow in addition to capmem > maxAlloc is needed
+      ;; to prevent an overflow which can be used to trigger a segfault
+      ;; on 32bit architectures with this example program:
+      ;;
+      ;; type T [1<<27 + 1]int64
+      ;;
+      ;; var d T
+      ;; var s []T
+      ;;
+      ;; func main() {
+      ;;   s = append(s, d, d, d, d)
+      ;;   print(len(s), "\n")
+      ;; }
+      (when (or overflow (> capmem maxAlloc))
+        (panic (conv errorString "growslice: len out of range")))
+
+
+      (let [^unsafe/Pointer p (zero unsafe/Pointer)]
+        (if (not (.Pointers et)) (do
+            (set! p (mallocgc capmem nil false))
+            ;; The append() that calls growslice is going to overwrite from oldLen to newLen.
+            ;; Only clear the part that will not be overwritten.
+            ;; The reflect_growslice() that calls growslice will manually clear
+            ;; the region not cleared here.
+            (memclrNoHeapPointers (add p newlenmem) (- capmem newlenmem)))
+          (do
+            ;; Note: can't use rawmem (which avoids zeroing of memory), because then GC can scan uninitialized memory.
+            (set! p (mallocgc capmem et true))
+            (when (and (> lenmem 0) (.-enabled writeBarrier))
+              ;; Only shade the pointers in oldPtr since we know the destination slice p
+              ;; only contains nil pointers because it has been cleared during alloc.
+              ;;
+              ;; It's safe to pass a type to this function as an optimization because
+              ;; from and to only ever refer to memory representing whole values of
+              ;; type et. See the comment on bulkBarrierPreWrite.
+              (bulkBarrierPreWriteSrcOnly (conv uintptr p) (conv uintptr oldPtr) (+ (- lenmem (.-Size_ et)) (.-PtrBytes et)) et))))
+
+
+        (memmove p oldPtr lenmem)
+
+        (lit slice p newLen newcap)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 323} (go/func growsliceNoAlias "growsliceNoAlias is like growslice but only for the case where\nwe know that oldPtr is not aliased.\n\nIn other words, the caller must know that there are no other references\nto the backing memory of the slice being grown aside from the slice header\nthat will be updated with new backing memory when growsliceNoAlias\nreturns, and therefore oldPtr must be the only pointer to its referent\naside from the slice header updated by the returned slice.\n\nIn addition, oldPtr must point to the start of the allocation and match\nthe pointer that was returned by mallocgc. In particular, oldPtr must not\nbe an interior pointer, such as after a reslice.\n\nSee freegc for details.\n" ^slice [^unsafe/Pointer oldPtr ^int newLen ^int oldCap ^int num ^{:tag (* _type)} et]
+  (let [s (growslice oldPtr newLen oldCap num et)]
+    (when (and goexperiment/RuntimeFreegc (!= oldPtr nil) (!= oldPtr (.-array s)))
+      (when [gp (getg)] (or (< (conv uintptr oldPtr) (.-lo (.-stack gp))) (<= (.-hi (.-stack gp)) (conv uintptr oldPtr)))
+        ;; oldPtr does not point into the current stack, and it is not
+        ;; the data pointer for s after the grow, so attempt to free it.
+        ;; (Note that freegc also verifies that oldPtr does not point into our stack,
+        ;; but checking here first is slightly cheaper for the case when
+        ;; oldPtr is on the stack and freegc would be a no-op.)
+        ;;
+        ;; TODO(thepudds): it may be that oldPtr==s.array only when elemsize==0,
+        ;; so perhaps we could prohibit growsliceNoAlias being called in that case
+        ;; and eliminate that check here, or alternatively, we could lean into
+        ;; freegc being a no-op for zero-sized allocations (that is, no check of
+        ;; oldPtr != s.array here and just let freegc return quickly).
+        (let [noscan (not (.Pointers et))]
+          (freegc oldPtr (* (conv uintptr oldCap) (.-Size_ et)) noscan))))
+
+
+    ^{:line 322} s))
+
+
+
+^{:go/end 358} (go/func nextslicecap "nextslicecap computes the next appropriate slice length.\n" ^int [^int newLen ^int oldCap]
+  (let [newcap oldCap
+      ^{:line 328} doublecap (+ newcap newcap)]
+    (when (> newLen doublecap)
+      (return newLen))
+
+
+    (let [^:const ^{:val 256} threshold 256]
+      (when (< oldCap threshold)
+        (return doublecap))
+
+      (while true
+        ;; Transition from growing 2x for small slices
+        ;; to growing 1.25x for large slices. This formula
+        ;; gives a smooth-ish transition between the two.
+        (set! newcap + (>> (+ newcap (* 3 threshold)) 2))
+
+        ;; We need to check `newcap >= newLen` and whether `newcap` overflowed.
+        ;; newLen is guaranteed to be larger than zero, hence
+        ;; when newcap overflows then `uint(newcap) > uint(newLen)`.
+        ;; This allows to check for both with the same comparison.
+        (when (>= (conv uint newcap) (conv uint newLen))
+          (break)))
+
+
+
+      ;; Set newcap to the requested cap when
+      ;; the newcap calculation overflowed.
+      (when (<= newcap 0)
+        (return newLen))
+
+      ^{:line 357} newcap)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 385} (go/func ^{:go/linkname "reflect_growslice reflect.growslice"} reflect_growslice "reflect_growslice should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/cloudwego/dynamicgo\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^slice [^{:tag (* _type)} et ^slice old ^int num]
+  ;; Semantically equivalent to slices.Grow, except that the caller
+  ;; is responsible for ensuring that old.len+num > old.cap.
+  (set! num - (- (.-cap old) (.-len old))) ; preserve memory of old[old.len:old.cap]
+  (let [new (growslice (.-array old) (+ (.-cap old) num) (.-cap old) num et)]
+    ;; growslice does not zero out new[old.cap:new.len] since it assumes that
+    ;; the memory will be overwritten by an append() that called growslice.
+    ;; Since the caller of reflect_growslice is not append(),
+    ;; zero out this region before returning the slice to the reflect package.
+    (when (not (.Pointers et))
+      (let [oldcapmem (* (conv uintptr (.-cap old)) (.-Size_ et))
+          ^{:line 380} newlenmem (* (conv uintptr (.-len new)) (.-Size_ et))]
+        (memclrNoHeapPointers (add (.-array new) oldcapmem) (- newlenmem oldcapmem))))
+
+    (set! (.-len new) (.-len old)) ; preserve the old length
+    ^{:line 384} new))
+
+
+^{:go/end 389} (go/func isPowerOfTwo ^bool [^uintptr x]
+  (== (bit-and x (- x 1)) 0))
+
+
+
+^{:go/end 429} (go/func slicecopy "slicecopy is used to copy from a string or slice of pointerless elements into a slice.\n" ^int [^unsafe/Pointer toPtr ^int toLen ^unsafe/Pointer fromPtr ^int fromLen ^uintptr width]
+  (when (or (== fromLen 0) (== toLen 0))
+    (return 0))
+
+
+  (let [n fromLen]
+    (when (< toLen n)
+      (set! n toLen))
+
+
+    (when (== width 0)
+      (return n))
+
+
+    (let [size (* (conv uintptr n) width)]
+      (when raceenabled
+        (let [callerpc (sys/GetCallerPC)
+            ^{:line 409} pc (abi/FuncPCABIInternal slicecopy)]
+          (racereadrangepc fromPtr size callerpc pc)
+          (racewriterangepc toPtr size callerpc pc)))
+
+      (when msanenabled
+        (msanread fromPtr size)
+        (msanwrite toPtr size))
+
+      (when asanenabled
+        (asanread fromPtr size)
+        (asanwrite toPtr size))
+
+
+      (if (== size 1) ; common case worth about 2x to do here
+        ;; TODO: is this still worth it with new memmove impl?
+        (set! @(conv (* byte) toPtr) @(conv (* byte) fromPtr)) ; known to be a byte pointer
+
+        (memmove toPtr fromPtr size))
+
+      ^{:line 428} n)))
+
+
+
+^{:go/end 438} (go/func ^{:go/linkname "bytealg_MakeNoZero internal/bytealg.MakeNoZero"} bytealg_MakeNoZero ^{:tag (slice byte)} [^int len]
+  (when (> (conv uintptr len) maxAlloc)
+    (panicmakeslicelen))
+
+  (let [cap (roundupsize (conv uintptr len) true)]
+    (subslice (unsafe/Slice (conv (* byte) (mallocgc cap nil false)) cap) _ len)))
+
+
+
+
+^{:go/end 454} (go/func moveSlice "moveSlice copies the input slice to the heap and returns it.\net is the element type of the slice.\n" [^{:tag (* _type)} et ^unsafe/Pointer old ^int len ^int cap] :results [unsafe/Pointer int int]
+  (when (== cap 0)
+    (when (!= old nil)
+      (set! old (conv unsafe/Pointer (addr zerobase))))
+
+    (return old 0 0))
+
+  (let [capmem (* (conv uintptr cap) (.-Size_ et))
+      ^{:line 450} new (mallocgc capmem et true)]
+    (bulkBarrierPreWriteSrcOnly (conv uintptr new) (conv uintptr old) capmem et)
+    (memmove new old capmem)
+    (return new len cap)))
+
+
+
+
+^{:go/end 469} (go/func moveSliceNoScan "moveSliceNoScan is like moveSlice except the element type is known to\nnot have any pointers. We instead pass in the size of the element.\n" [^uintptr elemSize ^unsafe/Pointer old ^int len ^int cap] :results [unsafe/Pointer int int]
+  (when (== cap 0)
+    (when (!= old nil)
+      (set! old (conv unsafe/Pointer (addr zerobase))))
+
+    (return old 0 0))
+
+  (let [capmem (* (conv uintptr cap) elemSize)
+      ^{:line 466} new (mallocgc capmem nil false)]
+    (memmove new old capmem)
+    (return new len cap)))
+
+
+
+
+
+^{:go/end 488} (go/func moveSliceNoCap "moveSliceNoCap is like moveSlice, but can pick any appropriate capacity\nfor the returned slice.\nElements between len and cap in the returned slice will be zeroed.\n" [^{:tag (* _type)} et ^unsafe/Pointer old ^int len] :results [unsafe/Pointer int int]
+  (when (== len 0)
+    (when (!= old nil)
+      (set! old (conv unsafe/Pointer (addr zerobase))))
+
+    (return old 0 0))
+
+  (let [lenmem (* (conv uintptr len) (.-Size_ et))
+      ^{:line 482} capmem (roundupsize lenmem false)
+      ^{:line 483} cap (/ capmem (.-Size_ et))
+      ^{:line 484} new (mallocgc (* cap (.-Size_ et)) et true)]
+    (bulkBarrierPreWriteSrcOnly (conv uintptr new) (conv uintptr old) lenmem et)
+    (memmove new old lenmem)
+    (return new len (conv int cap))))
+
+
+
+^{:go/end 506} (go/func moveSliceNoCapNoScan "moveSliceNoCapNoScan is a combination of moveSliceNoScan and moveSliceNoCap.\n" [^uintptr elemSize ^unsafe/Pointer old ^int len] :results [unsafe/Pointer int int]
+  (when (== len 0)
+    (when (!= old nil)
+      (set! old (conv unsafe/Pointer (addr zerobase))))
+
+    (return old 0 0))
+
+  (let [lenmem (* (conv uintptr len) elemSize)
+      ^{:line 499} capmem (roundupsize lenmem true)
+      ^{:line 500} new (mallocgc capmem nil false)]
+    (memmove new old lenmem)
+    (when (> capmem lenmem)
+      (memclrNoHeapPointers (add new lenmem) (- capmem lenmem)))
+
+    (return new len (conv int (/ capmem elemSize)))))
+
+
+
+
+^{:go/end 543} (go/func growsliceBuf "growsliceBuf is like growslice, but we can use the given buffer\nas a backing store if we want. bufPtr must be on the stack.\n" ^slice [^unsafe/Pointer oldPtr ^int newLen ^int oldCap ^int num ^{:tag (* _type)} et ^unsafe/Pointer bufPtr ^int bufLen]
+  (when (> newLen bufLen)
+    ;; Doesn't fit, process like a normal growslice.
+    (return (growslice oldPtr newLen oldCap num et)))
+
+  (let [oldLen (- newLen num)]
+    (when (and (!= oldPtr bufPtr) (!= oldLen 0))
+      ;; Move data to start of buffer.
+      ;; Note: bufPtr is on the stack, so no write barrier needed.
+      (memmove bufPtr oldPtr (* (conv uintptr oldLen) (.-Size_ et))))
+
+    ;; Pick a new capacity.
+    ;;
+    ;; Unlike growslice, we don't need to double the size each time.
+    ;; The work done here is not proportional to the length of the slice.
+    ;; (Unless the memmove happens above, but that is rare, and in any
+    ;; case there are not many elements on this path.)
+    ;;
+    ;; Instead, we try to just bump up to the next size class.
+    ;; This will ensure that we don't waste any space when we eventually
+    ;; call moveSlice with the resulting slice.
+    (let [newCap (conv int (/ (roundupsize (* (conv uintptr newLen) (.-Size_ et)) (not (.Pointers et))) (.-Size_ et)))]
+
+      ;; Zero slice beyond newLen.
+      ;; The buffer is stack memory, so NoHeapPointers is ok.
+      ;; Caller will overwrite [oldLen:newLen], so we don't need to zero that portion.
+      ;; If et.Pointers(), buffer is at least initialized so we don't need to
+      ;; worry about the caller overwriting junk in [oldLen:newLen].
+      (when (< newLen newCap)
+        (memclrNoHeapPointers (add bufPtr (* (conv uintptr newLen) (.-Size_ et))) (* (conv uintptr (- newCap newLen)) (.-Size_ et))))
+
+
+      (lit slice bufPtr newLen newCap))))
+
+
+
+
+^{:go/end 562} (go/func growsliceBufNoAlias "growsliceBufNoAlias is a combination of growsliceBuf and growsliceNoAlias.\nbufPtr must be on the stack.\n" ^slice [^unsafe/Pointer oldPtr ^int newLen ^int oldCap ^int num ^{:tag (* _type)} et ^unsafe/Pointer bufPtr ^int bufLen]
+  (let [s (growsliceBuf oldPtr newLen oldCap num et bufPtr bufLen)]
+    (when (and goexperiment/RuntimeFreegc (!= oldPtr bufPtr) (!= oldPtr nil) (!= oldPtr (.-array s)))
+      ;; oldPtr is not bufPtr (the stack buffer) and it is not
+      ;; the data pointer for s after the grow, so attempt to free it.
+      ;; (Note that freegc does a broader check that oldPtr does not point into our stack,
+      ;; but checking here first is slightly cheaper for a common case when oldPtr is bufPtr
+      ;; and freegc would be a no-op.)
+      ;;
+      ;; TODO(thepudds): see related TODO in growsliceNoAlias about possibly eliminating
+      ;; the oldPtr != s.array check.
+      (let [noscan (not (.Pointers et))]
+        (freegc oldPtr (* (conv uintptr oldCap) (.-Size_ et)) noscan)))
+
+    ^{:line 561} s))

@@ -1,0 +1,1053 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package png implements a PNG image decoder and encoder.
+;;
+;; The PNG specification is at https://www.w3.org/TR/PNG/.
+(in-ns 'go.image.png) (go/file "reader.go" :doc "Package png implements a PNG image decoder and encoder.\n\nThe PNG specification is at https://www.w3.org/TR/PNG/.\n" :imports [
+
+
+    ^{:line 11} [zlib "compress/zlib"]
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [hash "hash"]
+    ^{:line 15} [crc32 "hash/crc32"]
+    ^{:line 16} [image "image"]
+    ^{:line 17} [color "image/color"]
+    ^{:line 18} [io "io"]])
+
+
+
+(go/const "Color type, as per the PNG spec.\n"
+  ^{:line 23} [^{:val 0} ctGrayscale 0]
+  ^{:line 24} [^{:val 2} ctTrueColor 2]
+  ^{:line 25} [^{:val 3} ctPaletted 3]
+  ^{:line 26} [^{:val 4} ctGrayscaleAlpha 4]
+  ^{:line 27} [^{:val 6} ctTrueColorAlpha 6])
+
+
+
+(go/const "A cb is a combination of color type and bit depth.\n"
+  ^{:line 32} [^{:val 0} cbInvalid iota]
+  ^{:line 33} [^{:val 1} cbG1]
+  ^{:line 34} [^{:val 2} cbG2]
+  ^{:line 35} [^{:val 3} cbG4]
+  ^{:line 36} [^{:val 4} cbG8]
+  ^{:line 37} [^{:val 5} cbGA8]
+  ^{:line 38} [^{:val 6} cbTC8]
+  ^{:line 39} [^{:val 7} cbP1]
+  ^{:line 40} [^{:val 8} cbP2]
+  ^{:line 41} [^{:val 9} cbP4]
+  ^{:line 42} [^{:val 10} cbP8]
+  ^{:line 43} [^{:val 11} cbTCA8]
+  ^{:line 44} [^{:val 12} cbG16]
+  ^{:line 45} [^{:val 13} cbGA16]
+  ^{:line 46} [^{:val 14} cbTC16]
+  ^{:line 47} [^{:val 15} cbTCA16])
+
+
+^{:go/end 52} (go/func cbPaletted ^bool [^int cb]
+  (and (<= cbP1 cb) (<= cb cbP8)))
+
+
+^{:go/end 56} (go/func cbTrueColor ^bool [^int cb]
+  (or (== cb cbTC8) (== cb cbTC16)))
+
+
+
+(go/const "Filter type, as per the PNG spec.\n"
+  ^{:line 60} [^{:val 0} ftNone 0]
+  ^{:line 61} [^{:val 1} ftSub 1]
+  ^{:line 62} [^{:val 2} ftUp 2]
+  ^{:line 63} [^{:val 3} ftAverage 3]
+  ^{:line 64} [^{:val 4} ftPaeth 4]
+  ^{:line 65} [^{:val 5} nFilter 5])
+
+
+
+(go/const "Interlace type.\n"
+  ^{:line 70} [^{:val 0} itNone 0]
+  ^{:line 71} [^{:val 1} itAdam7 1])
+
+
+
+(go/type interlaceScan "interlaceScan defines the placement and size of a pass for Adam7 interlacing.\n" (struct
+    ^{:line 76 :tag int} xFactor ^int yFactor ^int xOffset ^int yOffset))
+
+
+
+
+(go/var ^{:doc "interlacing defines Adam7 interlacing, with 7 passes of reduced images.\nSee https://www.w3.org/TR/PNG/#8Interlace\n"} interlacing (lit (slice interlaceScan)
+    (lit _ 8 8 0 0)
+    (lit _ 8 8 4 0)
+    (lit _ 4 8 0 4)
+    (lit _ 4 4 2 0)
+    (lit _ 2 4 0 2)
+    (lit _ 2 2 1 0)
+    (lit _ 1 2 0 1)))
+
+
+
+
+
+
+
+
+(go/const "Decoding stage.\nThe PNG specification says that the IHDR, PLTE (if present), tRNS (if\npresent), IDAT and IEND chunks must appear in that order. There may be\nmultiple IDAT chunks, and IDAT chunks must be sequential (i.e. they may not\nhave any other chunks between them).\nhttps://www.w3.org/TR/PNG/#5ChunkOrdering\n"
+  ^{:line 98} [^{:val 0} dsStart iota]
+  ^{:line 99} [^{:val 1} dsSeenIHDR]
+  ^{:line 100} [^{:val 2} dsSeenPLTE]
+  ^{:line 101} [^{:val 3} dsSeentRNS]
+  ^{:line 102} [^{:val 4} dsSeenIDAT]
+  ^{:line 103} [^{:val 5} dsSeenIEND])
+
+
+(go/const ^{:val (byte-string 0x89 "PNG\r\n\u001a\n")} pngHeader (byte-string 0x89 "PNG\r\n\u001a\n"))
+
+(go/type decoder (struct
+    ^{:line 109 :tag io/Reader} r
+    ^{:line 110 :tag image/Image} img
+    ^{:line 111 :tag hash/Hash32} crc
+    ^{:line 112 :tag int} width ^int height
+    ^{:line 113 :tag int} depth
+    ^{:line 114 :tag color/Palette} palette
+    ^{:line 115 :tag int} cb
+    ^{:line 116 :tag int} stage
+    ^{:line 117 :tag uint32} idatLength
+    ^{:line 118 :tag (array (* 3 256) byte)} tmp
+    ^{:line 119 :tag int} interlace
+
+
+
+    ^{:line 123 :tag bool :doc "useTransparent and transparent are used for grayscale and truecolor\ntransparency, as opposed to palette transparency.\n"} useTransparent
+    ^{:line 124 :tag (array 6 byte)} transparent))
+
+
+
+(go/type FormatError "A FormatError reports that the input is not a valid PNG.\n" string)
+
+^{:go/end 130} (go/method Error ^string [^FormatError e] (+ "png: invalid format: " (conv string e)))
+
+(go/var chunkOrderError (conv FormatError "chunk out of order"))
+
+
+(go/type UnsupportedError "An UnsupportedError reports that the input uses a valid but unimplemented PNG feature.\n" string)
+
+^{:go/end 137} (go/method Error ^string [^UnsupportedError e] (+ "png: unsupported feature: " (conv string e)))
+
+^{:go/end 227} (go/method parseIHDR ^error [^{:tag (* decoder)} d ^uint32 length]
+  (when (!= length 13)
+    (return (conv FormatError "bad IHDR length")))
+
+  (when [(values _ err) (io/ReadFull (.-r d) (subslice (.-tmp d) _ 13))] (!= err nil)
+    (return err))
+
+  (.Write (.-crc d) (subslice (.-tmp d) _ 13))
+  (when (!= (aget (.-tmp d) 10) 0)
+    (return (conv UnsupportedError "compression method")))
+
+  (when (!= (aget (.-tmp d) 11) 0)
+    (return (conv UnsupportedError "filter method")))
+
+  (when (and (!= (aget (.-tmp d) 12) itNone) (!= (aget (.-tmp d) 12) itAdam7))
+    (return (conv FormatError "invalid interlace method")))
+
+  (set! (.-interlace d) (conv int (aget (.-tmp d) 12)))
+
+  (let [w (conv int32 (.Uint32 binary/BigEndian (subslice (.-tmp d) 0 4)))
+      ^{:line 159} h (conv int32 (.Uint32 binary/BigEndian (subslice (.-tmp d) 4 8)))]
+    (when (or (<= w 0) (<= h 0))
+      (return (conv FormatError "non-positive dimension")))
+
+    (let [nPixels64 (* (conv int64 w) (conv int64 h))
+        ^{:line 164} nPixels (conv int nPixels64)]
+      (when (!= nPixels64 (conv int64 nPixels))
+        (return (conv UnsupportedError "dimension overflow")))
+
+      ;; There can be up to 8 bytes per pixel, for 16 bits per channel RGBA.
+      (when (!= nPixels (/ (* nPixels 8) 8))
+        (return (conv UnsupportedError "dimension overflow")))
+
+
+      (set! (.-cb d) cbInvalid)
+      (set! (.-depth d) (conv int (aget (.-tmp d) 8)))
+      (switch (.-depth d)
+        (case [1]
+          (switch (aget (.-tmp d) 9)
+            (case [ctGrayscale]
+              (set! (.-cb d) cbG1))
+            (case [ctPaletted]
+              (set! (.-cb d) cbP1))))
+
+        (case [2]
+          (switch (aget (.-tmp d) 9)
+            (case [ctGrayscale]
+              (set! (.-cb d) cbG2))
+            (case [ctPaletted]
+              (set! (.-cb d) cbP2))))
+
+        (case [4]
+          (switch (aget (.-tmp d) 9)
+            (case [ctGrayscale]
+              (set! (.-cb d) cbG4))
+            (case [ctPaletted]
+              (set! (.-cb d) cbP4))))
+
+        (case [8]
+          (switch (aget (.-tmp d) 9)
+            (case [ctGrayscale]
+              (set! (.-cb d) cbG8))
+            (case [ctTrueColor]
+              (set! (.-cb d) cbTC8))
+            (case [ctPaletted]
+              (set! (.-cb d) cbP8))
+            (case [ctGrayscaleAlpha]
+              (set! (.-cb d) cbGA8))
+            (case [ctTrueColorAlpha]
+              (set! (.-cb d) cbTCA8))))
+
+        (case [16]
+          (switch (aget (.-tmp d) 9)
+            (case [ctGrayscale]
+              (set! (.-cb d) cbG16))
+            (case [ctTrueColor]
+              (set! (.-cb d) cbTC16))
+            (case [ctGrayscaleAlpha]
+              (set! (.-cb d) cbGA16))
+            (case [ctTrueColorAlpha]
+              (set! (.-cb d) cbTCA16)))))
+
+
+      (when (== (.-cb d) cbInvalid)
+        (return (conv UnsupportedError (fmt/Sprintf "bit depth %d, color type %d" (aget (.-tmp d) 8) (aget (.-tmp d) 9)))))
+
+      (set! (values (.-width d) (.-height d)) (values (conv int w) (conv int h)))
+      (.verifyChecksum d))))
+
+
+^{:go/end 261} (go/method parsePLTE ^error [^{:tag (* decoder)} d ^uint32 length]
+  (let [np (conv int (/ length 3))] ; The number of palette entries.
+    (when (or (!= (% length 3) 0) (<= np 0) (> np 256) (> np ^int (<< 1 (conv uint (.-depth d)))))
+      (return (conv FormatError "bad PLTE length")))
+
+    (let [(values n err) (io/ReadFull (.-r d) (subslice (.-tmp d) _ (* 3 np)))]
+      (when (!= err nil)
+        (return err))
+
+      (.Write (.-crc d) (subslice (.-tmp d) _ n))
+      (switch (.-cb d)
+        (case [cbP1 cbP2 cbP4 cbP8]
+          (set! (.-palette d) (make color/Palette 256))
+          (for [i 0] (< i np) (inc! i)
+            (aset (.-palette d) i (lit color/RGBA (aget (.-tmp d) (+ (* 3 i) 0)) (aget (.-tmp d) (+ (* 3 i) 1)) (aget (.-tmp d) (+ (* 3 i) 2)) 0xff)))
+
+          (for [i np] (< i 256) (inc! i)
+            ;; Initialize the rest of the palette to opaque black. The spec (section
+            ;; 11.2.3) says that "any out-of-range pixel value found in the image data
+            ;; is an error", but some real-world PNG files have out-of-range pixel
+            ;; values. We fall back to opaque black, the same as libpng 1.5.13;
+            ;; ImageMagick 6.5.7 returns an error.
+            (aset (.-palette d) i (lit color/RGBA 0x00 0x00 0x00 0xff)))
+
+          (set! (.-palette d) (subslice (.-palette d) _ np)))
+        (case [cbTC8 cbTCA8 cbTC16 cbTCA16])
+        ;; As per the PNG spec, a PLTE chunk is optional (and for practical purposes,
+        ;; ignorable) for the ctTrueColor and ctTrueColorAlpha color types (section 4.1.2).
+        (default
+          (return (conv FormatError "PLTE, color type mismatch"))))
+
+      (.verifyChecksum d))))
+
+
+^{:go/end 321} (go/method parsetRNS ^error [^{:tag (* decoder)} d ^uint32 length]
+  (switch (.-cb d)
+    (case [cbG1 cbG2 cbG4 cbG8 cbG16]
+      (when (!= length 2)
+        (return (conv FormatError "bad tRNS length")))
+
+      (let [(values n err) (io/ReadFull (.-r d) (subslice (.-tmp d) _ length))]
+        (when (!= err nil)
+          (return err))
+
+        (.Write (.-crc d) (subslice (.-tmp d) _ n))
+
+        (copy (subslice (.-transparent d)) (subslice (.-tmp d) _ length))
+        (switch (.-cb d)
+          (case [cbG1]
+            (set! (aget (.-transparent d) 1) * 0xff))
+          (case [cbG2]
+            (set! (aget (.-transparent d) 1) * 0x55))
+          (case [cbG4]
+            (set! (aget (.-transparent d) 1) * 0x11)))
+
+        (set! (.-useTransparent d) true)))
+
+    (case [cbTC8 cbTC16]
+      (when (!= length 6)
+        (return (conv FormatError "bad tRNS length")))
+
+      (let [(values n err) (io/ReadFull (.-r d) (subslice (.-tmp d) _ length))]
+        (when (!= err nil)
+          (return err))
+
+        (.Write (.-crc d) (subslice (.-tmp d) _ n))
+
+        (copy (subslice (.-transparent d)) (subslice (.-tmp d) _ length))
+        (set! (.-useTransparent d) true)))
+
+    (case [cbP1 cbP2 cbP4 cbP8]
+      (when (> length 256)
+        (return (conv FormatError "bad tRNS length")))
+
+      (let [(values n err) (io/ReadFull (.-r d) (subslice (.-tmp d) _ length))]
+        (when (!= err nil)
+          (return err))
+
+        (.Write (.-crc d) (subslice (.-tmp d) _ n))
+
+        (when (< (len (.-palette d)) n)
+          (set! (.-palette d) (subslice (.-palette d) _ n)))
+
+        (for [i 0] (< i n) (inc! i)
+          (let [rgba (assert color/RGBA (aget (.-palette d) i))]
+            (aset (.-palette d) i (lit color/NRGBA (.-R rgba) (.-G rgba) (.-B rgba) (aget (.-tmp d) i)))))))
+
+
+    (default
+      (return (conv FormatError "tRNS, color type mismatch"))))
+
+  (.verifyChecksum d))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 360} (go/method Read "Read presents one or more IDAT chunks as one continuous stream (minus the\nintermediate chunk headers and footers). If the PNG data looked like:\n\n\t... len0 IDAT xxx crc0 len1 IDAT yy crc1 len2 IEND crc2\n\nthen this reader presents xxxyy. For well-formed PNG data, the decoder state\nimmediately before the first Read call is that d.r is positioned between the\nfirst IDAT and xxx, and the decoder state immediately after the last Read\ncall is that d.r is positioned between yy and crc1.\n" [^{:tag (* decoder)} d ^{:tag (slice byte)} p] :results [int error]
+  (when (== (len p) 0)
+    (return 0 nil))
+
+  (while (== (.-idatLength d) 0)
+    ;; We have exhausted an IDAT chunk. Verify the checksum of that chunk.
+    (when [err (.verifyChecksum d)] (!= err nil)
+      (return 0 err))
+
+    ;; Read the length and chunk type of the next chunk, and check that
+    ;; it is an IDAT chunk.
+    (when [(values _ err) (io/ReadFull (.-r d) (subslice (.-tmp d) _ 8))] (!= err nil)
+      (return 0 err))
+
+    (set! (.-idatLength d) (.Uint32 binary/BigEndian (subslice (.-tmp d) _ 4)))
+    (when (!= (conv string (subslice (.-tmp d) 4 8)) "IDAT")
+      (return 0 (conv FormatError "not enough pixel data")))
+
+    (.Reset (.-crc d))
+    (.Write (.-crc d) (subslice (.-tmp d) 4 8)))
+
+  (when (< (conv int (.-idatLength d)) 0)
+    (return 0 (conv UnsupportedError "IDAT chunk length overflow")))
+
+  (let [(values n err) (.Read (.-r d) (subslice p _ (min (len p) (conv int (.-idatLength d)))))]
+    (.Write (.-crc d) (subslice p _ n))
+    (set! (.-idatLength d) - (conv uint32 n))
+    (return n err)))
+
+
+
+^{:go/end 408} (go/method decode "decode decodes the IDAT data into an image.\n" [^{:tag (* decoder)} d] :results [image/Image error]
+  (let [(values r err) (zlib/NewReader d)]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (.Close r))
+    (let [^image/Image img (zero image/Image)]
+      (cond (== (.-interlace d) itNone) (do
+          (set! (values img err) (.readImagePass d r 0 false))
+          (when (!= err nil)
+            (return nil err)))
+
+        (== (.-interlace d) itAdam7) (do
+          ;; Allocate a blank image of the full size.
+          (set! (values img err) (.readImagePass d nil 0 true))
+          (when (!= err nil)
+            (return nil err))
+
+          (for [pass 0] (< pass 7) (inc! pass)
+            (let [(values imagePass err) (.readImagePass d r pass false)]
+              (when (!= err nil)
+                (return nil err))
+
+              (when (!= imagePass nil)
+                (.mergePassInto d img imagePass pass))))))
+
+
+
+
+      ;; Check for EOF, to verify the zlib checksum.
+      (let [n 0]
+        (for [i 0] (and (== n 0) (== err nil)) (inc! i)
+          (when (== i 100)
+            (return nil io/ErrNoProgress))
+
+          (set! (values n err) (.Read r (subslice (.-tmp d) _ 1))))
+
+        (when (and (!= err nil) (!= err io/EOF))
+          (return nil (conv FormatError (.Error err))))
+
+        (when (or (!= n 0) (!= (.-idatLength d) 0))
+          (return nil (conv FormatError "too much pixel data")))
+
+
+        (return img nil)))))
+
+
+
+^{:go/end 785} (go/method readImagePass "readImagePass reads a single image pass, sized according to the pass number.\n" [^{:tag (* decoder)} d ^io/Reader r ^int pass ^bool allocateOnly] :results [image/Image error]
+  (let [bitsPerPixel 0
+      ^{:line 413} pixOffset 0
+
+      ^{:line 415 :tag (* image/Gray)} gray (zero (* image/Gray))
+      ^{:line 416 :tag (* image/RGBA)} rgba (zero (* image/RGBA))
+      ^{:line 417 :tag (* image/Paletted)} paletted (zero (* image/Paletted))
+      ^{:line 418 :tag (* image/NRGBA)} nrgba (zero (* image/NRGBA))
+      ^{:line 419 :tag (* image/Gray16)} gray16 (zero (* image/Gray16))
+      ^{:line 420 :tag (* image/RGBA64)} rgba64 (zero (* image/RGBA64))
+      ^{:line 421 :tag (* image/NRGBA64)} nrgba64 (zero (* image/NRGBA64))
+      ^{:line 422 :tag image/Image} img (zero image/Image)
+
+      (values width height) (values (.-width d) (.-height d))]
+    (when (and (== (.-interlace d) itAdam7) (not allocateOnly))
+      (let [p (aget interlacing pass)]
+        ;; Add the multiplication factor and subtract one, effectively rounding up.
+        (set! width (/ (- (+ (- width (.-xOffset p)) (.-xFactor p)) 1) (.-xFactor p)))
+        (set! height (/ (- (+ (- height (.-yOffset p)) (.-yFactor p)) 1) (.-yFactor p)))
+        ;; A PNG image can't have zero width or height, but for an interlaced
+        ;; image, an individual pass might have zero width or height. If so, we
+        ;; shouldn't even read a per-row filter type byte, so return early.
+        (when (or (== width 0) (== height 0))
+          (return nil nil))))
+
+
+    (switch (.-cb d)
+      (case [cbG1 cbG2 cbG4 cbG8]
+        (set! bitsPerPixel (.-depth d))
+        (if (.-useTransparent d) (do
+            (set! nrgba (image/NewNRGBA (image/Rect 0 0 width height)))
+            (set! img nrgba))
+          (do
+            (set! gray (image/NewGray (image/Rect 0 0 width height)))
+            (set! img gray))))
+
+      (case [cbGA8]
+        (set! bitsPerPixel 16)
+        (set! nrgba (image/NewNRGBA (image/Rect 0 0 width height)))
+        (set! img nrgba))
+      (case [cbTC8]
+        (set! bitsPerPixel 24)
+        (if (.-useTransparent d) (do
+            (set! nrgba (image/NewNRGBA (image/Rect 0 0 width height)))
+            (set! img nrgba))
+          (do
+            (set! rgba (image/NewRGBA (image/Rect 0 0 width height)))
+            (set! img rgba))))
+
+      (case [cbP1 cbP2 cbP4 cbP8]
+        (set! bitsPerPixel (.-depth d))
+        (set! paletted (image/NewPaletted (image/Rect 0 0 width height) (.-palette d)))
+        (set! img paletted))
+      (case [cbTCA8]
+        (set! bitsPerPixel 32)
+        (set! nrgba (image/NewNRGBA (image/Rect 0 0 width height)))
+        (set! img nrgba))
+      (case [cbG16]
+        (set! bitsPerPixel 16)
+        (if (.-useTransparent d) (do
+            (set! nrgba64 (image/NewNRGBA64 (image/Rect 0 0 width height)))
+            (set! img nrgba64))
+          (do
+            (set! gray16 (image/NewGray16 (image/Rect 0 0 width height)))
+            (set! img gray16))))
+
+      (case [cbGA16]
+        (set! bitsPerPixel 32)
+        (set! nrgba64 (image/NewNRGBA64 (image/Rect 0 0 width height)))
+        (set! img nrgba64))
+      (case [cbTC16]
+        (set! bitsPerPixel 48)
+        (if (.-useTransparent d) (do
+            (set! nrgba64 (image/NewNRGBA64 (image/Rect 0 0 width height)))
+            (set! img nrgba64))
+          (do
+            (set! rgba64 (image/NewRGBA64 (image/Rect 0 0 width height)))
+            (set! img rgba64))))
+
+      (case [cbTCA16]
+        (set! bitsPerPixel 64)
+        (set! nrgba64 (image/NewNRGBA64 (image/Rect 0 0 width height)))
+        (set! img nrgba64)))
+
+    (when allocateOnly
+      (return img nil))
+
+    (let [bytesPerPixel (/ (+ bitsPerPixel 7) 8)
+
+        ;; The +1 is for the per-row filter type, which is at cr[0].
+        ^{:line 501} rowSize (+ 1 (/ (+ (* (conv int64 bitsPerPixel) (conv int64 width)) 7) 8))]
+      (when (!= rowSize (conv int64 (conv int rowSize)))
+        (return nil (conv UnsupportedError "dimension overflow")))
+
+      ;; cr and pr are the bytes for the current and previous row.
+      (let [cr (make (slice uint8) rowSize)
+          ^{:line 507} pr (make (slice uint8) rowSize)]
+
+        (for [y 0] (< y height) (inc! y)
+          ;; Read the decompressed bytes.
+          (let [(values _ err) (io/ReadFull r cr)]
+            (when (!= err nil)
+              (when (or (== err io/EOF) (== err io/ErrUnexpectedEOF))
+                (return nil (conv FormatError "not enough pixel data")))
+
+              (return nil err))
+
+
+            ;; Apply the filter.
+            (let [cdat (subslice cr 1)
+                ^{:line 521} pdat (subslice pr 1)]
+              (switch (aget cr 0)
+                (case [ftNone])
+                ;; No-op.
+                (case [ftSub]
+                  (for [i bytesPerPixel] (< i (len cdat)) (inc! i)
+                    (set! (aget cdat i) + (aget cdat (- i bytesPerPixel)))))
+
+                (case [ftUp]
+                  (range [i p pdat]
+                    (set! (aget cdat i) + p)))
+
+                (case [ftAverage]
+                  ;; The first column has no column to the left of it, so it is a
+                  ;; special case. We know that the first column exists because we
+                  ;; check above that width != 0, and so len(cdat) != 0.
+                  (for [i 0] (< i bytesPerPixel) (inc! i)
+                    (set! (aget cdat i) + (/ (aget pdat i) 2)))
+
+                  (for [i bytesPerPixel] (< i (len cdat)) (inc! i)
+                    (set! (aget cdat i) + (conv uint8 (/ (+ (conv int (aget cdat (- i bytesPerPixel))) (conv int (aget pdat i))) 2)))))
+
+                (case [ftPaeth]
+                  (filterPaeth cdat pdat bytesPerPixel))
+                (default
+                  (return nil (conv FormatError "bad filter type"))))
+
+
+              ;; Convert from bytes to colors.
+              (switch (.-cb d)
+                (case [cbG1]
+                  (if (.-useTransparent d)
+                    (let [ty (aget (.-transparent d) 1)]
+                      (for [x 0] (< x width) (set! x + 8)
+                        (let [b (aget cdat (/ x 8))]
+                          (for [x2 0] (and (< x2 8) (< (+ x x2) width)) (inc! x2)
+                            (let [ycol (* (>> b 7) 0xff)
+                                ^{:line 558} acol (conv uint8 0xff)]
+                              (when (== ycol ty)
+                                (set! acol 0x00))
+
+                              (.SetNRGBA nrgba (+ x x2) y (lit color/NRGBA ycol ycol ycol acol))
+                              (set! b << 1))))))
+
+
+
+                    (for [x 0] (< x width) (set! x + 8)
+                      (let [b (aget cdat (/ x 8))]
+                        (for [x2 0] (and (< x2 8) (< (+ x x2) width)) (inc! x2)
+                          (.SetGray gray (+ x x2) y (lit color/Gray (* (>> b 7) 0xff)))
+                          (set! b << 1))))))
+
+
+
+                (case [cbG2]
+                  (if (.-useTransparent d)
+                    (let [ty (aget (.-transparent d) 1)]
+                      (for [x 0] (< x width) (set! x + 4)
+                        (let [b (aget cdat (/ x 4))]
+                          (for [x2 0] (and (< x2 4) (< (+ x x2) width)) (inc! x2)
+                            (let [ycol (* (>> b 6) 0x55)
+                                ^{:line 582} acol (conv uint8 0xff)]
+                              (when (== ycol ty)
+                                (set! acol 0x00))
+
+                              (.SetNRGBA nrgba (+ x x2) y (lit color/NRGBA ycol ycol ycol acol))
+                              (set! b << 2))))))
+
+
+
+                    (for [x 0] (< x width) (set! x + 4)
+                      (let [b (aget cdat (/ x 4))]
+                        (for [x2 0] (and (< x2 4) (< (+ x x2) width)) (inc! x2)
+                          (.SetGray gray (+ x x2) y (lit color/Gray (* (>> b 6) 0x55)))
+                          (set! b << 2))))))
+
+
+
+                (case [cbG4]
+                  (if (.-useTransparent d)
+                    (let [ty (aget (.-transparent d) 1)]
+                      (for [x 0] (< x width) (set! x + 2)
+                        (let [b (aget cdat (/ x 2))]
+                          (for [x2 0] (and (< x2 2) (< (+ x x2) width)) (inc! x2)
+                            (let [ycol (* (>> b 4) 0x11)
+                                ^{:line 606} acol (conv uint8 0xff)]
+                              (when (== ycol ty)
+                                (set! acol 0x00))
+
+                              (.SetNRGBA nrgba (+ x x2) y (lit color/NRGBA ycol ycol ycol acol))
+                              (set! b << 4))))))
+
+
+
+                    (for [x 0] (< x width) (set! x + 2)
+                      (let [b (aget cdat (/ x 2))]
+                        (for [x2 0] (and (< x2 2) (< (+ x x2) width)) (inc! x2)
+                          (.SetGray gray (+ x x2) y (lit color/Gray (* (>> b 4) 0x11)))
+                          (set! b << 4))))))
+
+
+
+                (case [cbG8]
+                  (if (.-useTransparent d)
+                    (let [ty (aget (.-transparent d) 1)]
+                      (for [x 0] (< x width) (inc! x)
+                        (let [ycol (aget cdat x)
+                            ^{:line 628} acol (conv uint8 0xff)]
+                          (when (== ycol ty)
+                            (set! acol 0x00))
+
+                          (.SetNRGBA nrgba x y (lit color/NRGBA ycol ycol ycol acol)))))
+
+                    (do
+                      (copy (subslice (.-Pix gray) pixOffset) cdat)
+                      (set! pixOffset + (.-Stride gray)))))
+
+                (case [cbGA8]
+                  (for [x 0] (< x width) (inc! x)
+                    (let [ycol (aget cdat (+ (* 2 x) 0))]
+                      (.SetNRGBA nrgba x y (lit color/NRGBA ycol ycol ycol (aget cdat (+ (* 2 x) 1)))))))
+
+                (case [cbTC8]
+                  (if (.-useTransparent d)
+                    (let [(values pix i j) (values (.-Pix nrgba) pixOffset 0)
+                        (values tr tg tb) (values (aget (.-transparent d) 1) (aget (.-transparent d) 3) (aget (.-transparent d) 5))]
+                      (for [x 0] (< x width) (inc! x)
+                        (let [r (aget cdat (+ j 0))
+                            ^{:line 649} g (aget cdat (+ j 1))
+                            ^{:line 650} b (aget cdat (+ j 2))
+                            ^{:line 651} a (conv uint8 0xff)]
+                          (when (and (== r tr) (== g tg) (== b tb))
+                            (set! a 0x00))
+
+                          (aset pix (+ i 0) r)
+                          (aset pix (+ i 1) g)
+                          (aset pix (+ i 2) b)
+                          (aset pix (+ i 3) a)
+                          (set! i + 4)
+                          (set! j + 3)))
+
+                      (set! pixOffset + (.-Stride nrgba)))
+
+                    (let [(values pix i j) (values (.-Pix rgba) pixOffset 0)]
+                      (for [x 0] (< x width) (inc! x)
+                        (aset pix (+ i 0) (aget cdat (+ j 0)))
+                        (aset pix (+ i 1) (aget cdat (+ j 1)))
+                        (aset pix (+ i 2) (aget cdat (+ j 2)))
+                        (aset pix (+ i 3) 0xff)
+                        (set! i + 4)
+                        (set! j + 3))
+
+                      (set! pixOffset + (.-Stride rgba)))))
+
+                (case [cbP1]
+                  (for [x 0] (< x width) (set! x + 8)
+                    (let [b (aget cdat (/ x 8))]
+                      (for [x2 0] (and (< x2 8) (< (+ x x2) width)) (inc! x2)
+                        (let [idx (>> b 7)]
+                          (when (<= (len (.-Palette paletted)) (conv int idx))
+                            (set! (.-Palette paletted) (subslice (.-Palette paletted) _ (+ (conv int idx) 1))))
+
+                          (.SetColorIndex paletted (+ x x2) y idx)
+                          (set! b << 1))))))
+
+
+                (case [cbP2]
+                  (for [x 0] (< x width) (set! x + 4)
+                    (let [b (aget cdat (/ x 4))]
+                      (for [x2 0] (and (< x2 4) (< (+ x x2) width)) (inc! x2)
+                        (let [idx (>> b 6)]
+                          (when (<= (len (.-Palette paletted)) (conv int idx))
+                            (set! (.-Palette paletted) (subslice (.-Palette paletted) _ (+ (conv int idx) 1))))
+
+                          (.SetColorIndex paletted (+ x x2) y idx)
+                          (set! b << 2))))))
+
+
+                (case [cbP4]
+                  (for [x 0] (< x width) (set! x + 2)
+                    (let [b (aget cdat (/ x 2))]
+                      (for [x2 0] (and (< x2 2) (< (+ x x2) width)) (inc! x2)
+                        (let [idx (>> b 4)]
+                          (when (<= (len (.-Palette paletted)) (conv int idx))
+                            (set! (.-Palette paletted) (subslice (.-Palette paletted) _ (+ (conv int idx) 1))))
+
+                          (.SetColorIndex paletted (+ x x2) y idx)
+                          (set! b << 4))))))
+
+
+                (case [cbP8]
+                  (when (!= (len (.-Palette paletted)) 256)
+                    (for [x 0] (< x width) (inc! x)
+                      (when (<= (len (.-Palette paletted)) (conv int (aget cdat x)))
+                        (set! (.-Palette paletted) (subslice (.-Palette paletted) _ (+ (conv int (aget cdat x)) 1))))))
+
+
+
+                  (copy (subslice (.-Pix paletted) pixOffset) cdat)
+                  (set! pixOffset + (.-Stride paletted)))
+                (case [cbTCA8]
+                  (copy (subslice (.-Pix nrgba) pixOffset) cdat)
+                  (set! pixOffset + (.-Stride nrgba)))
+                (case [cbG16]
+                  (if (.-useTransparent d)
+                    (let [ty (bit-or (<< (conv uint16 (aget (.-transparent d) 0)) 8) (conv uint16 (aget (.-transparent d) 1)))]
+                      (for [x 0] (< x width) (inc! x)
+                        (let [ycol (bit-or (<< (conv uint16 (aget cdat (+ (* 2 x) 0))) 8) (conv uint16 (aget cdat (+ (* 2 x) 1))))
+                            ^{:line 729} acol (conv uint16 0xffff)]
+                          (when (== ycol ty)
+                            (set! acol 0x0000))
+
+                          (.SetNRGBA64 nrgba64 x y (lit color/NRGBA64 ycol ycol ycol acol)))))
+
+
+                    (for [x 0] (< x width) (inc! x)
+                      (let [ycol (bit-or (<< (conv uint16 (aget cdat (+ (* 2 x) 0))) 8) (conv uint16 (aget cdat (+ (* 2 x) 1))))]
+                        (.SetGray16 gray16 x y (lit color/Gray16 ycol))))))
+
+
+                (case [cbGA16]
+                  (for [x 0] (< x width) (inc! x)
+                    (let [ycol (bit-or (<< (conv uint16 (aget cdat (+ (* 4 x) 0))) 8) (conv uint16 (aget cdat (+ (* 4 x) 1))))
+                        ^{:line 744} acol (bit-or (<< (conv uint16 (aget cdat (+ (* 4 x) 2))) 8) (conv uint16 (aget cdat (+ (* 4 x) 3))))]
+                      (.SetNRGBA64 nrgba64 x y (lit color/NRGBA64 ycol ycol ycol acol)))))
+
+                (case [cbTC16]
+                  (if (.-useTransparent d)
+                    (let [tr (bit-or (<< (conv uint16 (aget (.-transparent d) 0)) 8) (conv uint16 (aget (.-transparent d) 1)))
+                        ^{:line 750} tg (bit-or (<< (conv uint16 (aget (.-transparent d) 2)) 8) (conv uint16 (aget (.-transparent d) 3)))
+                        ^{:line 751} tb (bit-or (<< (conv uint16 (aget (.-transparent d) 4)) 8) (conv uint16 (aget (.-transparent d) 5)))]
+                      (for [x 0] (< x width) (inc! x)
+                        (let [rcol (bit-or (<< (conv uint16 (aget cdat (+ (* 6 x) 0))) 8) (conv uint16 (aget cdat (+ (* 6 x) 1))))
+                            ^{:line 754} gcol (bit-or (<< (conv uint16 (aget cdat (+ (* 6 x) 2))) 8) (conv uint16 (aget cdat (+ (* 6 x) 3))))
+                            ^{:line 755} bcol (bit-or (<< (conv uint16 (aget cdat (+ (* 6 x) 4))) 8) (conv uint16 (aget cdat (+ (* 6 x) 5))))
+                            ^{:line 756} acol (conv uint16 0xffff)]
+                          (when (and (== rcol tr) (== gcol tg) (== bcol tb))
+                            (set! acol 0x0000))
+
+                          (.SetNRGBA64 nrgba64 x y (lit color/NRGBA64 rcol gcol bcol acol)))))
+
+
+                    (for [x 0] (< x width) (inc! x)
+                      (let [rcol (bit-or (<< (conv uint16 (aget cdat (+ (* 6 x) 0))) 8) (conv uint16 (aget cdat (+ (* 6 x) 1))))
+                          ^{:line 765} gcol (bit-or (<< (conv uint16 (aget cdat (+ (* 6 x) 2))) 8) (conv uint16 (aget cdat (+ (* 6 x) 3))))
+                          ^{:line 766} bcol (bit-or (<< (conv uint16 (aget cdat (+ (* 6 x) 4))) 8) (conv uint16 (aget cdat (+ (* 6 x) 5))))]
+                        (.SetRGBA64 rgba64 x y (lit color/RGBA64 rcol gcol bcol 0xffff))))))
+
+
+                (case [cbTCA16]
+                  (for [x 0] (< x width) (inc! x)
+                    (let [rcol (bit-or (<< (conv uint16 (aget cdat (+ (* 8 x) 0))) 8) (conv uint16 (aget cdat (+ (* 8 x) 1))))
+                        ^{:line 773} gcol (bit-or (<< (conv uint16 (aget cdat (+ (* 8 x) 2))) 8) (conv uint16 (aget cdat (+ (* 8 x) 3))))
+                        ^{:line 774} bcol (bit-or (<< (conv uint16 (aget cdat (+ (* 8 x) 4))) 8) (conv uint16 (aget cdat (+ (* 8 x) 5))))
+                        ^{:line 775} acol (bit-or (<< (conv uint16 (aget cdat (+ (* 8 x) 6))) 8) (conv uint16 (aget cdat (+ (* 8 x) 7))))]
+                      (.SetNRGBA64 nrgba64 x y (lit color/NRGBA64 rcol gcol bcol acol))))))
+
+
+
+              ;; The current row for y is the previous row for y+1.
+              (set! (values pr cr) (values cr pr)))))
+
+
+        (return img nil)))))
+
+
+
+^{:go/end 852} (go/method mergePassInto "mergePassInto merges a single pass into a full sized image.\n" [^{:tag (* decoder)} d ^image/Image dst ^image/Image src ^int pass]
+  (let [p (aget interlacing pass)
+
+      ^{:line 791 :tag (slice uint8)} srcPix (zero (slice uint8))
+      ^{:line 792 :tag (slice uint8)} dstPix (zero (slice uint8))
+      ^{:line 793 :tag int} stride (zero int)
+      ^{:line 794 :tag image/Rectangle} rect (zero image/Rectangle)
+      ^{:line 795 :tag int} bytesPerPixel (zero int)]
+
+    (type-switch [target dst]
+      (case [(* image/Alpha)]
+        (set! srcPix (.-Pix (assert (* image/Alpha) src)))
+        (set! (values dstPix stride rect) (values (.-Pix target) (.-Stride target) (.-Rect target)))
+        (set! bytesPerPixel 1))
+      (case [(* image/Alpha16)]
+        (set! srcPix (.-Pix (assert (* image/Alpha16) src)))
+        (set! (values dstPix stride rect) (values (.-Pix target) (.-Stride target) (.-Rect target)))
+        (set! bytesPerPixel 2))
+      (case [(* image/Gray)]
+        (set! srcPix (.-Pix (assert (* image/Gray) src)))
+        (set! (values dstPix stride rect) (values (.-Pix target) (.-Stride target) (.-Rect target)))
+        (set! bytesPerPixel 1))
+      (case [(* image/Gray16)]
+        (set! srcPix (.-Pix (assert (* image/Gray16) src)))
+        (set! (values dstPix stride rect) (values (.-Pix target) (.-Stride target) (.-Rect target)))
+        (set! bytesPerPixel 2))
+      (case [(* image/NRGBA)]
+        (set! srcPix (.-Pix (assert (* image/NRGBA) src)))
+        (set! (values dstPix stride rect) (values (.-Pix target) (.-Stride target) (.-Rect target)))
+        (set! bytesPerPixel 4))
+      (case [(* image/NRGBA64)]
+        (set! srcPix (.-Pix (assert (* image/NRGBA64) src)))
+        (set! (values dstPix stride rect) (values (.-Pix target) (.-Stride target) (.-Rect target)))
+        (set! bytesPerPixel 8))
+      (case [(* image/Paletted)]
+        (let [source (assert (* image/Paletted) src)]
+          (set! srcPix (.-Pix source))
+          (set! (values dstPix stride rect) (values (.-Pix target) (.-Stride target) (.-Rect target)))
+          (set! bytesPerPixel 1)
+          (when (< (len (.-Palette target)) (len (.-Palette source)))
+            ;; readImagePass can return a paletted image whose implicit palette
+            ;; length (one more than the maximum Pix value) is larger than the
+            ;; explicit palette length (what's in the PLTE chunk). Make the
+            ;; same adjustment here.
+            (set! (.-Palette target) (.-Palette source)))))
+
+      (case [(* image/RGBA)]
+        (set! srcPix (.-Pix (assert (* image/RGBA) src)))
+        (set! (values dstPix stride rect) (values (.-Pix target) (.-Stride target) (.-Rect target)))
+        (set! bytesPerPixel 4))
+      (case [(* image/RGBA64)]
+        (set! srcPix (.-Pix (assert (* image/RGBA64) src)))
+        (set! (values dstPix stride rect) (values (.-Pix target) (.-Stride target) (.-Rect target)))
+        (set! bytesPerPixel 8)))
+
+    (let [(values s bounds) (values 0 (.Bounds src))]
+      (for [y (.-Y (.-Min bounds))] (< y (.-Y (.-Max bounds))) (inc! y)
+        (let [dBase (+ (* (- (+ (* y (.-yFactor p)) (.-yOffset p)) (.-Y (.-Min rect))) stride) (* (- (.-xOffset p) (.-X (.-Min rect))) bytesPerPixel))]
+          (for [x (.-X (.-Min bounds))] (< x (.-X (.-Max bounds))) (inc! x)
+            (let [d (+ dBase (* x (.-xFactor p) bytesPerPixel))]
+              (copy (subslice dstPix d) (subslice srcPix s (+ s bytesPerPixel)))
+              (set! s + bytesPerPixel))))))))
+
+
+
+
+^{:go/end 861} (go/method parseIDAT [^{:tag (* decoder)} d ^uint32 length] :results [^error err]
+  (set! (.-idatLength d) length)
+  (set! (values (.-img d) err) (.decode d))
+  (when (!= err nil)
+    (return err))
+
+  (.verifyChecksum d))
+
+
+^{:go/end 868} (go/method parseIEND ^error [^{:tag (* decoder)} d ^uint32 length]
+  (when (!= length 0)
+    (return (conv FormatError "bad IEND length")))
+
+  (.verifyChecksum d))
+
+
+^{:go/end 944} (go/method parseChunk ^error [^{:tag (* decoder)} d ^bool configOnly]
+  ;; Read the length and chunk type.
+  (when [(values _ err) (io/ReadFull (.-r d) (subslice (.-tmp d) _ 8))] (!= err nil)
+    (return err))
+
+  (let [length (.Uint32 binary/BigEndian (subslice (.-tmp d) _ 4))]
+    (.Reset (.-crc d))
+    (.Write (.-crc d) (subslice (.-tmp d) 4 8))
+
+    ;; Read the chunk data.
+    (switch (conv string (subslice (.-tmp d) 4 8))
+      (case ["IHDR"]
+        (when (!= (.-stage d) dsStart)
+          (return chunkOrderError))
+
+        (set! (.-stage d) dsSeenIHDR)
+        (return (.parseIHDR d length)))
+      (case ["PLTE"]
+        (when (!= (.-stage d) dsSeenIHDR)
+          (return chunkOrderError))
+
+        (set! (.-stage d) dsSeenPLTE)
+        (return (.parsePLTE d length)))
+      (case ["tRNS"]
+        (cond (cbPaletted (.-cb d))
+          (when (!= (.-stage d) dsSeenPLTE)
+            (return chunkOrderError))
+
+          (cbTrueColor (.-cb d))
+          (when (and (!= (.-stage d) dsSeenIHDR) (!= (.-stage d) dsSeenPLTE))
+            (return chunkOrderError))
+
+          (!= (.-stage d) dsSeenIHDR)
+          (return chunkOrderError))
+
+        (set! (.-stage d) dsSeentRNS)
+        (return (.parsetRNS d length)))
+      (case ["IDAT"]
+        (cond (or (< (.-stage d) dsSeenIHDR) (> (.-stage d) dsSeenIDAT) ^:go/paren (and (== (.-stage d) dsSeenIHDR) (cbPaletted (.-cb d))))
+          (return chunkOrderError)
+          (== (.-stage d) dsSeenIDAT)
+          ;; Ignore trailing zero-length or garbage IDAT chunks.
+          ;;
+          ;; This does not affect valid PNG images that contain multiple IDAT
+          ;; chunks, since the first call to parseIDAT below will consume all
+          ;; consecutive IDAT chunks required for decoding the image.
+          (break))
+
+        (set! (.-stage d) dsSeenIDAT)
+        (when configOnly
+          (return nil))
+
+        (return (.parseIDAT d length)))
+      (case ["IEND"]
+        (when (!= (.-stage d) dsSeenIDAT)
+          (return chunkOrderError))
+
+        (set! (.-stage d) dsSeenIEND)
+        (return (.parseIEND d length))))
+
+    (when (> length 0x7fffffff)
+      (return (conv FormatError (fmt/Sprintf "Bad chunk length: %d" length))))
+
+    ;; Ignore this chunk (of a known length).
+    (let [^{:tag (array 4096 byte)} ignored (zero (array 4096 byte))]
+      (while (> length 0)
+        (let [(values n err) (io/ReadFull (.-r d) (subslice ignored _ (min (len ignored) (conv int length))))]
+          (when (!= err nil)
+            (return err))
+
+          (.Write (.-crc d) (subslice ignored _ n))
+          (set! length - (conv uint32 n))))
+
+      (.verifyChecksum d))))
+
+
+^{:go/breaks [[5 953]] :go/end 954} (go/method verifyChecksum ^error [^{:tag (* decoder)} d]
+  (when [(values _ err) (io/ReadFull (.-r d) (subslice (.-tmp d) _ 4))] (!= err nil)
+    (return err))
+
+  (when (!= (.Uint32 binary/BigEndian (subslice (.-tmp d) _ 4)) (.Sum32 (.-crc d)))
+    (return (conv FormatError "invalid checksum")))
+
+  nil)
+
+
+^{:go/end 965} (go/method checkHeader ^error [^{:tag (* decoder)} d]
+  ^{:go/breaks [[4 964]]} (let [(values _ err) (io/ReadFull (.-r d) (subslice (.-tmp d) _ (len pngHeader)))]
+    (when (!= err nil)
+      (return err))
+
+    (when (!= (conv string (subslice (.-tmp d) _ (len pngHeader))) pngHeader)
+      (return (conv FormatError "not a PNG file")))
+
+    nil))
+
+
+
+
+^{:go/end 989} (go/func Decode "Decode reads a PNG image from r and returns it as an [image.Image].\nThe type of Image returned depends on the PNG contents.\n" [^io/Reader r] :results [image/Image error]
+  (let [d (addr ^{:go/breaks [2 4]} (lit decoder
+          :r r
+          :crc (crc32/NewIEEE)))]
+
+    (when [err (.checkHeader d)] (!= err nil)
+      (when (== err io/EOF)
+        (set! err io/ErrUnexpectedEOF))
+
+      (return nil err))
+
+    (while (!= (.-stage d) dsSeenIEND)
+      (when [err (.parseChunk d false)] (!= err nil)
+        (when (== err io/EOF)
+          (set! err io/ErrUnexpectedEOF))
+
+        (return nil err)))
+
+
+    (return (.-img d) nil)))
+
+
+
+
+^{:go/end 1050} (go/func DecodeConfig "DecodeConfig returns the color model and dimensions of a PNG image without\ndecoding the entire image.\n" [^io/Reader r] :results [image/Config error]
+  (let [d (addr ^{:go/breaks [2 4]} (lit decoder
+          :r r
+          :crc (crc32/NewIEEE)))]
+
+    (when [err (.checkHeader d)] (!= err nil)
+      (when (== err io/EOF)
+        (set! err io/ErrUnexpectedEOF))
+
+      (return (lit image/Config) err))
+
+
+    (while true
+      (when [err (.parseChunk d true)] (!= err nil)
+        (when (== err io/EOF)
+          (set! err io/ErrUnexpectedEOF))
+
+        (return (lit image/Config) err))
+
+
+      (if (cbPaletted (.-cb d))
+        (when (>= (.-stage d) dsSeentRNS)
+          (break))
+
+        (do
+          (when (>= (.-stage d) dsSeenIHDR)
+            (break)))))
+
+
+
+
+    (let [^color/Model cm (zero color/Model)]
+      (switch (.-cb d)
+        (case [cbG1 cbG2 cbG4 cbG8]
+          (set! cm color/GrayModel))
+        (case [cbGA8]
+          (set! cm color/NRGBAModel))
+        (case [cbTC8]
+          (set! cm color/RGBAModel))
+        (case [cbP1 cbP2 cbP4 cbP8]
+          (set! cm (.-palette d)))
+        (case [cbTCA8]
+          (set! cm color/NRGBAModel))
+        (case [cbG16]
+          (set! cm color/Gray16Model))
+        (case [cbGA16]
+          (set! cm color/NRGBA64Model))
+        (case [cbTC16]
+          (set! cm color/RGBA64Model))
+        (case [cbTCA16]
+          (set! cm color/NRGBA64Model)))
+
+      ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6]} (lit image/Config
+          :ColorModel cm
+          :Width (.-width d)
+          :Height (.-height d))
+        nil))))
+
+
+^{:go/end 1054} (go/func init []
+  (image/RegisterFormat "png" pngHeader Decode DecodeConfig))

@@ -1,0 +1,116 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.textproto) (go/file "pipeline.go" :imports [
+
+
+    ^{:line 8} [sync "sync"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Pipeline "A Pipeline manages a pipelined in-order request/response sequence.\n\nTo use a Pipeline p to manage multiple clients on a connection,\neach client should run:\n\n\tid := p.Next()\t// take a number\n\n\tp.StartRequest(id)\t// wait for turn to send request\n\t«send request»\n\tp.EndRequest(id)\t// notify Pipeline that request is sent\n\n\tp.StartResponse(id)\t// wait for turn to read response\n\t«read response»\n\tp.EndResponse(id)\t// notify Pipeline that response is read\n\nA pipelined server can use the same calls to ensure that\nresponses computed in parallel are written in the correct order.\n" (struct
+    ^{:line 29 :tag sync/Mutex} mu
+    ^{:line 30 :tag uint} id
+    ^{:line 31 :tag sequencer} request
+    ^{:line 32 :tag sequencer} response))
+
+
+
+^{:go/end 42} (go/method Next "Next returns the next id for a request/response pair.\n" ^uint [^{:tag (* Pipeline)} p]
+  (.Lock (.-mu p))
+  (let [id (.-id p)]
+    (inc! (.-id p))
+    (.Unlock (.-mu p))
+    ^{:line 41} id))
+
+
+
+
+^{:go/end 48} (go/method StartRequest "StartRequest blocks until it is time to send (or, if this is a server, receive)\nthe request with the given id.\n" [^{:tag (* Pipeline)} p ^uint id]
+  (.Start (.-request p) id))
+
+
+
+
+^{:go/end 54} (go/method EndRequest "EndRequest notifies p that the request with the given id has been sent\n(or, if this is a server, received).\n" [^{:tag (* Pipeline)} p ^uint id]
+  (.End (.-request p) id))
+
+
+
+
+^{:go/end 60} (go/method StartResponse "StartResponse blocks until it is time to receive (or, if this is a server, send)\nthe request with the given id.\n" [^{:tag (* Pipeline)} p ^uint id]
+  (.Start (.-response p) id))
+
+
+
+
+^{:go/end 66} (go/method EndResponse "EndResponse notifies p that the response with the given id has been received\n(or, if this is a server, sent).\n" [^{:tag (* Pipeline)} p ^uint id]
+  (.End (.-response p) id))
+
+
+
+
+
+
+(go/type sequencer "A sequencer schedules a sequence of numbered events that must\nhappen in order, one after the other. The event numbering must start\nat 0 and increment without skipping. The event number wraps around\nsafely as long as there are not 2^32 simultaneous events pending.\n" (struct
+    ^{:line 73 :tag sync/Mutex} mu
+    ^{:line 74 :tag uint} id
+    ^{:line 75 :tag (map uint (chan (struct)))} wait))
+
+
+
+
+
+^{:go/end 94} (go/method Start "Start waits until it is time for the event numbered id to begin.\nThat is, except for the first event, it waits until End(id-1) has\nbeen called.\n" [^{:tag (* sequencer)} s ^uint id]
+  (.Lock (.-mu s))
+  (when (== (.-id s) id)
+    (.Unlock (.-mu s))
+    (return))
+
+  (let [c (make (chan (struct)))]
+    (when (== (.-wait s) nil)
+      (set! (.-wait s) (make (map uint (chan (struct))))))
+
+    (aset (.-wait s) id c)
+    (.Unlock (.-mu s))
+    (<! c)))
+
+
+
+
+
+^{:go/end 118} (go/method End "End notifies the sequencer that the event numbered id has completed,\nallowing it to schedule the event numbered id+1.  It is a run-time error\nto call End with an id that is not the number of the active event.\n" [^{:tag (* sequencer)} s ^uint id]
+  (.Lock (.-mu s))
+  (when (!= (.-id s) id)
+    (.Unlock (.-mu s))
+    (panic "out of sync"))
+
+  (inc! id)
+  (set! (.-id s) id)
+  (when (== (.-wait s) nil)
+    (set! (.-wait s) (make (map uint (chan (struct))))))
+
+  (let [(values c ok) (aget (.-wait s) id)]
+    (when ok
+      (delete (.-wait s) id))
+
+    (.Unlock (.-mu s))
+    (when ok
+      (close c))))

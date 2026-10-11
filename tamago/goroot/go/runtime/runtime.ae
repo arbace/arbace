@@ -1,0 +1,318 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "runtime.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [atomic "internal/runtime/atomic"]
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+(go/directive "//go:generate go run wincallback.go")
+(go/directive "//go:generate go run mkduff.go")
+(go/directive "//go:generate go run mkfastlog2table.go")
+(go/directive "//go:generate go run mklockrank.go -o lockrank.go")
+
+(go/var ^ticksType ticks)
+
+(go/type ticksType (struct
+
+    ^{:line 22 :tag mutex :doc "lock protects access to start* and val.\n"} lock
+    ^{:line 23 :tag int64} startTicks
+    ^{:line 24 :tag int64} startTime
+    ^{:line 25 :tag atomic/Int64} val))
+
+
+
+
+
+^{:go/end 36} (go/method init "init initializes ticks to maximize the chance that we have a good ticksPerSecond reference.\n\nMust not run concurrently with ticksPerSecond.\n" [^{:tag (* ticksType)} t]
+  (lock (addr (.-lock ticks)))
+  (set! (.-startTime t) (nanotime))
+  (set! (.-startTicks t) (cputicks))
+  (unlock (addr (.-lock ticks))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const ^{:val 5000000 :doc "minTimeForTicksPerSecond is the minimum elapsed time we require to consider our ticksPerSecond\nmeasurement to be of decent enough quality for profiling.\n\nThere's a linear relationship here between minimum time and error from the true value.\nThe error from the true ticks-per-second in a linux/amd64 VM seems to be:\n-   1 ms -> ~0.02% error\n-   5 ms -> ~0.004% error\n-  10 ms -> ~0.002% error\n-  50 ms -> ~0.0003% error\n- 100 ms -> ~0.0001% error\n\nWe're willing to take 0.004% error here, because ticksPerSecond is intended to be used for\nconverting durations, not timestamps. Durations are usually going to be much larger, and so\nthe tiny error doesn't matter. The error is definitely going to be a problem when trying to\nuse this for timestamps, as it'll make those timestamps much less likely to line up.\n"} minTimeForTicksPerSecond (+ (* 5000000 (- 1 osHasLowResClockInt)) (* 100000000 osHasLowResClockInt)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 116} (go/func ticksPerSecond "ticksPerSecond returns a conversion rate between the cputicks clock and the nanotime clock.\n\nNote: Clocks are hard. Using this as an actual conversion rate for timestamps is ill-advised\nand should be avoided when possible. Use only for durations, where a tiny error term isn't going\nto make a meaningful difference in even a 1ms duration. If an accurate timestamp is needed,\nuse nanotime instead. (The entire Windows platform is a broad exception to this rule, where nanotime\nproduces timestamps on such a coarse granularity that the error from this conversion is actually\npreferable.)\n\nThe strategy for computing the conversion rate is to write down nanotime and cputicks as\nearly in process startup as possible. From then, we just need to wait until we get values\nfrom nanotime that we can use (some platforms have a really coarse system time granularity).\nWe require some amount of time to pass to ensure that the conversion rate is fairly accurate\nin aggregate. But because we compute this rate lazily, there's a pretty good chance a decent\namount of time has passed by the time we get here.\n\nMust be called from a normal goroutine context (running regular goroutine with a P).\n\nCalled by runtime/pprof in addition to runtime code.\n\nTODO(mknyszek): This doesn't account for things like CPU frequency scaling. Consider\na more sophisticated and general approach in the future.\n" ^int64 []
+  ;; Get the conversion rate if we've already computed it.
+  (let [r (.Load (.-val ticks))]
+    (when (!= r 0)
+      (return r))
+
+
+    ;; Compute the conversion rate.
+    (while true
+      (lock (addr (.-lock ticks)))
+      (set! r (.Load (.-val ticks)))
+      (when (!= r 0)
+        (unlock (addr (.-lock ticks)))
+        (return r))
+
+
+      ;; Grab the current time in both clocks.
+      (let [nowTime (nanotime)
+          ^{:line 95} nowTicks (cputicks)]
+
+        ;; See if we can use these times.
+        (when (and (> nowTicks (.-startTicks ticks)) (> (- nowTime (.-startTime ticks)) minTimeForTicksPerSecond))
+          ;; Perform the calculation with floats. We don't want to risk overflow.
+          (set! r (conv int64 (/ (* (conv float64 (- nowTicks (.-startTicks ticks))) 1.0E9) (conv float64 (- nowTime (.-startTime ticks))))))
+          (when (== r 0)
+            ;; Zero is both a sentinel value and it would be bad if callers used this as
+            ;; a divisor. We tried out best, so just make it 1.
+            (inc! r))
+
+          (.Store (.-val ticks) r)
+          (unlock (addr (.-lock ticks)))
+          (break))
+
+        (unlock (addr (.-lock ticks)))
+
+        ;; Sleep in one millisecond increments until we have a reliable time.
+        (timeSleep 1000000)))
+
+    ^{:line 115} r))
+
+
+(go/var ^{:tag (slice string)} envs)
+(go/var ^{:tag (slice string)} argslice)
+
+
+^{:go/end 122} (go/func ^{:go/linkname "syscall_runtime_envs syscall.runtime_envs"} syscall_runtime_envs ^{:tag (slice string)} [] (append (lit (slice string)) (spread envs)))
+
+
+^{:go/end 125} (go/func ^{:go/linkname "syscall_Getpagesize syscall.Getpagesize"} syscall_Getpagesize ^int [] (conv int physPageSize))
+
+
+^{:go/end 128} (go/func ^{:go/linkname "os_runtime_args os.runtime_args"} os_runtime_args ^{:tag (slice string)} [] (append (lit (slice string)) (spread argslice)))
+
+
+
+^{:go/end 134} (go/func ^:go/nosplit ^{:go/linkname "syscall_Exit syscall.Exit"} syscall_Exit [^int code]
+  (exit (conv int32 code)))
+
+
+(go/var ^string godebugDefault)
+(go/var ^{:tag (atomic/Pointer (func [string string]))} godebugUpdate)
+(go/var ^{:tag (atomic/Pointer string)} godebugEnv) ; set by parsedebugvars
+(go/var ^{:tag (atomic/Pointer (func [string] [(func [])]))} godebugNewIncNonDefault)
+
+
+^{:go/end 147} (go/func ^{:go/linkname "godebug_setUpdate internal/godebug.setUpdate"} godebug_setUpdate [^{:tag (func [string string])} update]
+  (let [p (new (func [string string]))]
+    (set! @p update)
+    (.Store godebugUpdate p)
+    (godebugNotify false)))
+
+
+
+^{:go/end 155} (go/func ^{:go/linkname "godebug_setNewIncNonDefault internal/godebug.setNewIncNonDefault"} godebug_setNewIncNonDefault [^{:tag (func [string] [(func [])])} newIncNonDefault]
+  (let [p (new (func [string] [(func [])]))]
+    (set! @p newIncNonDefault)
+    (.Store godebugNewIncNonDefault p)
+    (defaultGOMAXPROCSUpdateGODEBUG)))
+
+
+
+
+
+(go/type godebugInc "A godebugInc provides access to internal/godebug's IncNonDefault function\nfor a given GODEBUG setting.\nCalls before internal/godebug registers itself are dropped on the floor.\n" (struct
+    ^{:line 161 :tag string} name
+    ^{:line 162 :tag (atomic/Pointer (func []))} inc))
+
+
+^{:go/end 185} (go/method IncNonDefault [^{:tag (* godebugInc)} g]
+  (let [inc (.Load (.-inc g))]
+    (when (== inc nil)
+      (let [newInc (.Load godebugNewIncNonDefault)]
+        (when (== newInc nil)
+          (return))
+
+        (set! inc (new (func [])))
+        (set! @inc (@newInc (.-name g)))
+        (when raceenabled
+          (racereleasemerge (conv unsafe/Pointer (addr (.-inc g)))))
+
+        (when (not (.CompareAndSwap (.-inc g) nil inc))
+          (set! inc (.Load (.-inc g))))))
+
+
+    (when raceenabled
+      (raceacquire (conv unsafe/Pointer (addr (.-inc g)))))
+
+    (@inc)))
+
+
+^{:go/end 199} (go/func godebugNotify [^bool envChanged]
+  (let [update (.Load godebugUpdate)
+      ^{:line 189 :tag string} env (zero string)]
+    (when [p (.Load godebugEnv)] (!= p nil)
+      (set! env @p))
+
+    (when envChanged
+      (reparsedebugvars env))
+
+    (when (!= update nil)
+      (@update godebugDefault env))))
+
+
+
+
+^{:go/end 210} (go/func ^{:go/linkname "syscall_runtimeSetenv syscall.runtimeSetenv"} syscall_runtimeSetenv [^string key ^string value]
+  (setenv_c key value)
+  (when (== key "GODEBUG")
+    (let [p (new string)]
+      (set! @p value)
+      (.Store godebugEnv p)
+      (godebugNotify true))))
+
+
+
+
+^{:go/end 219} (go/func ^{:go/linkname "syscall_runtimeUnsetenv syscall.runtimeUnsetenv"} syscall_runtimeUnsetenv [^string key]
+  (unsetenv_c key)
+  (when (== key "GODEBUG")
+    (.Store godebugEnv nil)
+    (godebugNotify true)))
+
+
+
+
+
+
+
+^{:go/end 227} (go/func ^:go/nosplit writeErrStr "writeErrStr writes a string to descriptor 2.\nIf SetCrashOutput(f) was called, it also writes to f.\n" [^string s]
+  (writeErrData (unsafe/StringData s) (conv int32 (len s))))
+
+
+
+
+
+^{:go/end 243} (go/func ^:go/nosplit writeErrData "writeErrData is the common parts of writeErr{,Str}.\n" [^{:tag (* byte)} data ^int32 n]
+  (write 2 (conv unsafe/Pointer data) n)
+
+  ;; If crashing, print a copy to the SetCrashOutput fd.
+  (let [gp (getg)]
+    (when (or (and (!= gp nil) (> (.-dying (.-m gp)) 0))
+        (and (== gp nil) (> (.Load panicking) 0)))
+      (when [fd (.Load crashFD)] (!= fd (bit-not (conv uintptr 0)))
+        (write fd (conv unsafe/Pointer data) n)))))
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag atomic/Uintptr :doc "crashFD is an optional file descriptor to use for fatal panics, as\nset by debug.SetCrashOutput (see #42888). If it is a valid fd (not\nall ones), writeErr and related functions write to it in addition\nto standard error.\n\nInitialized to -1 in schedinit.\n"} crashFD)
+
+
+^{:go/end 291} (go/func ^{:go/linkname "setCrashFD"} setCrashFD ^uintptr [^uintptr fd]
+  ;; Don't change the crash FD if a crash is already in progress.
+  ;;
+  ;; Unlike the case below, this is not required for correctness, but it
+  ;; is generally nicer to have all of the crash output go to the same
+  ;; place rather than getting split across two different FDs.
+  (when (> (.Load panicking) 0)
+    (return (bit-not (conv uintptr 0))))
+
+
+  (let [old (.Swap crashFD fd)]
+
+    ;; If we are panicking, don't return the old FD to runtime/debug for
+    ;; closing. writeErrData may have already read the old FD from crashFD
+    ;; before the swap and closing it would cause the write to be lost [1].
+    ;; The old FD will never be closed, but we are about to crash anyway.
+    ;;
+    ;; On the writeErrData thread, panicking.Add(1) happens-before
+    ;; crashFD.Load() [2].
+    ;;
+    ;; On this thread, swapping old FD for new in crashFD happens-before
+    ;; panicking.Load() > 0.
+    ;;
+    ;; Therefore, if panicking.Load() == 0 here (old FD will be closed), it
+    ;; is impossible for the writeErrData thread to observe
+    ;; crashFD.Load() == old FD.
+    ;;
+    ;; [1] Or, if really unlucky, another concurrent open could reuse the
+    ;; FD, sending the write into an unrelated file.
+    ;;
+    ;; [2] If gp != nil, it occurs when incrementing gp.m.dying in
+    ;; startpanic_m. If gp == nil, we read panicking.Load() > 0, so an Add
+    ;; must have happened-before.
+    (when (> (.Load panicking) 0)
+      (return (bit-not (conv uintptr 0))))
+
+    ^{:line 290} old))
+
+
+
+
+
+
+
+(go/var ^{:tag (slice uintptr) :doc "auxv is populated on relevant platforms but defined here for all platforms\nso x/sys/cpu and x/sys/unix can assume the getAuxv symbol exists without\nkeeping its list of auxv-using GOOS build tags in sync.\n\nIt contains an even number of elements, (tag, value) pairs.\n"} auxv)
+
+
+
+
+
+
+^{:go/end 305} (go/func ^{:go/linkname "getAuxv"} getAuxv "golang.org/x/sys/cpu and golang.org/x/sys/unix use getAuxv via linkname.\nDo not remove or change the type signature.\nSee go.dev/issue/57336 and go.dev/issue/67401.\n" ^{:tag (slice uintptr)} [] auxv)
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag (array abi/ZeroValSize byte) :doc "zeroVal is used by reflect via linkname.\n\nzeroVal should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/ugorji/go/codec\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" :go/linkname "zeroVal"} zeroVal)

@@ -1,0 +1,326 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "ipsock.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [bytealg "internal/bytealg"]
+    ^{:line 10} [runtime "runtime"]
+    ^{:line 11} [sync "sync"]
+    ^{:line 12} [_ "unsafe"]]) ; for linkname
+
+
+;; BUG(rsc,mikio): On DragonFly BSD and OpenBSD, listening on the
+;; "tcp" and "udp" networks does not listen for both IPv4 and IPv6
+;; connections. This is due to the fact that IPv4 traffic will not be
+;; routed to an IPv6 socket - two separate sockets are required if
+;; both address families are to be supported.
+;; See inet6(4) for details.
+
+(go/type ipStackCapabilities (struct
+    ^{:line 23} sync/Once ; guards following
+    ^{:line 24 :tag bool} ipv4Enabled
+    ^{:line 25 :tag bool} ipv6Enabled
+    ^{:line 26 :tag bool} ipv4MappedIPv6Enabled))
+
+
+(go/var ^ipStackCapabilities ipStackCaps)
+
+
+
+^{:go/end 36} (go/func supportsIPv4 "supportsIPv4 reports whether the platform supports IPv4 networking\nfunctionality.\n" ^bool []
+  (.Do (.-Once ipStackCaps) (.-probe ipStackCaps))
+  (.-ipv4Enabled ipStackCaps))
+
+
+
+
+^{:go/end 43} (go/func supportsIPv6 "supportsIPv6 reports whether the platform supports IPv6 networking\nfunctionality.\n" ^bool []
+  (.Do (.-Once ipStackCaps) (.-probe ipStackCaps))
+  (.-ipv6Enabled ipStackCaps))
+
+
+
+
+
+^{:go/end 58} (go/func supportsIPv4map "supportsIPv4map reports whether the platform supports mapping an\nIPv4 address inside an IPv6 address at transport layer\nprotocols. See RFC 4291, RFC 4038 and RFC 3493.\n" ^bool []
+  ;; Some operating systems provide no support for mapping IPv4
+  ;; addresses to IPv6, and a runtime check is unnecessary.
+  (switch runtime/GOOS
+    (case ["dragonfly" "openbsd" "tamago"]
+      (return false)))
+
+
+  (.Do (.-Once ipStackCaps) (.-probe ipStackCaps))
+  (.-ipv4MappedIPv6Enabled ipStackCaps))
+
+
+
+(go/type addrList "An addrList represents a list of network endpoint addresses.\n" (slice Addr))
+
+
+^{:go/breaks [[5 73]] :go/end 74} (go/func isIPv4 "isIPv4 reports whether addr contains an IPv4 address.\n" ^bool [^Addr addr]
+  (type-switch [addr addr]
+    (case [(* TCPAddr)]
+      (return (!= (.To4 (.-IP addr)) nil)))
+    (case [(* UDPAddr)]
+      (return (!= (.To4 (.-IP addr)) nil)))
+    (case [(* IPAddr)]
+      (return (!= (.To4 (.-IP addr)) nil))))
+
+  false)
+
+
+
+^{:go/end 77} (go/func isNotIPv4 "isNotIPv4 reports whether addr does not contain an IPv4 address.\n" ^bool [^Addr addr] (not (isIPv4 addr)))
+
+
+
+
+^{:go/end 96} (go/method forResolve "forResolve returns the most appropriate address in address for\na call to ResolveTCPAddr, ResolveUDPAddr, or ResolveIPAddr.\nIPv4 is preferred, unless addr contains an IPv6 literal.\n" ^Addr [^addrList addrs ^string network ^string addr]
+  (let [^bool want6 (zero bool)]
+    (switch network
+      (case ["ip"]
+        ;; IPv6 literal (addr does NOT contain a port)
+        (set! want6 (> (bytealg/CountString addr \:) 0)))
+      (case ["tcp" "udp"]
+        ;; IPv6 literal. (addr contains a port, so look for '[')
+        (set! want6 (> (bytealg/CountString addr \[) 0))))
+
+    (when want6
+      (return (.first addrs isNotIPv4)))
+
+    (.first addrs isIPv4)))
+
+
+
+
+^{:go/end 107} (go/method first "first returns the first address which satisfies strategy, or if\nnone do, then the first address of any kind.\n" ^Addr [^addrList addrs ^{:tag (func [Addr] [bool])} strategy]
+  (range [_ addr addrs]
+    (when (strategy addr)
+      (return addr)))
+
+
+  (aget addrs 0))
+
+
+
+
+
+
+
+
+^{:go/end 127} (go/method partition "partition divides an address list into two categories, using a\nstrategy function to assign a boolean label to each address.\nThe first address, and any with a matching label, are returned as\nprimaries, while addresses with the opposite label are returned\nas fallbacks. For non-empty inputs, primaries is guaranteed to be\nnon-empty.\n" [^addrList addrs ^{:tag (func [Addr] [bool])} strategy] :results [^addrList primaries ^addrList fallbacks]
+  (let [^bool primaryLabel (zero bool)]
+    (range [i addr addrs]
+      (let [label (strategy addr)]
+        (if (or (== i 0) (== label primaryLabel)) (do
+            (set! primaryLabel label)
+            (set! primaries (append primaries addr)))
+
+          (set! fallbacks (append fallbacks addr)))))
+
+
+    (return)))
+
+
+
+
+
+
+^{:go/end 144} (go/func filterAddrList "filterAddrList applies a filter to a list of IP addresses,\nyielding a list of Addr objects. Known filters are nil, ipv4only,\nand ipv6only. It returns every address when the filter is nil.\nThe result contains at least one address when error is nil.\n" [^{:tag (func [IPAddr] [bool])} filter ^{:tag (slice IPAddr)} ips ^{:tag (func [IPAddr] [Addr])} inetaddr ^string originalAddr] :results [addrList error]
+  (let [^addrList addrs (zero addrList)]
+    (range [_ ip ips]
+      (when (or (== filter nil) (filter ip))
+        (set! addrs (append addrs (inetaddr ip)))))
+
+
+    (when (== (len addrs) 0)
+      (return nil (addr (lit AddrError :Err (.Error errNoSuitableAddress) :Addr originalAddr))))
+
+    (return addrs nil)))
+
+
+
+^{:go/end 149} (go/func ipv4only "ipv4only reports whether addr is an IPv4 address.\n" ^bool [^IPAddr addr]
+  (!= (.To4 (.-IP addr)) nil))
+
+
+
+^{:go/end 154} (go/func ipv6only "ipv6only reports whether addr is an IPv6 address except IPv4-mapped IPv6 address.\n" ^bool [^IPAddr addr]
+  (and (== (len (.-IP addr)) IPv6len) (== (.To4 (.-IP addr)) nil)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 218} (go/func SplitHostPort "SplitHostPort splits a network address of the form \"host:port\",\n\"host%zone:port\", \"[host]:port\" or \"[host%zone]:port\" into host or\nhost%zone and port.\n\nA literal IPv6 address in hostport must be enclosed in square\nbrackets, as in \"[::1]:80\", \"[::1%lo0]:80\".\n\nSee func Dial for a description of the hostport parameter, and host\nand port results.\n" [^string hostport] :results [^string host ^string port ^error err]
+  (let [
+      ^:const ^{:line 167 :val "missing port in address"} missingPort "missing port in address"
+      ^:const ^:go/grouped ^{:line 168 :val "too many colons in address"} tooManyColons "too many colons in address"
+
+      ^{:line 170} addrErr ^{:go/end 172} (fn [^string addr ^string why] :results [^string host ^string port ^error err]
+        (return "" "" (addr (lit AddrError :Err why :Addr addr))))
+
+      (values j k) (values 0 0)
+
+      ;; The port starts after the last colon.
+      ^{:line 176} i (bytealg/LastIndexByteString hostport \:)]
+    (when (< i 0)
+      (return (addrErr hostport missingPort)))
+
+
+    (if (== (aget hostport 0) \[)
+      ;; Expect the first ']' just before the last ':'.
+      (let [end (bytealg/IndexByteString hostport \])]
+        (when (< end 0)
+          (return (addrErr hostport "missing ']' in address")))
+
+        (switch (+ end 1)
+          (case [(len hostport)]
+            ;; There can't be a ':' behind the ']' now.
+            (return (addrErr hostport missingPort)))
+          (case [i])
+          ;; The expected result.
+          (default
+            ;; Either ']' isn't followed by a colon, or it is
+            ;; followed by a colon that is not the last one.
+            (when (== (aget hostport (+ end 1)) \:)
+              (return (addrErr hostport tooManyColons)))
+
+            (return (addrErr hostport missingPort))))
+
+        (set! host (subslice hostport 1 end))
+        (set! (values j k) (values 1 (+ end 1)))) ; there can't be a '[' resp. ']' before these positions
+      (do
+        (set! host (subslice hostport _ i))
+        (when (>= (bytealg/IndexByteString host \:) 0)
+          (return (addrErr hostport tooManyColons)))))
+
+
+    (when (>= (bytealg/IndexByteString (subslice hostport j) \[) 0)
+      (return (addrErr hostport "unexpected '[' in address")))
+
+    (when (>= (bytealg/IndexByteString (subslice hostport k) \]) 0)
+      (return (addrErr hostport "unexpected ']' in address")))
+
+
+    (set! port (subslice hostport (+ i 1)))
+    (return host port nil)))
+
+
+^{:go/end 229} (go/func splitHostZone [^string s] :results [^string host ^string zone]
+  ;; The IPv6 scoped addressing zone identifier starts after the
+  ;; last percent sign.
+  (if [i (bytealg/LastIndexByteString s \%)] (> i 0)
+    (set! (values host zone) (values (subslice s _ i) (subslice s (+ i 1))))
+
+    (set! host s))
+
+  (return))
+
+
+
+
+
+
+
+^{:go/end 243} (go/func JoinHostPort "JoinHostPort combines host and port into a network address of the\nform \"host:port\". If host contains a colon, as found in literal\nIPv6 addresses, then JoinHostPort returns \"[host]:port\".\n\nSee func Dial for a description of the host and port parameters.\n" ^string [^string host ^string port]
+  ;; We assume that host is a literal IPv6 address if host has
+  ;; colons.
+  (when (>= (bytealg/IndexByteString host \:) 0)
+    (return (+ "[" host "]:" port)))
+
+  (+ host ":" port))
+
+
+
+
+
+
+^{:go/end 309} (go/method internetAddrList "internetAddrList resolves addr, which may be a literal IP\naddress or a DNS name, and returns a list of internet protocol\nfamily addresses. The result contains at least one address when\nerror is nil.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string net ^string addr] :results [addrList error]
+  (let [
+      ^{:line 251 :tag error} err (zero error)
+      (values ^string host ^string port) (zero string)
+      ^{:line 253 :tag int} portnum (zero int)]
+
+    (switch net
+      (case ["tcp" "tcp4" "tcp6" "udp" "udp4" "udp6"]
+        (when (!= addr "")
+          (when [(set! (values host port err) (SplitHostPort addr))] (!= err nil)
+            (return nil err))
+
+          (when [(set! (values portnum err) (.LookupPort r ctx net port))] (!= err nil)
+            (return nil err))))
+
+
+      (case ["ip" "ip4" "ip6"]
+        (when (!= addr "")
+          (set! host addr)))
+
+      (default
+        (return nil (conv UnknownNetworkError net))))
+
+    (let [inetaddr ^{:go/end 283} (fn ^Addr [^IPAddr ip]
+          (switch net
+            (case ["tcp" "tcp4" "tcp6"]
+              (return (addr (lit TCPAddr :IP (.-IP ip) :Port portnum :Zone (.-Zone ip)))))
+            (case ["udp" "udp4" "udp6"]
+              (return (addr (lit UDPAddr :IP (.-IP ip) :Port portnum :Zone (.-Zone ip)))))
+            (case ["ip" "ip4" "ip6"]
+              (return (addr (lit IPAddr :IP (.-IP ip) :Zone (.-Zone ip)))))
+            (default
+              (panic (+ "unexpected network: " net)))))]
+
+
+      (when (== host "")
+        (return (lit addrList (inetaddr (lit IPAddr))) nil))
+
+
+      ;; Try as a literal IP address, then as a DNS name.
+      (let [(values ips ^:assign err) (.lookupIPAddr r ctx net host)]
+        (when (!= err nil)
+          (return nil err))
+
+        ;; Issue 18806: if the machine has halfway configured
+        ;; IPv6 such that it can bind on "::" (IPv6unspecified)
+        ;; but not connect back to that same address, fall
+        ;; back to dialing 0.0.0.0.
+        (when (and (== (len ips) 1) (.Equal (.-IP (aget ips 0)) IPv6unspecified))
+          (set! ips (append ips (lit IPAddr :IP IPv4zero))))
+
+
+        (let [^{:tag (func [IPAddr] [bool])} filter (zero (func [IPAddr] [bool]))]
+          (when (and (!= net "") (== (aget net (- (len net) 1)) \4))
+            (set! filter ipv4only))
+
+          (when (and (!= net "") (== (aget net (- (len net) 1)) \6))
+            (set! filter ipv6only))
+
+          (filterAddrList filter ips inetaddr host))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 327} (go/func ^{:go/linkname "loopbackIP"} loopbackIP "loopbackIP should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/database64128/tfo-go/v2\n  - github.com/metacubex/tfo-go\n  - github.com/sagernet/tfo-go\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^IP [^string net]
+  (when (and (!= net "") (== (aget net (- (len net) 1)) \6))
+    (return IPv6loopback))
+
+  (lit IP 127 0 0 1))

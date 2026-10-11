@@ -1,0 +1,413 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.mime) (go/file "encodedword.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [base64 "encoding/base64"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [unicode "unicode"]
+    ^{:line 15} [utf8 "unicode/utf8"]])
+
+
+
+(go/type WordEncoder "A WordEncoder is an RFC 2047 encoded-word encoder.\n" byte)
+
+(go/const
+
+  ^{:line 23} [^{:val 98 :doc "BEncoding represents Base64 encoding scheme as defined by RFC 2045.\n"} BEncoding (conv WordEncoder \b)]
+
+  ^{:line 25} [^{:val 113 :doc "QEncoding represents the Q-encoding scheme as defined by RFC 2047.\n"} QEncoding (conv WordEncoder \q)])
+
+
+(go/var
+  ^{:line 29} [errInvalidWord (errors/New "mime: invalid RFC 2047 encoded-word")])
+
+
+
+
+
+^{:go/end 40} (go/method Encode "Encode returns the encoded-word form of s. If s is ASCII without special\ncharacters, it is returned unchanged. The provided charset is the IANA\ncharset name of s. It is case insensitive.\n" ^string [^WordEncoder e ^string charset ^string s]
+  (when (not (needsEncoding s))
+    (return s))
+
+  (.encodeWord e charset s))
+
+
+^{:go/breaks [[4 48]] :go/end 49} (go/func needsEncoding ^bool [^string s]
+  (range [_ b s]
+    (when (and ^:go/paren (or (< b \space) (> b \~)) (!= b \tab))
+      (return true)))
+
+
+  false)
+
+
+
+^{:go/end 68} (go/method encodeWord "encodeWord encodes a string into an encoded-word.\n" ^string [^WordEncoder e ^string charset ^string s]
+  (let [^strings/Builder buf (zero strings/Builder)]
+    ;; Could use a hint like len(s)*3, but that's not enough for cases
+    ;; with word splits and too much for simpler inputs.
+    ;; 48 is close to maxEncodedWordLen/2, but adjusted to allocator size class.
+    (.Grow buf 48)
+
+    (.openWord e (addr buf) charset)
+    (if (== e BEncoding)
+      (.bEncode e (addr buf) charset s)
+
+      (.qEncode e (addr buf) charset s))
+
+    (closeWord (addr buf))
+
+    (.String buf)))
+
+
+(go/const
+
+
+  ^{:line 73} [^{:val 75 :doc "The maximum length of an encoded-word is 75 characters.\nSee RFC 2047, section 2.\n"} maxEncodedWordLen 75]
+
+
+  ^{:line 76} [^{:val 63 :doc "maxContentLen is how much content can be encoded, ignoring the header and\n2-byte footer.\n"} maxContentLen (- maxEncodedWordLen (len "=?UTF-8?q?") (len "?="))])
+
+
+(go/var maxBase64Len (.DecodedLen base64/StdEncoding maxContentLen))
+
+
+^{:go/end 110} (go/method bEncode "bEncode encodes s using base64 encoding and writes it to buf.\n" [^WordEncoder e ^{:tag (* strings/Builder)} buf ^string charset ^string s]
+  (let [w (base64/NewEncoder base64/StdEncoding buf)]
+    ;; If the charset is not UTF-8 or if the content is short, do not bother
+    ;; splitting the encoded-word.
+    (when (or (not (isUTF8 charset)) (<= (.EncodedLen base64/StdEncoding (len s)) maxContentLen))
+      (io/WriteString w s)
+      (.Close w)
+      (return))
+
+
+    (let [(values ^int currentLen ^int last ^int runeLen) (zero int)]
+      (for [i 0] (< i (len s)) (set! i + runeLen)
+        ;; Multi-byte characters must not be split across encoded-words.
+        ;; See RFC 2047, section 5.3.
+        (set! (values _ runeLen) (utf8/DecodeRuneInString (subslice s i)))
+
+        (if (<= (+ currentLen runeLen) maxBase64Len)
+          (set! currentLen + runeLen)
+          (do
+            (io/WriteString w (subslice s last i))
+            (.Close w)
+            (.splitWord e buf charset)
+            (set! last i)
+            (set! currentLen runeLen))))
+
+
+      (io/WriteString w (subslice s last))
+      (.Close w))))
+
+
+
+
+^{:go/end 141} (go/method qEncode "qEncode encodes s using Q encoding and writes it to buf. It splits the\nencoded-words when necessary.\n" [^WordEncoder e ^{:tag (* strings/Builder)} buf ^string charset ^string s]
+  ;; We only split encoded-words when the charset is UTF-8.
+  (when (not (isUTF8 charset))
+    (writeQString buf s)
+    (return))
+
+
+  (let [(values ^int currentLen ^int runeLen) (zero int)]
+    (for [i 0] (< i (len s)) (set! i + runeLen)
+      (let [b (aget s i)
+          ;; Multi-byte characters must not be split across encoded-words.
+          ;; See RFC 2047, section 5.3.
+          ^{:line 126 :tag int} encLen (zero int)]
+        (if (and (>= b \space) (<= b \~) (!= b \=) (!= b \?) (!= b \_))
+          (set! (values runeLen encLen) (values 1 1))
+          (do
+            (set! (values _ runeLen) (utf8/DecodeRuneInString (subslice s i)))
+            (set! encLen (* 3 runeLen))))
+
+
+        (when (> (+ currentLen encLen) maxContentLen)
+          (.splitWord e buf charset)
+          (set! currentLen 0))
+
+        (writeQString buf (subslice s i (+ i runeLen)))
+        (set! currentLen + encLen)))))
+
+
+
+
+^{:go/end 157} (go/func writeQString "writeQString encodes s using Q encoding and writes it to buf.\n" [^{:tag (* strings/Builder)} buf ^string s]
+  (for [i 0] (< i (len s)) (inc! i)
+    (switch [b (aget s i)]
+      (case [(== b \space)]
+        (.WriteByte buf \_))
+      (case [(and (>= b \!) (<= b \~) (!= b \=) (!= b \?) (!= b \_))]
+        (.WriteByte buf b))
+      (default
+        (.WriteByte buf \=)
+        (.WriteByte buf (aget upperhex (>> b 4)))
+        (.WriteByte buf (aget upperhex (bit-and b 0x0f)))))))
+
+
+
+
+
+^{:go/end 166} (go/method openWord "openWord writes the beginning of an encoded-word into buf.\n" [^WordEncoder e ^{:tag (* strings/Builder)} buf ^string charset]
+  (.WriteString buf "=?")
+  (.WriteString buf charset)
+  (.WriteByte buf \?)
+  (.WriteByte buf (conv byte e))
+  (.WriteByte buf \?))
+
+
+
+^{:go/end 171} (go/func closeWord "closeWord writes the end of an encoded-word into buf.\n" [^{:tag (* strings/Builder)} buf]
+  (.WriteString buf "?="))
+
+
+
+^{:go/end 178} (go/method splitWord "splitWord closes the current encoded-word and opens a new one.\n" [^WordEncoder e ^{:tag (* strings/Builder)} buf ^string charset]
+  (closeWord buf)
+  (.WriteByte buf \space)
+  (.openWord e buf charset))
+
+
+^{:go/end 182} (go/func isUTF8 ^bool [^string charset]
+  (strings/EqualFold charset "UTF-8"))
+
+
+(go/const ^{:val "0123456789ABCDEF"} upperhex "0123456789ABCDEF")
+
+
+(go/type WordDecoder "A WordDecoder decodes MIME headers containing RFC 2047 encoded-words.\n" (struct
+
+
+
+
+
+
+    ^{:line 194 :tag (func [^string charset ^io/Reader input] [io/Reader error]) :doc "CharsetReader, if non-nil, defines a function to generate\ncharset-conversion readers, converting from the provided\ncharset into UTF-8.\nCharsets are always lower-case. utf-8, iso-8859-1 and us-ascii charsets\nare handled by default.\nOne of the CharsetReader's result values must be non-nil.\n"} CharsetReader))
+
+
+
+^{:go/end 226} (go/method Decode "Decode decodes an RFC 2047 encoded-word.\n" [^{:tag (* WordDecoder)} d ^string word] :results [string error]
+  ;; See https://tools.ietf.org/html/rfc2047#section-2 for details.
+  ;; Our decoder is permissive, we accept empty encoded-text.
+  (when (or (< (len word) 8) (not (strings/HasPrefix word "=?")) (not (strings/HasSuffix word "?=")) (!= (strings/Count word "?") 4))
+    (return "" errInvalidWord))
+
+  (set! word (subslice word 2 (- (len word) 2)))
+
+  ;; split word "UTF-8?q?text" into "UTF-8", 'q', and "text"
+  (let [(values charset text _) (strings/Cut word "?")]
+    (when (== charset "")
+      (return "" errInvalidWord))
+
+    (let [(values encoding ^:assign text _) (strings/Cut text "?")]
+      (when (!= (len encoding) 1)
+        (return "" errInvalidWord))
+
+
+      (let [(values content err) (decode (aget encoding 0) text)]
+        (when (!= err nil)
+          (return "" err))
+
+
+        (let [^strings/Builder buf (zero strings/Builder)]
+          (when [err (.convert d (addr buf) charset content)] (!= err nil)
+            (return "" err))
+
+          (return (.String buf) nil))))))
+
+
+
+
+^{:go/end 302} (go/method DecodeHeader "DecodeHeader decodes all encoded-words of the given string. It returns an\nerror if and only if [WordDecoder.CharsetReader] of d returns an error.\n" [^{:tag (* WordDecoder)} d ^string header] :results [string error]
+  ;; If there is no encoded-word, returns before creating a buffer.
+  (let [i (strings/Index header "=?")]
+    (when (== i -1)
+      (return header nil))
+
+
+    (let [^strings/Builder buf (zero strings/Builder)]
+
+      (.WriteString buf (subslice header _ i))
+      (set! header (subslice header i))
+
+      (let [betweenWords false]
+        (while true
+          (let [start (strings/Index header "=?")]
+            (when (== start -1)
+              (break))
+
+            (let [cur (+ start (len "=?"))
+
+                ^{:line 250} i (strings/Index (subslice header cur) "?")]
+              (when (== i -1)
+                (break))
+
+              (let [charset (subslice header cur (+ cur i))]
+                (set! cur + (+ i (len "?")))
+
+                (when (< (len header) (+ cur (len "Q??=")))
+                  (break))
+
+                (let [encoding (aget header cur)]
+                  (inc! cur)
+
+                  (when (!= (aget header cur) \?)
+                    (break))
+
+                  (inc! cur)
+
+                  (let [j (strings/Index (subslice header cur) "?=")]
+                    (when (== j -1)
+                      (break))
+
+                    (let [text (subslice header cur (+ cur j))
+                        ^{:line 273} end (+ cur j (len "?="))
+
+                        (values content err) (decode encoding text)]
+                      (when (!= err nil)
+                        (set! betweenWords false)
+                        (.WriteString buf (subslice header _ end))
+                        (set! header (subslice header end))
+                        (continue))
+
+
+                      ;; Write characters before the encoded-word. White-space and newline
+                      ;; characters separating two encoded-words must be deleted.
+                      (when (and (> start 0) ^:go/paren (or (not betweenWords) (hasNonWhitespace (subslice header _ start))))
+                        (.WriteString buf (subslice header _ start)))
+
+
+                      (when [err (.convert d (addr buf) charset content)] (!= err nil)
+                        (return "" err))
+
+
+                      (set! header (subslice header end))
+                      (set! betweenWords true))))))))
+
+
+        (when (> (len header) 0)
+          (.WriteString buf header))
+
+
+        (return (.String buf) nil)))))
+
+
+^{:go/end 313} (go/func decode [^byte encoding ^string text] :results [(slice byte) error]
+  (switch encoding
+    (case [\B \b]
+      (return (.DecodeString base64/StdEncoding text)))
+    (case [\Q \q]
+      (return (qDecode text)))
+    (default
+      (return nil errInvalidWord))))
+
+
+
+^{:go/breaks [[4 343]] :go/end 344} (go/method convert ^error [^{:tag (* WordDecoder)} d ^{:tag (* strings/Builder)} buf ^string charset ^{:tag (slice byte)} content]
+  (switch
+    (case [(strings/EqualFold "utf-8" charset)]
+      (.Write buf content))
+    (case [(strings/EqualFold "iso-8859-1" charset)]
+      (range [_ c content]
+        (.WriteRune buf (conv rune c))))
+
+    (case [(strings/EqualFold "us-ascii" charset)]
+      (range [_ c content]
+        (if (>= c utf8/RuneSelf)
+          (.WriteRune buf unicode/ReplacementChar)
+
+          (.WriteByte buf c))))
+
+
+    (default
+      (when (== (.-CharsetReader d) nil)
+        (return (fmt/Errorf "mime: unhandled charset %q" charset)))
+
+      (let [(values r err) ((.-CharsetReader d) (strings/ToLower charset) (bytes/NewReader content))]
+        (when (!= err nil)
+          (return err))
+
+        (when [(set! (values _ err) (io/Copy buf r))] (!= err nil)
+          (return err)))))
+
+
+  nil)
+
+
+
+
+^{:go/breaks [[5 358]] :go/end 359} (go/func hasNonWhitespace "hasNonWhitespace reports whether s (assumed to be ASCII) contains at least\none byte of non-whitespace.\n" ^bool [^string s]
+  (range [_ b s]
+    (switch b
+      ;; Encoded-words can only be separated by linear white spaces which does
+      ;; not include vertical tabs (\v).
+      (case [\space \tab \newline \return])
+      (default
+        (return true))))
+
+
+  false)
+
+
+
+^{:go/end 388} (go/func qDecode "qDecode decodes a Q encoded string.\n" [^string s] :results [(slice byte) error]
+  (let [dec (make (slice byte) (len s))
+      ^{:line 364} n 0]
+    (for [i 0] (< i (len s)) (inc! i)
+      (switch [c (aget s i)]
+        (case [(== c \_)]
+          (aset dec n \space))
+        (case [(== c \=)]
+          (when (>= (+ i 2) (len s))
+            (return nil errInvalidWord))
+
+          (let [(values b err) (readHexByte (aget s (+ i 1)) (aget s (+ i 2)))]
+            (when (!= err nil)
+              (return nil err))
+
+            (aset dec n b)
+            (set! i + 2)))
+        (case [(or ^:go/paren (and (<= c \~) (>= c \space)) (== c \newline) (== c \return) (== c \tab))]
+          (aset dec n c))
+        (default
+          (return nil errInvalidWord)))
+
+      (inc! n))
+
+
+    (return (subslice dec _ n) nil)))
+
+
+
+^{:go/end 401} (go/func readHexByte "readHexByte returns the byte from its quoted-printable representation.\n" [^byte a ^byte b] :results [byte error]
+  (let [(values ^byte hb ^byte lb) (zero byte)
+      ^{:line 393 :tag error} err (zero error)]
+    (when [(set! (values hb err) (fromHex a))] (!= err nil)
+      (return 0 err))
+
+    (when [(set! (values lb err) (fromHex b))] (!= err nil)
+      (return 0 err))
+
+    (return (bit-or (<< hb 4) lb) nil)))
+
+
+^{:go/end 414} (go/func fromHex [^byte b] :results [byte error]
+  (switch
+    (case [(and (>= b \0) (<= b \9))]
+      (return (- b \0) nil))
+    (case [(and (>= b \A) (<= b \F))]
+      (return (+ (- b \A) 10) nil))
+    ;; Accept badly encoded bytes.
+    (case [(and (>= b \a) (<= b \f))]
+      (return (+ (- b \a) 10) nil)))
+
+  (return 0 (fmt/Errorf "mime: invalid hex byte %#02x" b)))

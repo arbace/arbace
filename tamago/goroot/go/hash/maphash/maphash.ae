@@ -1,0 +1,364 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package maphash provides hash functions on byte sequences and comparable values.
+;; It also defines [Hasher], the interface between a hash function and a hash table.
+;;
+;; These hash functions are intended to be used to implement hash
+;; tables, Bloom filters, and other data structures that need to map
+;; arbitrary strings or byte sequences to a uniform distribution on
+;; unsigned 64-bit integers.
+;;
+;; Each different instance of a hash table or data structure should use its own [Seed].
+;;
+;; The hash functions are not cryptographically secure.
+;; (See crypto/sha256 and crypto/sha512 for cryptographic use.)
+(in-ns 'go.hash.maphash) (go/file "maphash.go" :doc "Package maphash provides hash functions on byte sequences and comparable values.\nIt also defines [Hasher], the interface between a hash function and a hash table.\n\nThese hash functions are intended to be used to implement hash\ntables, Bloom filters, and other data structures that need to map\narbitrary strings or byte sequences to a uniform distribution on\nunsigned 64-bit integers.\n\nEach different instance of a hash table or data structure should use its own [Seed].\n\nThe hash functions are not cryptographically secure.\n(See crypto/sha256 and crypto/sha512 for cryptographic use.)\n" :imports [
+
+
+    ^{:line 20} [hash "hash"]
+    ^{:line 21} [abi "internal/abi"]
+    ^{:line 22} [maps "internal/runtime/maps"]
+    ^{:line 23} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Seed "A Seed is a random value that selects the specific hash function\ncomputed by a [Hash]. If two Hashes use the same Seeds, they\nwill compute the same hash values for any given input.\nIf two Hashes use different Seeds, they are very likely to compute\ndistinct hash values for any given input.\n\nA Seed must be initialized by calling [MakeSeed].\nThe zero seed is uninitialized and not valid for use with [Hash]'s SetSeed method.\n\nEach Seed value is local to a single process and cannot be serialized\nor otherwise recreated in a different process.\n" (struct
+    ^{:line 38 :tag uint64} s))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 63} (go/func Bytes "Bytes returns the hash of b with the given seed.\n\nBytes is equivalent to, but more convenient and efficient than:\n\n\tvar h Hash\n\th.SetSeed(seed)\n\th.Write(b)\n\treturn h.Sum64()\n" ^uint64 [^Seed seed ^{:tag (slice byte)} b]
+  (let [state (.-s seed)]
+    (when (== state 0)
+      (panic "maphash: use of uninitialized Seed"))
+
+
+    (when (> (len b) bufSize)
+      (set! b (subslice b _ (len b) (len b))) ; merge len and cap calculations when reslicing
+      (while (> (len b) bufSize)
+        (set! state (rthash (subslice b _ bufSize) state))
+        (set! b (subslice b bufSize))))
+
+
+    (rthash b state)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 83} (go/func String "String returns the hash of s with the given seed.\n\nString is equivalent to, but more convenient and efficient than:\n\n\tvar h Hash\n\th.SetSeed(seed)\n\th.WriteString(s)\n\treturn h.Sum64()\n" ^uint64 [^Seed seed ^string s]
+  (let [state (.-s seed)]
+    (when (== state 0)
+      (panic "maphash: use of uninitialized Seed"))
+
+    (while (> (len s) bufSize)
+      (set! state (rthashString (subslice s _ bufSize) state))
+      (set! s (subslice s bufSize)))
+
+    (rthashString s state)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Hash "A Hash computes a seeded hash of a byte sequence.\n\nThe zero Hash is a valid Hash ready to use.\nA zero Hash chooses a random seed for itself during\nthe first call to a Reset, Write, Seed, Clone, or Sum64 method.\nFor control over the seed, use SetSeed.\n\nThe computed hash values depend only on the initial seed and\nthe sequence of bytes provided to the Hash object, not on the way\nin which the bytes are provided. For example, the three sequences\n\n\th.Write([]byte{'f','o','o'})\n\th.WriteByte('f'); h.WriteByte('o'); h.WriteByte('o')\n\th.WriteString(\"foo\")\n\nall have the same effect.\n\nHashes are intended to be collision-resistant, even for situations\nwhere an adversary controls the byte sequences being hashed.\n\nA Hash is not safe for concurrent use by multiple goroutines, but a Seed is.\nIf multiple goroutines must compute the same seeded hash,\neach can declare its own Hash and call SetSeed with a common Seed.\n" (struct
+    ^{:line 109 :tag (array 0 (func []))} _ ; not comparable
+    ^{:line 110 :tag Seed} seed ; initial seed used for this hash
+    ^{:line 111 :tag Seed} state ; current hash of all flushed bytes
+    ^{:line 112 :tag (array bufSize byte)} buf ; unflushed byte buffer
+    ^{:line 113 :tag int} n)) ; number of unflushed bytes
+
+
+
+
+
+
+(go/const ^{:val 128 :doc "bufSize is the size of the Hash write buffer.\nThe buffer ensures that writes depend only on the sequence of bytes,\nnot the sequence of WriteByte/Write/WriteString calls,\nby always calling rthash with a full buffer (except for the tail).\n"} bufSize 128)
+
+
+
+
+
+
+^{:go/end 133} (go/method initSeed "initSeed seeds the hash if necessary.\ninitSeed is called lazily before any operation that actually uses h.seed/h.state.\nNote that this does not include Write/WriteByte/WriteString in the case\nwhere they only add to h.buf. (If they write too much, they call h.flush,\nwhich does call h.initSeed.)\n" [^{:tag (* Hash)} h]
+  (when (== (.-s (.-seed h)) 0)
+    (let [seed (MakeSeed)]
+      (set! (.-seed h) seed)
+      (set! (.-state h) seed))))
+
+
+
+
+
+^{:go/breaks [7] :go/end 144} (go/method WriteByte "WriteByte adds b to the sequence of bytes hashed by h.\nIt never fails; the error result is for implementing [io.ByteWriter].\n" ^error [^{:tag (* Hash)} h ^byte b]
+  (when (== (.-n h) (len (.-buf h)))
+    (.flush h))
+
+  (aset (.-buf h) (.-n h) b)
+  (inc! (.-n h))
+  nil)
+
+
+
+
+^{:go/end 176} (go/method Write "Write adds b to the sequence of bytes hashed by h.\nIt always writes all of b and never fails; the count and error result are for implementing [io.Writer].\n" [^{:tag (* Hash)} h ^{:tag (slice byte)} b] :results [int error]
+  (let [size (len b)]
+    ;; Deal with bytes left over in h.buf.
+    ;; h.n <= bufSize is always true.
+    ;; Checking it is ~free and it lets the compiler eliminate a bounds check.
+    (when (and (> (.-n h) 0) (<= (.-n h) bufSize))
+      (let [k (copy (subslice (.-buf h) (.-n h)) b)]
+        (set! (.-n h) + k)
+        (when (< (.-n h) bufSize)
+          ;; Copied the entirety of b to h.buf.
+          (return size nil))
+
+        (set! b (subslice b k))
+        (.flush h)))
+    ;; No need to set h.n = 0 here; it happens just before exit.
+
+    ;; Process as many full buffers as possible, without copying, and calling initSeed only once.
+    (when (> (len b) bufSize)
+      (.initSeed h)
+      (while (> (len b) bufSize)
+        (set! (.-s (.-state h)) (rthash (subslice b _ bufSize) (.-s (.-state h))))
+        (set! b (subslice b bufSize))))
+
+
+    ;; Copy the tail.
+    (copy (subslice (.-buf h)) b)
+    (set! (.-n h) (len b))
+    (return size nil)))
+
+
+
+
+^{:go/end 202} (go/method WriteString "WriteString adds the bytes of s to the sequence of bytes hashed by h.\nIt always writes all of s and never fails; the count and error result are for implementing [io.StringWriter].\n" [^{:tag (* Hash)} h ^string s] :results [int error]
+  ;; WriteString mirrors Write. See Write for comments.
+  (let [size (len s)]
+    (when (and (> (.-n h) 0) (<= (.-n h) bufSize))
+      (let [k (copy (subslice (.-buf h) (.-n h)) s)]
+        (set! (.-n h) + k)
+        (when (< (.-n h) bufSize)
+          (return size nil))
+
+        (set! s (subslice s k))
+        (.flush h)))
+
+    (when (> (len s) bufSize)
+      (.initSeed h)
+      (while (> (len s) bufSize)
+        (set! (.-s (.-state h)) (rthashString (subslice s _ bufSize) (.-s (.-state h))))
+        (set! s (subslice s bufSize))))
+
+
+    (copy (subslice (.-buf h)) s)
+    (set! (.-n h) (len s))
+    (return size nil)))
+
+
+
+^{:go/end 208} (go/method Seed "Seed returns h's seed value.\n" ^Seed [^{:tag (* Hash)} h]
+  (.initSeed h)
+  (.-seed h))
+
+
+
+
+
+
+
+^{:go/end 222} (go/method SetSeed "SetSeed sets h to use seed, which must have been returned by [MakeSeed]\nor by another [Hash.Seed] method.\nTwo [Hash] objects with the same seed behave identically.\nTwo [Hash] objects with different seeds will very likely behave differently.\nAny bytes added to h before this call will be discarded.\n" [^{:tag (* Hash)} h ^Seed seed]
+  (when (== (.-s seed) 0)
+    (panic "maphash: use of uninitialized Seed"))
+
+  (set! (.-seed h) seed)
+  (set! (.-state h) seed)
+  (set! (.-n h) 0))
+
+
+
+
+^{:go/end 230} (go/method Reset "Reset discards all bytes added to h.\n(The seed remains the same.)\n" [^{:tag (* Hash)} h]
+  (.initSeed h)
+  (set! (.-state h) (.-seed h))
+  (set! (.-n h) 0))
+
+
+
+^{:go/end 240} (go/method flush "precondition: buffer is full.\n" [^{:tag (* Hash)} h]
+  (when (!= (.-n h) (len (.-buf h)))
+    (panic "maphash: flush of partially full buffer"))
+
+  (.initSeed h)
+  (set! (.-s (.-state h)) (rthash (subslice (.-buf h) _ (.-n h)) (.-s (.-state h))))
+  (set! (.-n h) 0))
+
+
+
+
+
+
+
+
+
+^{:go/end 252} (go/method Sum64 "Sum64 returns h's current 64-bit value, which depends on\nh's seed and the sequence of bytes added to h since the\nlast call to [Hash.Reset] or [Hash.SetSeed].\n\nAll bits of the Sum64 result are close to uniformly and\nindependently distributed, so it can be safely reduced\nby using bit masking, shifting, or modular arithmetic.\n" ^uint64 [^{:tag (* Hash)} h]
+  (.initSeed h)
+  (rthash (subslice (.-buf h) _ (.-n h)) (.-s (.-state h))))
+
+
+
+^{:go/end 266} (go/func MakeSeed "MakeSeed returns a new random seed.\n" ^Seed []
+  (let [^uint64 s (zero uint64)]
+    (while true
+      (set! s (randUint64))
+      ;; We use seed 0 to indicate an uninitialized seed/hash,
+      ;; so keep trying until we get a non-zero seed.
+      (when (!= s 0)
+        (break)))
+
+
+    (lit Seed :s s)))
+
+
+
+
+
+^{:go/end 282} (go/method Sum "Sum appends the hash's current 64-bit value to b.\nIt exists for implementing [hash.Hash].\nFor direct calls, it is more efficient to use [Hash.Sum64].\n" ^{:tag (slice byte)} [^{:tag (* Hash)} h ^{:tag (slice byte)} b]
+  (let [x (.Sum64 h)]
+    (append b
+      (conv byte (>> x 0))
+      (conv byte (>> x 8))
+      (conv byte (>> x 16))
+      (conv byte (>> x 24))
+      (conv byte (>> x 32))
+      (conv byte (>> x 40))
+      (conv byte (>> x 48))
+      (conv byte (>> x 56)))))
+
+
+
+^{:go/end 285} (go/method Size "Size returns h's hash value size, 8 bytes.\n" ^int [^{:tag (* Hash)} h] 8)
+
+
+^{:go/end 288} (go/method BlockSize "BlockSize returns h's block size.\n" ^int [^{:tag (* Hash)} h] (len (.-buf h)))
+
+
+^{:go/end 295} (go/method Clone "Clone implements [hash.Cloner].\n" [^{:tag (* Hash)} h] :results [hash/Cloner error]
+  (.initSeed h)
+  (let [r @h]
+    (return (addr r) nil)))
+
+
+
+
+
+^{:go/end 303} (go/func Comparable "Comparable returns the hash of comparable value v with the given seed\nsuch that Comparable(s, v1) == Comparable(s, v2) if v1 == v2.\nIf v != v, then the resulting hash is randomly distributed.\n" :type-params [^comparable T] ^uint64 [^Seed seed ^T v]
+  (^{:inst [T]} abi/EscapeNonString v)
+  (^{:inst [T]} comparableHash v seed))
+
+
+
+^{:go/end 316} (go/func WriteComparable "WriteComparable adds x to the data hashed by h.\n" :type-params [^comparable T] [^{:tag (* Hash)} h ^T x]
+  (^{:inst [T]} abi/EscapeNonString x)
+  ;; writeComparable directly operates on h.state
+  ;; without using h.buf. Mix in the buffer length so it won't
+  ;; commute with a buffered write, which either changes h.n or changes
+  ;; h.state.
+  (when (!= (.-n h) 0)
+    (^{:inst [int]} writeComparable h (.-n h)))
+
+  (^{:inst [T]} writeComparable h x))
+
+
+
+(go/func ^:extern ^{:go/linkname "runtime_rand runtime.rand"} runtime_rand ^uint64 [])
+
+
+
+(go/func ^:extern ^:go/noescape ^{:go/linkname "runtime_memhash runtime.memhash"} runtime_memhash ^uintptr [^unsafe/Pointer p ^uintptr seed ^uintptr s])
+
+^{:go/end 339} (go/func rthash ^uint64 [^{:tag (slice byte)} buf ^uint64 seed]
+  (when (== (len buf) 0)
+    (return seed))
+
+  (let [len (len buf)]
+    ;; The runtime hasher only works on uintptr. For 64-bit
+    ;; architectures, we use the hasher directly. Otherwise,
+    ;; we use two parallel hashers on the lower and upper 32 bits.
+    (when maps/Use64BitHash
+      (return (conv uint64 (runtime_memhash (conv unsafe/Pointer (addr (aget buf 0))) (conv uintptr seed) (conv uintptr len)))))
+
+    (let [lo (runtime_memhash (conv unsafe/Pointer (addr (aget buf 0))) (conv uintptr (conv uint32 seed)) (conv uintptr len))
+        ^{:line 337} hi (runtime_memhash (conv unsafe/Pointer (addr (aget buf 0))) (conv uintptr (>> seed 32)) (conv uintptr len))]
+      (bit-or (<< (conv uint64 hi) 32) (conv uint64 lo)))))
+
+
+^{:go/end 344} (go/func rthashString ^uint64 [^string s ^uint64 state]
+  (let [buf (unsafe/Slice (unsafe/StringData s) (len s))]
+    (rthash buf state)))
+
+
+^{:go/end 348} (go/func randUint64 ^uint64 []
+  (runtime_rand))
+
+
+^{:go/end 361} (go/func comparableHash :type-params [^comparable T] ^uint64 [^T v ^Seed seed]
+  (let [s (.-s seed)
+      ^{:line 352 :tag (map T (struct))} m (zero (map T (struct)))
+      ^{:line 353} mTyp (abi/TypeOf m)
+      ^{:line 354} hasher (.-Hasher (conv (* abi/MapType) (conv unsafe/Pointer mTyp)))]
+    (when maps/Use64BitHash
+      (return (conv uint64 (hasher (abi/NoEscape (conv unsafe/Pointer (addr v))) (conv uintptr s)))))
+
+    (let [lo (hasher (abi/NoEscape (conv unsafe/Pointer (addr v))) (conv uintptr (conv uint32 s)))
+        ^{:line 359} hi (hasher (abi/NoEscape (conv unsafe/Pointer (addr v))) (conv uintptr (>> s 32)))]
+      (bit-or (<< (conv uint64 hi) 32) (conv uint64 lo)))))
+
+
+^{:go/end 365} (go/func writeComparable :type-params [^comparable T] [^{:tag (* Hash)} h ^T v]
+  (set! (.-s (.-state h)) (^{:inst [T]} comparableHash v (.-state h))))

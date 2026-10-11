@@ -1,0 +1,105 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.os) (go/file "root_internal.go" :build ["//go:build (js && wasm) || tamago"] :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [syscall "syscall"]])
+
+
+
+
+
+
+^{:go/end 21} (go/func checkPathEscapes "checkPathEscapes reports whether name escapes the root.\n\nDue to the lack of openat, checkPathEscapes is subject to TOCTOU races\nwhen symlinks change during the resolution process.\n" ^error [^{:tag (* Root)} r ^string name]
+  (checkPathEscapesInternal r name false))
+
+
+
+
+
+
+
+^{:go/end 30} (go/func checkPathEscapesLstat "checkPathEscapesLstat reports whether name escapes the root.\nIt does not resolve symlinks in the final path component.\n\nDue to the lack of openat, checkPathEscapes is subject to TOCTOU races\nwhen symlinks change during the resolution process.\n" ^error [^{:tag (* Root)} r ^string name]
+  (checkPathEscapesInternal r name true))
+
+
+^{:go/end 106} (go/func checkPathEscapesInternal ^error [^{:tag (* Root)} r ^string name ^bool lstat]
+  (when (.Load (.-closed (.-root r)))
+    (return ErrClosed))
+
+  (let [(values parts endsInSlash err) (splitPathInRoot name nil nil)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 105]]} (let [i 0
+        ^{:line 42} symlinks 0
+        ^{:line 43} base (.-name (.-root r))]
+      (while (< i (len parts))
+        (when (== (aget parts i) "..")
+          ;; Resolve one or more parent ("..") path components.
+          (let [end (+ i 1)]
+            (while (and (< end (len parts)) (== (aget parts end) ".."))
+              (inc! end))
+
+            (let [count (- end i)]
+              (when (> count i)
+                (return errPathEscapes))
+
+              (set! parts (^{:inst [(slice string) string]} slices/Delete parts (- i count) end))
+              (set! i - count)
+              (set! base (.-name (.-root r)))
+              (range [j i]
+                (set! base (joinPath base (aget parts j))))
+
+              (continue))))
+
+
+        (let [part (aget parts i)]
+          (when (== i (- (len parts) 1))
+            (when (and lstat (not endsInSlash))
+              (break)))
+
+
+
+          (let [next (joinPath base part)
+              (values fi err) (Lstat next)]
+            (when (!= err nil)
+              (when (IsNotExist err)
+                (return nil))
+
+              (return (underlyingError err)))
+
+            (when (!= (bit-and (.Mode fi) ModeSymlink) 0)
+              (let [(values link err) (Readlink next)]
+                (when (!= err nil)
+                  (return errPathEscapes))
+
+                (inc! symlinks)
+                (when (> symlinks rootMaxSymlinks)
+                  (return (errors/New "too many symlinks")))
+
+                (let [(values newparts newEndsInSlash ^:assign err) (splitPathInRoot link (subslice parts _ i) (subslice parts (+ i 1)))]
+                  (when (!= err nil)
+                    (return err))
+
+                  (when (and (== i (- (len parts) 1)) newEndsInSlash)
+                    (set! endsInSlash true))
+
+                  (set! parts newparts)
+                  (continue))))
+
+            (when (and (not (.IsDir fi)) (< i (- (len parts) 1)))
+              (return syscall/ENOTDIR))
+
+
+            (set! base next)
+            (inc! i))))
+
+      nil)))

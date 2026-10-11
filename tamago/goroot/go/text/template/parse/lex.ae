@@ -1,0 +1,686 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.text.template.parse) (go/file "lex.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [strings "strings"]
+    ^{:line 10} [unicode "unicode"]
+    ^{:line 11} [utf8 "unicode/utf8"]])
+
+
+
+(go/type item "item represents a token or text string returned from the scanner.\n" (struct
+    ^{:line 16 :tag itemType} typ ; The type of this item.
+    ^{:line 17 :tag Pos} pos ; The starting position, in bytes, of this item in the input string.
+    ^{:line 18 :tag string} val ; The value of this item.
+    ^{:line 19 :tag int} line)) ; The line number at the start of this item.
+
+
+^{:go/end 34} (go/method String ^string [^item i]
+  (switch
+    (case [(== (.-typ i) itemEOF)]
+      (return "EOF"))
+    (case [(== (.-typ i) itemError)]
+      (return (.-val i)))
+    (case [(> (.-typ i) itemKeyword)]
+      (return (fmt/Sprintf "<%s>" (.-val i))))
+    (case [(> (len (.-val i)) 10)]
+      (return (fmt/Sprintf "%.10q..." (.-val i)))))
+
+  (fmt/Sprintf "%q" (.-val i)))
+
+
+
+(go/type itemType "itemType identifies the type of lex items.\n" int)
+
+(go/const
+  ^{:line 40} [^{:tag itemType :val 0} itemError iota] ; error occurred; value is text of error
+  ^{:line 41} [^{:val 1} itemBool] ; boolean constant
+  ^{:line 42} [^{:val 2} itemChar] ; printable ASCII character; grab bag for comma etc.
+  ^{:line 43} [^{:val 3} itemCharConstant] ; character constant
+  ^{:line 44} [^{:val 4} itemComment] ; comment text
+  ^{:line 45} [^{:val 5} itemComplex] ; complex constant (1+2i); imaginary is just a number
+  ^{:line 46} [^{:val 6} itemAssign] ; equals ('=') introducing an assignment
+  ^{:line 47} [^{:val 7} itemDeclare] ; colon-equals (':=') introducing a declaration
+  ^{:line 48} [^{:val 8} itemEOF]
+  ^{:line 49} [^{:val 9} itemField] ; alphanumeric identifier starting with '.'
+  ^{:line 50} [^{:val 10} itemIdentifier] ; alphanumeric identifier not starting with '.'
+  ^{:line 51} [^{:val 11} itemLeftDelim] ; left action delimiter
+  ^{:line 52} [^{:val 12} itemLeftParen] ; '(' inside action
+  ^{:line 53} [^{:val 13} itemNumber] ; simple number, including imaginary
+  ^{:line 54} [^{:val 14} itemPipe] ; pipe symbol
+  ^{:line 55} [^{:val 15} itemRawString] ; raw quoted string (includes quotes)
+  ^{:line 56} [^{:val 16} itemRightDelim] ; right action delimiter
+  ^{:line 57} [^{:val 17} itemRightParen] ; ')' inside action
+  ^{:line 58} [^{:val 18} itemSpace] ; run of spaces separating arguments
+  ^{:line 59} [^{:val 19} itemString] ; quoted string (includes quotes)
+  ^{:line 60} [^{:val 20} itemText] ; plain text
+  ^{:line 61} [^{:val 21} itemVariable] ; variable starting with '$', such as '$' or  '$1' or '$hello'
+
+  ^{:line 63} [^{:val 22 :doc "Keywords appear after all the rest.\n"} itemKeyword] ; used only to delimit the keywords
+  ^{:line 64} [^{:val 23} itemBlock] ; block keyword
+  ^{:line 65} [^{:val 24} itemBreak] ; break keyword
+  ^{:line 66} [^{:val 25} itemContinue] ; continue keyword
+  ^{:line 67} [^{:val 26} itemDot] ; the cursor, spelled '.'
+  ^{:line 68} [^{:val 27} itemDefine] ; define keyword
+  ^{:line 69} [^{:val 28} itemElse] ; else keyword
+  ^{:line 70} [^{:val 29} itemEnd] ; end keyword
+  ^{:line 71} [^{:val 30} itemIf] ; if keyword
+  ^{:line 72} [^{:val 31} itemNil] ; the untyped nil constant, easiest to treat as a keyword
+  ^{:line 73} [^{:val 32} itemRange] ; range keyword
+  ^{:line 74} [^{:val 33} itemTemplate] ; template keyword
+  ^{:line 75} [^{:val 34} itemWith]) ; with keyword
+
+
+(go/var key (lit (map string itemType)
+    ^{:line 79} ["." itemDot]
+    ^{:line 80} ["block" itemBlock]
+    ^{:line 81} ["break" itemBreak]
+    ^{:line 82} ["continue" itemContinue]
+    ^{:line 83} ["define" itemDefine]
+    ^{:line 84} ["else" itemElse]
+    ^{:line 85} ["end" itemEnd]
+    ^{:line 86} ["if" itemIf]
+    ^{:line 87} ["range" itemRange]
+    ^{:line 88} ["nil" itemNil]
+    ^{:line 89} ["template" itemTemplate]
+    ^{:line 90} ["with" itemWith]))
+
+
+(go/const ^{:val -1} eof -1)
+
+
+
+
+
+
+
+
+
+(go/const "Trimming spaces.\nIf the action begins \"{{- \" rather than \"{{\", then all space/tab/newlines\npreceding the action are trimmed; conversely if it ends \" -}}\" the\nleading spaces are trimmed. This is done entirely in the lexer; the\nparser never sees it happen. We require an ASCII space (' ', \\t, \\r, \\n)\nto be present to avoid ambiguity with things like \"{{-3}}\". It reads\nbetter with the space present anyway. For simplicity, only ASCII\ndoes the job.\n"
+  ^{:line 104} [^{:val " \t\r\n"} spaceChars " \t\r\n"] ; These are the space characters defined by Go itself.
+  ^{:line 105} [^{:val \-} trimMarker \-] ; Attached to left/right delimiter, trims trailing spaces from preceding/following text.
+  ^{:line 106} [^{:val 2} trimMarkerLen (conv Pos (+ 1 1))]) ; marker plus space before or after
+
+
+
+(go/type stateFn "stateFn represents the state of the scanner as a function that returns the next state.\n" (func [(* lexer)] [stateFn]))
+
+
+(go/type lexer "lexer holds the state of the scanner.\n" (struct
+    ^{:line 114 :tag string} name ; the name of the input; used only for error reports
+    ^{:line 115 :tag string} input ; the string being scanned
+    ^{:line 116 :tag string} leftDelim ; start of action marker
+    ^{:line 117 :tag string} rightDelim ; end of action marker
+    ^{:line 118 :tag Pos} pos ; current position in the input
+    ^{:line 119 :tag Pos} start ; start position of this item
+    ^{:line 120 :tag bool} atEOF ; we have hit the end of input and returned eof
+    ^{:line 121 :tag int} parenDepth ; nesting depth of ( ) exprs
+    ^{:line 122 :tag int} line ; 1+number of newlines seen
+    ^{:line 123 :tag int} startLine ; start line of this item
+    ^{:line 124 :tag item} item ; item to return to parser
+    ^{:line 125 :tag bool} insideAction ; are we inside an action?
+    ^{:line 126 :tag lexOptions} options))
+
+
+
+(go/type lexOptions "lexOptions control behavior of the lexer. All default to false.\n" (struct
+    ^{:line 131 :tag bool} emitComment ; emit itemComment tokens.
+    ^{:line 132 :tag bool} breakOK ; break keyword allowed
+    ^{:line 133 :tag bool} continueOK)) ; continue keyword allowed
+
+
+
+^{:go/end 148} (go/method next "next returns the next rune in the input.\n" ^rune [^{:tag (* lexer)} l]
+  (when (>= (conv int (.-pos l)) (len (.-input l)))
+    (set! (.-atEOF l) true)
+    (return eof))
+
+  (let [(values r w) (utf8/DecodeRuneInString (subslice (.-input l) (.-pos l)))]
+    (set! (.-pos l) + (conv Pos w))
+    (when (== r \newline)
+      (inc! (.-line l)))
+
+    ^{:line 147} r))
+
+
+
+^{:go/end 155} (go/method peek "peek returns but does not consume the next rune in the input.\n" ^rune [^{:tag (* lexer)} l]
+  (let [r (.next l)]
+    (.backup l)
+    ^{:line 154} r))
+
+
+
+^{:go/end 167} (go/method backup "backup steps back one rune.\n" [^{:tag (* lexer)} l]
+  (when (and (not (.-atEOF l)) (> (.-pos l) 0))
+    (let [(values r w) (utf8/DecodeLastRuneInString (subslice (.-input l) _ (.-pos l)))]
+      (set! (.-pos l) - (conv Pos w))
+      ;; Correct newline count.
+      (when (== r \newline)
+        (dec! (.-line l))))))
+
+
+
+
+
+
+^{:go/end 176} (go/method thisItem "thisItem returns the item at the current input point with the specified type\nand advances the input.\n" ^item [^{:tag (* lexer)} l ^itemType t]
+  (let [i (lit item t (.-start l) (subslice (.-input l) (.-start l) (.-pos l)) (.-startLine l))]
+    (set! (.-start l) (.-pos l))
+    (set! (.-startLine l) (.-line l))
+    ^{:line 175} i))
+
+
+
+^{:go/end 181} (go/method emit "emit passes the trailing text as an item back to the parser.\n" ^stateFn [^{:tag (* lexer)} l ^itemType t]
+  (.emitItem l (.thisItem l t)))
+
+
+
+^{:go/breaks [5] :go/end 187} (go/method emitItem "emitItem passes the specified item to the parser.\n" ^stateFn [^{:tag (* lexer)} l ^item i]
+  (set! (.-item l) i)
+  nil)
+
+
+
+
+
+^{:go/end 196} (go/method ignore "ignore skips over the pending input before this point.\nIt tracks newlines in the ignored text, so use it only\nfor text that is skipped without calling l.next.\n" [^{:tag (* lexer)} l]
+  (set! (.-line l) + (strings/Count (subslice (.-input l) (.-start l) (.-pos l)) "\n"))
+  (set! (.-start l) (.-pos l))
+  (set! (.-startLine l) (.-line l)))
+
+
+
+^{:go/breaks [6] :go/end 205} (go/method accept "accept consumes the next rune if it's from the valid set.\n" ^bool [^{:tag (* lexer)} l ^string valid]
+  (when (strings/ContainsRune valid (.next l))
+    (return true))
+
+  (.backup l)
+  false)
+
+
+
+^{:go/end 212} (go/method acceptRun "acceptRun consumes a run of runes from the valid set.\n" [^{:tag (* lexer)} l ^string valid]
+  (while (strings/ContainsRune valid (.next l)))
+
+  (.backup l))
+
+
+
+
+^{:go/breaks [8] :go/end 222} (go/method errorf "errorf returns an error token and terminates the scan by passing\nback a nil pointer that will be the next state, terminating l.nextItem.\n" ^stateFn [^{:tag (* lexer)} l ^string format & ^{:tag (slice any)} args]
+  (set! (.-item l) (lit item itemError (.-start l) (fmt/Sprintf format (spread args)) (.-startLine l)))
+  (set! (.-start l) 0)
+  (set! (.-pos l) 0)
+  (set! (.-input l) (subslice (.-input l) _ 0))
+  nil)
+
+
+
+
+^{:go/end 238} (go/method nextItem "nextItem returns the next item from the input.\nCalled by the parser, not in the lexing goroutine.\n" ^item [^{:tag (* lexer)} l]
+  (set! (.-item l) (lit item itemEOF (.-pos l) "EOF" (.-startLine l)))
+  (let [state lexText]
+    (when (.-insideAction l)
+      (set! state lexInsideAction))
+
+    (while true
+      (set! state (state l))
+      (when (== state nil)
+        (return (.-item l))))))
+
+
+
+
+
+^{:go/end 258} (go/func lex "lex creates a new scanner for the input string.\n" ^{:tag (* lexer)} [^string name ^string input ^string left ^string right]
+  (when (== left "")
+    (set! left defaultLeftDelim))
+
+  (when (== right "")
+    (set! right defaultRightDelim))
+
+  (let [l (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit lexer
+          :name name
+          :input input
+          :leftDelim left
+          :rightDelim right
+          :line 1
+          :startLine 1
+          :insideAction false))]
+
+    ^{:line 257} l))
+
+
+;; state functions
+
+(go/const
+  ^{:line 263} [^{:val "{{"} defaultLeftDelim "{{"]
+  ^{:line 264} [^{:val "}}"} defaultRightDelim "}}"]
+  ^{:line 265} [^{:val "/*"} leftComment "/*"]
+  ^{:line 266} [^{:val "*/"} rightComment "*/"])
+
+
+
+^{:go/end 298} (go/func lexText "lexText scans until an opening action delimiter, \"{{\".\n" ^stateFn [^{:tag (* lexer)} l]
+  (when [x (strings/Index (subslice (.-input l) (.-pos l)) (.-leftDelim l))] (>= x 0)
+    (when (> x 0)
+      (set! (.-pos l) + (conv Pos x))
+      ;; Do we trim any trailing space?
+      (let [trimLength (conv Pos 0)
+          ^{:line 276} delimEnd (+ (.-pos l) (conv Pos (len (.-leftDelim l))))]
+        (when (hasLeftTrimMarker (subslice (.-input l) delimEnd))
+          (set! trimLength (rightTrimLength (subslice (.-input l) (.-start l) (.-pos l)))))
+
+        (set! (.-pos l) - trimLength)
+        (set! (.-line l) + (strings/Count (subslice (.-input l) (.-start l) (.-pos l)) "\n"))
+        (let [i (.thisItem l itemText)]
+          (set! (.-pos l) + trimLength)
+          (.ignore l)
+          (when (> (len (.-val i)) 0)
+            (return (.emitItem l i))))))
+
+
+    (return lexLeftDelim))
+
+  (set! (.-pos l) (conv Pos (len (.-input l))))
+  ;; Correctly reached EOF.
+  (when (> (.-pos l) (.-start l))
+    (set! (.-line l) + (strings/Count (subslice (.-input l) (.-start l) (.-pos l)) "\n"))
+    (return (.emit l itemText)))
+
+  (.emit l itemEOF))
+
+
+
+^{:go/end 303} (go/func rightTrimLength "rightTrimLength returns the length of the spaces at the end of the string.\n" ^Pos [^string s]
+  (conv Pos (- (len s) (len (strings/TrimRight s spaceChars)))))
+
+
+
+^{:go/end 314} (go/method atRightDelim "atRightDelim reports whether the lexer is at a right delimiter, possibly preceded by a trim marker.\n" [^{:tag (* lexer)} l] :results [^bool delim ^bool trimSpaces]
+  (when (and (hasRightTrimMarker (subslice (.-input l) (.-pos l))) (strings/HasPrefix (subslice (.-input l) (+ (.-pos l) trimMarkerLen)) (.-rightDelim l))) ; With trim marker.
+    (return true true))
+
+  (when (strings/HasPrefix (subslice (.-input l) (.-pos l)) (.-rightDelim l)) ; Without trim marker.
+    (return true false))
+
+  (return false false))
+
+
+
+^{:go/end 319} (go/func leftTrimLength "leftTrimLength returns the length of the spaces at the beginning of the string.\n" ^Pos [^string s]
+  (conv Pos (- (len s) (len (strings/TrimLeft s spaceChars)))))
+
+
+
+
+^{:go/end 341} (go/func lexLeftDelim "lexLeftDelim scans the left delimiter, which is known to be present, possibly with a trim marker.\n(The text to be trimmed has already been emitted.)\n" ^stateFn [^{:tag (* lexer)} l]
+  (set! (.-pos l) + (conv Pos (len (.-leftDelim l))))
+  (let [trimSpace (hasLeftTrimMarker (subslice (.-input l) (.-pos l)))
+      ^{:line 326} afterMarker (conv Pos 0)]
+    (when trimSpace
+      (set! afterMarker trimMarkerLen))
+
+    (when (strings/HasPrefix (subslice (.-input l) (+ (.-pos l) afterMarker)) leftComment)
+      (set! (.-pos l) + afterMarker)
+      (.ignore l)
+      (return lexComment))
+
+    (let [i (.thisItem l itemLeftDelim)]
+      (set! (.-insideAction l) true)
+      (set! (.-pos l) + afterMarker)
+      (.ignore l)
+      (set! (.-parenDepth l) 0)
+      (.emitItem l i))))
+
+
+
+^{:go/end 369} (go/func lexComment "lexComment scans a comment. The left comment marker is known to be present.\n" ^stateFn [^{:tag (* lexer)} l]
+  (set! (.-pos l) + (conv Pos (len leftComment)))
+  (let [x (strings/Index (subslice (.-input l) (.-pos l)) rightComment)]
+    (when (< x 0)
+      (return (.errorf l "unclosed comment")))
+
+    (set! (.-pos l) + (conv Pos (+ x (len rightComment))))
+    (let [(values delim trimSpace) (.atRightDelim l)]
+      (when (not delim)
+        (return (.errorf l "comment ends before closing delimiter")))
+
+      (set! (.-line l) + (strings/Count (subslice (.-input l) (.-start l) (.-pos l)) "\n"))
+      (let [i (.thisItem l itemComment)]
+        (when trimSpace
+          (set! (.-pos l) + trimMarkerLen))
+
+        (set! (.-pos l) + (conv Pos (len (.-rightDelim l))))
+        (when trimSpace
+          (set! (.-pos l) + (leftTrimLength (subslice (.-input l) (.-pos l)))))
+
+        (.ignore l)
+        (when (.-emitComment (.-options l))
+          (return (.emitItem l i)))
+
+        ^{:line 368} lexText))))
+
+
+
+^{:go/end 386} (go/func lexRightDelim "lexRightDelim scans the right delimiter, which is known to be present, possibly with a trim marker.\n" ^stateFn [^{:tag (* lexer)} l]
+  (let [(values _ trimSpace) (.atRightDelim l)]
+    (when trimSpace
+      (set! (.-pos l) + trimMarkerLen)
+      (.ignore l))
+
+    (set! (.-pos l) + (conv Pos (len (.-rightDelim l))))
+    (let [i (.thisItem l itemRightDelim)]
+      (when trimSpace
+        (set! (.-pos l) + (leftTrimLength (subslice (.-input l) (.-pos l))))
+        (.ignore l))
+
+      (set! (.-insideAction l) false)
+      (.emitItem l i))))
+
+
+
+^{:go/end 452} (go/func lexInsideAction "lexInsideAction scans the elements inside action delimiters.\n" ^stateFn [^{:tag (* lexer)} l]
+  ;; Either number, quoted string, or identifier.
+  ;; Spaces separate arguments; runs of spaces turn into itemSpace.
+  ;; Pipe symbols separate and are emitted.
+  (let [(values delim _) (.atRightDelim l)]
+    (when delim
+      (when (== (.-parenDepth l) 0)
+        (return lexRightDelim))
+
+      (return (.errorf l "unclosed left paren")))
+
+    (switch [r (.next l)]
+      (case [(== r eof)]
+        (return (.errorf l "unclosed action")))
+      (case [(isSpace r)]
+        (.backup l) ; Put space back in case we have " -}}".
+        (return lexSpace))
+      (case [(== r \=)]
+        (return (.emit l itemAssign)))
+      (case [(== r \:)]
+        (when (!= (.next l) \=)
+          (return (.errorf l "expected :=")))
+
+        (return (.emit l itemDeclare)))
+      (case [(== r \|)]
+        (return (.emit l itemPipe)))
+      (case [(== r \")]
+        (return lexQuote))
+      (case [(== r \`)]
+        (return lexRawQuote))
+      (case [(== r \$)]
+        (return lexVariable))
+      (case [(== r \')]
+        (return lexChar))
+      (case [(== r \.)]
+        ;; special look-ahead for ".field" so we don't break l.backup().
+        (when (< (.-pos l) (conv Pos (len (.-input l))))
+          (let [r (aget (.-input l) (.-pos l))]
+            (when (or (< r \0) (< \9 r))
+              (return lexField))))
+
+
+        (fallthrough)) ; '.' can start a number.
+      (case [(or (== r \+) (== r \-) ^:go/paren (and (<= \0 r) (<= r \9)))]
+        (.backup l)
+        (return lexNumber))
+      (case [(isAlphaNumeric r)]
+        (.backup l)
+        (return lexIdentifier))
+      (case [(== r \()]
+        (inc! (.-parenDepth l))
+        (return (.emit l itemLeftParen)))
+      (case [(== r \))]
+        (dec! (.-parenDepth l))
+        (when (< (.-parenDepth l) 0)
+          (return (.errorf l "unexpected right paren")))
+
+        (return (.emit l itemRightParen)))
+      (case [(and (<= r unicode/MaxASCII) (unicode/IsPrint r))]
+        (return (.emit l itemChar)))
+      (default
+        (return (.errorf l "unrecognized character in action: %#U" r))))))
+
+
+
+
+
+
+^{:go/end 477} (go/func lexSpace "lexSpace scans a run of space characters.\nWe have not consumed the first space, which is known to be present.\nTake care if there is a trim-marked right delimiter, which starts with a space.\n" ^stateFn [^{:tag (* lexer)} l]
+  (let [^rune r (zero rune)
+      ^{:line 459 :tag int} numSpaces (zero int)]
+    (while true
+      (set! r (.peek l))
+      (when (not (isSpace r))
+        (break))
+
+      (.next l)
+      (inc! numSpaces))
+
+    ;; Be careful about a trim-marked closing delimiter, which has a minus
+    ;; after a space. We know there is a space, so check for the '-' that might follow.
+    (when (and (hasRightTrimMarker (subslice (.-input l) (- (.-pos l) 1))) (strings/HasPrefix (subslice (.-input l) (+ (- (.-pos l) 1) trimMarkerLen)) (.-rightDelim l)))
+      (.backup l) ; Before the space.
+      (when (== numSpaces 1)
+        (return lexRightDelim))) ; On the delim, so go right to that.
+
+
+    (.emit l itemSpace)))
+
+
+
+^{:go/end 507} (go/func lexIdentifier "lexIdentifier scans an alphanumeric.\n" ^stateFn [^{:tag (* lexer)} l]
+  (while true
+    (switch [r (.next l)]
+      (case [(isAlphaNumeric r)])
+      ;; absorb.
+      (default
+        (.backup l)
+        (let [word (subslice (.-input l) (.-start l) (.-pos l))]
+          (when (not (.atTerminator l))
+            (return (.errorf l "bad character %#U" r)))
+
+          (switch
+            (case [(> (aget key word) itemKeyword)]
+              (let [item (aget key word)]
+                (when (or (and (== item itemBreak) (not (.-breakOK (.-options l)))) (and (== item itemContinue) (not (.-continueOK (.-options l)))))
+                  (return (.emit l itemIdentifier)))
+
+                (return (.emit l item))))
+            (case [(== (aget word 0) \.)]
+              (return (.emit l itemField)))
+            (case [(== word "true") (== word "false")]
+              (return (.emit l itemBool)))
+            (default
+              (return (.emit l itemIdentifier)))))))))
+
+
+
+
+
+
+
+^{:go/end 513} (go/func lexField "lexField scans a field: .Alphanumeric.\nThe . has been scanned.\n" ^stateFn [^{:tag (* lexer)} l]
+  (lexFieldOrVariable l itemField))
+
+
+
+
+^{:go/end 522} (go/func lexVariable "lexVariable scans a Variable: $Alphanumeric.\nThe $ has been scanned.\n" ^stateFn [^{:tag (* lexer)} l]
+  (when (.atTerminator l) ; Nothing interesting follows -> "$".
+    (return (.emit l itemVariable)))
+
+  (lexFieldOrVariable l itemVariable))
+
+
+
+
+^{:go/end 545} (go/func lexFieldOrVariable "lexFieldOrVariable scans a field or variable: [.$]Alphanumeric.\nThe . or $ has been scanned.\n" ^stateFn [^{:tag (* lexer)} l ^itemType typ]
+  (when (.atTerminator l) ; Nothing interesting follows -> "." or "$".
+    (when (== typ itemVariable)
+      (return (.emit l itemVariable)))
+
+    (return (.emit l itemDot)))
+
+  (let [^rune r (zero rune)]
+    (while true
+      (set! r (.next l))
+      (when (not (isAlphaNumeric r))
+        (.backup l)
+        (break)))
+
+
+    (when (not (.atTerminator l))
+      (return (.errorf l "bad character %#U" r)))
+
+    (.emit l typ)))
+
+
+
+
+
+
+^{:go/end 561} (go/method atTerminator "atTerminator reports whether the input is at valid termination character to\nappear after an identifier. Breaks .X.Y into two pieces. Also catches cases\nlike \"$x+2\" not being acceptable without a space, in case we decide one\nday to implement arithmetic.\n" ^bool [^{:tag (* lexer)} l]
+  (let [r (.peek l)]
+    (when (isSpace r)
+      (return true))
+
+    (switch r
+      (case [eof \. \, \| \: \) \(]
+        (return true)))
+
+    (strings/HasPrefix (subslice (.-input l) (.-pos l)) (.-rightDelim l))))
+
+
+
+
+^{:go/end 581} (go/func lexChar "lexChar scans a character constant. The initial quote is already\nscanned. Syntax checking is done by the parser.\n" ^stateFn [^{:tag (* lexer)} l]
+  (label :Loop
+    (while true
+      (switch (.next l)
+        (case [\\]
+          (when [r (.next l)] (and (!= r eof) (!= r \newline))
+            (break))
+
+          (fallthrough))
+        (case [eof \newline]
+          (return (.errorf l "unterminated character constant")))
+        (case [\']
+          (break :Loop)))))
+
+
+  (.emit l itemCharConstant))
+
+
+
+
+
+
+^{:go/end 599} (go/func lexNumber "lexNumber scans a number: decimal, octal, hex, float, or imaginary. This\nisn't a perfect number scanner - for instance it accepts \".\" and \"0x0.2\"\nand \"089\" - but when it's wrong the input is invalid and the parser (via\nstrconv) will notice.\n" ^stateFn [^{:tag (* lexer)} l]
+  (when (not (.scanNumber l))
+    (return (.errorf l "bad number syntax: %q" (subslice (.-input l) (.-start l) (.-pos l)))))
+
+  (when [sign (.peek l)] (or (== sign \+) (== sign \-))
+    ;; Complex: 1+2i. No spaces, must end in 'i'.
+    (when (or (not (.scanNumber l)) (!= (aget (.-input l) (- (.-pos l) 1)) \i))
+      (return (.errorf l "bad number syntax: %q" (subslice (.-input l) (.-start l) (.-pos l)))))
+
+    (return (.emit l itemComplex)))
+
+  (.emit l itemNumber))
+
+
+^{:go/end 636} (go/method scanNumber ^bool [^{:tag (* lexer)} l]
+  ;; Optional leading sign.
+  (.accept l "+-")
+  ;; Is it hex?
+  ^{:go/breaks [[9 635]]} (let [digits "0123456789_"]
+    (when (.accept l "0")
+      ;; Note: Leading 0 does not mean octal in floats.
+      (cond (.accept l "xX")
+        (set! digits "0123456789abcdefABCDEF_")
+        (.accept l "oO")
+        (set! digits "01234567_")
+        (.accept l "bB")
+        (set! digits "01_")))
+
+
+    (.acceptRun l digits)
+    (when (.accept l ".")
+      (.acceptRun l digits))
+
+    (when (and (== (len digits) (+ 10 1)) (.accept l "eE"))
+      (.accept l "+-")
+      (.acceptRun l "0123456789_"))
+
+    (when (and (== (len digits) (+ 16 6 1)) (.accept l "pP"))
+      (.accept l "+-")
+      (.acceptRun l "0123456789_"))
+
+    ;; Is it imaginary?
+    (.accept l "i")
+    ;; Next thing mustn't be alphanumeric.
+    (when (isAlphaNumeric (.peek l))
+      (.next l)
+      (return false))
+
+    true))
+
+
+
+^{:go/end 655} (go/func lexQuote "lexQuote scans a quoted string.\n" ^stateFn [^{:tag (* lexer)} l]
+  (label :Loop
+    (while true
+      (switch (.next l)
+        (case [\\]
+          (when [r (.next l)] (and (!= r eof) (!= r \newline))
+            (break))
+
+          (fallthrough))
+        (case [eof \newline]
+          (return (.errorf l "unterminated quoted string")))
+        (case [\"]
+          (break :Loop)))))
+
+
+  (.emit l itemString))
+
+
+
+^{:go/end 669} (go/func lexRawQuote "lexRawQuote scans a raw quoted string.\n" ^stateFn [^{:tag (* lexer)} l]
+  (label :Loop
+    (while true
+      (switch (.next l)
+        (case [eof]
+          (return (.errorf l "unterminated raw quoted string")))
+        (case [\`]
+          (break :Loop)))))
+
+
+  (.emit l itemRawString))
+
+
+
+^{:go/end 674} (go/func isSpace "isSpace reports whether r is a space character.\n" ^bool [^rune r]
+  (or (== r \space) (== r \tab) (== r \return) (== r \newline)))
+
+
+
+^{:go/end 679} (go/func isAlphaNumeric "isAlphaNumeric reports whether r is an alphabetic, digit, or underscore.\n" ^bool [^rune r]
+  (or (== r \_) (unicode/IsLetter r) (unicode/IsDigit r)))
+
+
+^{:go/end 683} (go/func hasLeftTrimMarker ^bool [^string s]
+  (and (>= (len s) 2) (== (aget s 0) trimMarker) (isSpace (conv rune (aget s 1)))))
+
+
+^{:go/end 687} (go/func hasRightTrimMarker ^bool [^string s]
+  (and (>= (len s) 2) (isSpace (conv rune (aget s 0))) (== (aget s 1) trimMarker)))

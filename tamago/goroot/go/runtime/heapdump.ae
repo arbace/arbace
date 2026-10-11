@@ -1,0 +1,757 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Implementation of runtime/debug.WriteHeapDump. Writes all
+;; objects in the heap plus additional info (roots, threads,
+;; finalizers, etc.) to a file.
+
+;; The format of the dumped file is described at
+;; https://golang.org/s/go15heapdump.
+
+(in-ns 'go.runtime) (go/file "heapdump.go" :imports [
+
+
+    ^{:line 15} [abi "internal/abi"]
+    ^{:line 16} [goarch "internal/goarch"]
+    ^{:line 17} [gc "internal/runtime/gc"]
+    ^{:line 18} [unsafe "unsafe"]])
+
+
+
+^{:go/end 41} (go/func ^{:go/linkname "runtime_debug_WriteHeapDump runtime/debug.WriteHeapDump"} runtime_debug_WriteHeapDump [^uintptr fd]
+  (let [stw (stopTheWorld stwWriteHeapDump)
+
+      ;; Keep m on this G's stack instead of the system stack.
+      ;; Both readmemstats_m and writeheapdump_m have pretty large
+      ;; peak stack depths and we risk blowing the system stack.
+      ;; This is safe because the world is stopped, so we don't
+      ;; need to worry about anyone shrinking and therefore moving
+      ;; our stack.
+      ^{:line 31 :tag MemStats} m (zero MemStats)]
+    (systemstack ^{:go/end 38} (fn []
+        ;; Call readmemstats_m here instead of deeper in
+        ;; writeheapdump_m because we might blow the system stack
+        ;; otherwise.
+        (readmemstats_m (addr m))
+        (writeheapdump_m fd (addr m))))
+
+
+    (startTheWorld stw)))
+
+
+(go/const
+  ^{:line 44} [^{:val 0} fieldKindEol 0]
+  ^{:line 45} [^{:val 1} fieldKindPtr 1]
+  ^{:line 46} [^{:val 2} fieldKindIface 2]
+  ^{:line 47} [^{:val 3} fieldKindEface 3]
+  ^{:line 48} [^{:val 0} tagEOF 0]
+  ^{:line 49} [^{:val 1} tagObject 1]
+  ^{:line 50} [^{:val 2} tagOtherRoot 2]
+  ^{:line 51} [^{:val 3} tagType 3]
+  ^{:line 52} [^{:val 4} tagGoroutine 4]
+  ^{:line 53} [^{:val 5} tagStackFrame 5]
+  ^{:line 54} [^{:val 6} tagParams 6]
+  ^{:line 55} [^{:val 7} tagFinalizer 7]
+  ^{:line 56} [^{:val 8} tagItab 8]
+  ^{:line 57} [^{:val 9} tagOSThread 9]
+  ^{:line 58} [^{:val 10} tagMemStats 10]
+  ^{:line 59} [^{:val 11} tagQueuedFinalizer 11]
+  ^{:line 60} [^{:val 12} tagData 12]
+  ^{:line 61} [^{:val 13} tagBSS 13]
+  ^{:line 62} [^{:val 14} tagDefer 14]
+  ^{:line 63} [^{:val 15} tagPanic 15]
+  ^{:line 64} [^{:val 16} tagMemProf 16]
+  ^{:line 65} [^{:val 17} tagAllocSample 17])
+
+
+(go/var ^uintptr dumpfd) ; fd to write the dump to.
+(go/var ^{:tag (slice byte)} tmpbuf)
+
+
+(go/const "buffer of pending write data\n"
+  ^{:line 73} [^{:val 4096} bufSize 4096])
+
+
+(go/var ^{:tag (array bufSize byte)} buf)
+(go/var ^uintptr nbuf)
+
+^{:go/end 97} (go/func dwrite [^unsafe/Pointer data ^uintptr len]
+  (when (== len 0)
+    (return))
+
+  (when (<= (+ nbuf len) bufSize)
+    (copy (subslice buf nbuf) (subslice (conv (* (array bufSize byte)) data) _ len))
+    (set! nbuf + len)
+    (return))
+
+
+  (write dumpfd (conv unsafe/Pointer (addr buf)) (conv int32 nbuf))
+  (if (>= len bufSize) (do
+      (write dumpfd data (conv int32 len))
+      (set! nbuf 0))
+    (do
+      (copy (subslice buf) (subslice (conv (* (array bufSize byte)) data) _ len))
+      (set! nbuf len))))
+
+
+
+^{:go/end 101} (go/func dwritebyte [^byte b]
+  (dwrite (conv unsafe/Pointer (addr b)) 1))
+
+
+^{:go/end 106} (go/func flush []
+  (write dumpfd (conv unsafe/Pointer (addr buf)) (conv int32 nbuf))
+  (set! nbuf 0))
+
+
+
+
+
+
+
+
+(go/const "Cache of types that have been serialized already.\nWe use a type's hash field to pick a bucket.\nInside a bucket, we keep a list of types that\nhave been serialized so far, most recently used first.\nNote: when a bucket overflows we may end up\nserializing a type more than once. That's ok.\n"
+  ^{:line 115} [^{:val 256} typeCacheBuckets 256]
+  ^{:line 116} [^{:val 4} typeCacheAssoc 4])
+
+
+(go/type typeCacheBucket (struct
+    ^{:line 120 :tag (array typeCacheAssoc (* _type))} t))
+
+
+(go/var ^{:tag (array typeCacheBuckets typeCacheBucket)} typecache)
+
+
+^{:go/end 137} (go/func dumpint "dump a uint64 in a varint format parseable by encoding/binary.\n" [^uint64 v]
+  (let [^{:tag (array 10 byte)} buf (zero (array 10 byte))
+      ^{:line 128 :tag int} n (zero int)]
+    (while (>= v 0x80)
+      (aset buf n (conv byte (bit-or v 0x80)))
+      (inc! n)
+      (set! v >> 7))
+
+    (aset buf n (conv byte v))
+    (inc! n)
+    (dwrite (conv unsafe/Pointer (addr buf)) (conv uintptr n))))
+
+
+^{:go/end 145} (go/func dumpbool [^bool b]
+  (if b
+    (dumpint 1)
+
+    (dumpint 0)))
+
+
+
+
+^{:go/end 151} (go/func dumpmemrange "dump varint uint64 length followed by memory contents.\n" [^unsafe/Pointer data ^uintptr len]
+  (dumpint (conv uint64 len))
+  (dwrite data len))
+
+
+^{:go/end 158} (go/func dumpslice [^{:tag (slice byte)} b]
+  (dumpint (conv uint64 (len b)))
+  (when (> (len b) 0)
+    (dwrite (conv unsafe/Pointer (addr (aget b 0))) (conv uintptr (len b)))))
+
+
+
+^{:go/end 162} (go/func dumpstr [^string s]
+  (dumpmemrange (conv unsafe/Pointer (unsafe/StringData s)) (conv uintptr (len s))))
+
+
+
+^{:go/end 210} (go/func dumptype "dump information for a type.\n" [^{:tag (* _type)} t]
+  (when (== t nil)
+    (return))
+
+
+  ;; If we've definitely serialized the type before,
+  ;; no need to do it again.
+  (let [b (addr (aget typecache (bit-and (.-Hash t) (- typeCacheBuckets 1))))]
+    (when (== t (aget (.-t b) 0))
+      (return))
+
+    (for [i 1] (< i typeCacheAssoc) (inc! i)
+      (when (== t (aget (.-t b) i))
+        ;; Move-to-front
+        (for [j i] (> j 0) (dec! j)
+          (aset (.-t b) j (aget (.-t b) (- j 1))))
+
+        (aset (.-t b) 0 t)
+        (return)))
+
+
+
+    ;; Might not have been dumped yet. Dump it and
+    ;; remember we did so.
+    (for [j (- typeCacheAssoc 1)] (> j 0) (dec! j)
+      (aset (.-t b) j (aget (.-t b) (- j 1))))
+
+    (aset (.-t b) 0 t)
+
+    ;; dump the type
+    (dumpint tagType)
+    (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer t))))
+    (dumpint (conv uint64 (.-Size_ t)))
+    (let [rt (toRType t)]
+      (if [x (.Uncommon t)] (or (== x nil) (== (.Name (.nameOff rt (.-PkgPath x))) ""))
+        (dumpstr (.string rt))
+
+        (let [pkgpath (.Name (.nameOff rt (.-PkgPath x)))
+            ^{:line 203} name (.name rt)]
+          (dumpint (conv uint64 (+ (conv uintptr (len pkgpath)) 1 (conv uintptr (len name)))))
+          (dwrite (conv unsafe/Pointer (unsafe/StringData pkgpath)) (conv uintptr (len pkgpath)))
+          (dwritebyte \.)
+          (dwrite (conv unsafe/Pointer (unsafe/StringData name)) (conv uintptr (len name)))))
+
+      (dumpbool (or (not (.IsDirectIface t)) (.Pointers t))))))
+
+
+
+^{:go/end 218} (go/func dumpobj "dump an object.\n" [^unsafe/Pointer obj ^uintptr size ^bitvector bv]
+  (dumpint tagObject)
+  (dumpint (conv uint64 (conv uintptr obj)))
+  (dumpmemrange obj size)
+  (dumpfields bv))
+
+
+^{:go/end 224} (go/func dumpotherroot [^string description ^unsafe/Pointer to]
+  (dumpint tagOtherRoot)
+  (dumpstr description)
+  (dumpint (conv uint64 (conv uintptr to))))
+
+
+^{:go/end 233} (go/func dumpfinalizer [^unsafe/Pointer obj ^{:tag (* funcval)} fn ^{:tag (* _type)} fint ^{:tag (* ptrtype)} ot]
+  (dumpint tagFinalizer)
+  (dumpint (conv uint64 (conv uintptr obj)))
+  (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer fn))))
+  (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-fn fn)))))
+  (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer fint))))
+  (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer ot)))))
+
+
+(go/type childInfo (struct
+
+
+    ^{:line 238 :tag uintptr :doc "Information passed up from the callee frame about\nthe layout of the outargs region.\n"} argoff ; where the arguments start in the frame
+    ^{:line 239 :tag uintptr} arglen ; size of args region
+    ^{:line 240 :tag bitvector} args ; if args.n >= 0, pointer map of args region
+    ^{:line 241 :tag (* uint8)} sp ; callee sp
+    ^{:line 242 :tag uintptr} depth)) ; depth in call stack (0 == most recent)
+
+
+
+^{:go/end 253} (go/func dumpbv "dump kinds & offsets of interesting fields in bv.\n" [^{:tag (* bitvector)} cbv ^uintptr offset]
+  (for [i (conv uintptr 0)] (< i (conv uintptr (.-n cbv))) (inc! i)
+    (when (== (.ptrbit cbv i) 1)
+      (dumpint fieldKindPtr)
+      (dumpint (conv uint64 (+ offset (* i goarch/PtrSize)))))))
+
+
+
+
+^{:go/end 339} (go/func dumpframe [^{:tag (* stkframe)} s ^{:tag (* childInfo)} child]
+  (let [f (.-fn s)
+
+      ;; Figure out what we can about our stack map
+      ^{:line 259} pc (.-pc s)
+      ^{:line 260} pcdata (conv int32 -1)] ; Use the entry map at function entry
+    (when (!= pc (.entry f))
+      (dec! pc)
+      (set! pcdata (pcdatavalue f abi/PCDATA_StackMapIndex pc)))
+
+    (when (== pcdata -1)
+      ;; We do not have a valid pcdata value but there might be a
+      ;; stackmap for this function. It is likely that we are looking
+      ;; at the function prologue, assume so and hope for the best.
+      (set! pcdata 0))
+
+    (let [stkmap (conv (* stackmap) (funcdata f abi/FUNCDATA_LocalsPointerMaps))
+
+        ^{:line 273 :tag bitvector} bv (zero bitvector)]
+      (if (and (!= stkmap nil) (> (.-n stkmap) 0))
+        (set! bv (stackmapdata stkmap pcdata))
+
+        (set! (.-n bv) -1))
+
+
+      ;; Dump main body of stack frame.
+      (dumpint tagStackFrame)
+      (dumpint (conv uint64 (.-sp s))) ; lowest address in frame
+      (dumpint (conv uint64 (.-depth child))) ; # of frames deep on the stack
+      (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-sp child))))) ; sp of child, or 0 if bottom of stack
+      (dumpmemrange (conv unsafe/Pointer (.-sp s)) (- (.-fp s) (.-sp s))) ; frame contents
+      (dumpint (conv uint64 (.entry f)))
+      (dumpint (conv uint64 (.-pc s)))
+      (dumpint (conv uint64 (.-continpc s)))
+      (let [name (funcname f)]
+        (when (== name "")
+          (set! name "unknown function"))
+
+        (dumpstr name)
+
+        ;; Dump fields in the outargs section
+        (if (>= (.-n (.-args child)) 0)
+          (dumpbv (addr (.-args child)) (.-argoff child))
+
+          ;; conservative - everything might be a pointer
+          (for [off (.-argoff child)] (< off (+ (.-argoff child) (.-arglen child))) (set! off + goarch/PtrSize)
+            (dumpint fieldKindPtr)
+            (dumpint (conv uint64 off))))
+
+
+
+        ;; Dump fields in the local vars section
+        (cond (== stkmap nil)
+          ;; No locals information, dump everything.
+          (for [off (.-arglen child)] (< off (- (.-varp s) (.-sp s))) (set! off + goarch/PtrSize)
+            (dumpint fieldKindPtr)
+            (dumpint (conv uint64 off)))
+
+          (< (.-n stkmap) 0)
+          ;; Locals size information, dump just the locals.
+          (let [size (conv uintptr (- (.-n stkmap)))]
+            (for [off (- (.-varp s) size (.-sp s))] (< off (- (.-varp s) (.-sp s))) (set! off + goarch/PtrSize)
+              (dumpint fieldKindPtr)
+              (dumpint (conv uint64 off))))
+
+          (> (.-n stkmap) 0)
+          ;; Locals bitmap information, scan just the pointers in
+          ;; locals.
+          (dumpbv (addr bv) (- (.-varp s) (* (conv uintptr (.-n bv)) goarch/PtrSize) (.-sp s))))
+
+        (dumpint fieldKindEol)
+
+        ;; Record arg info for parent.
+        (set! (.-argoff child) (- (.-argp s) (.-fp s)))
+        (set! (.-arglen child) (.argBytes s))
+        (set! (.-sp child) (conv (* uint8) (conv unsafe/Pointer (.-sp s))))
+        (inc! (.-depth child))
+        (set! stkmap (conv (* stackmap) (funcdata f abi/FUNCDATA_ArgsPointerMaps)))
+        (if (!= stkmap nil)
+          (set! (.-args child) (stackmapdata stkmap pcdata))
+
+          (set! (.-n (.-args child)) -1))
+
+        (return)))))
+
+
+^{:go/end 406} (go/func dumpgoroutine [^{:tag (* g)} gp]
+  (let [(values ^uintptr sp ^uintptr pc ^uintptr lr) (zero uintptr)]
+    (if (!= (.-syscallsp gp) 0) (do
+        (set! sp (.-syscallsp gp))
+        (set! pc (.-syscallpc gp))
+        (set! lr 0))
+      (do
+        (set! sp (.-sp (.-sched gp)))
+        (set! pc (.-pc (.-sched gp)))
+        (set! lr (.-lr (.-sched gp)))))
+
+
+    (dumpint tagGoroutine)
+    (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer gp))))
+    (dumpint (conv uint64 sp))
+    (dumpint (.-goid gp))
+    (dumpint (conv uint64 (.-gopc gp)))
+    (dumpint (conv uint64 (readgstatus gp)))
+    (dumpbool (isSystemGoroutine gp false))
+    (dumpbool false) ; isbackground
+    (dumpint (conv uint64 (.-waitsince gp)))
+    (dumpstr (.String (.-waitreason gp)))
+    (dumpint (conv uint64 (conv uintptr (.-ctxt (.-sched gp)))))
+    (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-m gp)))))
+    (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-_defer gp)))))
+    (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-_panic gp)))))
+
+    ;; dump stack
+    (let [^childInfo child (zero childInfo)]
+      (set! (.-n (.-args child)) -1)
+      (set! (.-arglen child) 0)
+      (set! (.-sp child) nil)
+      (set! (.-depth child) 0)
+      (let [^unwinder u (zero unwinder)]
+        (for [(.initAt u pc sp lr gp 0)] (.valid u) (.next u)
+          (dumpframe (addr (.-frame u)) (addr child)))
+
+
+        ;; dump defer & panic records
+        (for [d (.-_defer gp)] (!= d nil) (set! d (.-link d))
+          (dumpint tagDefer)
+          (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer d))))
+          (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer gp))))
+          (dumpint (conv uint64 (.-sp d)))
+          (dumpint (conv uint64 (.-pc d)))
+          (let [fn @(conv (* (* funcval)) (conv unsafe/Pointer (addr (.-fn d))))]
+            (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer fn))))
+            (if (== (.-fn d) nil)
+              ;; d.fn can be nil for open-coded defers
+              (dumpint (conv uint64 0))
+
+              (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-fn fn))))))
+
+            (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-link d)))))))
+
+        (for [p (.-_panic gp)] (!= p nil) (set! p (.-link p))
+          (dumpint tagPanic)
+          (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer p))))
+          (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer gp))))
+          (let [eface (efaceOf (addr (.-arg p)))]
+            (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-_type eface)))))
+            (dumpint (conv uint64 (conv uintptr (.-data eface))))
+            (dumpint 0) ; was p->defer, no longer recorded
+            (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-link p)))))))))))
+
+
+
+^{:go/end 434} (go/func dumpgs []
+  (assertWorldStopped)
+
+  ;; goroutines & stacks
+  (forEachG ^{:go/end 433} (fn [^{:tag (* g)} gp]
+      (let [status (readgstatus gp)] ; The world is stopped so gp will not be in a scan state.
+        (switch status
+          (case [_Grunning]
+            ;; Dump goroutine if it's _Grunning only during a syscall. This is safe
+            ;; because the goroutine will just park without mutating its stack, since
+            ;; the world is stopped.
+            (when (!= (.-syscallsp gp) 0)
+              (dumpgoroutine gp))
+
+            (fallthrough))
+          (default
+            (print "runtime: unexpected G.status " (conv hex status) "\n")
+            (throw "dumpgs in STW - bad status"))
+          (case [_Gdead _Gdeadextra])
+          ;; ok
+          (case [_Grunnable
+              ^{:line 429} _Gsyscall
+              ^{:line 430} _Gwaiting]
+            (dumpgoroutine gp)))))))
+
+
+
+
+^{:go/end 443} (go/func finq_callback [^{:tag (* funcval)} fn ^unsafe/Pointer obj ^uintptr nret ^{:tag (* _type)} fint ^{:tag (* ptrtype)} ot]
+  (dumpint tagQueuedFinalizer)
+  (dumpint (conv uint64 (conv uintptr obj)))
+  (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer fn))))
+  (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-fn fn)))))
+  (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer fint))))
+  (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer ot)))))
+
+
+^{:go/end 479} (go/func dumproots []
+  ;; To protect mheap_.allspans.
+  (assertWorldStopped)
+
+  ;; TODO(mwhudson): dump datamask etc from all objects
+  ;; data segment
+  (dumpint tagData)
+  (dumpint (conv uint64 (.-data firstmoduledata)))
+  (dumpmemrange (conv unsafe/Pointer (.-data firstmoduledata)) (- (.-edata firstmoduledata) (.-data firstmoduledata)))
+  (dumpfields (.-gcdatamask firstmoduledata))
+
+  ;; bss segment
+  (dumpint tagBSS)
+  (dumpint (conv uint64 (.-bss firstmoduledata)))
+  (dumpmemrange (conv unsafe/Pointer (.-bss firstmoduledata)) (- (.-ebss firstmoduledata) (.-bss firstmoduledata)))
+  (dumpfields (.-gcbssmask firstmoduledata))
+
+  ;; mspan.types
+  (range [_ s (.-allspans mheap_)]
+    (when (== (.get (.-state s)) mSpanInUse)
+      ;; Finalizers
+      (for [sp (.-specials s)] (!= sp nil) (set! sp (.-next sp))
+        (when (!= (.-kind sp) _KindSpecialFinalizer)
+          (continue))
+
+        (let [spf (conv (* specialfinalizer) (conv unsafe/Pointer sp))
+            ^{:line 471} p (conv unsafe/Pointer (+ (.base s) (.-offset (.-special spf))))]
+          (dumpfinalizer p (.-fn spf) (.-fint spf) (.-ot spf))))))
+
+
+
+
+  ;; Finalizer queue
+  (iterate_finq finq_callback))
+
+
+
+
+(go/var ^{:tag (array gc/MaxObjsPerSpan bool) :doc "Bit vector of free marks.\nNeeds to be as big as the largest number of objects per span.\n"} freemark)
+
+^{:go/end 514} (go/func dumpobjs []
+  ;; To protect mheap_.allspans.
+  (assertWorldStopped)
+
+  (range [_ s (.-allspans mheap_)]
+    (when (!= (.get (.-state s)) mSpanInUse)
+      (continue))
+
+    (let [p (.base s)
+        ^{:line 494} size (.-elemsize s)
+        ^{:line 495} n (/ (<< (.-npages s) gc/PageShift) size)]
+      (when (> n (conv uintptr (len freemark)))
+        (throw "freemark array doesn't have enough entries"))
+
+
+      (for [freeIndex (conv uint16 0)] (< freeIndex (.-nelems s)) (inc! freeIndex)
+        (when (.isFree s (conv uintptr freeIndex))
+          (aset freemark freeIndex true)))
+
+
+
+      (for [j (conv uintptr 0)] (< j n) (set! (values j p) (values (+ j 1) (+ p size)))
+        (when (aget freemark j)
+          (aset freemark j false)
+          (continue))
+
+        (dumpobj (conv unsafe/Pointer p) size (makeheapobjbv p size))))))
+
+
+
+
+^{:go/end 548} (go/func dumpparams []
+  (dumpint tagParams)
+  (let [x (conv uintptr 1)]
+    (if (== @(conv (* byte) (conv unsafe/Pointer (addr x))) 1)
+      (dumpbool false) ; little-endian ptrs
+
+      (dumpbool true)) ; big-endian ptrs
+
+    (dumpint goarch/PtrSize)
+    (let [(values ^uintptr arenaStart ^uintptr arenaEnd) (zero uintptr)]
+      (range [i1 (.-arenas mheap_)]
+        (when (== (aget (.-arenas mheap_) i1) nil)
+          (continue))
+
+        (range [i ha (aget (.-arenas mheap_) i1)]
+          (when (== ha nil)
+            (continue))
+
+          (let [base (arenaBase (bit-or (<< (conv arenaIdx i1) arenaL1Shift) (conv arenaIdx i)))]
+            (when (or (== arenaStart 0) (< base arenaStart))
+              (set! arenaStart base))
+
+            (when (> (+ base heapArenaBytes) arenaEnd)
+              (set! arenaEnd (+ base heapArenaBytes))))))
+
+
+
+      (dumpint (conv uint64 arenaStart))
+      (dumpint (conv uint64 arenaEnd))
+      (dumpstr goarch/GOARCH)
+      (dumpstr buildVersion)
+      (dumpint (conv uint64 numCPUStartup)))))
+
+
+^{:go/end 556} (go/func itab_callback [^{:tag (* itab)} tab]
+  (let [t (.-Type tab)]
+    (dumptype t)
+    (dumpint tagItab)
+    (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer tab))))
+    (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer t))))))
+
+
+^{:go/end 560} (go/func dumpitabs []
+  (iterate_itabs itab_callback))
+
+
+^{:go/end 569} (go/func dumpms []
+  (for [mp allm] (!= mp nil) (set! mp (.-alllink mp))
+    (dumpint tagOSThread)
+    (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer mp))))
+    (dumpint (conv uint64 (.-id mp)))
+    (dumpint (.-procid mp))))
+
+
+
+
+^{:go/end 607} (go/func ^:go/systemstack dumpmemstats [^{:tag (* MemStats)} m]
+  (assertWorldStopped)
+
+  ;; These ints should be identical to the exported
+  ;; MemStats structure and should be ordered the same
+  ;; way too.
+  (dumpint tagMemStats)
+  (dumpint (.-Alloc m))
+  (dumpint (.-TotalAlloc m))
+  (dumpint (.-Sys m))
+  (dumpint (.-Lookups m))
+  (dumpint (.-Mallocs m))
+  (dumpint (.-Frees m))
+  (dumpint (.-HeapAlloc m))
+  (dumpint (.-HeapSys m))
+  (dumpint (.-HeapIdle m))
+  (dumpint (.-HeapInuse m))
+  (dumpint (.-HeapReleased m))
+  (dumpint (.-HeapObjects m))
+  (dumpint (.-StackInuse m))
+  (dumpint (.-StackSys m))
+  (dumpint (.-MSpanInuse m))
+  (dumpint (.-MSpanSys m))
+  (dumpint (.-MCacheInuse m))
+  (dumpint (.-MCacheSys m))
+  (dumpint (.-BuckHashSys m))
+  (dumpint (.-GCSys m))
+  (dumpint (.-OtherSys m))
+  (dumpint (.-NextGC m))
+  (dumpint (.-LastGC m))
+  (dumpint (.-PauseTotalNs m))
+  (for [i 0] (< i 256) (inc! i)
+    (dumpint (aget (.-PauseNs m) i)))
+
+  (dumpint (conv uint64 (.-NumGC m))))
+
+
+^{:go/end 654} (go/func dumpmemprof_callback [^{:tag (* bucket)} b ^uintptr nstk ^{:tag (* uintptr)} pstk ^uintptr size ^uintptr allocs ^uintptr frees]
+  (let [stk (conv (* (array 100000 uintptr)) (conv unsafe/Pointer pstk))]
+    (dumpint tagMemProf)
+    (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer b))))
+    (dumpint (conv uint64 size))
+    (dumpint (conv uint64 nstk))
+    (for [i (conv uintptr 0)] (< i nstk) (inc! i)
+      (let [pc (aget stk i)
+          ^{:line 617} f (findfunc pc)]
+        (if (not (.valid f))
+          (let [^{:tag (array 64 byte)} buf (zero (array 64 byte))
+              ^{:line 620} n (len buf)]
+            (dec! n)
+            (aset buf n \))
+            (if (== pc 0) (do
+                (dec! n)
+                (aset buf n \0))
+
+              (while (> pc 0)
+                (dec! n)
+                (aset buf n (aget "0123456789abcdef" (bit-and pc 15)))
+                (set! pc >> 4)))
+
+
+            (dec! n)
+            (aset buf n \x)
+            (dec! n)
+            (aset buf n \0)
+            (dec! n)
+            (aset buf n \()
+            (dumpslice (subslice buf n))
+            (dumpstr "?")
+            (dumpint 0))
+          (do
+            (dumpstr (funcname f))
+            (when (and (> i 0) (> pc (.entry f)))
+              (dec! pc))
+
+            (let [(values file line) (funcline f pc)]
+              (dumpstr file)
+              (dumpint (conv uint64 line)))))))
+
+
+    (dumpint (conv uint64 allocs))
+    (dumpint (conv uint64 frees))))
+
+
+^{:go/end 676} (go/func dumpmemprof []
+  ;; To protect mheap_.allspans.
+  (assertWorldStopped)
+
+  (iterate_memprof dumpmemprof_callback)
+  (range [_ s (.-allspans mheap_)]
+    (when (!= (.get (.-state s)) mSpanInUse)
+      (continue))
+
+    (for [sp (.-specials s)] (!= sp nil) (set! sp (.-next sp))
+      (when (!= (.-kind sp) _KindSpecialProfile)
+        (continue))
+
+      (let [spp (conv (* specialprofile) (conv unsafe/Pointer sp))
+          ^{:line 670} p (+ (.base s) (.-offset (.-special spp)))]
+        (dumpint tagAllocSample)
+        (dumpint (conv uint64 p))
+        (dumpint (conv uint64 (conv uintptr (conv unsafe/Pointer (.-b spp)))))))))
+
+
+
+
+(go/var dumphdr (conv (slice byte) "go1.7 heap dump\n"))
+
+^{:go/end 701} (go/func mdump [^{:tag (* MemStats)} m]
+  (assertWorldStopped)
+
+  ;; make sure we're done sweeping
+  (range [_ s (.-allspans mheap_)]
+    (when (== (.get (.-state s)) mSpanInUse)
+      (.ensureSwept s)))
+
+
+  (memclrNoHeapPointers (conv unsafe/Pointer (addr typecache)) (unsafe/Sizeof typecache))
+  (dwrite (conv unsafe/Pointer (addr (aget dumphdr 0))) (conv uintptr (len dumphdr)))
+  (dumpparams)
+  (dumpitabs)
+  (dumpobjs)
+  (dumpgs)
+  (dumpms)
+  (dumproots)
+  (dumpmemstats m)
+  (dumpmemprof)
+  (dumpint tagEOF)
+  (flush))
+
+
+^{:go/end 723} (go/func writeheapdump_m [^uintptr fd ^{:tag (* MemStats)} m]
+  (assertWorldStopped)
+
+  (let [gp (getg)]
+    (casGToWaiting (.-curg (.-m gp)) _Grunning waitReasonDumpingHeap)
+
+    ;; Set dump file.
+    (set! dumpfd fd)
+
+    ;; Call dump routine.
+    (mdump m)
+
+    ;; Reset dump file.
+    (set! dumpfd 0)
+    (when (!= tmpbuf nil)
+      (sysFree (conv unsafe/Pointer (addr (aget tmpbuf 0))) (conv uintptr (len tmpbuf)) (addr (.-other_sys memstats)))
+      (set! tmpbuf nil))
+
+
+    (casgstatus (.-curg (.-m gp)) _Gwaiting _Grunning)))
+
+
+
+^{:go/end 729} (go/func dumpfields "dumpint() the kind & offset of each field in an object.\n" [^bitvector bv]
+  (dumpbv (addr bv) 0)
+  (dumpint fieldKindEol))
+
+
+^{:go/end 758} (go/func makeheapobjbv ^bitvector [^uintptr p ^uintptr size]
+  ;; Extend the temp buffer if necessary.
+  (let [nptr (/ size goarch/PtrSize)]
+    (when (< (conv uintptr (len tmpbuf)) (+ (/ nptr 8) 1))
+      (when (!= tmpbuf nil)
+        (sysFree (conv unsafe/Pointer (addr (aget tmpbuf 0))) (conv uintptr (len tmpbuf)) (addr (.-other_sys memstats))))
+
+      (let [n (+ (/ nptr 8) 1)
+          ^{:line 739} p (sysAlloc n (addr (.-other_sys memstats)) "heapdump")]
+        (when (== p nil)
+          (throw "heapdump: out of memory"))
+
+        (set! tmpbuf (subslice (conv (* (array (<< 1 30) byte)) p) _ n))))
+
+    ;; Convert heap bitmap to pointer bitmap.
+    (clear (subslice tmpbuf _ (+ (/ nptr 8) 1)))
+    (let [s (spanOf p)
+        ^{:line 748} tp (.typePointersOf s p size)]
+      (while true
+        (let [^uintptr addr (zero uintptr)]
+          (when [(set! (values tp addr) (.next tp (+ p size)))] (== addr 0)
+            (break))
+
+          (let [i (/ (- addr p) goarch/PtrSize)]
+            (set! (aget tmpbuf (/ i 8)) bit-or ^byte (<< 1 (% i 8))))))
+
+      (lit bitvector (conv int32 nptr) (addr (aget tmpbuf 0))))))

@@ -1,0 +1,158 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.net) (go/file "iprawsock_posix.go" :build ["//go:build unix || js || wasip1 || windows || tamago"] :imports [
+
+
+    ^{:line 10} [context "context"]
+    ^{:line 11} [syscall "syscall"]])
+
+
+^{:go/breaks [[4 21]] :go/end 22} (go/func sockaddrToIP ^Addr [^syscall/Sockaddr sa]
+  (type-switch [sa sa]
+    (case [(* syscall/SockaddrInet4)]
+      (return (addr (lit IPAddr :IP (subslice (.-Addr sa) 0)))))
+    (case [(* syscall/SockaddrInet6)]
+      (return (addr (lit IPAddr :IP (subslice (.-Addr sa) 0) :Zone (.name zoneCache (conv int (.-ZoneId sa))))))))
+
+  nil)
+
+
+^{:go/end 32} (go/method family ^int [^{:tag (* IPAddr)} a]
+  (when (or (== a nil) (<= (len (.-IP a)) IPv4len))
+    (return syscall/AF_INET))
+
+  (when (!= (.To4 (.-IP a)) nil)
+    (return syscall/AF_INET))
+
+  ^{:line 31} syscall/AF_INET6)
+
+
+^{:go/end 39} (go/method sockaddr [^{:tag (* IPAddr)} a ^int family] :results [syscall/Sockaddr error]
+  (when (== a nil)
+    (return nil nil))
+
+  (ipToSockaddr family (.-IP a) 0 (.-Zone a)))
+
+
+^{:go/end 43} (go/method toLocal ^sockaddr [^{:tag (* IPAddr)} a ^string net]
+  (addr (lit IPAddr (loopbackIP net) (.-Zone a))))
+
+
+^{:go/end 58} (go/method readFrom [^{:tag (* IPConn)} c ^{:tag (slice byte)} b] :results [int (* IPAddr) error]
+  ;; TODO(cw,rsc): consider using readv if we know the family
+  ;; type to avoid the header trim/copy
+  (let [^{:tag (* IPAddr)} addr (zero (* IPAddr))
+      (values n sa err) (.readFrom ^{:go/via [conn]} (.-fd c) b)]
+    (type-switch [sa sa]
+      (case [(* syscall/SockaddrInet4)]
+        (set! addr (addr (lit IPAddr :IP (subslice (.-Addr sa) 0))))
+        (set! n (stripIPv4Header n b)))
+      (case [(* syscall/SockaddrInet6)]
+        (set! addr (addr (lit IPAddr :IP (subslice (.-Addr sa) 0) :Zone (.name zoneCache (conv int (.-ZoneId sa))))))))
+
+    (return n addr err)))
+
+
+^{:go/end 73} (go/func stripIPv4Header ^int [^int n ^{:tag (slice byte)} b]
+  (when (< (len b) 20)
+    (return n))
+
+  (let [l (<< (conv int (bit-and (aget b 0) 0x0f)) 2)]
+    (when (or (> 20 l) (> l (len b)))
+      (return n))
+
+    (when (!= (>> (aget b 0) 4) 4)
+      (return n))
+
+    (copy b (subslice b l))
+    (- n l)))
+
+
+^{:go/end 85} (go/method readMsg [^{:tag (* IPConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob] :results [^int n ^int oobn ^int flags ^{:tag (* IPAddr)} addr ^error err]
+  (let [^syscall/Sockaddr sa (zero syscall/Sockaddr)]
+    (set! (values n oobn flags sa err) (.readMsg ^{:go/via [conn]} (.-fd c) b oob 0))
+    (type-switch [sa sa]
+      (case [(* syscall/SockaddrInet4)]
+        (set! addr (addr (lit IPAddr :IP (subslice (.-Addr sa) 0)))))
+      (case [(* syscall/SockaddrInet6)]
+        (set! addr (addr (lit IPAddr :IP (subslice (.-Addr sa) 0) :Zone (.name zoneCache (conv int (.-ZoneId sa))))))))
+
+    (return)))
+
+
+^{:go/end 99} (go/method writeTo [^{:tag (* IPConn)} c ^{:tag (slice byte)} b ^{:tag (* IPAddr)} addr] :results [int error]
+  (when (.-isConnected ^{:go/via [conn]} (.-fd c))
+    (return 0 ErrWriteToConnected))
+
+  (when (== addr nil)
+    (return 0 errMissingAddress))
+
+  (let [(values sa err) (.sockaddr addr (.-family ^{:go/via [conn]} (.-fd c)))]
+    (when (!= err nil)
+      (return 0 err))
+
+    (.writeTo ^{:go/via [conn]} (.-fd c) b sa)))
+
+
+^{:go/end 113} (go/method writeMsg [^{:tag (* IPConn)} c ^{:tag (slice byte)} b ^{:tag (slice byte)} oob ^{:tag (* IPAddr)} addr] :results [^int n ^int oobn ^error err]
+  (when (.-isConnected ^{:go/via [conn]} (.-fd c))
+    (return 0 0 ErrWriteToConnected))
+
+  (when (== addr nil)
+    (return 0 0 errMissingAddress))
+
+  (let [(values sa ^:assign err) (.sockaddr addr (.-family ^{:go/via [conn]} (.-fd c)))]
+    (when (!= err nil)
+      (return 0 0 err))
+
+    (.writeMsg ^{:go/via [conn]} (.-fd c) b oob sa)))
+
+
+^{:go/end 136} (go/method dialIP [^{:tag (* sysDialer)} sd ^context/Context ctx ^{:tag (* IPAddr)} laddr ^{:tag (* IPAddr)} raddr] :results [(* IPConn) error]
+  (let [(values network proto err) (parseNetwork ctx (.-network sd) true)]
+    (when (!= err nil)
+      (return nil err))
+
+    (switch network
+      (case ["ip" "ip4" "ip6"])
+      (default
+        (return nil (conv UnknownNetworkError (.-network sd)))))
+
+    (let [ctrlCtxFn (.-ControlContext (.-Dialer sd))]
+      (when (and (== ctrlCtxFn nil) (!= (.-Control (.-Dialer sd)) nil))
+        (set! ctrlCtxFn ^{:go/end 129} (fn ^error [^context/Context ctx ^string network ^string address ^syscall/RawConn c]
+            ((.-Control (.-Dialer sd)) network address c))))
+
+
+      (let [(values fd ^:assign err) (internetSocket ctx network laddr raddr syscall/SOCK_RAW proto "dial" ctrlCtxFn)]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (newIPConn fd) nil)))))
+
+
+^{:go/end 159} (go/method listenIP [^{:tag (* sysListener)} sl ^context/Context ctx ^{:tag (* IPAddr)} laddr] :results [(* IPConn) error]
+  (let [(values network proto err) (parseNetwork ctx (.-network sl) true)]
+    (when (!= err nil)
+      (return nil err))
+
+    (switch network
+      (case ["ip" "ip4" "ip6"])
+      (default
+        (return nil (conv UnknownNetworkError (.-network sl)))))
+
+    (let [^{:tag (func [^context/Context ctx ^string network ^string address ^syscall/RawConn c] [error])} ctrlCtxFn (zero (func [^context/Context ctx ^string network ^string address ^syscall/RawConn c] [error]))]
+      (when (!= (.-Control (.-ListenConfig sl)) nil)
+        (set! ctrlCtxFn ^{:go/end 152} (fn ^error [^context/Context ctx ^string network ^string address ^syscall/RawConn c]
+            ((.-Control (.-ListenConfig sl)) network address c))))
+
+
+      (let [(values fd ^:assign err) (internetSocket ctx network laddr nil syscall/SOCK_RAW proto "listen" ctrlCtxFn)]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (newIPConn fd) nil)))))

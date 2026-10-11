@@ -1,0 +1,109 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace.raw) (go/file "reader.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+
+    ^{:line 13} [tracev2 "internal/trace/tracev2"]
+    ^{:line 14} [version "internal/trace/version"]])
+
+
+
+
+(go/type Reader "Reader parses trace bytes with only very basic validation\ninto an event stream.\n" (struct
+    ^{:line 20 :tag (* bufio/Reader)} r
+    ^{:line 21 :tag version/Version} v
+    ^{:line 22 :tag (slice tracev2/EventSpec)} specs))
+
+
+
+^{:go/end 33} (go/func NewReader "NewReader creates a new reader for the trace wire format.\n" [^io/Reader r] :results [(* Reader) error]
+  (let [br (bufio/NewReader r)
+      (values v err) (version/ReadHeader br)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (addr (lit Reader :r br :v v :specs (.Specs v))) nil)))
+
+
+
+^{:go/end 38} (go/method Version "Version returns the version of the trace that we're reading.\n" ^version/Version [^{:tag (* Reader)} r]
+  (.-v r))
+
+
+
+^{:go/end 82} (go/method ReadEvent "ReadEvent reads and returns the next trace event in the byte stream.\n" [^{:tag (* Reader)} r] :results [Event error]
+  (let [(values evb err) (.ReadByte (.-r r))]
+    (when (== err io/EOF)
+      (return (lit Event) io/EOF))
+
+    (when (!= err nil)
+      (return (lit Event) err))
+
+    (when (or (>= (conv int evb) (len (.-specs r))) (== evb 0))
+      (return (lit Event) (fmt/Errorf "invalid event type: %d" evb)))
+
+    (let [ev (conv tracev2/EventType evb)
+        ^{:line 53} spec (aget (.-specs r) ev)
+        (values args ^:assign err) (.readArgs r (len (.-Args spec)))]
+      (when (!= err nil)
+        (return (lit Event) err))
+
+      (when (.-IsStack spec)
+        (let [len (conv int (aget args 1))]
+          (for [i 0] (< i len) (inc! i)
+            ;; Each stack frame has four args: pc, func ID, file ID, line number.
+            (let [(values frame err) (.readArgs r 4)]
+              (when (!= err nil)
+                (return (lit Event) err))
+
+              (set! args (append args (spread frame)))))))
+
+
+      (let [^{:tag (slice byte)} data (zero (slice byte))]
+        (when (.-HasData spec)
+          (set! (values data err) (.readData r))
+          (when (!= err nil)
+            (return (lit Event) err)))
+
+
+        ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6 8]} (lit Event
+            :Version (.-v r)
+            :Ev ev
+            :Args args
+            :Data data)
+          nil)))))
+
+
+^{:go/end 94} (go/method readArgs [^{:tag (* Reader)} r ^int n] :results [(slice uint64) error]
+  (let [^{:tag (slice uint64)} args (zero (slice uint64))]
+    (for [i 0] (< i n) (inc! i)
+      (let [(values val err) (binary/ReadUvarint (.-r r))]
+        (when (!= err nil)
+          (return nil err))
+
+        (set! args (append args val))))
+
+    (return args nil)))
+
+
+^{:go/end 110} (go/method readData [^{:tag (* Reader)} r] :results [(slice byte) error]
+  (let [(values len err) (binary/ReadUvarint (.-r r))]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [^{:tag (slice byte)} data (zero (slice byte))]
+      (for [i 0] (< i (conv int len)) (inc! i)
+        (let [(values b err) (.ReadByte (.-r r))]
+          (when (!= err nil)
+            (return nil err))
+
+          (set! data (append data b))))
+
+      (return data nil))))

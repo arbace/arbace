@@ -1,0 +1,79 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package rand provides cryptographically secure random bytes from the
+;; operating system.
+(in-ns 'go.crypto.internal.sysrand) (go/file "rand.go" :doc "Package rand provides cryptographically secure random bytes from the\noperating system.\n" :imports [
+
+
+    ^{:line 10} [os "os"]
+    ^{:line 11} [sync "sync"]
+    ^{:line 12} [atomic "sync/atomic"]
+    ^{:line 13} [time "time"]
+    ^{:line 14} [_ "unsafe"]])
+
+
+(go/var ^atomic/Bool firstUse)
+
+^{:go/end 21} (go/func warnBlocked []
+  (println "crypto/rand: blocked for 60 seconds waiting to read random data from the kernel"))
+
+
+
+
+
+(go/func ^:extern ^{:go/linkname "fatal"} fatal "fatal is [runtime.fatal], pushed via linkname.\n" [string])
+
+(go/var ^bool testingOnlyFailRead)
+
+
+
+
+
+
+
+
+^{:go/end 54} (go/func Read "Read fills b with cryptographically secure random bytes from the operating\nsystem. It always fills b entirely and crashes the program irrecoverably if\nan error is encountered. The operating system APIs are documented to never\nreturn an error on all but legacy Linux systems.\n\nNote that Read is not affected by [testing/cryptotest.SetGlobalRand], and it\nshould not be used directly by algorithm implementations.\n" [^{:tag (slice byte)} b]
+  (when (.CompareAndSwap firstUse false true)
+    ;; First use of randomness. Start timer to warn about
+    ;; being blocked on entropy not being available.
+    (let [t (time/AfterFunc time/Minute warnBlocked)]
+      (defer (.Stop t))))
+
+  (when [err (read b)] (or (!= err nil) testingOnlyFailRead)
+    (let [^string errStr (zero string)]
+      (if (not testingOnlyFailRead)
+        (set! errStr (.Error err))
+
+        (set! errStr "testing simulated failure"))
+
+      (fatal (+ "crypto/rand: failed to read random data (see https://go.dev/issue/66821): " errStr))
+      (panic "unreachable")))) ; To be sure.
+
+
+
+;; The urandom fallback is only used on Linux kernels before 3.17 and on AIX.
+
+(go/var ^sync/Once urandomOnce)
+(go/var ^{:tag (* os/File)} urandomFile)
+(go/var ^error urandomErr)
+
+^{:go/breaks [[6 79]] :go/end 80} (go/func urandomRead ^error [^{:tag (slice byte)} b]
+  (.Do urandomOnce ^{:go/end 65} (fn []
+      (set! (values urandomFile urandomErr) (os/Open "/dev/urandom"))))
+
+  (when (!= urandomErr nil)
+    (return urandomErr))
+
+  (while (> (len b) 0)
+    (let [(values n err) (.Read urandomFile b)]
+      ;; Note that we don't ignore EAGAIN because it should not be possible to
+      ;; hit for a blocking read from urandom, although there were
+      ;; unreproducible reports of it at https://go.dev/issue/9205.
+      (when (!= err nil)
+        (return err))
+
+      (set! b (subslice b n))))
+
+  nil)

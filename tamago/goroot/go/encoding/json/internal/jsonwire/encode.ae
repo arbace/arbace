@@ -1,0 +1,289 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.internal.jsonwire) (go/file "encode.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [math "math"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [utf16 "unicode/utf16"]
+    ^{:line 14} [utf8 "unicode/utf8"]
+
+    ^{:line 16} [jsonflags "encoding/json/internal/jsonflags"]])
+
+
+
+
+(go/var ^{:doc "escapeASCII reports whether the ASCII character needs to be escaped.\nIt conservatively assumes EscapeForHTML.\n"} escapeASCII ^{:go/breaks [2 18 34 50 66 82 98 114]} (lit (array ... uint8)
+    1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 ; escape control characters
+    1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 ; escape control characters
+    0 0 1 0 0 0 1 0 0 0 0 0 0 0 0 0 ; escape '"' and '&'
+    0 0 0 0 0 0 0 0 0 0 0 0 1 0 1 0 ; escape '<' and '>'
+    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+    0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 ; escape '\\'
+    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
+
+
+
+
+
+^{:go/end 52} (go/func NeedEscape "NeedEscape reports whether src needs escaping of any characters.\nIt conservatively assumes EscapeForHTML and EscapeForJS.\nIt reports true for inputs with invalid UTF-8.\n" ^bool [^{:tag (slice byte)} src]
+  ^{:go/breaks [[3 51]]} (let [^int i (zero int)]
+    (while (> (conv uint (len src)) (conv uint i))
+      (if [c (aget src i)] (< c utf8/RuneSelf) (do
+          (when (> (aget escapeASCII c) 0)
+            (return true))
+
+          (inc! i))
+
+        (let [(values r rn) (utf8/DecodeRune (subslice src i))]
+          (when (or (== r utf8/RuneError) (== r \u2028) (== r \u2029))
+            (return true))
+
+          (set! i + rn))))
+
+
+    false))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 110} (go/func AppendQuote "AppendQuote appends src to dst as a JSON string per RFC 7159, section 7.\n\nIt takes in flags and respects the following:\n  - EscapeForHTML escapes '<', '>', and '&'.\n  - EscapeForJS escapes '\\u2028' and '\\u2029'.\n  - AllowInvalidUTF8 avoids reporting an error for invalid UTF-8.\n\nRegardless of whether AllowInvalidUTF8 is specified,\ninvalid bytes are replaced with the Unicode replacement character ('\\ufffd').\nIf no escape flags are set, then the shortest representable form is used,\nwhich is also the canonical form for strings (RFC 8785, section 3.2.2.2).\n" [^{:tag (slice byte)} dst ^{:tag (slice byte)} src ^{:tag (* jsonflags/Flags)} flags] :results [(slice byte) error]
+  (let [(values ^int i ^int n) (zero int)
+      ^{:line 67 :tag bool} hasInvalidUTF8 (zero bool)]
+    (set! dst (^{:inst [(slice byte) byte]} slices/Grow dst (+ (len "\"") (len src) (len "\""))))
+    (set! dst (append dst \"))
+    (while (> (conv uint (len src)) (conv uint n))
+      (if [c (aget src n)] (< c utf8/RuneSelf) (do
+          ;; Handle single-byte ASCII.
+          (inc! n)
+          (when (== (aget escapeASCII c) 0)
+            (continue)) ; no escaping possibly needed
+
+          ;; Handle escaping of single-byte ASCII.
+          (when (or (not (or (== c \<) (== c \>) (== c \&))) (.Get flags jsonflags/EscapeForHTML))
+            (set! dst (append dst (spread (subslice src i (- n 1)))))
+            (set! dst (appendEscapedASCII dst c))
+            (set! i n)))
+
+
+        ;; Handle multi-byte Unicode.
+        (let [(values r rn) (utf8/DecodeRune (subslice src n))]
+          (set! n + rn)
+          (when (and (!= r utf8/RuneError) (!= r \u2028) (!= r \u2029))
+            (continue)) ; no escaping possibly needed
+
+          ;; Handle escaping of multi-byte Unicode.
+          (switch
+            (case [(isInvalidUTF8 r rn)]
+              (set! hasInvalidUTF8 true)
+              (set! dst (append dst (spread (subslice src i (- n rn)))))
+              (set! dst (append dst (spread "\ufffd")))
+              (set! i n))
+            (case [(and ^:go/paren (or (== r \u2028) (== r \u2029)) (.Get flags jsonflags/EscapeForJS))]
+              (set! dst (append dst (spread (subslice src i (- n rn)))))
+              (set! dst (appendEscapedUnicode dst r))
+              (set! i n))))))
+
+
+
+    (set! dst (append dst (spread (subslice src i n))))
+    (set! dst (append dst \"))
+    (when (and hasInvalidUTF8 (not (.Get flags jsonflags/AllowInvalidUTF8)))
+      (return dst ErrInvalidUTF8))
+
+    (return dst nil)))
+
+
+^{:go/end 130} (go/func appendEscapedASCII ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^byte c]
+  (switch c
+    (case [\" \\]
+      (set! dst (append dst \\ c)))
+    (case [\backspace]
+      (set! dst (append dst (spread "\\b"))))
+    (case [\formfeed]
+      (set! dst (append dst (spread "\\f"))))
+    (case [\newline]
+      (set! dst (append dst (spread "\\n"))))
+    (case [\return]
+      (set! dst (append dst (spread "\\r"))))
+    (case [\tab]
+      (set! dst (append dst (spread "\\t"))))
+    (default
+      (set! dst (appendEscapedUTF16 dst (conv uint16 c)))))
+
+  ^{:line 129} dst)
+
+
+^{:go/end 140} (go/func appendEscapedUnicode ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^rune r]
+  (if [(values r1 r2) (utf16/EncodeRune r)] (and (!= r1 \ufffd) (!= r2 \ufffd)) (do
+      (set! dst (appendEscapedUTF16 dst (conv uint16 r1)))
+      (set! dst (appendEscapedUTF16 dst (conv uint16 r2))))
+
+    (set! dst (appendEscapedUTF16 dst (conv uint16 r))))
+
+  ^{:line 139} dst)
+
+
+^{:go/end 145} (go/func appendEscapedUTF16 ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^uint16 x]
+  (let [^:const ^{:val "0123456789abcdef"} hex "0123456789abcdef"]
+    (append dst \\ \u (aget hex (bit-and (>> x 12) 0xf)) (aget hex (bit-and (>> x 8) 0xf)) (aget hex (bit-and (>> x 4) 0xf)) (aget hex (bit-and (>> x 0) 0xf)))))
+
+
+
+
+
+^{:go/end 200} (go/func ReformatString "ReformatString consumes a JSON string from src and appends it to dst,\nreformatting it if necessary according to the specified flags.\nIt returns the appended output and the number of consumed input bytes.\n" [^{:tag (slice byte)} dst ^{:tag (slice byte)} src ^{:tag (* jsonflags/Flags)} flags] :results [(slice byte) int error]
+  ;; TODO: Should this update ValueFlags as input?
+  (let [^ValueFlags valFlags (zero ValueFlags)
+      (values n err) (ConsumeString (addr valFlags) src (not (.Get flags jsonflags/AllowInvalidUTF8)))]
+    (when (!= err nil)
+      (return dst n err))
+
+
+    ;; If the output requires no special escapes, and the input
+    ;; is already in canonical form or should be preserved verbatim,
+    ;; then directly copy the input to the output.
+    (when (and (not (.Get flags jsonflags/AnyEscape))
+        ^:go/paren (or (.IsCanonical valFlags) (.Get flags jsonflags/PreserveRawStrings)))
+      (set! dst (append dst (spread (subslice src _ n)))) ; copy the string verbatim
+      (return dst n nil))
+
+
+    ;; Under [jsonflags.PreserveRawStrings], any pre-escaped sequences
+    ;; remain escaped, however we still need to respect the
+    ;; [jsonflags.EscapeForHTML] and [jsonflags.EscapeForJS] options.
+    (when (.Get flags jsonflags/PreserveRawStrings)
+      (let [(values ^int i ^int lastAppendIndex) (zero int)]
+        (while (< i n)
+          (if [c (aget src i)] (< c utf8/RuneSelf) (do
+              (when (and ^:go/paren (or (== c \<) (== c \>) (== c \&)) (.Get flags jsonflags/EscapeForHTML))
+                (set! dst (append dst (spread (subslice src lastAppendIndex i))))
+                (set! dst (appendEscapedASCII dst c))
+                (set! lastAppendIndex (+ i 1)))
+
+              (inc! i))
+
+            (let [(values r rn) (utf8/DecodeRune (subslice src i))]
+              (when (and ^:go/paren (or (== r \u2028) (== r \u2029)) (.Get flags jsonflags/EscapeForJS))
+                (set! dst (append dst (spread (subslice src lastAppendIndex i))))
+                (set! dst (appendEscapedUnicode dst r))
+                (set! lastAppendIndex (+ i rn)))
+
+              (set! i + rn))))
+
+
+        (return (append dst (spread (subslice src lastAppendIndex n))) n nil)))
+
+
+    ;; The input contains characters that might need escaping,
+    ;; unnecessary escape sequences, or invalid UTF-8.
+    ;; Perform a round-trip unquote and quote to properly reformat
+    ;; these sequences according to the current flags.
+    (let [(values b _) (AppendUnquote nil (subslice src _ n))]
+      (set! (values dst _) (AppendQuote dst b flags))
+      (return dst n nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 236} (go/func AppendFloat "AppendFloat appends src to dst as a JSON number per RFC 7159, section 6.\nIt formats numbers similar to the ES6 number-to-string conversion.\nSee https://go.dev/issue/14135.\n\nThe output is identical to ECMA-262, 6th edition, section 7.1.12.1 and with\nRFC 8785, section 3.2.2.3 for 64-bit floating-point numbers except for -0,\nwhich is formatted as -0 instead of just 0.\n\nFor 32-bit floating-point numbers,\nthe output is a 32-bit equivalent of the algorithm.\nNote that ECMA-262 specifies no algorithm for 32-bit numbers.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^float64 src ^int bits]
+  (when (== bits 32)
+    (set! src (conv float64 (conv float32 src))))
+
+
+  (let [abs (math/Abs src)
+      ^{:line 219} fmt (conv byte \f)]
+    (when (!= abs 0)
+      (when (or (and (== bits 64) ^:go/paren (or (< (conv float64 abs) 1.0E-6) (>= (conv float64 abs) 1.0E21)))
+          (and (== bits 32) ^:go/paren (or (< (conv float32 abs) 1.0E-6) (>= (conv float32 abs) 1.0E21))))
+        (set! fmt \e)))
+
+
+    (set! dst (strconv/AppendFloat dst src fmt -1 bits))
+    (when (== fmt \e)
+      ;; Clean up e-09 to e-9.
+      (let [n (len dst)]
+        (when (and (>= n 4) (== (aget dst (- n 4)) \e) (== (aget dst (- n 3)) \-) (== (aget dst (- n 2)) \0))
+          (aset dst (- n 2) (aget dst (- n 1)))
+          (set! dst (subslice dst _ (- n 1))))))
+
+
+    ^{:line 235} dst))
+
+
+
+
+
+^{:go/end 290} (go/func ReformatNumber "ReformatNumber consumes a JSON number from src and appends it to dst,\ncanonicalizing it if specified.\nIt returns the appended output and the number of consumed input bytes.\n" [^{:tag (slice byte)} dst ^{:tag (slice byte)} src ^{:tag (* jsonflags/Flags)} flags] :results [(slice byte) int error]
+  (let [(values n err) (ConsumeNumber src)]
+    (when (!= err nil)
+      (return dst n err))
+
+    (when (not (.Get flags jsonflags/CanonicalizeNumbers))
+      (set! dst (append dst (spread (subslice src _ n)))) ; copy the number verbatim
+      (return dst n nil))
+
+
+    ;; Identify the kind of number.
+    (let [^bool isFloat (zero bool)]
+      (range [_ c (subslice src _ n)]
+        (when (or (== c \.) (== c \e) (== c \E))
+          (set! isFloat true) ; has fraction or exponent
+          (break)))
+
+
+
+      ;; Check if need to canonicalize this kind of number.
+      (switch
+        (case [(== (conv string (subslice src _ n)) "-0")]
+          (break)) ; canonicalize -0 as 0 regardless of kind
+        (case [isFloat]
+          (when (not (.Get flags jsonflags/CanonicalizeRawFloats))
+            (set! dst (append dst (spread (subslice src _ n)))) ; copy the number verbatim
+            (return dst n nil)))
+
+        (default
+          ;; As an optimization, we can copy integer numbers below 2⁵³ verbatim
+          ;; since the canonical form is always identical.
+          (let [^:const ^{:val 16} maxExactIntegerDigits 16] ; len(strconv.AppendUint(nil, 1<<53, 10))
+            (when (or (not (.Get flags jsonflags/CanonicalizeRawInts)) (< n maxExactIntegerDigits))
+              (set! dst (append dst (spread (subslice src _ n)))) ; copy the number verbatim
+              (return dst n nil)))))
+
+
+
+      ;; Parse and reformat the number (which uses a canonical format).
+      (let [(values fv _) (strconv/ParseFloat (conv string (subslice src _ n)) 64)]
+        (switch
+          (case [(== fv 0)]
+            (set! fv 0)) ; normalize negative zero as just zero
+          (case [(math/IsInf fv (+ 1))]
+            (set! fv (+ math/MaxFloat64)))
+          (case [(math/IsInf fv -1)]
+            (set! fv (- math/MaxFloat64))))
+
+        (return (AppendFloat dst fv 64) n nil)))))

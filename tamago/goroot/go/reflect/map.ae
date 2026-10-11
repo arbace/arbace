@@ -1,0 +1,491 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.reflect) (go/file "map.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goexperiment "internal/goexperiment"]
+    ^{:line 10} [race "internal/race"]
+    ^{:line 11} [maps "internal/runtime/maps"]
+    ^{:line 12} [sys "internal/runtime/sys"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+^{:go/end 22} (go/method Key ^Type [^{:tag (* rtype)} t]
+  (when (!= (.Kind t) Map)
+    (panic (+ "reflect: Key of non-map type " (.String t))))
+
+  (let [tt (conv (* abi/MapType) (conv unsafe/Pointer t))]
+    (toType (.-Key tt))))
+
+
+
+
+
+
+
+
+^{:go/end 109} (go/func MapOf "MapOf returns the map type with the given key and element types.\nFor example, if k represents int and e represents string,\nMapOf(k, e) represents map[int]string.\n\nIf the key type is not a valid map key type (that is, if it does\nnot implement Go's == operator), MapOf panics.\n" ^Type [^Type key ^Type elem]
+  (let [ktyp (.common key)
+      ^{:line 32} etyp (.common elem)]
+    (set! key (toType ktyp))
+    (set! elem (toType etyp))
+
+    (when (== (.-Equal ktyp) nil)
+      (panic (+ "reflect.MapOf: invalid key type " (stringFor ktyp))))
+
+
+    ;; Look in cache.
+    (let [ckey (lit cacheKey Map ktyp etyp 0)]
+      (when [(values mt ok) (.Load lookupCache ckey)] ok
+        (return (assert Type mt)))
+
+
+      ;; Look in known types.
+      (let [s (+ "map[" (stringFor ktyp) "]" (stringFor etyp))]
+        (range [_ tt (typesByString s)]
+          (let [mt (conv (* abi/MapType) (conv unsafe/Pointer tt))]
+            (when (and (== (.-Key mt) ktyp) (== (.-Elem mt) etyp))
+              (let [(values ti _) (.LoadOrStore lookupCache ckey (toRType tt))]
+                (return (assert Type ti))))))
+
+
+
+        (let [group (groupOf key elem)
+
+            ;; Make a map type.
+            ;; Note: flag values must match those used in the TMAP case
+            ;; in ../cmd/compile/internal/reflectdata/reflect.go:writeType.
+            ^{:line 61 :tag any} imap (conv (map unsafe/Pointer unsafe/Pointer) nil)
+            ^{:line 62} mt @@(conv (* (* abi/MapType)) (conv unsafe/Pointer (addr imap)))]
+          (set! ^{:go/via [Type]} (.-Str mt) (resolveReflectName (newName s "" false false)))
+          (set! ^{:go/via [Type]} (.-TFlag mt) abi/TFlagDirectIface)
+          (set! ^{:go/via [Type]} (.-Hash mt) (fnv1 (.-Hash etyp) \m (conv byte (>> (.-Hash ktyp) 24)) (conv byte (>> (.-Hash ktyp) 16)) (conv byte (>> (.-Hash ktyp) 8)) (conv byte (.-Hash ktyp))))
+          (set! (.-Key mt) ktyp)
+          (set! (.-Elem mt) etyp)
+          (set! (.-Group mt) (.common group))
+          (set! (.-Hasher mt) ^{:go/end 71} (fn ^uintptr [^unsafe/Pointer p ^uintptr seed]
+              (typehash ktyp p seed)))
+
+          (set! (.-GroupSize mt) (.Size (.-Group mt)))
+          (if goexperiment/MapSplitGroup (do
+              ;; Split layout: field 1 is keys array, field 2 is elems array.
+              (set! (.-KeysOff mt) (.-Offset (.Field group 1)))
+              (set! (.-KeyStride mt) (.Size (.Elem (.-Type (.Field group 1)))))
+              (set! (.-ElemsOff mt) (.-Offset (.Field group 2)))
+              (set! (.-ElemStride mt) (.Size (.Elem (.-Type (.Field group 2)))))
+              (set! (.-ElemOff mt) 0))
+
+            ;; Interleaved layout: field 1 is slots array.
+            ;; KeyStride = ElemStride = slot stride.
+            ;; ElemsOff = slots offset + elem offset within slot.
+            (let [slot (.Elem (.-Type (.Field group 1)))
+                ^{:line 85} slotSize (.Size slot)]
+              (set! (.-KeysOff mt) (.-Offset (.Field group 1)))
+              (set! (.-KeyStride mt) slotSize)
+              (set! (.-ElemsOff mt) (+ (.-Offset (.Field group 1)) (.-Offset (.Field slot 1))))
+              (set! (.-ElemStride mt) slotSize)
+              (set! (.-ElemOff mt) (.-Offset (.Field slot 1)))))
+
+          (set! (.-Flags mt) 0)
+          (when (needKeyUpdate ktyp)
+            (set! (.-Flags mt) bit-or abi/MapNeedKeyUpdate))
+
+          (when (hashMightPanic ktyp)
+            (set! (.-Flags mt) bit-or abi/MapHashMightPanic))
+
+          (when (> (.-Size_ ktyp) abi/MapMaxKeyBytes)
+            (set! (.-Flags mt) bit-or abi/MapIndirectKey))
+
+          (when (> (.-Size_ etyp) abi/MapMaxElemBytes)
+            (set! (.-Flags mt) bit-or abi/MapIndirectElem))
+
+          (set! ^{:go/via [Type]} (.-PtrToThis mt) 0)
+
+          (let [(values ti _) (.LoadOrStore lookupCache ckey (toRType (addr (.-Type mt))))]
+            (assert Type ti)))))))
+
+
+^{:go/end 174} (go/func groupOf ^Type [^Type ktyp ^Type etyp]
+  (when (> (.Size ktyp) abi/MapMaxKeyBytes)
+    (set! ktyp (PointerTo ktyp)))
+
+  (when (> (.Size etyp) abi/MapMaxElemBytes)
+    (set! etyp (PointerTo etyp)))
+
+
+  (when goexperiment/MapSplitGroup
+    ;; Split layout (KKKKVVVV):
+    ;; type group struct {
+    ;;     ctrl  uint64
+    ;;     keys  [abi.MapGroupSlots]keyType
+    ;;     elems [abi.MapGroupSlots]elemType
+    ;; }
+    (let [fields (lit (slice StructField)
+          ^{:go/breaks [2 4]} (lit _
+            :Name "Ctrl"
+            :Type ((inst TypeFor uint64)))
+
+          ^{:go/breaks [2 4]} (lit _
+            :Name "Keys"
+            :Type (ArrayOf abi/MapGroupSlots ktyp))
+
+          ^{:go/breaks [2 4]} (lit _
+            :Name "Elems"
+            :Type (ArrayOf abi/MapGroupSlots etyp)))]
+
+
+      (return (StructOf fields))))
+
+
+  ;; Interleaved slot layout (KVKVKVKV):
+  ;; type group struct {
+  ;;     ctrl  uint64
+  ;;     slots [abi.MapGroupSlots]struct {
+  ;;         key  keyType
+  ;;         elem elemType
+  ;;     }
+  ;; }
+  (let [slotFields (lit (slice StructField)
+        ^{:go/breaks [2 4]} (lit _
+          :Name "Key"
+          :Type ktyp)
+
+        ^{:go/breaks [2 4]} (lit _
+          :Name "Elem"
+          :Type etyp))
+
+
+      ^{:line 161} slot (StructOf slotFields)
+
+      ^{:line 163} fields (lit (slice StructField)
+        ^{:go/breaks [2 4]} (lit _
+          :Name "Ctrl"
+          :Type ((inst TypeFor uint64)))
+
+        ^{:go/breaks [2 4]} (lit _
+          :Name "Slots"
+          :Type (ArrayOf abi/MapGroupSlots slot)))]
+
+
+    (StructOf fields)))
+
+
+(go/var stringType (rtypeOf ""))
+
+
+
+
+
+^{:go/end 215} (go/method MapIndex "MapIndex returns the value associated with key in the map v.\nIt panics if v's Kind is not [Map].\nIt returns the zero Value if key is not found in the map or if v represents a nil map.\nAs in Go, the key's value must be assignable to the map's key type.\n" ^Value [^Value v ^Value key]
+  ^{:go/via [flag]} (.mustBe v Map)
+  (let [tt (conv (* abi/MapType) (conv unsafe/Pointer (.typ v)))
+
+      ;; Do not require key to be exported, so that DeepEqual
+      ;; and other programs can use all the keys returned by
+      ;; MapKeys as arguments to MapIndex. If either the map
+      ;; or the key is unexported, though, the result will be
+      ;; considered unexported. This is consistent with the
+      ;; behavior for structs, which allow read but not write
+      ;; of unexported fields.
+
+      ^{:line 194 :tag unsafe/Pointer} e (zero unsafe/Pointer)]
+    (if (and ^:go/paren (or (== (.-Key tt) stringType) (== ^{:go/via [flag]} (.kind key) String)) (== (.-Key tt) (.typ key)) (<= (.Size (.-Elem tt)) abi/MapMaxElemBytes))
+      (let [k @(conv (* string) (.-ptr key))]
+        (set! e (mapaccess_faststr (.typ v) (.pointer v) k)))
+      (do
+        (set! key (.assignTo key "reflect.Value.MapIndex" (.-Key tt) nil))
+        (let [^unsafe/Pointer k (zero unsafe/Pointer)]
+          (if (!= (bit-and (.-flag key) flagIndir) 0)
+            (set! k (.-ptr key))
+
+            (set! k (conv unsafe/Pointer (addr (.-ptr key)))))
+
+          (set! e (mapaccess (.typ v) (.pointer v) k)))))
+
+    (when (== e nil)
+      (return (lit Value)))
+
+    (let [typ (.-Elem tt)
+        ^{:line 212} fl (.ro (bit-or (.-flag v) (.-flag key)))]
+      (set! fl bit-or (conv flag (.Kind typ)))
+      (copyVal typ fl e))))
+
+
+
+
+
+^{:go/end 228} (go/func ^:go/noinline mapIterStart "Equivalent to runtime.mapIterStart.\n" [^{:tag (* abi/MapType)} t ^{:tag (* maps/Map)} m ^{:tag (* maps/Iter)} it]
+  (when (and race/Enabled (!= m nil))
+    (let [callerpc (sys/GetCallerPC)]
+      (race/ReadPC (conv unsafe/Pointer m) callerpc (abi/FuncPCABIInternal mapIterStart))))
+
+
+  (.Init it t m)
+  (.Next it))
+
+
+
+
+
+^{:go/end 240} (go/func ^:go/noinline mapIterNext "Equivalent to runtime.mapIterNext.\n" [^{:tag (* maps/Iter)} it]
+  (when race/Enabled
+    (let [callerpc (sys/GetCallerPC)]
+      (race/ReadPC (conv unsafe/Pointer (.Map it)) callerpc (abi/FuncPCABIInternal mapIterNext))))
+
+
+  (.Next it))
+
+
+
+
+
+
+^{:go/end 278} (go/method MapKeys "MapKeys returns a slice containing all the keys present in the map,\nin unspecified order.\nIt panics if v's Kind is not [Map].\nIt returns an empty slice if v represents a nil map.\n" ^{:tag (slice Value)} [^Value v]
+  ^{:go/via [flag]} (.mustBe v Map)
+  (let [tt (conv (* abi/MapType) (conv unsafe/Pointer (.typ v)))
+      ^{:line 249} keyType (.-Key tt)
+
+      ^{:line 251} fl (bit-or (.ro (.-flag v)) (conv flag (.Kind keyType)))
+
+      ;; Escape analysis can't see that the map doesn't escape. It sees an
+      ;; escape from maps.IterStart, via assignment into it, even though it
+      ;; doesn't escape this function.
+      ^{:line 256} mptr (abi/NoEscape (.pointer v))
+      ^{:line 257} m (conv (* maps/Map) mptr)
+      ^{:line 258} mlen (conv int 0)]
+    (when (!= m nil)
+      (set! mlen (maplen mptr)))
+
+    (let [^maps/Iter it (zero maps/Iter)]
+      (mapIterStart tt m (addr it))
+      (let [a (make (slice Value) mlen)
+          ^{:line 265 :tag int} i (zero int)]
+        (for [(set! i 0)] (< i (len a)) (inc! i)
+          (let [key (.Key it)]
+            (when (== key nil)
+              ;; Someone deleted an entry from the map since we
+              ;; called maplen above. It's a data race, but nothing
+              ;; we can do about it.
+              (break))
+
+            (aset a i (copyVal keyType fl key))
+            (mapIterNext (addr it))))
+
+        (subslice a _ i)))))
+
+
+
+
+(go/type MapIter "A MapIter is an iterator for ranging over a map.\nSee [Value.MapRange].\n" (struct
+    ^{:line 283 :tag Value} m
+    ^{:line 284 :tag maps/Iter} hiter))
+
+
+
+^{:go/end 300} (go/method Key "Key returns the key of iter's current map entry.\n" ^Value [^{:tag (* MapIter)} iter]
+  (when (not (.Initialized (.-hiter iter)))
+    (panic "MapIter.Key called before Next"))
+
+  (let [iterkey (.Key (.-hiter iter))]
+    (when (== iterkey nil)
+      (panic "MapIter.Key called on exhausted iterator"))
+
+
+    (let [t (conv (* abi/MapType) (conv unsafe/Pointer (.typ (.-m iter))))
+        ^{:line 298} ktype (.-Key t)]
+      (copyVal ktype (bit-or (.ro (.-flag (.-m iter))) (conv flag (.Kind ktype))) iterkey))))
+
+
+
+
+
+
+
+^{:go/end 329} (go/method SetIterKey "SetIterKey assigns to v the key of iter's current map entry.\nIt is equivalent to v.Set(iter.Key()), but it avoids allocating a new Value.\nAs in Go, the key must be assignable to v's type and\nmust not be derived from an unexported field.\nIt panics if [Value.CanSet] returns false.\n" [^Value v ^{:tag (* MapIter)} iter]
+  (when (not (.Initialized (.-hiter iter)))
+    (panic "reflect: Value.SetIterKey called before Next"))
+
+  (let [iterkey (.Key (.-hiter iter))]
+    (when (== iterkey nil)
+      (panic "reflect: Value.SetIterKey called on exhausted iterator"))
+
+
+    ^{:go/via [flag]} (.mustBeAssignable v)
+    (let [^unsafe/Pointer target (zero unsafe/Pointer)]
+      (when (== ^{:go/via [flag]} (.kind v) Interface)
+        (set! target (.-ptr v)))
+
+
+      (let [t (conv (* abi/MapType) (conv unsafe/Pointer (.typ (.-m iter))))
+          ^{:line 323} ktype (.-Key t)]
+
+        ^{:go/via [flag]} (.mustBeExported (.-m iter)) ; do not let unexported m leak
+        (let [key (lit Value ktype iterkey (bit-or (.-flag (.-m iter)) (conv flag (.Kind ktype)) flagIndir))]
+          (set! key (.assignTo key "reflect.MapIter.SetKey" (.typ v) target))
+          (typedmemmove (.typ v) (.-ptr v) (.-ptr key)))))))
+
+
+
+^{:go/end 344} (go/method Value "Value returns the value of iter's current map entry.\n" ^Value [^{:tag (* MapIter)} iter]
+  (when (not (.Initialized (.-hiter iter)))
+    (panic "MapIter.Value called before Next"))
+
+  (let [iterelem (.Elem (.-hiter iter))]
+    (when (== iterelem nil)
+      (panic "MapIter.Value called on exhausted iterator"))
+
+
+    (let [t (conv (* abi/MapType) (conv unsafe/Pointer (.typ (.-m iter))))
+        ^{:line 342} vtype (.-Elem t)]
+      (copyVal vtype (bit-or (.ro (.-flag (.-m iter))) (conv flag (.Kind vtype))) iterelem))))
+
+
+
+
+
+
+
+^{:go/end 373} (go/method SetIterValue "SetIterValue assigns to v the value of iter's current map entry.\nIt is equivalent to v.Set(iter.Value()), but it avoids allocating a new Value.\nAs in Go, the value must be assignable to v's type and\nmust not be derived from an unexported field.\nIt panics if [Value.CanSet] returns false.\n" [^Value v ^{:tag (* MapIter)} iter]
+  (when (not (.Initialized (.-hiter iter)))
+    (panic "reflect: Value.SetIterValue called before Next"))
+
+  (let [iterelem (.Elem (.-hiter iter))]
+    (when (== iterelem nil)
+      (panic "reflect: Value.SetIterValue called on exhausted iterator"))
+
+
+    ^{:go/via [flag]} (.mustBeAssignable v)
+    (let [^unsafe/Pointer target (zero unsafe/Pointer)]
+      (when (== ^{:go/via [flag]} (.kind v) Interface)
+        (set! target (.-ptr v)))
+
+
+      (let [t (conv (* abi/MapType) (conv unsafe/Pointer (.typ (.-m iter))))
+          ^{:line 367} vtype (.-Elem t)]
+
+        ^{:go/via [flag]} (.mustBeExported (.-m iter)) ; do not let unexported m leak
+        (let [elem (lit Value vtype iterelem (bit-or (.-flag (.-m iter)) (conv flag (.Kind vtype)) flagIndir))]
+          (set! elem (.assignTo elem "reflect.MapIter.SetValue" (.typ v) target))
+          (typedmemmove (.typ v) (.-ptr v) (.-ptr elem)))))))
+
+
+
+
+
+^{:go/end 393} (go/method Next "Next advances the map iterator and reports whether there is another\nentry. It returns false when iter is exhausted; subsequent\ncalls to [MapIter.Key], [MapIter.Value], or [MapIter.Next] will panic.\n" ^bool [^{:tag (* MapIter)} iter]
+  (when (not (.IsValid (.-m iter)))
+    (panic "MapIter.Next called on an iterator that does not have an associated map Value"))
+
+  (if (not (.Initialized (.-hiter iter)))
+    (let [t (conv (* abi/MapType) (conv unsafe/Pointer (.typ (.-m iter))))
+        ^{:line 384} m (conv (* maps/Map) (.pointer (.-m iter)))]
+      (mapIterStart t m (addr (.-hiter iter))))
+    (do
+      (when (== (.Key (.-hiter iter)) nil)
+        (panic "MapIter.Next called on exhausted iterator"))
+
+      (mapIterNext (addr (.-hiter iter)))))
+
+  (!= (.Key (.-hiter iter)) nil))
+
+
+
+
+
+
+^{:go/end 405} (go/method Reset "Reset modifies iter to iterate over v.\nIt panics if v's Kind is not [Map] and v is not the zero Value.\nReset(Value{}) causes iter to not to refer to any map,\nwhich may allow the previously iterated-over map to be garbage collected.\n" [^{:tag (* MapIter)} iter ^Value v]
+  (when (.IsValid v)
+    ^{:go/via [flag]} (.mustBe v Map))
+
+  (set! (.-m iter) v)
+  (set! (.-hiter iter) (lit maps/Iter)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 431} (go/method MapRange "MapRange returns a range iterator for a map.\nIt panics if v's Kind is not [Map].\n\nCall [MapIter.Next] to advance the iterator, and [MapIter.Key]/[MapIter.Value] to access each entry.\n[MapIter.Next] returns false when the iterator is exhausted.\nMapRange follows the same iteration semantics as a range statement.\n\nExample:\n\n\titer := reflect.ValueOf(m).MapRange()\n\tfor iter.Next() {\n\t\tk := iter.Key()\n\t\tv := iter.Value()\n\t\t...\n\t}\n" ^{:tag (* MapIter)} [^Value v]
+  ;; This is inlinable to take advantage of "function outlining".
+  ;; The allocation of MapIter can be stack allocated if the caller
+  ;; does not allow it to escape.
+  ;; See https://blog.filippo.io/efficient-go-apis-with-the-inliner/
+  (when (!= ^{:go/via [flag]} (.kind v) Map)
+    ^{:go/via [flag]} (.panicNotMap v))
+
+  (addr (lit MapIter :m v)))
+
+
+
+
+
+
+
+
+^{:go/end 483} (go/method SetMapIndex "SetMapIndex sets the element associated with key in the map v to elem.\nIt panics if v's Kind is not [Map].\nIf elem is the zero Value, SetMapIndex deletes the key from the map.\nOtherwise if v holds a nil map, SetMapIndex will panic.\nAs in Go, key's elem must be assignable to the map's key type,\nand elem's value must be assignable to the map's elem type.\n" [^Value v ^Value key ^Value elem]
+  ^{:go/via [flag]} (.mustBe v Map)
+  ^{:go/via [flag]} (.mustBeExported v)
+  ^{:go/via [flag]} (.mustBeExported key)
+  (let [tt (conv (* abi/MapType) (conv unsafe/Pointer (.typ v)))]
+
+    (when (and ^:go/paren (or (== (.-Key tt) stringType) (== ^{:go/via [flag]} (.kind key) String)) (== (.-Key tt) (.typ key)) (<= (.Size (.-Elem tt)) abi/MapMaxElemBytes))
+      (let [k @(conv (* string) (.-ptr key))]
+        (when (== (.typ elem) nil)
+          (mapdelete_faststr (.typ v) (.pointer v) k)
+          (return))
+
+        ^{:go/via [flag]} (.mustBeExported elem)
+        (set! elem (.assignTo elem "reflect.Value.SetMapIndex" (.-Elem tt) nil))
+        (let [^unsafe/Pointer e (zero unsafe/Pointer)]
+          (if (!= (bit-and (.-flag elem) flagIndir) 0)
+            (set! e (.-ptr elem))
+
+            (set! e (conv unsafe/Pointer (addr (.-ptr elem)))))
+
+          (mapassign_faststr (.typ v) (.pointer v) k e)
+          (return))))
+
+
+    (set! key (.assignTo key "reflect.Value.SetMapIndex" (.-Key tt) nil))
+    (let [^unsafe/Pointer k (zero unsafe/Pointer)]
+      (if (!= (bit-and (.-flag key) flagIndir) 0)
+        (set! k (.-ptr key))
+
+        (set! k (conv unsafe/Pointer (addr (.-ptr key)))))
+
+      (when (== (.typ elem) nil)
+        (mapdelete (.typ v) (.pointer v) k)
+        (return))
+
+      ^{:go/via [flag]} (.mustBeExported elem)
+      (set! elem (.assignTo elem "reflect.Value.SetMapIndex" (.-Elem tt) nil))
+      (let [^unsafe/Pointer e (zero unsafe/Pointer)]
+        (if (!= (bit-and (.-flag elem) flagIndir) 0)
+          (set! e (.-ptr elem))
+
+          (set! e (conv unsafe/Pointer (addr (.-ptr elem)))))
+
+        (mapassign (.typ v) (.pointer v) k e)))))
+
+
+
+
+
+
+
+^{:go/end 492} (go/method ^:go/noinline panicNotMap "Force slow panicking path not inlined, so it won't add to the\ninlining budget of the caller.\nTODO: undo when the inliner is no longer bottom-up only.\n" [^flag f]
+  (.mustBe f Map))

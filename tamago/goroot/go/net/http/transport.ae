@@ -1,0 +1,3455 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; HTTP client implementation. See RFC 7230 through 7235.
+;;
+;; This is the low-level Transport implementation of RoundTripper.
+;; The high-level interface is in client.go.
+
+(in-ns 'go.net.http) (go/file "transport.go" :imports [
+
+
+    ^{:line 13} [bufio "bufio"]
+    ^{:line 14} [flate "compress/flate"]
+    ^{:line 15} [gzip "compress/gzip"]
+    ^{:line 16} [list "container/list"]
+    ^{:line 17} [context "context"]
+    ^{:line 18} [tls "crypto/tls"]
+    ^{:line 19} [errors "errors"]
+    ^{:line 20} [fmt "fmt"]
+    ^{:line 21} [godebug "internal/godebug"]
+    ^{:line 22} [io "io"]
+    ^{:line 23} [log "log"]
+    ^{:line 24} [maps "maps"]
+    ^{:line 25} [net "net"]
+    ^{:line 26} [httptrace "net/http/httptrace"]
+    ^{:line 27} [internal "net/http/internal"]
+    ^{:line 28} [ascii "net/http/internal/ascii"]
+    ^{:line 29} [textproto "net/textproto"]
+    ^{:line 30} [url "net/url"]
+    ^{:line 31} [reflect "reflect"]
+    ^{:line 32} [strings "strings"]
+    ^{:line 33} [sync "sync"]
+    ^{:line 34} [atomic "sync/atomic"]
+    ^{:line 35} [time "time"]
+    ^{:line 36} [_ "unsafe"]
+
+    ^{:line 38} [httpguts "golang.org/x/net/http/httpguts"]
+    ^{:line 39} [httpproxy "golang.org/x/net/http/httpproxy"]])
+
+
+
+
+
+
+
+(go/var ^{:tag RoundTripper :doc "DefaultTransport is the default implementation of [Transport] and is\nused by [DefaultClient]. It establishes network connections as needed\nand caches them for reuse by subsequent calls. It uses HTTP proxies\nas directed by the environment variables HTTP_PROXY, HTTPS_PROXY\nand NO_PROXY (or the lowercase versions thereof).\n"} DefaultTransport (addr ^{:go/breaks [2 4 [6 53] 8 10 12 14]} (lit Transport
+      :Proxy ProxyFromEnvironment
+      :DialContext (defaultTransportDialContext (addr ^{:go/breaks [2 4]} (lit net/Dialer
+            :Timeout (* 30 time/Second)
+            :KeepAlive (* 30 time/Second))))
+
+      :ForceAttemptHTTP2 true
+      :MaxIdleConns 100
+      :IdleConnTimeout (* 90 time/Second)
+      :TLSHandshakeTimeout (* 10 time/Second)
+      :ExpectContinueTimeout (* 1 time/Second))))
+
+
+
+
+(go/const ^{:val 2 :doc "DefaultMaxIdleConnsPerHost is the default value of [Transport]'s\nMaxIdleConnsPerHost.\n"} DefaultMaxIdleConnsPerHost 2)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Transport "Transport is an implementation of [RoundTripper] that supports HTTP,\nHTTPS, and HTTP proxies (for either HTTP or HTTPS with CONNECT).\n\nBy default, Transport caches connections for future re-use.\nThis may leave many open connections when accessing many hosts.\nThis behavior can be managed using [Transport.CloseIdleConnections] method\nand the [Transport.MaxIdleConnsPerHost] and [Transport.DisableKeepAlives] fields.\n\nTransports should be reused instead of created as needed.\nTransports are safe for concurrent use by multiple goroutines.\n\nA Transport is a low-level primitive for making HTTP and HTTPS requests.\nFor high-level functionality, such as cookies and redirects, see [Client].\n\nTransport uses HTTP/1.1 for HTTP URLs and either HTTP/1.1 or HTTP/2\nfor HTTPS URLs, depending on whether the server supports HTTP/2,\nand how the Transport is configured. The [DefaultTransport] supports HTTP/2.\nTo explicitly enable HTTP/2 on a transport, set [Transport.Protocols].\n\nResponses with status codes in the 1xx range are either handled\nautomatically (100 expect-continue) or ignored. The one\nexception is HTTP status code 101 (Switching Protocols), which is\nconsidered a terminal status and returned by [Transport.RoundTrip]. To see the\nignored 1xx responses, use the httptrace trace package's\nClientTrace.Got1xxResponse.\n\nTransport only retries a request upon encountering a network error\nif the connection has already been used successfully and if the\nrequest is idempotent and either has no body or has its [Request.GetBody]\ndefined. HTTP requests are considered idempotent if they have HTTP methods\nGET, HEAD, OPTIONS, or TRACE; or if their [Header] map contains an\n\"Idempotency-Key\" or \"X-Idempotency-Key\" entry. If the idempotency key\nvalue is a zero-length slice, the request is treated as idempotent but the\nheader is not sent on the wire.\n" (struct
+    ^{:line 99 :tag sync/Mutex} idleMu
+    ^{:line 100 :tag bool} closeIdle ; user has requested to close all idle conns
+    ^{:line 101 :tag (map connectMethodKey (slice (* persistConn)))} idleConn ; most recently used at end
+    ^{:line 102 :tag (map connectMethodKey wantConnQueue)} idleConnWait ; waiting getConns
+    ^{:line 103 :tag connLRU} idleLRU
+
+    ^{:line 105 :tag sync/Mutex} reqMu
+    ^{:line 106 :tag (map (* Request) context/CancelCauseFunc)} reqCanceler
+
+    ^{:line 108 :tag sync/Mutex} altMu ; guards changing altProto only
+    ^{:line 109 :tag atomic/Value} altProto ; of nil or map[string]RoundTripper, key is URI scheme
+
+    ^{:line 111 :tag sync/Mutex} connsPerHostMu
+    ^{:line 112 :tag (map connectMethodKey int)} connsPerHost
+    ^{:line 113 :tag (map connectMethodKey wantConnQueue)} connsPerHostWait ; waiting getConns
+    ^{:line 114 :tag wantConnQueue} dialsInProgress
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 130 :tag (func [(* Request)] [(* url/URL) error]) :doc "Proxy specifies a function to return a proxy for a given\nRequest. If the function returns a non-nil error, the\nrequest is aborted with the provided error.\n\nThe proxy type is determined by the URL scheme. \"http\",\n\"https\", \"socks5\", and \"socks5h\" are supported. If the scheme is empty,\n\"http\" is assumed.\n\"socks5\" is treated the same as \"socks5h\".\n\nIf the proxy URL contains a userinfo subcomponent,\nthe proxy request will pass the username and password\nin a Proxy-Authorization header.\n\nIf Proxy is nil or returns a nil *URL, no proxy is used.\n"} Proxy
+
+
+
+
+    ^{:line 135 :tag (func [^context/Context ctx ^{:tag (* url/URL)} proxyURL ^{:tag (* Request)} connectReq ^{:tag (* Response)} connectRes] [error]) :doc "OnProxyConnectResponse is called when the Transport gets an HTTP response from\na proxy for a CONNECT request. It's called before the check for a 200 OK response.\nIf it returns an error, the request fails with that error.\n"} OnProxyConnectResponse
+
+
+
+
+
+
+
+
+
+    ^{:line 145 :tag (func [^context/Context ctx ^string network ^string addr] [net/Conn error]) :doc "DialContext specifies the dial function for creating unencrypted TCP connections.\nIf DialContext is nil (and the deprecated Dial below is also nil),\nthen the transport dials using package net.\n\nDialContext runs concurrently with calls to RoundTrip.\nA RoundTrip call that initiates a dial may end up using\na connection dialed previously when the earlier connection\nbecomes idle before the later DialContext completes.\n"} DialContext
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 157 :tag (func [^string network ^string addr] [net/Conn error]) :doc "Dial specifies the dial function for creating unencrypted TCP connections.\n\nDial runs concurrently with calls to RoundTrip.\nA RoundTrip call that initiates a dial may end up using\na connection dialed previously when the earlier connection\nbecomes idle before the later Dial completes.\n\nDeprecated: Use DialContext instead, which allows the transport\nto cancel dials as soon as they are no longer needed.\nIf both are set, DialContext takes priority.\n"} Dial
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 172 :tag (func [^context/Context ctx ^string network ^string addr] [net/Conn error]) :doc "DialTLSContext specifies an optional dial function for creating\nTLS connections for non-proxied HTTPS requests.\n\nIf DialTLSContext is nil (and the deprecated DialTLS below is also nil),\nDialContext and TLSClientConfig are used.\n\nIf DialTLSContext is set, the Dial and DialContext hooks are not used for HTTPS\nrequests and the TLSClientConfig and TLSHandshakeTimeout\nare ignored. The returned net.Conn is assumed to already be\npast the TLS handshake.\n\nTo support ALPN protocol negotiation, the returned net.Conn should be\na *tls.Conn or implement the same ConnectionState method as *tls.Conn.\n"} DialTLSContext
+
+
+
+
+
+
+
+    ^{:line 180 :tag (func [^string network ^string addr] [net/Conn error]) :doc "DialTLS specifies an optional dial function for creating\nTLS connections for non-proxied HTTPS requests.\n\nDeprecated: Use DialTLSContext instead, which allows the transport\nto cancel dials as soon as they are no longer needed.\nIf both are set, DialTLSContext takes priority.\n"} DialTLS
+
+
+
+
+
+    ^{:line 186 :tag (* tls/Config) :doc "TLSClientConfig specifies the TLS configuration to use with\ntls.Client.\nIf nil, the default configuration is used.\nIf non-nil, HTTP/2 support may not be enabled by default.\n"} TLSClientConfig
+
+
+
+    ^{:line 190 :tag time/Duration :doc "TLSHandshakeTimeout specifies the maximum amount of time to\nwait for a TLS handshake. Zero means no timeout.\n"} TLSHandshakeTimeout
+
+
+
+
+
+
+    ^{:line 197 :tag bool :doc "DisableKeepAlives, if true, disables HTTP keep-alives and\nwill only use the connection to the server for a single\nHTTP request.\n\nThis is unrelated to the similarly named TCP keep-alives.\n"} DisableKeepAlives
+
+
+
+
+
+
+
+
+
+    ^{:line 207 :tag bool :doc "DisableCompression, if true, prevents the Transport from\nrequesting compression with an \"Accept-Encoding: gzip\"\nrequest header when the Request contains no existing\nAccept-Encoding value. If the Transport requests gzip on\nits own and gets a gzipped response, it's transparently\ndecoded in the Response.Body. However, if the user\nexplicitly requested gzip it is not automatically\nuncompressed.\n"} DisableCompression
+
+
+
+    ^{:line 211 :tag int :doc "MaxIdleConns controls the maximum number of idle (keep-alive)\nconnections across all hosts. Zero means no limit.\n"} MaxIdleConns
+
+
+
+
+    ^{:line 216 :tag int :doc "MaxIdleConnsPerHost, if non-zero, controls the maximum idle\n(keep-alive) connections to keep per-host. If zero,\nDefaultMaxIdleConnsPerHost is used.\n"} MaxIdleConnsPerHost
+
+
+
+
+
+
+    ^{:line 223 :tag int :doc "MaxConnsPerHost optionally limits the total number of\nconnections per host, including connections in the dialing,\nactive, and idle states. On limit violation, dials will block.\n\nZero means no limit.\n"} MaxConnsPerHost
+
+
+
+
+
+    ^{:line 229 :tag time/Duration :doc "IdleConnTimeout is the maximum amount of time an idle\n(keep-alive) connection will remain idle before closing\nitself.\nZero means no limit.\n"} IdleConnTimeout
+
+
+
+
+
+    ^{:line 235 :tag time/Duration :doc "ResponseHeaderTimeout, if non-zero, specifies the amount of\ntime to wait for a server's response headers after fully\nwriting the request (including its body, if any). This\ntime does not include the time to read the response body.\n"} ResponseHeaderTimeout
+
+
+
+
+
+
+
+
+    ^{:line 244 :tag time/Duration :doc "ExpectContinueTimeout, if non-zero, specifies the amount of\ntime to wait for a server's first response headers after fully\nwriting the request headers if the request has an\n\"Expect: 100-continue\" header. Zero means no timeout and\ncauses the body to be sent immediately, without\nwaiting for the server to approve.\nThis time does not include the time to send the request header.\n"} ExpectContinueTimeout
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 259 :tag (map string (func [^string authority ^{:tag (* tls/Conn)} c] [RoundTripper])) :doc "TLSNextProto specifies how the Transport switches to an\nalternate protocol (such as HTTP/2) after a TLS ALPN\nprotocol negotiation. If Transport dials a TLS connection\nwith a non-empty protocol name and TLSNextProto contains a\nmap entry for that key (such as \"h2\"), then the func is\ncalled with the request's authority (such as \"example.com\"\nor \"example.com:1234\") and the TLS connection. The function\nmust return a RoundTripper that then handles the request.\nIf TLSNextProto is not nil, HTTP/2 support is not enabled\nautomatically.\n\nHistorically, TLSNextProto was used to disable HTTP/2 support.\nThe Transport.Protocols field now provides a simpler way to do this.\n"} TLSNextProto
+
+
+
+
+    ^{:line 264 :tag Header :doc "ProxyConnectHeader optionally specifies headers to send to\nproxies during CONNECT requests.\nTo set the header dynamically, see GetProxyConnectHeader.\n"} ProxyConnectHeader
+
+
+
+
+
+
+
+
+    ^{:line 273 :tag (func [^context/Context ctx ^{:tag (* url/URL)} proxyURL ^string target] [Header error]) :doc "GetProxyConnectHeader optionally specifies a func to return\nheaders to send to proxyURL during a CONNECT request to the\nip:port target.\nIf it returns an error, the Transport's RoundTrip fails with\nthat error. It can return (nil, nil) to not add headers.\nIf GetProxyConnectHeader is non-nil, ProxyConnectHeader is\nignored.\n"} GetProxyConnectHeader
+
+
+
+
+
+
+    ^{:line 280 :tag int64 :doc "MaxResponseHeaderBytes specifies a limit on how many\nresponse bytes are allowed in the server's response\nheader.\n\nZero means to use a default limit.\n"} MaxResponseHeaderBytes
+
+
+
+
+    ^{:line 285 :tag int :doc "WriteBufferSize specifies the size of the write buffer used\nwhen writing to the transport.\nIf zero, a default (currently 4KB) is used.\n"} WriteBufferSize
+
+
+
+
+    ^{:line 290 :tag int :doc "ReadBufferSize specifies the size of the read buffer used\nwhen reading from the transport.\nIf zero, a default (currently 4KB) is used.\n"} ReadBufferSize
+
+
+
+    ^{:line 294 :tag sync/Once :doc "nextProtoOnce guards initialization of TLSNextProto and\nh2Transport (via onceSetNextProtoDefaults)\n"} nextProtoOnce
+    ^{:line 295 :tag closeIdleConnectionser} closeIdleFunc ; non-nil if http2 wired up
+    ^{:line 296 :tag (* http2Transport)} h2Transport
+    ^{:line 297 :tag http2ExternalTransportConfig} h2Config
+    ^{:line 298 :tag dialClientConner} h3Transport ; non-nil if http3 wired up
+    ^{:line 299 :tag bool} tlsNextProtoWasNil ; whether TLSNextProto was nil when the Once fired
+
+
+
+
+
+
+    ^{:line 306 :tag bool :doc "ForceAttemptHTTP2 controls whether HTTP/2 is enabled when a non-zero\nDial, DialTLS, or DialContext func or TLSClientConfig is provided.\nBy default, use of any those fields conservatively disables HTTP/2.\nTo use a custom dialer or TLS config and still attempt HTTP/2\nupgrades, set this to true.\n"} ForceAttemptHTTP2
+
+
+    ^{:line 309 :tag (* HTTP2Config) :doc "HTTP2 configures HTTP/2 connections.\n"} HTTP2
+
+
+
+
+
+
+
+
+
+    ^{:line 319 :tag (* Protocols) :doc "Protocols is the set of protocols supported by the transport.\n\nIf Protocols includes UnencryptedHTTP2 and does not include HTTP1,\nthe transport will use unencrypted HTTP/2 for requests for http:// URLs.\n\nIf Protocols is nil, the default is usually HTTP/1 only.\nIf ForceAttemptHTTP2 is true, or if TLSNextProto contains an \"h2\" entry,\nthe default is HTTP/1 and HTTP/2.\n"} Protocols))
+
+
+^{:go/end 327} (go/method writeBufferSize ^int [^{:tag (* Transport)} t]
+  (when (> (.-WriteBufferSize t) 0)
+    (return (.-WriteBufferSize t)))
+
+  (<< 4 10))
+
+
+^{:go/end 334} (go/method readBufferSize ^int [^{:tag (* Transport)} t]
+  (when (> (.-ReadBufferSize t) 0)
+    (return (.-ReadBufferSize t)))
+
+  (<< 4 10))
+
+
+^{:go/end 341} (go/method maxHeaderResponseSize ^int64 [^{:tag (* Transport)} t]
+  (when (> (.-MaxResponseHeaderBytes t) 0)
+    (return (.-MaxResponseHeaderBytes t)))
+
+  (<< 10 20)) ; conservative default; same as http2
+
+
+
+^{:go/end 388} (go/method Clone "Clone returns a deep copy of t's exported fields.\n" ^{:tag (* Transport)} [^{:tag (* Transport)} t]
+  (.Do (.-nextProtoOnce t) (.-onceSetNextProtoDefaults t))
+  (let [t2 (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36 38 40 42]} (lit Transport
+          :Proxy (.-Proxy t)
+          :OnProxyConnectResponse (.-OnProxyConnectResponse t)
+          :DialContext (.-DialContext t)
+          :Dial (.-Dial t)
+          :DialTLS (.-DialTLS t)
+          :DialTLSContext (.-DialTLSContext t)
+          :TLSHandshakeTimeout (.-TLSHandshakeTimeout t)
+          :DisableKeepAlives (.-DisableKeepAlives t)
+          :DisableCompression (.-DisableCompression t)
+          :MaxIdleConns (.-MaxIdleConns t)
+          :MaxIdleConnsPerHost (.-MaxIdleConnsPerHost t)
+          :MaxConnsPerHost (.-MaxConnsPerHost t)
+          :IdleConnTimeout (.-IdleConnTimeout t)
+          :ResponseHeaderTimeout (.-ResponseHeaderTimeout t)
+          :ExpectContinueTimeout (.-ExpectContinueTimeout t)
+          :ProxyConnectHeader (.Clone (.-ProxyConnectHeader t))
+          :GetProxyConnectHeader (.-GetProxyConnectHeader t)
+          :MaxResponseHeaderBytes (.-MaxResponseHeaderBytes t)
+          :ForceAttemptHTTP2 (.-ForceAttemptHTTP2 t)
+          :WriteBufferSize (.-WriteBufferSize t)
+          :ReadBufferSize (.-ReadBufferSize t)))]
+
+    (when (!= (.-TLSClientConfig t) nil)
+      (set! (.-TLSClientConfig t2) (.Clone (.-TLSClientConfig t))))
+
+    (when (!= (.-HTTP2 t) nil)
+      (set! (.-HTTP2 t2) (addr (lit HTTP2Config)))
+      (set! @(.-HTTP2 t2) @(.-HTTP2 t)))
+
+    (when (!= (.-Protocols t) nil)
+      (set! (.-Protocols t2) (addr (lit Protocols)))
+      (set! @(.-Protocols t2) @(.-Protocols t)))
+
+    (when (not (.-tlsNextProtoWasNil t))
+      (let [npm (^{:inst [(map string (func [string (* tls/Conn)] [RoundTripper])) string (func [string (* tls/Conn)] [RoundTripper])]} maps/Clone (.-TLSNextProto t))]
+        (when (== npm nil)
+          (set! npm (make (map string (func [^string authority ^{:tag (* tls/Conn)} c] [RoundTripper])))))
+
+        (set! (.-TLSNextProto t2) npm)))
+
+    ^{:line 387} t2))
+
+
+(go/type dialClientConner (interface
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "DialClientConn creates a new client connection to address.\n\nIf proxy is non-nil, the connection should use the provided proxy.\nIf HTTP/3 proxies are not supported, DialClientConn should return\nan error wrapping [errors.ErrUnsupported].\n\nThe RoundTripper returned by DialClientConn must also implement the\nfollowing methods to support [ClientConn] methods of the same name:\n\tClose() error\n\tErr() error\n\tReserve() error\n\tRelease() error\n\tAvailable() int\n\tInFlight() int\n\nThe client connection should arrange to call internalStateHook\nwhen the connection closes, when requests complete, and when the\nconnection concurrency limit changes.\n\nThe client connection must call the internal state hook when\nthe connection state changes asynchronously, such as when a request completes.\n\nThe internal state hook need not be called after synchronous changes\nto the state: Close, Reserve, Release, and RoundTrip calls\nwhich don't start a request do not need to call the hook.\n"} DialClientConn [^context/Context ctx ^string address ^{:tag (* url/URL)} proxy ^{:tag (func [])} internalStateHook] :results [RoundTripper error])))
+
+
+(go/type closeIdleConnectionser (interface
+
+
+
+
+
+
+
+
+    (^{:doc "CloseIdleConnections is called by Transport.CloseIdleConnections.\n\nWe expect to use this on transports supplied by x/net/http2 or x/net/http3.\n\nThe transport will close idle connections created with DialClientConn\nbefore calling this method. The HTTP/3 transport should not attempt to\nclose idle connections, but may clean up shared resources such as UDP\nsockets if no connections remain.\n"} CloseIdleConnections [])))
+
+
+^{:go/end 433} (go/method hasCustomTLSDialer ^bool [^{:tag (* Transport)} t]
+  (or (!= (.-DialTLS t) nil) (!= (.-DialTLSContext t) nil)))
+
+
+(go/var http2client (godebug/New "http2client"))
+
+
+
+^{:go/end 474} (go/method onceSetNextProtoDefaults "onceSetNextProtoDefaults initializes TLSNextProto.\nIt must be called via t.nextProtoOnce.Do.\n" [^{:tag (* Transport)} t]
+  (set! (.-tlsNextProtoWasNil t) (== (.-TLSNextProto t) nil))
+  (when (== (.Value http2client) "0")
+    (.IncNonDefault http2client)
+    (return))
+
+
+  ;; If they've already configured http2 with
+  ;; golang.org/x/net/http2 instead of the bundled copy, try to
+  ;; get at its http2.Transport value (via the "https"
+  ;; altproto map) so we can call CloseIdleConnections on it if
+  ;; requested. (Issue 22891)
+  (let [(values altProto _) (assert (map string RoundTripper) (.Load (.-altProto t)))]
+    (when [rv (reflect/ValueOf (aget altProto "https"))] (and (.IsValid rv) (== (.Kind (.Type rv)) reflect/Struct) (== (.NumField (.Type rv)) 1))
+      (when [v (.Field rv 0)] (.CanInterface v)
+        (when [(values h2i ok) (assert closeIdleConnectionser (.Interface v))] ok
+          (set! (.-closeIdleFunc t) h2i)
+          (return))))
+
+
+
+
+    (when [(values _ ok) (aget (.-TLSNextProto t) "h2")] ok
+      ;; There's an existing HTTP/2 implementation installed.
+      (return))
+
+    (let [protocols (.protocols t)]
+      (when (and (not (.HTTP2 protocols)) (not (.UnencryptedHTTP2 protocols)))
+        (return))
+
+      (when omitBundledHTTP2
+        (return))
+
+
+      (.configureHTTP2 t protocols))))
+
+
+^{:go/end 501} (go/method protocols ^Protocols [^{:tag (* Transport)} t]
+  (when (!= (.-Protocols t) nil)
+    (return @(.-Protocols t))) ; user-configured set
+
+  (let [^Protocols p (zero Protocols)]
+    (.SetHTTP1 p true) ; default always includes HTTP/1
+    (switch
+      (case [(!= (.-TLSNextProto t) nil)]
+        ;; Setting TLSNextProto to an empty map is a documented way
+        ;; to disable HTTP/2 on a Transport.
+        (when (!= (aget (.-TLSNextProto t) "h2") nil)
+          (.SetHTTP2 p true)))
+
+      (case [(and (not (.-ForceAttemptHTTP2 t)) ^:go/paren (or (!= (.-TLSClientConfig t) nil) (!= (.-Dial t) nil) (!= (.-DialContext t) nil) (.hasCustomTLSDialer t)))])
+      ;; Be conservative and don't automatically enable
+      ;; http2 if they've specified a custom TLS config or
+      ;; custom dialers. Let them opt-in themselves via
+      ;; Transport.Protocols.SetHTTP2(true) so we don't surprise them
+      ;; by modifying their tls.Config. Issue 14275.
+      ;; However, if ForceAttemptHTTP2 is true, it overrides the above checks.
+      (case [(== (.Value http2client) "0")])
+      (default
+        (.SetHTTP2 p true)))
+
+    ^{:line 500} p))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 521} (go/func ProxyFromEnvironment "ProxyFromEnvironment returns the URL of the proxy to use for a\ngiven request, as indicated by the environment variables\nHTTP_PROXY, HTTPS_PROXY and NO_PROXY (or the lowercase versions\nthereof). Requests use the proxy from the environment variable\nmatching their scheme, unless excluded by NO_PROXY.\n\nThe environment values may be either a complete URL or a\n\"host[:port]\", in which case the \"http\" scheme is assumed.\nAn error is returned if the value is a different form.\n\nA nil URL and nil error are returned if no proxy is defined in the\nenvironment, or a proxy should not be used for the given request,\nas defined by NO_PROXY.\n\nAs a special case, if req.URL.Host is \"localhost\" (with or without\na port number), then a nil URL and nil error will be returned.\n" [^{:tag (* Request)} req] :results [(* url/URL) error]
+  ((envProxyFunc) (.-URL req)))
+
+
+
+
+^{:go/end 529} (go/func ProxyURL "ProxyURL returns a proxy function (for use in a [Transport])\nthat always returns the same URL.\n" ^{:tag (func [(* Request)] [(* url/URL) error])} [^{:tag (* url/URL)} fixedURL]
+  ^{:go/end 528} (fn [(* Request)] :results [(* url/URL) error]
+    (return fixedURL nil)))
+
+
+
+
+
+
+(go/type transportRequest "transportRequest is a wrapper around a *Request that adds\noptional extra headers to write and stores any error to return\nfrom roundTrip.\n" (struct
+    (* Request) ; original request, not to be mutated
+    ^{:line 536 :tag Header} extra ; extra headers to write, or nil
+    ^{:line 537 :tag (* httptrace/ClientTrace)} trace ; optional
+
+    ^{:line 539 :tag context/Context} ctx ; canceled when we are done with the request
+    ^{:line 540 :tag context/CancelCauseFunc} cancel
+
+    ^{:line 542 :tag sync/Mutex} mu ; guards err
+    ^{:line 543 :tag error} err)) ; first setError value for mapRoundTripError to consider
+
+
+^{:go/end 551} (go/method extraHeaders ^Header [^{:tag (* transportRequest)} tr]
+  (when (== (.-extra tr) nil)
+    (set! (.-extra tr) (make Header)))
+
+  (.-extra tr))
+
+
+^{:go/end 559} (go/method setError [^{:tag (* transportRequest)} tr ^error err]
+  (.Lock (.-mu tr))
+  (when (== (.-err tr) nil)
+    (set! (.-err tr) err))
+
+  (.Unlock (.-mu tr)))
+
+
+
+
+^{:go/breaks [[5 571]] :go/end 572} (go/method useRegisteredProtocol "useRegisteredProtocol reports whether an alternate protocol (as registered\nwith Transport.RegisterProtocol) should be respected for this request.\n" ^bool [^{:tag (* Transport)} t ^{:tag (* Request)} req]
+  (when (and (== (.-Scheme (.-URL req)) "https") (.requiresHTTP1 req))
+    ;; If this request requires HTTP/1, don't use the
+    ;; "https" alternate protocol, which is used by the
+    ;; HTTP/2 code to take over requests if there's an
+    ;; existing cached HTTP/2 connection.
+    (return false))
+
+  true)
+
+
+
+
+
+^{:go/end 592} (go/method alternateRoundTripper "alternateRoundTripper returns the alternate RoundTripper to use\nfor this request if the Request's URL scheme requires one,\nor nil for the normal case of using the Transport.\n" ^RoundTripper [^{:tag (* Transport)} t ^{:tag (* Request)} req]
+  (when (not (.useRegisteredProtocol t req))
+    (return nil))
+
+  (when (and (== (.-Scheme (.-URL req)) "https") (!= (.-h2Config t) nil) (.ExternalRoundTrip (.-h2Config t)))
+    ;; This Transport has been configured to use an x/net/http2 Transport
+    ;; with a user-provided ClientConnPool. We're going to pass off the
+    ;; RoundTrip to x/net/http2 so it can use that pool.
+    ;;
+    ;; The ClientConnPool API is deprecated, but we're doing our best here
+    ;; to continue supporting any users who are using it.
+    (return (.-h2Config t)))
+
+  (let [(values altProto _) (assert (map string RoundTripper) (.Load (.-altProto t)))]
+    (aget altProto (.-Scheme (.-URL req)))))
+
+
+^{:go/breaks [[4 607]] :go/end 608} (go/func validateHeaders ^string [^Header hdrs]
+  (range [k vv hdrs]
+    (when (not (httpguts/ValidHeaderFieldName k))
+      (return (fmt/Sprintf "field name %q" k)))
+
+    (range [_ v vv]
+      (when (not (httpguts/ValidHeaderFieldValue v))
+        ;; Don't include the value in the error,
+        ;; because it may be sensitive.
+        (return (fmt/Sprintf "field value for %q" k)))))
+
+
+
+  "")
+
+
+
+^{:go/end 770} (go/method roundTrip "roundTrip implements a RoundTripper over HTTP.\n" [^{:tag (* Transport)} t ^{:tag (* Request)} req] :results [^{:tag (* Response)} _ ^error err]
+  (.Do (.-nextProtoOnce t) (.-onceSetNextProtoDefaults t))
+  (let [ctx (.Context req)
+      ^{:line 614} trace (httptrace/ContextClientTrace ctx)]
+
+    (when (== (.-URL req) nil)
+      (.closeBody req)
+      (return nil (errors/New "http: nil Request.URL")))
+
+    (when (== (.-Header req) nil)
+      (.closeBody req)
+      (return nil (errors/New "http: nil Request.Header")))
+
+    (let [scheme (.-Scheme (.-URL req))
+        ^{:line 625} isHTTP (or (== scheme "http") (== scheme "https"))]
+      (when isHTTP
+        ;; Validate the outgoing headers.
+        (when [err (validateHeaders (.-Header req))] (!= err "")
+          (.closeBody req)
+          (return nil (fmt/Errorf "net/http: invalid header %s" err)))
+
+
+        ;; Validate the outgoing trailers too.
+        (when [err (validateHeaders (.-Trailer req))] (!= err "")
+          (.closeBody req)
+          (return nil (fmt/Errorf "net/http: invalid trailer %s" err))))
+
+
+
+      (let [origReq req]
+        (set! req (setupRewindBody req))
+
+        (when [altRT (.alternateRoundTripper t req)] (!= altRT nil)
+          (when [(values resp err) (.RoundTrip altRT req)] (!= err ErrSkipAltProtocol)
+            (return resp err))
+
+          (let [^error err (zero error)]
+            (set! (values req err) (rewindBody req))
+            (when (!= err nil)
+              (return nil err))))
+
+
+        (when (not isHTTP)
+          (.closeBody req)
+          (return nil (badStringError "unsupported protocol scheme" scheme)))
+
+        (when (and (!= (.-Method req) "") (not (validMethod (.-Method req))))
+          (.closeBody req)
+          (return nil (fmt/Errorf "net/http: invalid method %q" (.-Method req))))
+
+        (when (== (.-Host (.-URL req)) "")
+          (.closeBody req)
+          (return nil (errors/New "http: no Host in request URL")))
+
+
+        ;; Transport request context.
+        ;;
+        ;; If RoundTrip returns an error, it cancels this context before returning.
+        ;;
+        ;; If RoundTrip returns no error:
+        ;;   - For an HTTP/1 request, persistConn.readLoop cancels this context
+        ;;     after reading the request body.
+        ;;   - For an HTTP/2 request, RoundTrip cancels this context after the HTTP/2
+        ;;     RoundTripper returns.
+        (let [(values ^:assign ctx cancel) (context/WithCancelCause (.Context req))]
+
+          ;; Convert Request.Cancel into context cancellation.
+          (when (!= (.-Cancel origReq) nil)
+            (go (awaitLegacyCancel ctx cancel origReq)))
+
+
+          ;; Convert Transport.CancelRequest into context cancellation.
+          ;;
+          ;; This is lamentably expensive. CancelRequest has been deprecated for a long time
+          ;; and doesn't work on HTTP/2 requests. Perhaps we should drop support for it entirely.
+          (set! cancel (.prepareTransportCancel t origReq cancel))
+
+          (defer (^{:go/end 692} (fn []
+                (when (!= err nil)
+                  (cancel err)))))
+
+
+
+          (while true
+            (select
+              (case (<! (.Done ctx))
+                (.closeBody req)
+                (return nil (context/Cause ctx)))
+              (default))
+
+
+            ;; treq gets modified by roundTrip, so we need to recreate for each retry.
+            (let [treq (addr (lit transportRequest :Request req :trace trace :ctx ctx :cancel cancel))
+                (values cm err) (.connectMethodForRequest t treq)]
+              (when (!= err nil)
+                (.closeBody req)
+                (return nil err))
+
+
+              ;; Get the cached or newly-created connection to either the
+              ;; host (for http or https), the http proxy, or the http proxy
+              ;; pre-CONNECTed to https server. In any case, we'll be ready
+              ;; to send it requests.
+              (let [(values pconn ^:assign err) (.getConn t treq cm)]
+                (when (!= err nil)
+                  (.closeBody req)
+                  (return nil err))
+
+
+                (let [^{:tag (* Response)} resp (zero (* Response))]
+                  (if (!= (.-alt pconn) nil)
+                    ;; HTTP/2 path.
+                    (set! (values resp err) (.RoundTrip (.-alt pconn) req))
+
+                    (set! (values resp err) (.roundTrip pconn treq)))
+
+                  (when (== err nil)
+                    (when (!= (.-alt pconn) nil)
+                      ;; HTTP/2 requests are not cancelable with CancelRequest,
+                      ;; so we have no further need for the request context.
+                      ;;
+                      ;; On the HTTP/1 path, roundTrip takes responsibility for
+                      ;; canceling the context after the response body is read.
+                      (cancel errRequestDone))
+
+                    (set! (.-Request resp) origReq)
+                    (return resp nil))
+
+
+                  ;; Failed. Clean up and determine whether to retry.
+                  (cond (http2isNoCachedConnError err)
+                    (when (.removeIdleConn t pconn)
+                      (.decConnsPerHost t (.-cacheKey pconn)))
+
+                    (not (.shouldRetryRequest pconn req err)) (do
+                      ;; Issue 16465: return underlying net.Conn.Read error from peek,
+                      ;; as we've historically done.
+                      (when [(values e ok) (assert nothingWrittenError err)] ok
+                        (set! err (.-error e)))
+
+                      (when [(values e ok) (assert transportReadFromServerError err)] ok
+                        (set! err (.-err e)))
+
+                      (when [(values b ok) (assert (* readTrackingBody) (.-Body req))] (and ok (not (.Load (.-didClose b))))
+                        ;; Issue 49621: Close the request body if pconn.roundTrip
+                        ;; didn't do so already. This can happen if the pconn
+                        ;; write loop exits without reading the write request.
+                        (.closeBody req))
+
+                      (return nil err)))
+
+                  (testHookRoundTripRetried)
+
+                  ;; Rewind the body if we're able to.
+                  (set! (values req err) (rewindBody req))
+                  (when (!= err nil)
+                    (return nil err)))))))))))
+
+
+
+
+^{:go/end 775} (go/func http2isNoCachedConnError ^bool [^error err]
+  (let [(values _ ok) (assert (interface (IsHTTP2NoCachedConnError [])) err)]
+    ^{:line 774} ok))
+
+
+^{:go/end 783} (go/func awaitLegacyCancel [^context/Context ctx ^context/CancelCauseFunc cancel ^{:tag (* Request)} req]
+  (select
+    (case (<! (.-Cancel req))
+      (cancel errRequestCanceled))
+    (case (<! (.Done ctx)))))
+
+
+
+(go/var errCannotRewind (errors/New "net/http: cannot rewind body after connection loss"))
+
+(go/type readTrackingBody (struct
+    ^{:line 788} io/ReadCloser
+    ^{:line 789 :tag bool} didRead ; not atomic.Bool because only one goroutine (the user's) should be accessing
+    ^{:line 790 :tag atomic/Bool} didClose))
+
+
+^{:go/end 796} (go/method Read [^{:tag (* readTrackingBody)} r ^{:tag (slice byte)} data] :results [int error]
+  (set! (.-didRead r) true)
+  (.Read (.-ReadCloser r) data))
+
+
+^{:go/end 803} (go/method Close ^error [^{:tag (* readTrackingBody)} r]
+  (when (not (.CompareAndSwap (.-didClose r) false true))
+    (return nil))
+
+  (.Close (.-ReadCloser r)))
+
+
+
+
+
+
+^{:go/end 816} (go/func setupRewindBody "setupRewindBody returns a new request with a custom body wrapper\nthat can report whether the body needs rewinding.\nThis lets rewindBody avoid an error result when the request\ndoes not have GetBody but the body hasn't been read at all yet.\n" ^{:tag (* Request)} [^{:tag (* Request)} req]
+  (when (or (== (.-Body req) nil) (== (.-Body req) NoBody))
+    (return req))
+
+  (let [newReq @req]
+    (set! (.-Body newReq) (addr (lit readTrackingBody :ReadCloser (.-Body req))))
+    (addr newReq)))
+
+
+
+
+
+
+^{:go/end 839} (go/func rewindBody "rewindBody returns a new request with the body rewound.\nIt returns req unmodified if the body does not need rewinding.\nrewindBody takes care of closing req.Body when appropriate\n(in all cases except when rewindBody returns req unmodified).\n" [^{:tag (* Request)} req] :results [^{:tag (* Request)} rewound ^error err]
+  (when (or (== (.-Body req) nil) (== (.-Body req) NoBody) ^:go/paren (and (not (.-didRead (assert (* readTrackingBody) (.-Body req)))) (not (.Load (.-didClose (assert (* readTrackingBody) (.-Body req)))))))
+    (return req nil)) ; nothing to rewind
+
+  (when (not (.Load (.-didClose (assert (* readTrackingBody) (.-Body req)))))
+    (.closeBody req))
+
+  (when (== (.-GetBody req) nil)
+    (return nil errCannotRewind))
+
+  (let [(values body ^:assign err) ((.-GetBody req))]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [newReq @req]
+      (set! (.-Body newReq) (addr (lit readTrackingBody :ReadCloser body)))
+      (return (addr newReq) nil))))
+
+
+
+
+
+^{:go/breaks [[11 888]] :go/end 889} (go/method shouldRetryRequest "shouldRetryRequest reports whether we should retry sending a failed\nHTTP request on a new connection. The non-nil input error is the\nerror from roundTrip.\n" ^bool [^{:tag (* persistConn)} pc ^{:tag (* Request)} req ^error err]
+  (when (http2isNoCachedConnError err)
+    ;; Issue 16582: if the user started a bunch of
+    ;; requests at once, they can all pick the same conn
+    ;; and violate the server's max concurrent streams.
+    ;; Instead, match the HTTP/1 behavior for now and dial
+    ;; again to get a new TCP connection, rather than failing
+    ;; this request.
+    (return true))
+
+  (when (== err errMissingHost)
+    ;; User error.
+    (return false))
+
+  (when (not (.isReused pc))
+    ;; This was a fresh connection. There's no reason the server
+    ;; should've hung up on us.
+    ;;
+    ;; Also, if we retried now, we could loop forever
+    ;; creating new connections and retrying if the server
+    ;; is just hanging up on us because it doesn't like
+    ;; our request (as opposed to sending an error).
+    (return false))
+
+  (when [(values _ ok) (assert nothingWrittenError err)] ok
+    ;; We never wrote anything, so it's safe to retry, if there's no body or we
+    ;; can "rewind" the body with GetBody.
+    (return (or (== (.outgoingLength req) 0) (!= (.-GetBody req) nil))))
+
+  (when (not (.isReplayable req))
+    ;; Don't retry non-idempotent requests.
+    (return false))
+
+  (when [(values _ ok) (assert transportReadFromServerError err)] ok
+    ;; We got some non-EOF net.Conn.Read failure reading
+    ;; the 1st response byte from the server.
+    (return true))
+
+  (when (== err errServerClosedIdle)
+    ;; The server replied with io.EOF while we were trying to
+    ;; read the response. Probably an unfortunately keep-alive
+    ;; timeout, just as the client was writing a request.
+    (return true))
+
+  false) ; conservatively
+
+
+
+(go/var ^{:doc "ErrSkipAltProtocol is a sentinel error value defined by Transport.RegisterProtocol.\n"} ErrSkipAltProtocol internal/ErrSkipAltProtocol)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 908} (go/method RegisterProtocol "RegisterProtocol registers a new protocol with scheme.\nThe [Transport] will pass requests using the given scheme to rt.\nIt is rt's responsibility to simulate HTTP request semantics.\n\nRegisterProtocol can be used by other packages to provide\nimplementations of protocol schemes like \"ftp\" or \"file\".\n\nIf rt.RoundTrip returns [ErrSkipAltProtocol], the Transport will\nhandle the [Transport.RoundTrip] itself for that one request, as if the\nprotocol were not registered.\n" [^{:tag (* Transport)} t ^string scheme ^RoundTripper rt]
+  (when [err (.registerProtocol t scheme rt)] (!= err nil)
+    (panic err)))
+
+
+
+^{:go/end 943} (go/method registerProtocol ^error [^{:tag (* Transport)} t ^string scheme ^RoundTripper rt]
+  (.Lock (.-altMu t))
+  (defer (.Unlock (.-altMu t)))
+
+  (when (== scheme "http/2")
+    (when (!= (.-h2Config t) nil)
+      (panic "http: HTTP/2 Transport already registered"))
+
+    (let [^bool ok (zero bool)]
+      (when [(set! (values (.-h2Config t) ok) (assert http2ExternalTransportConfig rt))] (not ok)
+        (panic "http: HTTP/2 configuration does not implement ExternalTransportConfig"))
+
+      (.Registered (.-h2Config t) t)))
+
+
+  (when (== scheme "http/3")
+    (let [^bool ok (zero bool)]
+      (when [(set! (values (.-h3Transport t) ok) (assert dialClientConner rt))] (not ok)
+        (panic "http: HTTP/3 RoundTripper does not implement DialClientConn"))))
+
+
+
+  (let [(values oldMap _) (assert (map string RoundTripper) (.Load (.-altProto t)))]
+    (when [(values _ exists) (aget oldMap scheme)] exists
+      (return (errors/New (+ "protocol " scheme " already registered"))))
+
+    ^{:go/breaks [5]} (let [newMap (^{:inst [(map string RoundTripper) string RoundTripper]} maps/Clone oldMap)]
+      (when (== newMap nil)
+        (set! newMap (make (map string RoundTripper))))
+
+      (aset newMap scheme rt)
+      (.Store (.-altProto t) newMap)
+      nil)))
+
+
+
+
+
+
+^{:go/end 987} (go/method CloseIdleConnections "CloseIdleConnections closes any connections which were previously\nconnected from previous requests but are now sitting idle in\na \"keep-alive\" state. It does not interrupt any connections currently\nin use.\n" [^{:tag (* Transport)} t]
+  (.Do (.-nextProtoOnce t) (.-onceSetNextProtoDefaults t))
+  (.Lock (.-idleMu t))
+  (let [m (.-idleConn t)]
+    (set! (.-idleConn t) nil)
+    (set! (.-closeIdle t) true) ; close newly idle connections
+    (set! (.-idleLRU t) (lit connLRU))
+    (.Unlock (.-idleMu t))
+    (range [_ conns m]
+      (range [_ pconn conns]
+        (.close pconn errCloseIdleConns)))
+
+
+    (.Lock (.-connsPerHostMu t))
+    (.all (.-dialsInProgress t) ^{:go/end 967} (fn [^{:tag (* wantConn)} w]
+        (when (and (!= (.-cancelCtx w) nil) (not (.waiting w)))
+          ((.-cancelCtx w)))))
+
+
+    (.Unlock (.-connsPerHostMu t))
+
+    ;; Tell various associated transports to close their connections.
+
+    ;; net/http/internal/http2 transport. This is the common case for HTTP/2 users.
+    (when [tr2 (.-h2Transport t)] (!= tr2 nil)
+      (.CloseIdleConnections tr2))
+
+    ;; Probably an older x/net/http2 transport registered via Transport.RegisterProtocol.
+    ;; This is a legacy path; modern users just use internal/http2.
+    ;; (Note that we don't use this path when x/net/http2 wraps the net/http transport;
+    ;; this is supporting pre-wrapping x/net/http2.)
+    (when [t2 (.-closeIdleFunc t)] (!= t2 nil)
+      (.CloseIdleConnections t2))
+
+    ;; HTTP/3 transport, probably from x/net/http3.
+    (when [(values cc ok) (assert closeIdleConnectionser (.-h3Transport t))] ok
+      (.CloseIdleConnections cc))))
+
+
+
+
+^{:go/end 1010} (go/method prepareTransportCancel "prepareTransportCancel sets up state to convert Transport.CancelRequest into context cancellation.\n" ^context/CancelCauseFunc [^{:tag (* Transport)} t ^{:tag (* Request)} req ^context/CancelCauseFunc origCancel]
+  ;; Historically, RoundTrip has not modified the Request in any way.
+  ;; We could avoid the need to keep a map of all in-flight requests by adding
+  ;; a field to the Request containing its cancel func, and setting that field
+  ;; while the request is in-flight. Callers aren't supposed to reuse a Request
+  ;; until after the response body is closed, so this wouldn't violate any
+  ;; concurrency guarantees.
+  (let [cancel ^{:go/end 1002} (fn [^error err]
+        (origCancel err)
+        (.Lock (.-reqMu t))
+        (delete (.-reqCanceler t) req)
+        (.Unlock (.-reqMu t)))]
+
+    (.Lock (.-reqMu t))
+    (when (== (.-reqCanceler t) nil)
+      (set! (.-reqCanceler t) (make (map (* Request) context/CancelCauseFunc))))
+
+    (aset (.-reqCanceler t) req cancel)
+    (.Unlock (.-reqMu t))
+    ^{:line 1009} cancel))
+
+
+
+
+
+
+
+
+^{:go/end 1025} (go/method CancelRequest "CancelRequest cancels an in-flight request by closing its connection.\nCancelRequest should only be called after [Transport.RoundTrip] has returned.\n\nDeprecated: Use [Request.WithContext] to create a request with a\ncancelable context instead. CancelRequest cannot cancel HTTP/2\nrequests. This may become a no-op in a future release of Go.\n" [^{:tag (* Transport)} t ^{:tag (* Request)} req]
+  (.Lock (.-reqMu t))
+  (let [cancel (aget (.-reqCanceler t) req)]
+    (.Unlock (.-reqMu t))
+    (when (!= cancel nil)
+      (cancel errRequestCanceled))))
+
+
+
+;;
+;; Private implementation past this point.
+;;
+
+(go/var
+  ^{:line 1032} [^sync/Once envProxyOnce]
+  ^{:line 1033} [^{:tag (func [(* url/URL)] [(* url/URL) error])} envProxyFuncValue])
+
+
+
+
+^{:go/end 1043} (go/func envProxyFunc "envProxyFunc returns a function that reads the\nenvironment variable to determine the proxy address.\n" ^{:tag (func [(* url/URL)] [(* url/URL) error])} []
+  (.Do envProxyOnce ^{:go/end 1041} (fn []
+      (set! envProxyFuncValue (.ProxyFunc (httpproxy/FromEnvironment)))))
+
+  ^{:line 1042} envProxyFuncValue)
+
+
+
+^{:go/end 1049} (go/func resetProxyConfig "resetProxyConfig is used by tests.\n" []
+  (set! envProxyOnce (lit sync/Once))
+  (set! envProxyFuncValue nil))
+
+
+^{:go/end 1059} (go/method connectMethodForRequest [^{:tag (* Transport)} t ^{:tag (* transportRequest)} treq] :results [^connectMethod cm ^error err]
+  (set! (.-targetScheme cm) (.-Scheme ^{:go/via [Request]} (.-URL treq)))
+  (set! (.-targetAddr cm) (canonicalAddr ^{:go/via [Request]} (.-URL treq)))
+  (when (!= (.-Proxy t) nil)
+    (set! (values (.-proxyURL cm) err) ((.-Proxy t) (.-Request treq))))
+
+  (set! (.-onlyH1 cm) ^{:go/via [Request]} (.requiresHTTP1 treq))
+  (return cm err))
+
+
+
+
+^{:go/breaks [[6 1072]] :go/end 1073} (go/method proxyAuth "proxyAuth returns the Proxy-Authorization header to set\non requests, if applicable.\n" ^string [^{:tag (* connectMethod)} cm]
+  (when (== (.-proxyURL cm) nil)
+    (return ""))
+
+  (when [u (.-User (.-proxyURL cm))] (!= u nil)
+    (let [username (.Username u)
+        (values password _) (.Password u)]
+      (return (+ "Basic " (basicAuth username password)))))
+
+  "")
+
+
+
+(go/var "error values for debugging and testing, not seen by users.\n"
+  ^{:line 1077} [errKeepAlivesDisabled (errors/New "http: putIdleConn: keep alives disabled")]
+  ^{:line 1078} [errConnBroken (errors/New "http: putIdleConn: connection is in bad state")]
+  ^{:line 1079} [errCloseIdle (errors/New "http: putIdleConn: CloseIdleConnections was called")]
+  ^{:line 1080} [errTooManyIdle (errors/New "http: putIdleConn: too many idle connections")]
+  ^{:line 1081} [errTooManyIdleHost (errors/New "http: putIdleConn: too many idle connections for host")]
+  ^{:line 1082} [errCloseIdleConns (errors/New "http: CloseIdleConnections called")]
+  ^{:line 1083} [errReadLoopExiting (errors/New "http: persistConn.readLoop exiting")]
+  ^{:line 1084} [errIdleConnTimeout (errors/New "http: idle connection timeout")]
+
+
+
+
+
+  ^{:line 1090} [^{:doc "errServerClosedIdle is not seen by users for idempotent requests, but may be\nseen by a user if the server shuts down an idle connection and sends its FIN\nin flight with already-written POST body bytes from the client.\nSee https://github.com/golang/go/issues/19943#issuecomment-355607646\n"} errServerClosedIdle (errors/New "http: server closed idle connection")])
+
+
+
+
+
+
+
+
+
+
+(go/type transportReadFromServerError "transportReadFromServerError is used by Transport.readLoop when the\n1 byte peek read fails and we're actually anticipating a response.\nUsually this is just due to the inherent keep-alive shut down race,\nwhere the server closed the connection at the same time the client\nwrote. The underlying err field is usually io.EOF or some\nECONNRESET sort of thing which varies by platform. But it might be\nthe user's custom net.Conn.Read error too, so we carry it along for\nthem to return from Transport.RoundTrip.\n" (struct
+    ^{:line 1102 :tag error} err))
+
+
+^{:go/end 1105} (go/method Unwrap ^error [^transportReadFromServerError e] (.-err e))
+
+^{:go/end 1109} (go/method Error ^string [^transportReadFromServerError e]
+  (fmt/Sprintf "net/http: Transport failed to read from server: %v" (.-err e)))
+
+
+^{:go/end 1115} (go/method putOrCloseIdleConn [^{:tag (* Transport)} t ^{:tag (* persistConn)} pconn]
+  (when [err (.tryPutIdleConn t pconn)] (!= err nil)
+    (.close pconn err)))
+
+
+
+^{:go/end 1122} (go/method maxIdleConnsPerHost ^int [^{:tag (* Transport)} t]
+  (when [v (.-MaxIdleConnsPerHost t)] (!= v 0)
+    (return v))
+
+  ^{:line 1121} DefaultMaxIdleConnsPerHost)
+
+
+
+
+
+
+
+^{:go/end 1236} (go/method tryPutIdleConn "tryPutIdleConn adds pconn to the list of idle persistent connections awaiting\na new request.\nIf pconn is no longer needed or not in a good state, tryPutIdleConn returns\nan error explaining why it wasn't registered.\ntryPutIdleConn does not close pconn. Use putOrCloseIdleConn instead for that.\n" ^error [^{:tag (* Transport)} t ^{:tag (* persistConn)} pconn]
+  (when (or (.-DisableKeepAlives t) (< (.-MaxIdleConnsPerHost t) 0))
+    (return errKeepAlivesDisabled))
+
+  (when (.isBroken pconn)
+    (return errConnBroken))
+
+  (.markReused pconn)
+  (when (.-isClientConn pconn)
+    ;; internalStateHook is always set for conns created by NewClientConn.
+    (defer ((.-internalStateHook pconn)))
+    (.Lock (.-mu pconn))
+    (defer (.Unlock (.-mu pconn)))
+    (when (not (.-inFlight pconn))
+      (panic "pconn is not in flight"))
+
+    (set! (.-inFlight pconn) false)
+    (select
+      (case (>! (.-availch pconn) (lit (struct))))
+      (default
+        (panic "unable to make pconn available")))
+
+    (return nil))
+
+
+  (.Lock (.-idleMu t))
+  (defer (.Unlock (.-idleMu t)))
+
+  ;; HTTP/2 (pconn.alt != nil) connections do not come out of the idle list,
+  ;; because multiple goroutines can use them simultaneously.
+  ;; If this is an HTTP/2 connection being “returned,” we're done.
+  (when (and (!= (.-alt pconn) nil) (!= (aget (.-m (.-idleLRU t)) pconn) nil))
+    (return nil))
+
+
+  ;; Deliver pconn to goroutine waiting for idle connection, if any.
+  ;; (They may be actively dialing, but this conn is ready first.
+  ;; Chrome calls this socket late binding.
+  ;; See https://www.chromium.org/developers/design-documents/network-stack#TOC-Connection-Management.)
+  (let [key (.-cacheKey pconn)]
+    (when [(values q ok) (aget (.-idleConnWait t) key)] ok
+      (let [done false]
+        (if (== (.-alt pconn) nil)
+          ;; HTTP/1.
+          ;; Loop over the waiting list until we find a w that isn't done already, and hand it pconn.
+          (while (> (.len q) 0)
+            (let [w (.popFront q)]
+              (when (.tryDeliver w pconn nil (lit time/Time))
+                (set! done true)
+                (break))))
+
+
+
+          ;; HTTP/2.
+          ;; Can hand the same pconn to everyone in the waiting list,
+          ;; and we still won't be done: we want to put it in the idle
+          ;; list unconditionally, for any future clients too.
+          (while (> (.len q) 0)
+            (let [w (.popFront q)]
+              (.tryDeliver w pconn nil (lit time/Time)))))
+
+
+        (if (== (.len q) 0)
+          (delete (.-idleConnWait t) key)
+
+          (aset (.-idleConnWait t) key q))
+
+        (when done
+          (return nil))))
+
+
+
+    (when (.-closeIdle t)
+      (return errCloseIdle))
+
+    (when (== (.-idleConn t) nil)
+      (set! (.-idleConn t) (make (map connectMethodKey (slice (* persistConn))))))
+
+    ^{:go/breaks [9]} (let [idles (aget (.-idleConn t) key)]
+      (when (>= (len idles) (.maxIdleConnsPerHost t))
+        (return errTooManyIdleHost))
+
+      (range [_ exist idles]
+        (when (== exist pconn)
+          (log/Fatalf "dup idle pconn %p in freelist" pconn)))
+
+
+      (aset (.-idleConn t) key (append idles pconn))
+      (.add (.-idleLRU t) pconn)
+      (when (and (!= (.-MaxIdleConns t) 0) (> (.len (.-idleLRU t)) (.-MaxIdleConns t)))
+        (let [oldest (.removeOldest (.-idleLRU t))]
+          (.close oldest errTooManyIdle)
+          (.removeIdleConnLocked t oldest)))
+
+
+      ;; Set idle timer, but only for HTTP/1 (pconn.alt == nil).
+      ;; The HTTP/2 implementation manages the idle timer itself
+      ;; (see idleConnTimeout in h2_bundle.go).
+      (when (and (> (.-IdleConnTimeout t) 0) (== (.-alt pconn) nil))
+        (if (!= (.-idleTimer pconn) nil)
+          (.Reset (.-idleTimer pconn) (.-IdleConnTimeout t))
+
+          (set! (.-idleTimer pconn) (time/AfterFunc (.-IdleConnTimeout t) (.-closeConnIfStillIdle pconn)))))
+
+
+      (set! (.-idleAt pconn) (time/Now))
+      nil)))
+
+
+
+
+
+^{:go/end 1325} (go/method queueForIdleConn "queueForIdleConn queues w to receive the next idle connection for w.cm.\nAs an optimization hint to the caller, queueForIdleConn reports whether\nit successfully delivered an already-idle connection.\n" [^{:tag (* Transport)} t ^{:tag (* wantConn)} w] :results [^bool delivered]
+  (when (.-DisableKeepAlives t)
+    (return false))
+
+
+  (.Lock (.-idleMu t))
+  (defer (.Unlock (.-idleMu t)))
+
+  ;; Stop closing connections that become idle - we might want one.
+  ;; (That is, undo the effect of t.CloseIdleConnections.)
+  (set! (.-closeIdle t) false)
+
+  (when (== w nil)
+    ;; Happens in test hook.
+    (return false))
+
+
+  ;; If IdleConnTimeout is set, calculate the oldest
+  ;; persistConn.idleAt time we're willing to use a cached idle
+  ;; conn.
+  (let [^time/Time oldTime (zero time/Time)]
+    (when (> (.-IdleConnTimeout t) 0)
+      (set! oldTime (.Add (time/Now) (- (.-IdleConnTimeout t)))))
+
+
+    ;; Look for most recently-used idle connection.
+    (when [(values list ok) (aget (.-idleConn t) (.-key w))] ok
+      (let [stop false
+          ^{:line 1269} delivered false]
+        (while (and (> (len list) 0) (not stop))
+          (let [pconn (aget list (- (len list) 1))
+
+              ;; See whether this connection has been idle too long, considering
+              ;; only the wall time (the Round(0)), in case this is a laptop or VM
+              ;; coming out of suspend with previously cached idle connections.
+              ^{:line 1276} tooOld (and (not (.IsZero oldTime)) (.Before (.Round (.-idleAt pconn) 0) oldTime))]
+            (when tooOld
+              ;; Async cleanup. Launch in its own goroutine (as if a
+              ;; time.AfterFunc called it); it acquires idleMu, which we're
+              ;; holding, and does a synchronous net.Conn.Close.
+              (go (.closeConnIfStillIdle pconn)))
+
+            (when (or (.isBroken pconn) tooOld)
+              ;; If either persistConn.readLoop has marked the connection
+              ;; broken, but Transport.removeIdleConn has not yet removed it
+              ;; from the idle list, or if this persistConn is too old (it was
+              ;; idle too long), then ignore it and look for another. In both
+              ;; cases it's already in the process of being closed.
+              (set! list (subslice list _ (- (len list) 1)))
+              (continue))
+
+            (set! delivered (.tryDeliver w pconn nil (.-idleAt pconn)))
+            (when delivered
+              (if (!= (.-alt pconn) nil) (do)
+                ;; HTTP/2: multiple clients can share pconn.
+                ;; Leave it in the list.
+                (do
+                  ;; HTTP/1: only one client can use pconn.
+                  ;; Remove it from the list.
+                  (.remove (.-idleLRU t) pconn)
+                  (set! list (subslice list _ (- (len list) 1))))))
+
+
+            (set! stop true)))
+
+        (if (> (len list) 0)
+          (aset (.-idleConn t) (.-key w) list)
+
+          (delete (.-idleConn t) (.-key w)))
+
+        (when stop
+          (return delivered))))
+
+
+
+    ;; Register to receive next connection that becomes idle.
+    (when (== (.-idleConnWait t) nil)
+      (set! (.-idleConnWait t) (make (map connectMethodKey wantConnQueue))))
+
+    ^{:go/breaks [5]} (let [q (aget (.-idleConnWait t) (.-key w))]
+      (.cleanFrontNotWaiting q)
+      (.pushBack q w)
+      (aset (.-idleConnWait t) (.-key w) q)
+      false)))
+
+
+
+^{:go/end 1335} (go/method removeIdleConn "removeIdleConn marks pconn as dead.\n" ^bool [^{:tag (* Transport)} t ^{:tag (* persistConn)} pconn]
+  (when (.-isClientConn pconn)
+    (return true))
+
+  (.Lock (.-idleMu t))
+  (defer (.Unlock (.-idleMu t)))
+  (.removeIdleConnLocked t pconn))
+
+
+
+^{:go/end 1368} (go/method removeIdleConnLocked "t.idleMu must be held.\n" ^bool [^{:tag (* Transport)} t ^{:tag (* persistConn)} pconn]
+  (when (!= (.-idleTimer pconn) nil)
+    (.Stop (.-idleTimer pconn)))
+
+  (.remove (.-idleLRU t) pconn)
+  (let [key (.-cacheKey pconn)
+      ^{:line 1344} pconns (aget (.-idleConn t) key)
+      ^{:line 1345 :tag bool} removed (zero bool)]
+    (switch (len pconns)
+      (case [0])
+      ;; Nothing
+      (case [1]
+        (when (== (aget pconns 0) pconn)
+          (delete (.-idleConn t) key)
+          (set! removed true)))
+
+      (default
+        (range [i v pconns]
+          (when (!= v pconn)
+            (continue))
+
+          ;; Slide down, keeping most recently-used
+          ;; conns at the end.
+          (copy (subslice pconns i) (subslice pconns (+ i 1)))
+          (aset (.-idleConn t) key (subslice pconns _ (- (len pconns) 1)))
+          (set! removed true)
+          (break))))
+
+
+    ^{:line 1367} removed))
+
+
+(go/var ^net/Dialer zeroDialer)
+
+^{:go/end 1388} (go/method dial [^{:tag (* Transport)} t ^context/Context ctx ^string network ^string addr] :results [net/Conn error]
+  (when (!= (.-DialContext t) nil)
+    (let [(values c err) ((.-DialContext t) ctx network addr)]
+      (when (and (== c nil) (== err nil))
+        (set! err (errors/New "net/http: Transport.DialContext hook returned (nil, nil)")))
+
+      (return c err)))
+
+  (when (!= (.-Dial t) nil)
+    (let [(values c err) ((.-Dial t) network addr)]
+      (when (and (== c nil) (== err nil))
+        (set! err (errors/New "net/http: Transport.Dial hook returned (nil, nil)")))
+
+      (return c err)))
+
+  (.DialContext zeroDialer ctx network addr))
+
+
+
+
+
+
+
+
+(go/type wantConn "A wantConn records state about a wanted connection\n(that is, an active call to getConn).\nThe conn may be gotten by dialing or by finding an idle connection,\nor a cancellation may make the conn no longer wanted.\nThese three options are racing against each other and use\nwantConn to coordinate and agree about the winning outcome.\n" (struct
+    ^{:line 1397 :tag connectMethod} cm
+    ^{:line 1398 :tag connectMethodKey} key ; cm.key()
+
+
+
+
+    ^{:line 1403 :tag (func []) :doc "hooks for testing to know when dials are done\nbeforeDial is called in the getConn goroutine when the dial is queued.\nafterDial is called when the dial is completed or canceled.\n"} beforeDial
+    ^{:line 1404 :tag (func [])} afterDial
+
+    ^{:line 1406 :tag sync/Mutex} mu ; protects ctx, done and sending of the result
+    ^{:line 1407 :tag context/Context} ctx ; context for dial, cleared after delivered or canceled
+    ^{:line 1408 :tag context/CancelFunc} cancelCtx
+    ^{:line 1409 :tag bool} done ; true after delivered or canceled
+    ^{:line 1410 :tag (chan connOrError)} result)) ; channel to deliver connection or error
+
+
+(go/type connOrError (struct
+    ^{:line 1414 :tag (* persistConn)} pc
+    ^{:line 1415 :tag error} err
+    ^{:line 1416 :tag time/Time} idleAt))
+
+
+
+^{:go/end 1425} (go/method waiting "waiting reports whether w is still waiting for an answer (connection or error).\n" ^bool [^{:tag (* wantConn)} w]
+  (.Lock (.-mu w))
+  (defer (.Unlock (.-mu w)))
+
+  (not (.-done w)))
+
+
+
+^{:go/end 1433} (go/method getCtxForDial "getCtxForDial returns context for dial or nil if connection was delivered or canceled.\n" ^context/Context [^{:tag (* wantConn)} w]
+  (.Lock (.-mu w))
+  (defer (.Unlock (.-mu w)))
+
+  (.-ctx w))
+
+
+
+^{:go/breaks [[12 1452]] :go/end 1453} (go/method tryDeliver "tryDeliver attempts to deliver pc, err to w and reports whether it succeeded.\n" ^bool [^{:tag (* wantConn)} w ^{:tag (* persistConn)} pc ^error err ^time/Time idleAt]
+  (.Lock (.-mu w))
+  (defer (.Unlock (.-mu w)))
+
+  (when (.-done w)
+    (return false))
+
+  (when (== (== pc nil) (== err nil))
+    (panic "net/http: internal error: misuse of tryDeliver"))
+
+  (set! (.-ctx w) nil)
+  (set! (.-done w) true)
+
+  (>! (.-result w) (lit connOrError :pc pc :err err :idleAt idleAt))
+  (close (.-result w))
+
+  true)
+
+
+
+
+^{:go/end 1477} (go/method cancel "cancel marks w as no longer wanting a result (for example, due to cancellation).\nIf a connection has been delivered already, cancel returns it with t.putOrCloseIdleConn.\n" [^{:tag (* wantConn)} w ^{:tag (* Transport)} t]
+  (.Lock (.-mu w))
+  (let [^{:tag (* persistConn)} pc (zero (* persistConn))]
+    (if (.-done w)
+      (when [(values r ok) (<! (.-result w))] ok
+        (set! pc (.-pc r)))
+
+
+      (close (.-result w)))
+
+    (set! (.-ctx w) nil)
+    (set! (.-done w) true)
+    (.Unlock (.-mu w))
+
+    ;; HTTP/2 connections (pc.alt != nil) aren't removed from the idle pool on use,
+    ;; and should not be added back here. If the pconn isn't in the idle pool,
+    ;; it's because we removed it due to an error.
+    (when (and (!= pc nil) (== (.-alt pc) nil))
+      (.putOrCloseIdleConn t pc))))
+
+
+
+
+(go/type wantConnQueue "A wantConnQueue is a queue of wantConns.\n" (struct
+
+
+
+
+
+
+
+
+
+
+    ^{:line 1491 :tag (slice (* wantConn)) :doc "This is a queue, not a deque.\nIt is split into two stages - head[headPos:] and tail.\npopFront is trivial (headPos++) on the first stage, and\npushBack is trivial (append) on the second stage.\nIf the first stage is empty, popFront can swap the\nfirst and second stages to remedy the situation.\n\nThis two-stage split is analogous to the use of two lists\nin Okasaki's purely functional queue but without the\noverhead of reversing the list when swapping stages.\n"} head
+    ^{:line 1492 :tag int} headPos
+    ^{:line 1493 :tag (slice (* wantConn))} tail))
+
+
+
+^{:go/end 1499} (go/method len "len returns the number of items in the queue.\n" ^int [^{:tag (* wantConnQueue)} q]
+  (+ (- (len (.-head q)) (.-headPos q)) (len (.-tail q))))
+
+
+
+^{:go/end 1504} (go/method pushBack "pushBack adds w to the back of the queue.\n" [^{:tag (* wantConnQueue)} q ^{:tag (* wantConn)} w]
+  (set! (.-tail q) (append (.-tail q) w)))
+
+
+
+^{:go/end 1519} (go/method popFront "popFront removes and returns the wantConn at the front of the queue.\n" ^{:tag (* wantConn)} [^{:tag (* wantConnQueue)} q]
+  (when (>= (.-headPos q) (len (.-head q)))
+    (when (== (len (.-tail q)) 0)
+      (return nil))
+
+    ;; Pick up tail as new head, clear tail.
+    (set! (values (.-head q) (.-headPos q) (.-tail q)) (values (.-tail q) 0 (subslice (.-head q) _ 0))))
+
+  (let [w (aget (.-head q) (.-headPos q))]
+    (aset (.-head q) (.-headPos q) nil)
+    (inc! (.-headPos q))
+    ^{:line 1518} w))
+
+
+
+^{:go/breaks [[6 1529]] :go/end 1530} (go/method peekFront "peekFront returns the wantConn at the front of the queue without removing it.\n" ^{:tag (* wantConn)} [^{:tag (* wantConnQueue)} q]
+  (when (< (.-headPos q) (len (.-head q)))
+    (return (aget (.-head q) (.-headPos q))))
+
+  (when (> (len (.-tail q)) 0)
+    (return (aget (.-tail q) 0)))
+
+  nil)
+
+
+
+
+^{:go/end 1543} (go/method cleanFrontNotWaiting "cleanFrontNotWaiting pops any wantConns that are no longer waiting from the head of the\nqueue, reporting whether any were popped.\n" [^{:tag (* wantConnQueue)} q] :results [^bool cleaned]
+  (while true
+    (let [w (.peekFront q)]
+      (when (or (== w nil) (.waiting w))
+        (return cleaned))
+
+      (.popFront q)
+      (set! cleaned true))))
+
+
+
+
+^{:go/end 1554} (go/method cleanFrontCanceled "cleanFrontCanceled pops any wantConns with canceled dials from the head of the queue.\n" [^{:tag (* wantConnQueue)} q]
+  (while true
+    (let [w (.peekFront q)]
+      (when (or (== w nil) (!= (.-cancelCtx w) nil))
+        (return))
+
+      (.popFront q))))
+
+
+
+
+
+^{:go/end 1565} (go/method all "all iterates over all wantConns in the queue.\nThe caller must not modify the queue while iterating.\n" [^{:tag (* wantConnQueue)} q ^{:tag (func [(* wantConn)])} f]
+  (range [_ w (subslice (.-head q) (.-headPos q))]
+    (f w))
+
+  (range [_ w (.-tail q)]
+    (f w)))
+
+
+
+^{:go/end 1577} (go/method customDialTLS [^{:tag (* Transport)} t ^context/Context ctx ^string network ^string addr] :results [^net/Conn conn ^error err]
+  (if (!= (.-DialTLSContext t) nil)
+    (set! (values conn err) ((.-DialTLSContext t) ctx network addr))
+
+    (set! (values conn err) ((.-DialTLS t) network addr)))
+
+  (when (and (== conn nil) (== err nil))
+    (set! err (errors/New "net/http: Transport.DialTLS or DialTLSContext returned (nil, nil)")))
+
+  (return))
+
+
+
+
+
+
+^{:go/end 1657} (go/method getConn "getConn dials and creates a new persistConn to the target as\nspecified in the connectMethod. This includes doing a proxy CONNECT\nand/or setting up TLS.  If this doesn't return an error, the persistConn\nis ready to write requests to.\n" [^{:tag (* Transport)} t ^{:tag (* transportRequest)} treq ^connectMethod cm] :results [^{:tag (* persistConn)} _ ^error err]
+  (let [req (.-Request treq)
+      ^{:line 1585} trace (.-trace treq)
+      ^{:line 1586} ctx (.Context req)]
+    (when (and (!= trace nil) (!= (.-GetConn trace) nil))
+      ((.-GetConn trace) (.addr cm)))
+
+
+    ;; Detach from the request context's cancellation signal.
+    ;; The dial should proceed even if the request is canceled,
+    ;; because a future request may be able to make use of the connection.
+    ;;
+    ;; We retain the request context's values.
+    (let [(values dialCtx dialCancel) (context/WithCancel (context/WithoutCancel ctx))
+
+        ^{:line 1598} w (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit wantConn
+            :cm cm
+            :key (.key cm)
+            :ctx dialCtx
+            :cancelCtx dialCancel
+            :result (make (chan connOrError) 1)
+            :beforeDial testHookPrePendingDial
+            :afterDial testHookPostPendingDial))]
+
+      (defer (^{:go/end 1611} (fn []
+            (when (!= err nil)
+              (.cancel w t)))))
+
+
+
+      ;; Queue for idle connection.
+      (when [delivered (.queueForIdleConn t w)] (not delivered)
+        (.queueForDial t w))
+
+
+      ;; Wait for completion or cancellation.
+      (select
+        (case [r (<! (.-result w))]
+          ;; Trace success but only for HTTP/1.
+          ;; HTTP/2 calls trace.GotConn itself.
+          (when (and (!= (.-pc r) nil) (== (.-alt (.-pc r)) nil) (!= trace nil) (!= (.-GotConn trace) nil))
+            (let [info ^{:go/breaks [2 4]} (lit httptrace/GotConnInfo
+                  :Conn (.-conn (.-pc r))
+                  :Reused (.isReused (.-pc r)))]
+
+              (when (not (.IsZero (.-idleAt r)))
+                (set! (.-WasIdle info) true)
+                (set! (.-IdleTime info) (time/Since (.-idleAt r))))
+
+              ((.-GotConn trace) info)))
+
+          (when (!= (.-err r) nil)
+            ;; If the request has been canceled, that's probably
+            ;; what caused r.err; if so, prefer to return the
+            ;; cancellation error (see golang.org/issue/16049).
+            (select
+              (case (<! (.Done (.-ctx treq)))
+                (let [err (context/Cause (.-ctx treq))]
+                  (when (== err errRequestCanceled)
+                    (set! err errRequestCanceledConn))
+
+                  (return nil err)))
+              (default)))
+          ;; return below
+
+
+          (return (.-pc r) (.-err r)))
+        (case (<! (.Done (.-ctx treq)))
+          (let [err (context/Cause (.-ctx treq))]
+            (when (== err errRequestCanceled)
+              (set! err errRequestCanceledConn))
+
+            (return nil err)))))))
+
+
+
+
+
+^{:go/end 1688} (go/method queueForDial "queueForDial queues w to wait for permission to begin dialing.\nOnce w receives permission to dial, it will do so in a separate goroutine.\n" [^{:tag (* Transport)} t ^{:tag (* wantConn)} w]
+  ((.-beforeDial w))
+
+  (.Lock (.-connsPerHostMu t))
+  (defer (.Unlock (.-connsPerHostMu t)))
+
+  (when (<= (.-MaxConnsPerHost t) 0)
+    (.startDialConnForLocked t w)
+    (return))
+
+
+  (when [n (aget (.-connsPerHost t) (.-key w))] (< n (.-MaxConnsPerHost t))
+    (when (== (.-connsPerHost t) nil)
+      (set! (.-connsPerHost t) (make (map connectMethodKey int))))
+
+    (aset (.-connsPerHost t) (.-key w) (+ n 1))
+    (.startDialConnForLocked t w)
+    (return))
+
+
+  (when (== (.-connsPerHostWait t) nil)
+    (set! (.-connsPerHostWait t) (make (map connectMethodKey wantConnQueue))))
+
+  (let [q (aget (.-connsPerHostWait t) (.-key w))]
+    (.cleanFrontNotWaiting q)
+    (.pushBack q w)
+    (aset (.-connsPerHostWait t) (.-key w) q)))
+
+
+
+
+^{:go/end 1701} (go/method startDialConnForLocked "startDialConnFor calls dialConn in a new goroutine.\nt.connsPerHostMu must be held.\n" [^{:tag (* Transport)} t ^{:tag (* wantConn)} w]
+  (.cleanFrontCanceled (.-dialsInProgress t))
+  (.pushBack (.-dialsInProgress t) w)
+  (go (^{:go/end 1700} (fn []
+        (.dialConnFor t w)
+        (.Lock (.-connsPerHostMu t))
+        (defer (.Unlock (.-connsPerHostMu t)))
+        (set! (.-cancelCtx w) nil)))))
+
+
+
+
+
+
+^{:go/end 1726} (go/method dialConnFor "dialConnFor dials on behalf of w and delivers the result to w.\ndialConnFor has received permission to dial w.cm and is counted in t.connCount[w.cm.key()].\nIf the dial is canceled or unsuccessful, dialConnFor decrements t.connCount[w.cm.key()].\n" [^{:tag (* Transport)} t ^{:tag (* wantConn)} w]
+  (defer ((.-afterDial w)))
+  (let [ctx (.getCtxForDial w)]
+    (when (== ctx nil)
+      (.decConnsPerHost t (.-key w))
+      (return))
+
+
+    (let [^:const ^{:val false} isClientConn false
+        (values pc err) (.dialConn t ctx (.-cm w) isClientConn nil)
+        ^{:line 1716} delivered (.tryDeliver w pc err (lit time/Time))]
+      (when (and (== err nil) ^:go/paren (or (not delivered) (!= (.-alt pc) nil)))
+        ;; pconn was not passed to w,
+        ;; or it is HTTP/2 and can be shared.
+        ;; Add to the idle connection pool.
+        (.putOrCloseIdleConn t pc))
+
+      (when (!= err nil)
+        (.decConnsPerHost t (.-key w))))))
+
+
+
+
+
+^{:go/end 1776} (go/method decConnsPerHost "decConnsPerHost decrements the per-host connection count for key,\nwhich may in turn give a different waiting goroutine permission to dial.\n" [^{:tag (* Transport)} t ^connectMethodKey key]
+  (when (<= (.-MaxConnsPerHost t) 0)
+    (return))
+
+
+  (.Lock (.-connsPerHostMu t))
+  (defer (.Unlock (.-connsPerHostMu t)))
+  (let [n (aget (.-connsPerHost t) key)]
+    (when (== n 0)
+      ;; Shouldn't happen, but if it does, the counting is buggy and could
+      ;; easily lead to a silent deadlock, so report the problem loudly.
+      (panic "net/http: internal error: connCount underflow"))
+
+
+    ;; Can we hand this count to a goroutine still waiting to dial?
+    ;; (Some goroutines on the wait list may have timed out or
+    ;; gotten a connection another way. If they're all gone,
+    ;; we don't want to kick off any spurious dial operations.)
+    (when [q (aget (.-connsPerHostWait t) key)] (> (.len q) 0)
+      (let [done false]
+        (while (> (.len q) 0)
+          (let [w (.popFront q)]
+            (when (.waiting w)
+              (.startDialConnForLocked t w)
+              (set! done true)
+              (break))))
+
+
+        (if (== (.len q) 0)
+          (delete (.-connsPerHostWait t) key)
+
+          ;; q is a value (like a slice), so we have to store
+          ;; the updated q back into the map.
+          (aset (.-connsPerHostWait t) key q))
+
+        (when done
+          (return))))
+
+
+
+    ;; Otherwise, decrement the recorded count.
+    (if [(dec! n)] (== n 0)
+      (delete (.-connsPerHost t) key)
+
+      (aset (.-connsPerHost t) key n))))
+
+
+
+
+
+
+^{:go/end 1828} (go/method addTLS "Add TLS to a persistent connection, i.e. negotiate a TLS session. If pconn is already a TLS\ntunnel, this function establishes a nested TLS session inside the encrypted channel.\nThe remote endpoint's name may be overridden by TLSClientConfig.ServerName.\n" ^error [^{:tag (* persistConn)} pconn ^context/Context ctx ^string name ^{:tag (* httptrace/ClientTrace)} trace]
+  ;; Initiate TLS and check remote host name against certificate.
+  (let [cfg (cloneTLSConfig (.-TLSClientConfig (.-t pconn)))]
+    (when (== (.-ServerName cfg) "")
+      (set! (.-ServerName cfg) name))
+
+    (when (.-onlyH1 (.-cacheKey pconn))
+      (set! (.-NextProtos cfg) nil))
+
+    (let [plainConn (.-conn pconn)
+        ^{:line 1791} tlsConn (tls/Client plainConn cfg)
+        ^{:line 1792} errc (make (chan error) 2)
+        ^{:line 1793 :tag (* time/Timer)} timer (zero (* time/Timer))] ; for canceling TLS handshake
+      (when [d (.-TLSHandshakeTimeout (.-t pconn))] (!= d 0)
+        (set! timer (time/AfterFunc d ^{:go/end 1797} (fn []
+              (>! errc (lit tlsHandshakeTimeoutError))))))
+
+
+      (go (^{:go/end 1808} (fn []
+            (when (and (!= trace nil) (!= (.-TLSHandshakeStart trace) nil))
+              ((.-TLSHandshakeStart trace)))
+
+            (let [err (.HandshakeContext tlsConn ctx)]
+              (when (!= timer nil)
+                (.Stop timer))
+
+              (>! errc err)))))
+
+      (when [err (<! errc)] (!= err nil)
+        (.Close plainConn)
+        (when (== err (lit tlsHandshakeTimeoutError))
+          ;; Now that we have closed the connection,
+          ;; wait for the call to HandshakeContext to return.
+          (<! errc))
+
+        (when (and (!= trace nil) (!= (.-TLSHandshakeDone trace) nil))
+          ((.-TLSHandshakeDone trace) (lit tls/ConnectionState) err))
+
+        (return err))
+
+      ^{:go/breaks [5]} (let [cs (.ConnectionState tlsConn)]
+        (when (and (!= trace nil) (!= (.-TLSHandshakeDone trace) nil))
+          ((.-TLSHandshakeDone trace) cs nil))
+
+        (set! (.-tlsState pconn) (addr cs))
+        (set! (.-conn pconn) tlsConn)
+        nil))))
+
+
+(go/type erringRoundTripper (interface
+    (RoundTripErr ^error [])))
+
+
+(go/var testHookProxyConnectTimeout context/WithTimeout)
+
+^{:go/end 2126} (go/method dialConn [^{:tag (* Transport)} t ^context/Context ctx ^connectMethod cm ^bool isClientConn ^{:tag (func [])} internalStateHook] :results [^{:tag (* persistConn)} pconn ^error err]
+  ;; TODO: actually support HTTP/3. Among other things:
+  ;; - make HTTP/3 play well with proxy.
+  ;; - implement happy eyeball between HTTP/3 and HTTP/1 & HTTP/2.
+  ;; - clean up the connection pooling logic.
+  (when [p (.protocols t)] (.http3 p)
+    (when (or (.HTTP1 p) (.HTTP2 p) (.UnencryptedHTTP2 p))
+      (return nil (errors/New "http: when using HTTP3, Transport.Protocols must contain only HTTP3")))
+
+    (when (== (.-h3Transport t) nil)
+      (return nil (errors/New "http: Transport.Protocols contains HTTP3, but Transport does not support HTTP/3")))
+
+    (let [(values rt err) (.DialClientConn (.-h3Transport t) ctx (.addr cm) (.-proxyURL cm) internalStateHook)]
+      (when (!= err nil)
+        (return nil err))
+
+      ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6]} (lit persistConn
+            :t t
+            :cacheKey (.key cm)
+            :alt rt))
+        nil)))
+
+
+  (set! pconn (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit persistConn
+        :t t
+        :cacheKey (.key cm)
+        :reqch (make (chan requestAndChan) 1)
+        :writech (make (chan writeRequest) 1)
+        :closech (make (chan (struct)))
+        :writeErrCh (make (chan error) 1)
+        :writeLoopDone (make (chan (struct)))
+        :isClientConn isClientConn
+        :internalStateHook internalStateHook)))
+
+  (let [trace (httptrace/ContextClientTrace ctx)
+      ^{:line 1871} wrapErr ^{:go/end 1877} (fn ^error [^error err]
+        (when (!= (.-proxyURL cm) nil)
+          ;; Return a typed error, per Issue 16997
+          (return (addr (lit net/OpError :Op "proxyconnect" :Net "tcp" :Err err))))
+
+        ^{:line 1876} err)]
+
+
+    (when [(values rt err) (.http2ExternalDial t ctx cm)] (!= err errors/ErrUnsupported)
+      (when (!= err nil)
+        (return nil err))
+
+      (return (addr (lit persistConn :t t :cacheKey (.-cacheKey pconn) :alt rt)) nil))
+
+
+    (if (and (== (.scheme cm) "https") (.hasCustomTLSDialer t))
+      (let [^error err (zero error)]
+        (set! (values (.-conn pconn) err) (.customDialTLS t ctx "tcp" (.addr cm)))
+        (when (!= err nil)
+          (return nil (wrapErr err)))
+
+        (let-type [connectionStater (interface
+              (ConnectionState ^tls/ConnectionState []))
+
+            ^{:line 1895} handshaker (interface
+              (HandshakeContext ^error [context/Context]))]
+
+          (when [(values cstater ok) (assert connectionStater (.-conn pconn))] ok
+            (when (and (!= trace nil) (!= (.-TLSHandshakeStart trace) nil))
+              ((.-TLSHandshakeStart trace)))
+
+            (when [(values handshaker ok) (assert handshaker cstater)] ok
+              ;; Handshake here, in case DialTLS didn't. TLSNextProto below
+              ;; depends on it for knowing the connection state.
+              (when [err (.HandshakeContext handshaker ctx)] (!= err nil)
+                (go (.Close (.-conn pconn)))
+                (when (and (!= trace nil) (!= (.-TLSHandshakeDone trace) nil))
+                  ((.-TLSHandshakeDone trace) (lit tls/ConnectionState) err))
+
+                (return nil err)))
+
+
+            (let [cs (.ConnectionState cstater)]
+              (when (and (!= trace nil) (!= (.-TLSHandshakeDone trace) nil))
+                ((.-TLSHandshakeDone trace) cs nil))
+
+              (set! (.-tlsState pconn) (addr cs))))))
+
+
+      (let [(values conn err) (.dial t ctx "tcp" (.addr cm))]
+        (when (!= err nil)
+          (return nil (wrapErr err)))
+
+        (set! (.-conn pconn) conn)
+        (when (== (.scheme cm) "https")
+          (let [^string firstTLSHost (zero string)]
+            (when [(set! (values firstTLSHost _ err) (net/SplitHostPort (.addr cm)))] (!= err nil)
+              (return nil (wrapErr err)))
+
+            (when [(set! err (.addTLS pconn ctx firstTLSHost trace))] (!= err nil)
+              (return nil (wrapErr err)))))))
+
+
+
+
+    ;; Proxy setup.
+    (switch
+      (case [(== (.-proxyURL cm) nil)])
+      ;; Do nothing. Not using a proxy.
+      (case [(or (== (.-Scheme (.-proxyURL cm)) "socks5") (== (.-Scheme (.-proxyURL cm)) "socks5h"))]
+        (let [conn (.-conn pconn)
+            ^{:line 1942} d (socksNewDialer "tcp" (.String (.RemoteAddr conn)))]
+          (when [u (.-User (.-proxyURL cm))] (!= u nil)
+            (let [auth (addr ^{:go/breaks [2]} (lit socksUsernamePassword
+                    :Username (.Username u)))]
+
+              (set! (values (.-Password auth) _) (.Password u))
+              (set! (.-AuthMethods d) (lit (slice socksAuthMethod)
+                  ^{:line 1949} socksAuthMethodNotRequired
+                  ^{:line 1950} socksAuthMethodUsernamePassword))
+
+              (set! (.-Authenticate d) (.-Authenticate auth))))
+
+          (when [(values _ err) (.DialWithConn d ctx conn "tcp" (.-targetAddr cm))] (!= err nil)
+            (.Close conn)
+            (return nil err))))
+
+      (case [(== (.-targetScheme cm) "http")]
+        (set! (.-isProxy pconn) true)
+        (when [pa (.proxyAuth cm)] (!= pa "")
+          (set! (.-mutateHeaderFunc pconn) ^{:go/end 1963} (fn [^Header h]
+              (.Set h "Proxy-Authorization" pa)))))
+
+
+      (case [(== (.-targetScheme cm) "https")]
+        (let [conn (.-conn pconn)
+            ^{:line 1967 :tag Header} hdr (zero Header)]
+          (if (!= (.-GetProxyConnectHeader t) nil)
+            (let [^error err (zero error)]
+              (set! (values hdr err) ((.-GetProxyConnectHeader t) ctx (.-proxyURL cm) (.-targetAddr cm)))
+              (when (!= err nil)
+                (.Close conn)
+                (return nil err)))
+
+
+            (set! hdr (.-ProxyConnectHeader t)))
+
+          (when (== hdr nil)
+            (set! hdr (make Header)))
+
+          (when [pa (.proxyAuth cm)] (!= pa "")
+            (set! hdr (.Clone hdr))
+            (.Set hdr "Proxy-Authorization" pa))
+
+          (let [connectReq (addr ^{:go/breaks [2 4 6 8]} (lit Request
+                  :Method "CONNECT"
+                  :URL (addr (lit url/URL :Opaque (.-targetAddr cm)))
+                  :Host (.-targetAddr cm)
+                  :Header hdr))
+
+
+              ;; Set a (long) timeout here to make sure we don't block forever
+              ;; and leak a goroutine if the connection stops replying after
+              ;; the TCP connect.
+              (values connectCtx cancel) (testHookProxyConnectTimeout ctx (* 1 time/Minute))]
+            (defer (cancel))
+
+            (let [didReadResponse (make (chan (struct))) ; closed after CONNECT write+read is done or fails
+
+                ^{:line 2000 :tag (* Response)} resp (zero (* Response))
+                ^{:line 2001 :tag error} err (zero error)] ; write or read error
+
+              ;; Write the CONNECT request & read the response.
+              (go (^{:go/end 2014} (fn []
+                    (defer (close didReadResponse))
+                    (set! err (.Write connectReq conn))
+                    (when (!= err nil)
+                      (return))
+
+                    ;; Okay to use and discard buffered reader here, because
+                    ;; TLS server will not speak until spoken to.
+                    (let [br (bufio/NewReader (addr (lit io/LimitedReader :R conn :N (.maxHeaderResponseSize t))))]
+                      (set! (values resp err) (ReadResponse br connectReq))))))
+
+              (select
+                (case (<! (.Done connectCtx))
+                  (.Close conn)
+                  (<! didReadResponse)
+                  (return nil (.Err connectCtx)))
+                (case (<! didReadResponse)))
+              ;; resp or err now set
+
+              (when (!= err nil)
+                (.Close conn)
+                (return nil err))
+
+
+              (when (!= (.-OnProxyConnectResponse t) nil)
+                (set! err ((.-OnProxyConnectResponse t) ctx (.-proxyURL cm) connectReq resp))
+                (when (!= err nil)
+                  (.Close conn)
+                  (return nil err)))
+
+
+
+              (when (!= (.-StatusCode resp) 200)
+                (let [(values _ text ok) (strings/Cut (.-Status resp) " ")]
+                  (.Close conn)
+                  (when (not ok)
+                    (return nil (errors/New "unknown status code")))
+
+                  (return nil (errors/New text)))))))))
+
+
+
+    (when (and (!= (.-proxyURL cm) nil) (== (.-targetScheme cm) "https"))
+      (when [err (.addTLS pconn ctx (.tlsHost cm) trace)] (!= err nil)
+        (return nil err)))
+
+
+
+    ;; Possible unencrypted HTTP/2 with prior knowledge.
+    (let [unencryptedHTTP2 (and (== (.-tlsState pconn) nil)
+          (!= (.-Protocols t) nil)
+          (.UnencryptedHTTP2 (.-Protocols t))
+          (not (.HTTP1 (.-Protocols t))))
+
+        ^{:line 2058} http2 (or unencryptedHTTP2
+          ^:go/paren (and (!= (.-tlsState pconn) nil) (== (.-NegotiatedProtocol (.-tlsState pconn)) "h2")))]
+
+      (when (and http2 (!= (.-h2Transport t) nil))
+        (if isClientConn
+          (let [(values cc err) (.http2NewClientConn t (.-conn pconn) internalStateHook)]
+            (when (== err nil)
+              (return (addr (lit persistConn :t t :cacheKey (.-cacheKey pconn) :alt cc :isClientConn true)) nil))
+
+            (when (!= err errors/ErrUnsupported)
+              (return nil err)))
+
+
+          (let [(values rt err) (.http2AddConn t (.-targetScheme cm) (.-targetAddr cm) (.-conn pconn))]
+            (when (== err nil)
+              (return (addr (lit persistConn :t t :cacheKey (.-cacheKey pconn) :alt rt)) nil))
+
+            (when (!= err errors/ErrUnsupported)
+              (return nil err)))))
+
+
+
+
+      (when (and isClientConn ^:go/paren (or unencryptedHTTP2 ^:go/paren (and (!= (.-tlsState pconn) nil) (== (.-NegotiatedProtocol (.-tlsState pconn)) "h2"))))
+        (let [(values altProto _) (assert (map string RoundTripper) (.Load (.-altProto t)))
+            (values h2 ok) (assert newClientConner (aget altProto "https"))]
+          (when (not ok)
+            (return nil (errors/New "http: HTTP/2 implementation does not support NewClientConn (update golang.org/x/net?)")))
+
+          (let [(values alt err) (.NewClientConn h2 (.-conn pconn) internalStateHook)]
+            (when (!= err nil)
+              (.Close (.-conn pconn))
+              (return nil err))
+
+            (return (addr (lit persistConn :t t :cacheKey (.-cacheKey pconn) :alt alt :isClientConn true)) nil))))
+
+
+      (when unencryptedHTTP2
+        (let [(values next ok) (aget (.-TLSNextProto t) nextProtoUnencryptedHTTP2)]
+          (when (not ok)
+            (return nil (errors/New "http: Transport does not support unencrypted HTTP/2")))
+
+          (let [alt (next (.-targetAddr cm) (unencryptedTLSConn (.-conn pconn)))]
+            (when [(values e ok) (assert erringRoundTripper alt)] ok
+              ;; pconn.conn was closed by next (http2configureTransports.upgradeFn).
+              (return nil (.RoundTripErr e)))
+
+            (return (addr (lit persistConn :t t :cacheKey (.-cacheKey pconn) :alt alt)) nil))))
+
+
+      (when [s (.-tlsState pconn)] (and (!= s nil) (.-NegotiatedProtocolIsMutual s) (!= (.-NegotiatedProtocol s) ""))
+        (let [(values tlsConn tlsConnOK) (assert (* tls/Conn) (.-conn pconn))]
+          (when [(values next ok) (aget (.-TLSNextProto t) (.-NegotiatedProtocol s))] (and tlsConnOK ok)
+            (let [alt (next (.-targetAddr cm) tlsConn)]
+              (when [(values e ok) (assert erringRoundTripper alt)] ok
+                ;; pconn.conn was closed by next (http2configureTransports.upgradeFn).
+                (return nil (.RoundTripErr e)))
+
+              (return (addr (lit persistConn :t t :cacheKey (.-cacheKey pconn) :alt alt)) nil)))))
+
+
+
+      (set! (.-br pconn) (bufio/NewReaderSize pconn (.readBufferSize t)))
+      (set! (.-bw pconn) (bufio/NewWriterSize (lit persistConnWriter pconn) (.writeBufferSize t)))
+
+      (go (.readLoop pconn))
+      (go (.writeLoop pconn))
+      (return pconn nil))))
+
+
+
+
+
+
+
+
+(go/type persistConnWriter "persistConnWriter is the io.Writer written to by pc.bw.\nIt accumulates the number of bytes written to the underlying conn,\nso the retry logic can determine whether any bytes made it across\nthe wire.\nThis is exactly 1 pointer field wide so it can go into an interface\nwithout allocation.\n" (struct
+    ^{:line 2135 :tag (* persistConn)} pc))
+
+
+^{:go/end 2142} (go/method Write [^persistConnWriter w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (set! (values n err) (.Write (.-conn (.-pc w)) p))
+  (set! (.-nwrite (.-pc w)) + (conv int64 n))
+  (return))
+
+
+
+
+
+^{:go/end 2151} (go/method ReadFrom "ReadFrom exposes persistConnWriter's underlying Conn to io.Copy and if\nthe Conn implements io.ReaderFrom, it can take advantage of optimizations\nsuch as sendfile.\n" [^persistConnWriter w ^io/Reader r] :results [^int64 n ^error err]
+  (set! (values n err) (io/Copy (.-conn (.-pc w)) r))
+  (set! (.-nwrite (.-pc w)) + n)
+  (return))
+
+
+(go/var ^io/ReaderFrom _ (conv (* persistConnWriter) nil))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type connectMethod "connectMethod is the map key (in its String form) for keeping persistent\nTCP connections alive for subsequent HTTP requests.\n\nA connect method may be of the following types:\n\n\tconnectMethod.key().String()      Description\n\t------------------------------    -------------------------\n\t|http|foo.com                     http directly to server, no proxy\n\t|https|foo.com                    https directly to server, no proxy\n\t|https,h1|foo.com                 https directly to server w/o HTTP/2, no proxy\n\thttp://proxy.com|https|foo.com    http to proxy, then CONNECT to foo.com\n\thttp://proxy.com|http             http to proxy, http to anywhere after that\n\tsocks5://proxy.com|http|foo.com   socks5 to proxy, then http to foo.com\n\tsocks5://proxy.com|https|foo.com  socks5 to proxy, then https to foo.com\n\thttps://proxy.com|https|foo.com   https to proxy, then CONNECT to foo.com\n\thttps://proxy.com|http            https to proxy, http to anywhere after that\n" (struct
+    ^{:line 2172 :tag incomparable} _
+    ^{:line 2173 :tag (* url/URL)} proxyURL ; nil for no proxy, else full proxy URL
+    ^{:line 2174 :tag string} targetScheme ; "http" or "https"
+
+
+
+    ^{:line 2178 :tag string :doc "If proxyURL specifies an http or https proxy, and targetScheme is http (not https),\nthen targetAddr is not included in the connect method key, because the socket can\nbe reused for different targetAddr values.\n"} targetAddr
+    ^{:line 2179 :tag bool} onlyH1)) ; whether to disable HTTP/2 and force HTTP/1
+
+
+^{:go/end 2197} (go/method key ^connectMethodKey [^{:tag (* connectMethod)} cm]
+  (let [proxyStr ""
+      ^{:line 2184} targetAddr (.-targetAddr cm)]
+    (when (!= (.-proxyURL cm) nil)
+      (set! proxyStr (.String (.-proxyURL cm)))
+      (when (and ^:go/paren (or (== (.-Scheme (.-proxyURL cm)) "http") (== (.-Scheme (.-proxyURL cm)) "https")) (== (.-targetScheme cm) "http"))
+        (set! targetAddr "")))
+
+
+    ^{:go/breaks [2 4 6 8]} (lit connectMethodKey
+      :proxy proxyStr
+      :scheme (.-targetScheme cm)
+      :addr targetAddr
+      :onlyH1 (.-onlyH1 cm))))
+
+
+
+
+^{:go/end 2205} (go/method scheme "scheme returns the first hop scheme: http, https, or socks5\n" ^string [^{:tag (* connectMethod)} cm]
+  (when (!= (.-proxyURL cm) nil)
+    (return (.-Scheme (.-proxyURL cm))))
+
+  (.-targetScheme cm))
+
+
+
+^{:go/end 2213} (go/method addr "addr returns the first hop \"host:port\" to which we need to TCP connect.\n" ^string [^{:tag (* connectMethod)} cm]
+  (when (!= (.-proxyURL cm) nil)
+    (return (canonicalAddr (.-proxyURL cm))))
+
+  (.-targetAddr cm))
+
+
+
+
+^{:go/end 2220} (go/method tlsHost "tlsHost returns the host name to match against the peer's\nTLS certificate.\n" ^string [^{:tag (* connectMethod)} cm]
+  (let [h (.-targetAddr cm)]
+    (removePort h)))
+
+
+
+
+
+(go/type connectMethodKey "connectMethodKey is the map key version of connectMethod, with a\nstringified proxy URL (or the empty string) instead of a pointer to\na URL.\n" (struct
+    ^{:line 2226 :tag string} proxy ^string scheme ^string addr
+    ^{:line 2227 :tag bool} onlyH1))
+
+
+^{:go/end 2237} (go/method String ^string [^connectMethodKey k]
+  ;; Only used by tests.
+  (let [^string h1 (zero string)]
+    (when (.-onlyH1 k)
+      (set! h1 ",h1"))
+
+    (fmt/Sprintf "%s|%s%s|%s" (.-proxy k) (.-scheme k) h1 (.-addr k))))
+
+
+
+
+(go/type persistConn "persistConn wraps a connection, usually a persistent one\n(but may be used for non-keep-alive requests as well)\n" (struct
+
+
+
+    ^{:line 2245 :tag RoundTripper :doc "alt optionally specifies the TLS NextProto RoundTripper.\nThis is used for HTTP/2 today and future protocols later.\nIf it's non-nil, the rest of the fields are unused.\n"} alt
+
+    ^{:line 2247 :tag (* Transport)} t
+    ^{:line 2248 :tag connectMethodKey} cacheKey
+    ^{:line 2249 :tag net/Conn} conn
+    ^{:line 2250 :tag (* tls/ConnectionState)} tlsState
+    ^{:line 2251 :tag (* bufio/Reader)} br ; from conn
+    ^{:line 2252 :tag (* bufio/Writer)} bw ; to conn
+    ^{:line 2253 :tag int64} nwrite ; bytes written
+    ^{:line 2254 :tag (chan requestAndChan)} reqch ; written by roundTrip; read by readLoop
+    ^{:line 2255 :tag (chan writeRequest)} writech ; written by roundTrip; read by writeLoop
+    ^{:line 2256 :tag (chan (struct))} closech ; closed when conn closed
+    ^{:line 2257 :tag (chan (struct))} availch ; ClientConn only: contains a value when conn is usable
+    ^{:line 2258 :tag bool} isProxy
+    ^{:line 2259 :tag bool} sawEOF ; whether we've seen EOF from conn; owned by readLoop
+    ^{:line 2260 :tag bool} isClientConn ; whether this is a ClientConn (outside any pool)
+    ^{:line 2261 :tag int64} readLimit ; bytes allowed to be read; owned by readLoop
+
+
+
+
+    ^{:line 2266 :tag (chan error) :doc "writeErrCh passes the request write error (usually nil)\nfrom the writeLoop goroutine to the readLoop which passes\nit off to the res.Body reader, which then uses it to decide\nwhether or not a connection can be reused. Issue 7569.\n"} writeErrCh
+
+    ^{:line 2268 :tag (chan (struct))} writeLoopDone ; closed when write loop ends
+
+
+    ^{:line 2271 :tag time/Time :doc "Both guarded by Transport.idleMu:\n"} idleAt ; time it last become idle
+    ^{:line 2272 :tag (* time/Timer)} idleTimer ; holding an AfterFunc to close it
+
+    ^{:line 2274 :tag sync/Mutex} mu ; guards following fields
+    ^{:line 2275 :tag int} numExpectedResponses
+    ^{:line 2276 :tag error} closed ; set non-nil when conn is closed, before closech is closed
+    ^{:line 2277 :tag error} canceledErr ; set non-nil if conn is canceled
+    ^{:line 2278 :tag bool} reused ; whether conn has had successful request/response and is being reused.
+    ^{:line 2279 :tag bool} reserved ; ClientConn only: concurrency slot reserved
+    ^{:line 2280 :tag bool} inFlight ; ClientConn only: request is in flight
+    ^{:line 2281 :tag (func [])} internalStateHook ; ClientConn state hook
+
+
+
+
+    ^{:line 2286 :tag (func [Header]) :doc "mutateHeaderFunc is an optional func to modify extra\nheaders on each outbound request before it's written. (the\noriginal Request given to RoundTrip is not modified)\n"} mutateHeaderFunc))
+
+
+^{:go/end 2291} (go/method maxHeaderResponseSize ^int64 [^{:tag (* persistConn)} pc]
+  (.maxHeaderResponseSize (.-t pc)))
+
+
+^{:go/end 2306} (go/method Read [^{:tag (* persistConn)} pc ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (<= (.-readLimit pc) 0)
+    (return 0 (fmt/Errorf "read limit of %d bytes exhausted" (.maxHeaderResponseSize pc))))
+
+  (when (> (conv int64 (len p)) (.-readLimit pc))
+    (set! p (subslice p _ (.-readLimit pc))))
+
+  (set! (values n err) (.Read (.-conn pc) p))
+  (when (== err io/EOF)
+    (set! (.-sawEOF pc) true))
+
+  (set! (.-readLimit pc) - (conv int64 n))
+  (return))
+
+
+
+^{:go/end 2314} (go/method isBroken "isBroken reports whether this connection is in a known broken state.\n" ^bool [^{:tag (* persistConn)} pc]
+  (.Lock (.-mu pc))
+  (let [b (!= (.-closed pc) nil)]
+    (.Unlock (.-mu pc))
+    ^{:line 2313} b))
+
+
+
+
+^{:go/end 2322} (go/method canceled "canceled returns non-nil if the connection was closed due to\nCancelRequest or due to context cancellation.\n" ^error [^{:tag (* persistConn)} pc]
+  (.Lock (.-mu pc))
+  (defer (.Unlock (.-mu pc)))
+  (.-canceledErr pc))
+
+
+
+^{:go/end 2330} (go/method isReused "isReused reports whether this connection has been used before.\n" ^bool [^{:tag (* persistConn)} pc]
+  (.Lock (.-mu pc))
+  (let [r (.-reused pc)]
+    (.Unlock (.-mu pc))
+    ^{:line 2329} r))
+
+
+^{:go/end 2337} (go/method cancelRequest [^{:tag (* persistConn)} pc ^error err]
+  (.Lock (.-mu pc))
+  (defer (.Unlock (.-mu pc)))
+  (set! (.-canceledErr pc) err)
+  (.closeLocked pc errRequestCanceled))
+
+
+
+
+
+^{:go/end 2352} (go/method closeConnIfStillIdle "closeConnIfStillIdle closes the connection if it's still sitting idle.\nThis is what's called by the persistConn's idleTimer, and is run in its\nown goroutine.\n" [^{:tag (* persistConn)} pc]
+  (let [t (.-t pc)]
+    (.Lock (.-idleMu t))
+    (defer (.Unlock (.-idleMu t)))
+    (when [(values _ ok) (aget (.-m (.-idleLRU t)) pc)] (not ok)
+      ;; Not idle.
+      (return))
+
+    (.removeIdleConnLocked t pc)
+    (.close pc errIdleConnTimeout)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2410} (go/method mapRoundTripError "mapRoundTripError returns the appropriate error value for\npersistConn.roundTrip.\n\nThe provided err is the first error that (*persistConn).roundTrip\nhappened to receive from its select statement.\n\nThe startBytesWritten value should be the value of pc.nwrite before the roundTrip\nstarted writing the request.\n" ^error [^{:tag (* persistConn)} pc ^{:tag (* transportRequest)} req ^int64 startBytesWritten ^error err]
+  (when (== err nil)
+    (return nil))
+
+
+  ;; Wait for the writeLoop goroutine to terminate to avoid data
+  ;; races on callers who mutate the request on failure.
+  ;;
+  ;; When resc in pc.roundTrip and hence rc.ch receives a responseAndError
+  ;; with a non-nil error it implies that the persistConn is either closed
+  ;; or closing. Waiting on pc.writeLoopDone is hence safe as all callers
+  ;; close closech which in turn ensures writeLoop returns.
+  (<! (.-writeLoopDone pc))
+
+  ;; If the request was canceled, that's better than network
+  ;; failures that were likely the result of tearing down the
+  ;; connection.
+  (when [cerr (.canceled pc)] (!= cerr nil)
+    (return cerr))
+
+
+  ;; See if an error was set explicitly.
+  (.Lock (.-mu req))
+  (let [reqErr (.-err req)]
+    (.Unlock (.-mu req))
+    (when (!= reqErr nil)
+      (return reqErr))
+
+
+    (when (== err errServerClosedIdle)
+      ;; Don't decorate
+      (return err))
+
+
+    (when [(values _ ok) (assert transportReadFromServerError err)] ok
+      (when (== (.-nwrite pc) startBytesWritten)
+        (return (lit nothingWrittenError err)))
+
+      ;; Don't decorate
+      (return err))
+
+    (when (.isBroken pc)
+      (when (== (.-nwrite pc) startBytesWritten)
+        (return (lit nothingWrittenError err)))
+
+      (return (fmt/Errorf "net/http: HTTP/1.x transport connection broken: %w" err)))
+
+    ^{:line 2409} err))
+
+
+
+
+
+(go/var ^{:doc "errCallerOwnsConn is an internal sentinel error used when we hand\noff a writable response.Body to the caller. We use this to prevent\nclosing a net.Conn that is now owned by the caller.\n"} errCallerOwnsConn (errors/New "read loop ending; caller owns writable underlying conn"))
+
+
+
+
+(go/const ^{:val 262144 :doc "maxPostCloseReadBytes is the max number of bytes that a client is willing to\nread when draining the response body of any unread bytes after it has been\nclosed. This number is chosen for consistency with maxPostHandlerReadBytes.\n"} maxPostCloseReadBytes (<< 256 10))
+
+
+
+
+(go/const ^{:val 50000000 :doc "maxPostCloseReadTime defines the maximum amount of time that a client is\nwilling to spend on draining a response body of any unread bytes after it\nhas been closed.\n"} maxPostCloseReadTime (* 50 time/Millisecond))
+
+^{:go/end 2442} (go/func maybeDrainBody ^bool [^io/Reader body]
+  (let [drainedCh (make (chan bool) 1)]
+    (go (^{:go/end 2435} (fn []
+          (if [(values _ err) (io/CopyN io/Discard body (+ maxPostCloseReadBytes 1))] (== err io/EOF)
+            (>! drainedCh true)
+
+            (>! drainedCh false)))))
+
+
+    (select
+      (case [drained (<! drainedCh)]
+        (return drained))
+      (case (<! (time/After maxPostCloseReadTime))
+        (return false)))))
+
+
+
+^{:go/end 2628} (go/method readLoop [^{:tag (* persistConn)} pc]
+  (let [closeErr errReadLoopExiting] ; default value, if not changed below
+    (defer (^{:go/end 2452} (fn []
+          (.close pc closeErr)
+          (.removeIdleConn (.-t pc) pc)
+          (when (!= (.-internalStateHook pc) nil)
+            ((.-internalStateHook pc))))))
+
+
+
+    (let [tryPutIdleConn ^{:go/end 2467} (fn ^bool [^{:tag (* transportRequest)} treq]
+          ^{:go/breaks [[4 2466]]} (let [trace (.-trace treq)]
+            (when [err (.tryPutIdleConn (.-t pc) pc)] (!= err nil)
+              (set! closeErr err)
+              (when (and (!= trace nil) (!= (.-PutIdleConn trace) nil) (!= err errKeepAlivesDisabled))
+                ((.-PutIdleConn trace) err))
+
+              (return false))
+
+            (when (and (!= trace nil) (!= (.-PutIdleConn trace) nil))
+              ((.-PutIdleConn trace) nil))
+
+            true))
+
+
+        ;; eofc is used to block caller goroutines reading from Response.Body
+        ;; at EOF until this goroutines has (potentially) added the connection
+        ;; back to the idle pool.
+        ^{:line 2472} eofc (make (chan (struct)))]
+      (defer (close eofc)) ; unblock reader on errors
+
+      ;; Read this once, before loop starts. (to avoid races in tests)
+      (.Lock testHookMu)
+      (let [testHookReadLoopBeforeNextRead testHookReadLoopBeforeNextRead]
+        (.Unlock testHookMu)
+
+        (let [alive true]
+          (while alive
+            (set! (.-readLimit pc) (.maxHeaderResponseSize pc))
+            (let [(values _ err) (.Peek (.-br pc) 1)]
+
+              (.Lock (.-mu pc))
+              (when (== (.-numExpectedResponses pc) 0)
+                (.readLoopPeekFailLocked pc err)
+                (.Unlock (.-mu pc))
+                (return))
+
+              (.Unlock (.-mu pc))
+
+              (let [rc (<! (.-reqch pc))
+                  ^{:line 2494} trace (.-trace (.-treq rc))
+
+                  ^{:line 2496 :tag (* Response)} resp (zero (* Response))]
+                (if (== err nil)
+                  (set! (values resp err) (.readResponse pc rc trace))
+                  (do
+                    (set! err (lit transportReadFromServerError err))
+                    (set! closeErr err)))
+
+
+                (when (!= err nil)
+                  (when (<= (.-readLimit pc) 0)
+                    (set! err (fmt/Errorf "net/http: server response headers exceeded %d bytes; aborted" (.maxHeaderResponseSize pc))))
+
+
+                  (select
+                    (case (>! (.-ch rc) (lit responseAndError :err err)))
+                    (case (<! (.-callerGone rc))
+                      (return)))
+
+                  (return))
+
+                (set! (.-readLimit pc) maxInt64) ; effectively no limit for response bodies
+
+                (.Lock (.-mu pc))
+                (dec! (.-numExpectedResponses pc))
+                (.Unlock (.-mu pc))
+
+                (let [bodyWritable (.bodyIsWritable resp)
+                    ^{:line 2523} hasBody (and (!= (.-Method (.-Request (.-treq rc))) "HEAD") (!= (.-ContentLength resp) 0))]
+
+                  (when (or (.-Close resp) (.-Close (.-Request (.-treq rc))) (<= (.-StatusCode resp) 199) bodyWritable)
+                    ;; Don't do keep-alive on error if either party requested a close
+                    ;; or we get an unexpected informational (1xx) response.
+                    ;; StatusCode 100 is already handled above.
+                    (set! alive false))
+
+
+                  (when (or (not hasBody) bodyWritable)
+                    ;; Put the idle conn back into the pool before we send the response
+                    ;; so if they process it quickly and make another request, they'll
+                    ;; get this same conn. But we use the unbuffered channel 'rc'
+                    ;; to guarantee that persistConn.roundTrip got out of its select
+                    ;; potentially waiting for this persistConn to close.
+                    (set! alive (and alive
+                        (not (.-sawEOF pc))
+                        (.wroteRequest pc)
+                        (tryPutIdleConn (.-treq rc))))
+
+                    (when bodyWritable
+                      (set! closeErr errCallerOwnsConn))
+
+
+                    (select
+                      (case (>! (.-ch rc) (lit responseAndError :res resp)))
+                      (case (<! (.-callerGone rc))
+                        (return)))
+
+
+                    ((.-cancel (.-treq rc)) errRequestDone)
+
+                    ;; Now that they've read from the unbuffered channel, they're safely
+                    ;; out of the select that also waits on this goroutine to die, so
+                    ;; we're allowed to exit now if needed (if alive is false)
+                    (testHookReadLoopBeforeNextRead)
+                    (continue))
+
+
+                  (let [waitForBodyRead (make (chan bool) 2)
+                      ^{:line 2563} body (addr ^{:go/breaks [2 4 [6 2571]]} (lit bodyEOFSignal
+                          :body (.-Body resp)
+                          :earlyCloseFn ^{:go/breaks [4] :go/end 2570} (fn ^error []
+                            (>! waitForBodyRead false)
+                            (<! eofc) ; will be closed by deferred call at the end of the function
+                            nil)
+
+
+                          :fn ^{:go/end 2582} (fn ^error [^error err]
+                            (let [isEOF (== err io/EOF)]
+                              (>! waitForBodyRead isEOF)
+                              (cond isEOF
+                                (<! eofc) ; see comment above eofc declaration
+                                (!= err nil)
+                                (when [cerr (.canceled pc)] (!= cerr nil)
+                                  (return cerr)))
+
+
+                              ^{:line 2581} err))))]
+
+
+
+                    (set! (.-Body resp) body)
+                    (when (and (.-addedGzip rc) (ascii/EqualFold (.Get (.-Header resp) "Content-Encoding") "gzip"))
+                      (set! (.-Body resp) (addr (lit gzipReader :body body)))
+                      (.Del (.-Header resp) "Content-Encoding")
+                      (.Del (.-Header resp) "Content-Length")
+                      (set! (.-ContentLength resp) -1)
+                      (set! (.-Uncompressed resp) true))
+
+
+                    (select
+                      (case (>! (.-ch rc) (lit responseAndError :res resp)))
+                      (case (<! (.-callerGone rc))
+                        (return)))
+
+
+                    ;; Before looping back to the top of this function and peeking on
+                    ;; the bufio.Reader, wait for the caller goroutine to finish
+                    ;; reading the response body. (or for cancellation or death)
+                    (select
+                      (case [bodyEOF (<! waitForBodyRead)]
+                        (let [tryDrain (and (not bodyEOF) (<= (.-ContentLength resp) maxPostCloseReadBytes))]
+                          (when tryDrain
+                            (>! eofc (lit (struct)))
+                            (set! bodyEOF (maybeDrainBody (.-body body))))
+
+                          (set! alive (and alive
+                              ^{:line 2611} bodyEOF
+                              (not (.-sawEOF pc))
+                              (.wroteRequest pc)
+                              (tryPutIdleConn (.-treq rc))))
+                          (when (and (not tryDrain) bodyEOF)
+                            (>! eofc (lit (struct))))))
+
+                      (case (<! (.Done (.-ctx (.-treq rc))))
+                        (set! alive false)
+                        (.cancelRequest pc (context/Cause (.-ctx (.-treq rc)))))
+                      (case (<! (.-closech pc))
+                        (set! alive false)))
+
+
+                    ((.-cancel (.-treq rc)) errRequestDone)
+                    (testHookReadLoopBeforeNextRead)))))))))))
+
+
+
+^{:go/end 2649} (go/method readLoopPeekFailLocked [^{:tag (* persistConn)} pc ^error peekErr]
+  (when (!= (.-closed pc) nil)
+    (return))
+
+  (when [n (.Buffered (.-br pc))] (> n 0)
+    (let [(values buf _) (.Peek (.-br pc) n)]
+      (if (is408Message buf) (do
+          (.closeLocked pc errServerClosedIdle)
+          (return))
+
+        (log/Printf "Unsolicited response received on idle HTTP channel starting with %q; err=%v" buf peekErr))))
+
+
+  (if (== peekErr io/EOF)
+    ;; common case.
+    (.closeLocked pc errServerClosedIdle)
+
+    (.closeLocked pc (fmt/Errorf "readLoopPeekFailLocked: %w" peekErr))))
+
+
+
+
+
+
+^{:go/end 2662} (go/func is408Message "is408Message reports whether buf has the prefix of an\nHTTP 408 Request Timeout response.\nSee golang.org/issue/32310.\n" ^bool [^{:tag (slice byte)} buf]
+  (when (< (len buf) (len "HTTP/1.x 408"))
+    (return false))
+
+  (when (!= (conv string (subslice buf _ 7)) "HTTP/1.")
+    (return false))
+
+  (== (conv string (subslice buf 8 12)) " 408"))
+
+
+
+
+
+^{:go/end 2734} (go/method readResponse "readResponse reads an HTTP response (or two, in the case of \"Expect:\n100-continue\") from the server. It returns the final non-100 one.\ntrace is optional.\n" [^{:tag (* persistConn)} pc ^requestAndChan rc ^{:tag (* httptrace/ClientTrace)} trace] :results [^{:tag (* Response)} resp ^error err]
+  (when (and (!= trace nil) (!= (.-GotFirstResponseByte trace) nil))
+    (when [(values peek err) (.Peek (.-br pc) 1)] (and (== err nil) (== (len peek) 1))
+      ((.-GotFirstResponseByte trace))))
+
+
+
+  (let [continueCh (.-continueCh rc)]
+    (while true
+      (set! (values resp err) (ReadResponse (.-br pc) (.-Request (.-treq rc))))
+      (when (!= err nil)
+        (return))
+
+      (let [resCode (.-StatusCode resp)]
+        (when (and (!= continueCh nil) (== resCode StatusContinue))
+          (when (and (!= trace nil) (!= (.-Got100Continue trace) nil))
+            ((.-Got100Continue trace)))
+
+          (>! continueCh (lit (struct)))
+          (set! continueCh nil))
+
+        (let [is1xx (and (<= 100 resCode) (<= resCode 199))
+            ;; treat 101 as a terminal status, see issue 26161
+            ^{:line 2690} is1xxNonTerminal (and is1xx (!= resCode StatusSwitchingProtocols))]
+          (when is1xxNonTerminal
+            (when (and (!= trace nil) (!= (.-Got1xxResponse trace) nil))
+              (when [err ((.-Got1xxResponse trace) resCode (conv textproto/MIMEHeader (.-Header resp)))] (!= err nil)
+                (return nil err))
+
+              ;; If the 1xx response was delivered to the user,
+              ;; then they're responsible for limiting the number of
+              ;; responses. Reset the header limit.
+              ;;
+              ;; If the user didn't examine the 1xx response, then we
+              ;; limit the size of all headers (including both 1xx
+              ;; and the final response) to maxHeaderResponseSize.
+              (set! (.-readLimit pc) (.maxHeaderResponseSize pc))) ; reset the limit
+
+            (continue))
+
+          (break))))
+
+    (when (.isProtocolSwitch resp)
+      (set! (.-Body resp) (newReadWriteCloserBody (.-br pc) (.-conn pc))))
+
+    (when (!= continueCh nil)
+      ;; We send an "Expect: 100-continue" header, but the server
+      ;; responded with a terminal status and no 100 Continue.
+      ;;
+      ;; If we're going to keep using the connection, we need to send the request body.
+      ;; Tell writeLoop to skip sending the body if we're going to close the connection,
+      ;; or to send it otherwise.
+      ;;
+      ;; The case where we receive a 101 Switching Protocols response is a bit
+      ;; ambiguous, since we don't know what protocol we're switching to.
+      ;; Conceivably, it's one that doesn't need us to send the body.
+      ;; Given that we'll send the body if ExpectContinueTimeout expires,
+      ;; be consistent and always send it if we aren't closing the connection.
+      (if (or (.-Close resp) (.-Close (.-Request (.-treq rc))))
+        (close continueCh) ; don't send the body; the connection will close
+
+        (>! continueCh (lit (struct))))) ; send the body
+
+
+
+    (set! (.-TLS resp) (.-tlsState pc))
+    (return)))
+
+
+
+
+
+^{:go/end 2756} (go/method waitForContinue "waitForContinue returns the function to block until\nany response, timeout or connection close. After any of them,\nthe function returns a bool which indicates if the body should be sent.\n" ^{:tag (func [] [bool])} [^{:tag (* persistConn)} pc ^{:tag (chan :recv (struct))} continueCh]
+  (when (== continueCh nil)
+    (return nil))
+
+  ^{:go/end 2755} (fn ^bool []
+    (let [timer (time/NewTimer (.-ExpectContinueTimeout (.-t pc)))]
+      (defer (.Stop timer))
+
+      (select
+        (case [(values _ ok) (<! continueCh)]
+          (return ok))
+        (case (<! (.-C timer))
+          (return true))
+        (case (<! (.-closech pc))
+          (return false))))))
+
+
+
+
+^{:go/end 2764} (go/func newReadWriteCloserBody ^io/ReadWriteCloser [^{:tag (* bufio/Reader)} br ^io/ReadWriteCloser rwc]
+  (let [body (addr (lit readWriteCloserBody :ReadWriteCloser rwc))]
+    (when (!= (.Buffered br) 0)
+      (set! (.-br body) br))
+
+    ^{:line 2763} body))
+
+
+
+
+
+
+
+(go/type readWriteCloserBody "readWriteCloserBody is the Response.Body type used when we want to\ngive users write access to the Body through the underlying\nconnection (TCP, unless using custom dialers). This is then\nthe concrete type for a Response.Body on the 101 Switching\nProtocols response, as used by WebSockets, h2c, etc.\n" (struct
+    ^{:line 2772 :tag incomparable} _
+    ^{:line 2773 :tag (* bufio/Reader)} br ; used until empty
+    ^{:line 2774} io/ReadWriteCloser))
+
+
+^{:go/end 2789} (go/method Read [^{:tag (* readWriteCloserBody)} b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (!= (.-br b) nil)
+    (when [n (.Buffered (.-br b))] (> (len p) n)
+      (set! p (subslice p _ n)))
+
+    (set! (values n err) (.Read (.-br b) p))
+    (when (== (.Buffered (.-br b)) 0)
+      (set! (.-br b) nil))
+
+    (return n err))
+
+  (.Read (.-ReadWriteCloser b) p))
+
+
+^{:go/end 2796} (go/method CloseWrite ^error [^{:tag (* readWriteCloserBody)} b]
+  (when [(values cw ok) (assert (interface (CloseWrite ^error [])) (.-ReadWriteCloser b))] ok
+    (return (.CloseWrite cw)))
+
+  (fmt/Errorf "CloseWrite: %w" ErrNotSupported))
+
+
+
+(go/type nothingWrittenError "nothingWrittenError wraps a write errors which ended up writing zero bytes.\n" (struct
+    ^{:line 2800} error))
+
+
+^{:go/end 2805} (go/method Unwrap ^error [^nothingWrittenError nwe]
+  (.-error nwe))
+
+
+^{:go/end 2843} (go/method writeLoop [^{:tag (* persistConn)} pc]
+  (defer (close (.-writeLoopDone pc)))
+  (while true
+    (select
+      (case [wr (<! (.-writech pc))]
+        (let [startBytesWritten (.-nwrite pc)
+            ^{:line 2813} err (.write (.-Request (.-req wr)) (.-bw pc) (.-isProxy pc) (.-extra (.-req wr)) (.waitForContinue pc (.-continueCh wr)))]
+          (when [(values bre ok) (assert requestBodyReadError err)] ok
+            (set! err (.-error bre))
+            ;; Errors reading from the user's
+            ;; Request.Body are high priority.
+            ;; Set it here before sending on the
+            ;; channels below or calling
+            ;; pc.close() which tears down
+            ;; connections and causes other
+            ;; errors.
+            (.setError (.-req wr) err))
+
+          (when (== err nil)
+            (set! err (.Flush (.-bw pc))))
+
+          (when (!= err nil)
+            (when (== (.-nwrite pc) startBytesWritten)
+              (set! err (lit nothingWrittenError err))))
+
+
+          (>! (.-writeErrCh pc) err) ; to the body reader, which might recycle us
+          (>! (.-ch wr) err) ; to the roundTrip function
+          (when (!= err nil)
+            (.close pc err)
+            (return))))
+
+      (case (<! (.-closech pc))
+        (return)))))
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "maxWriteWaitBeforeConnReuse is how long the a Transport RoundTrip\nwill wait to see the Request's Body.Write result after getting a\nresponse from the server. See comments in (*persistConn).wroteRequest.\n\nIn tests, we set this to a large value to avoid flakiness from inconsistent\nrecycling of connections.\n"} maxWriteWaitBeforeConnReuse (* 50 time/Millisecond))
+
+
+
+^{:go/end 2881} (go/method wroteRequest "wroteRequest is a check before recycling a connection that the previous write\n(from writeLoop above) happened and was successful.\n" ^bool [^{:tag (* persistConn)} pc]
+  (select
+    (case [err (<! (.-writeErrCh pc))]
+      ;; Common case: the write happened well before the response, so
+      ;; avoid creating a timer.
+      (return (== err nil)))
+    (default
+      ;; Rare case: the request was written in writeLoop above but
+      ;; before it could send to pc.writeErrCh, the reader read it
+      ;; all, processed it, and called us here. In this case, give the
+      ;; write goroutine a bit of time to finish its send.
+      ;;
+      ;; Less rare case: We also get here in the legitimate case of
+      ;; Issue 7569, where the writer is still writing (or stalled),
+      ;; but the server has already replied. In this case, we don't
+      ;; want to wait too long, and we want to return false so this
+      ;; connection isn't re-used.
+      (let [t (time/NewTimer maxWriteWaitBeforeConnReuse)]
+        (defer (.Stop t))
+        (select
+          (case [err (<! (.-writeErrCh pc))]
+            (return (== err nil)))
+          (case (<! (.-C t))
+            (return false)))))))
+
+
+
+
+
+
+(go/type responseAndError "responseAndError is how the goroutine reading from an HTTP/1 server\ncommunicates with the goroutine doing the RoundTrip.\n" (struct
+    ^{:line 2886 :tag incomparable} _
+    ^{:line 2887 :tag (* Response)} res ; else use this response (see res method)
+    ^{:line 2888 :tag error} err))
+
+
+(go/type requestAndChan (struct
+    ^{:line 2892 :tag incomparable} _
+    ^{:line 2893 :tag (* transportRequest)} treq
+    ^{:line 2894 :tag (chan responseAndError)} ch ; unbuffered; always send in select on callerGone
+
+
+
+
+    ^{:line 2899 :tag bool :doc "whether the Transport (as opposed to the user client code)\nadded the Accept-Encoding gzip header. If the Transport\nset it, only then do we transparently decode the gzip.\n"} addedGzip
+
+
+
+
+
+    ^{:line 2905 :tag (chan :send (struct)) :doc "Optional blocking chan for Expect: 100-continue (for send).\nIf the request has an \"Expect: 100-continue\" header and\nthe server responds 100 Continue, readLoop send a value\nto writeLoop via this chan.\n"} continueCh
+
+    ^{:line 2907 :tag (chan :recv (struct))} callerGone)) ; closed when roundTrip caller has returned
+
+
+
+
+
+
+(go/type writeRequest "A writeRequest is sent by the caller's goroutine to the\nwriteLoop's goroutine to write a request while the read loop\nconcurrently waits on both the write response and the server's\nreply.\n" (struct
+    ^{:line 2915 :tag (* transportRequest)} req
+    ^{:line 2916 :tag (chan :send error)} ch
+
+
+
+
+    ^{:line 2921 :tag (chan :recv (struct)) :doc "Optional blocking chan for Expect: 100-continue (for receive).\nIf not nil, writeLoop blocks sending request body until\nit receives from this chan.\n"} continueCh))
+
+
+
+
+(go/type timeoutError "httpTimeoutError represents a timeout.\nIt implements net.Error and wraps context.DeadlineExceeded.\n" (struct
+    ^{:line 2927 :tag string} err))
+
+
+^{:go/end 2930} (go/method Error ^string [^{:tag (* timeoutError)} e] (.-err e))
+^{:go/end 2931} (go/method Timeout ^bool [^{:tag (* timeoutError)} e] true)
+^{:go/end 2932} (go/method Temporary ^bool [^{:tag (* timeoutError)} e] true)
+^{:go/end 2933} (go/method Is ^bool [^{:tag (* timeoutError)} e ^error err] (== err context/DeadlineExceeded))
+
+(go/var ^error errTimeout (addr (lit timeoutError "net/http: timeout awaiting response headers")))
+
+
+
+(go/var ^{:doc "errRequestCanceled is set to be identical to the one from h2 to facilitate\ntesting.\n"} errRequestCanceled internal/ErrRequestCanceled)
+(go/var errRequestCanceledConn (errors/New "net/http: request canceled while waiting for connection")) ; TODO: unify?
+
+
+
+(go/var ^{:doc "errRequestDone is used to cancel the round trip Context after a request is successfully done.\nIt should not be seen by the user.\n"} errRequestDone (errors/New "net/http: request completed"))
+
+^{:go/end 2946} (go/func nop [])
+
+
+(go/var "testHooks. Always non-nil.\n"
+  ^{:line 2950} [testHookEnterRoundTrip nop]
+  ^{:line 2951} [testHookWaitResLoop nop]
+  ^{:line 2952} [testHookRoundTripRetried nop]
+  ^{:line 2953} [testHookPrePendingDial nop]
+  ^{:line 2954} [testHookPostPendingDial nop]
+
+  ^{:line 2956} [^sync/Locker testHookMu (lit fakeLocker)] ; guards following
+  ^{:line 2957} [testHookReadLoopBeforeNextRead nop])
+
+
+^{:go/end 2969} (go/method waitForAvailability ^error [^{:tag (* persistConn)} pc ^context/Context ctx]
+  (select
+    (case (<! (.-availch pc))
+      (return nil))
+    (case (<! (.-closech pc))
+      (return (.-closed pc)))
+    (case (<! (.Done ctx))
+      (return (.Err ctx)))))
+
+
+
+^{:go/end 3119} (go/method roundTrip [^{:tag (* persistConn)} pc ^{:tag (* transportRequest)} req] :results [^{:tag (* Response)} resp ^error err]
+  (testHookEnterRoundTrip)
+
+  (.Lock (.-mu pc))
+  (when (.-isClientConn pc)
+    (when (not (.-reserved pc))
+      (.Unlock (.-mu pc))
+      (when [err (.waitForAvailability pc (.-ctx req))] (!= err nil)
+        (return nil err))
+
+      (.Lock (.-mu pc)))
+
+    (set! (.-reserved pc) false)
+    (set! (.-inFlight pc) true))
+
+  (inc! (.-numExpectedResponses pc))
+  (let [headerFn (.-mutateHeaderFunc pc)]
+    (.Unlock (.-mu pc))
+
+    (when (!= headerFn nil)
+      (headerFn (.extraHeaders req)))
+
+
+    ;; Ask for a compressed version if the caller didn't set their
+    ;; own value for Accept-Encoding. We only attempt to
+    ;; uncompress the gzip stream if we were the layer that
+    ;; requested it.
+    (let [requestedGzip false]
+      (when (and (not (.-DisableCompression (.-t pc)))
+          (== (.Get ^{:go/via [Request]} (.-Header req) "Accept-Encoding") "")
+          (== (.Get ^{:go/via [Request]} (.-Header req) "Range") "")
+          (!= ^{:go/via [Request]} (.-Method req) "HEAD"))
+        ;; Request gzip only, not deflate. Deflate is ambiguous and
+        ;; not as universally supported anyway.
+        ;; See: https://zlib.net/zlib_faq.html#faq39
+        ;;
+        ;; Note that we don't request this for HEAD requests,
+        ;; due to a bug in nginx:
+        ;;   https://trac.nginx.org/nginx/ticket/358
+        ;;   https://golang.org/issue/5522
+        ;;
+        ;; We don't request gzip if the request is for a range, since
+        ;; auto-decoding a portion of a gzipped document will just fail
+        ;; anyway. See https://golang.org/issue/8923
+        (set! requestedGzip true)
+        (.Set (.extraHeaders req) "Accept-Encoding" "gzip"))
+
+
+      (let [^{:tag (chan (struct))} continueCh (zero (chan (struct)))]
+        (when (and ^{:go/via [Request]} (.ProtoAtLeast req 1 1) (!= ^{:go/via [Request]} (.-Body req) nil) ^{:go/via [Request]} (.expectsContinue req))
+          (set! continueCh (make (chan (struct)) 1)))
+
+
+        (when (and (.-DisableKeepAlives (.-t pc))
+            (not ^{:go/via [Request]} (.wantsClose req))
+            (not (isProtocolSwitchHeader ^{:go/via [Request]} (.-Header req))))
+          (.Set (.extraHeaders req) "Connection" "close"))
+
+
+        (let [gone (make (chan (struct)))]
+          (defer (close gone))
+
+          (let [^:const ^{:val false} debugRoundTrip false
+
+              ;; Write the request concurrently with waiting for a response,
+              ;; in case the server decides to reply before reading our full
+              ;; request body.
+              ^{:line 3038} startBytesWritten (.-nwrite pc)
+              ^{:line 3039} writeErrCh (make (chan error) 1)]
+            (>! (.-writech pc) (lit writeRequest req writeErrCh continueCh))
+
+            (let [resc (make (chan responseAndError))]
+              (>! (.-reqch pc) ^{:go/breaks [2 4 6 8 10]} (lit requestAndChan
+                  :treq req
+                  :ch resc
+                  :addedGzip requestedGzip
+                  :continueCh continueCh
+                  :callerGone gone))
+
+
+              (let [handleResponse ^{:go/end 3062} (fn [^responseAndError re] :results [(* Response) error]
+                    (when (== (== (.-res re) nil) (== (.-err re) nil))
+                      (panic (fmt/Sprintf "internal error: exactly one of res or err should be set; nil=%v" (== (.-res re) nil))))
+
+                    (when debugRoundTrip
+                      (.logf req "resc recv: %p, %T/%#v" (.-res re) (.-err re) (.-err re)))
+
+                    (when (!= (.-err re) nil)
+                      (return nil (.mapRoundTripError pc req startBytesWritten (.-err re))))
+
+                    (return (.-res re) nil))
+
+
+                  ^{:line 3064 :tag (chan :recv time/Time)} respHeaderTimer (zero (chan :recv time/Time))
+                  ^{:line 3065} ctxDoneChan (.Done (.-ctx req))
+                  ^{:line 3066} pcClosed (.-closech pc)]
+                (while true
+                  (testHookWaitResLoop)
+                  (select
+                    (case [err (<! writeErrCh)]
+                      (when debugRoundTrip
+                        (.logf req "writeErrCh recv: %T/%#v" err err))
+
+                      (when (!= err nil)
+                        (.close pc (fmt/Errorf "write error: %w" err))
+                        (return nil (.mapRoundTripError pc req startBytesWritten err)))
+
+                      (when [d (.-ResponseHeaderTimeout (.-t pc))] (> d 0)
+                        (when debugRoundTrip
+                          (.logf req "starting timer for %v" d))
+
+                        (let [timer (time/NewTimer d)]
+                          (defer (.Stop timer)) ; prevent leaks
+                          (set! respHeaderTimer (.-C timer)))))
+
+                    (case (<! pcClosed)
+                      (select
+                        (case [re (<! resc)]
+                          ;; The pconn closing raced with the response to the request,
+                          ;; probably after the server wrote a response and immediately
+                          ;; closed the connection. Use the response.
+                          (return (handleResponse re)))
+                        (default))
+
+                      (when debugRoundTrip
+                        (.logf req "closech recv: %T %#v" (.-closed pc) (.-closed pc)))
+
+                      (return nil (.mapRoundTripError pc req startBytesWritten (.-closed pc))))
+                    (case (<! respHeaderTimer)
+                      (when debugRoundTrip
+                        (.logf req "timeout waiting for response headers."))
+
+                      (.close pc errTimeout)
+                      (return nil errTimeout))
+                    (case [re (<! resc)]
+                      (return (handleResponse re)))
+                    (case (<! ctxDoneChan)
+                      (select
+                        (case [re (<! resc)]
+                          ;; readLoop is responsible for canceling req.ctx after
+                          ;; it reads the response body. Check for a response racing
+                          ;; the context close, and use the response if available.
+                          (return (handleResponse re)))
+                        (default))
+
+                      (.cancelRequest pc (context/Cause (.-ctx req))))))))))))))
+
+
+
+
+
+
+(go/type tLogKey "tLogKey is a context WithValue key for test debugging contexts containing\na t.Logf func. See export_test.go's Request.WithT method.\n" (struct))
+
+^{:go/end 3129} (go/method logf [^{:tag (* transportRequest)} tr ^string format & ^{:tag (slice any)} args]
+  (when [(values logf ok) (assert (func [string & (slice any)]) (.Value (.Context (.-Request tr)) (lit tLogKey)))] ok
+    (logf (+ (.Format (time/Now) time/RFC3339Nano) ": " format) (spread args))))
+
+
+
+
+
+^{:go/end 3137} (go/method markReused "markReused marks this connection as having been successfully used for a\nrequest and response.\n" [^{:tag (* persistConn)} pc]
+  (.Lock (.-mu pc))
+  (set! (.-reused pc) true)
+  (.Unlock (.-mu pc)))
+
+
+
+
+
+
+
+^{:go/end 3148} (go/method close "close closes the underlying TCP connection and closes\nthe pc.closech channel.\n\nThe provided err is only for testing and debugging; in normal\ncircumstances it should never be seen by users.\n" [^{:tag (* persistConn)} pc ^error err]
+  (.Lock (.-mu pc))
+  (defer (.Unlock (.-mu pc)))
+  (.closeLocked pc err))
+
+
+^{:go/end 3172} (go/method closeLocked [^{:tag (* persistConn)} pc ^error err]
+  (when (== err nil)
+    (panic "nil error"))
+
+  (when (== (.-closed pc) nil)
+    (set! (.-closed pc) err)
+    (.decConnsPerHost (.-t pc) (.-cacheKey pc))
+    ;; Close HTTP/1 (pc.alt == nil) connection.
+    ;; HTTP/2 closes its connection itself.
+    ;; Close HTTP/3 connection if it implements io.Closer.
+    (if (== (.-alt pc) nil) (do
+        (when (!= err errCallerOwnsConn)
+          (.Close (.-conn pc)))
+
+        (close (.-closech pc)))
+      (do
+        (when [(values cc ok) (assert io/Closer (.-alt pc))] ok
+          (.Close cc)))))
+
+
+
+  (set! (.-mutateHeaderFunc pc) nil))
+
+
+^{:go/end 3185} (go/func schemePort ^string [^string scheme]
+  (switch scheme
+    (case ["http"]
+      (return "80"))
+    (case ["https"]
+      (return "443"))
+    (case ["socks5" "socks5h"]
+      (return "1080"))
+    (default
+      (return ""))))
+
+
+
+^{:go/end 3193} (go/func idnaASCIIFromURL ^string [^{:tag (* url/URL)} url]
+  (let [addr (.Hostname url)]
+    (when [(values v err) (idnaASCII addr)] (== err nil)
+      (set! addr v))
+
+    ^{:line 3192} addr))
+
+
+
+^{:go/end 3202} (go/func canonicalAddr "canonicalAddr returns url.Host but always with a \":port\" suffix.\n" ^string [^{:tag (* url/URL)} url]
+  (let [port (.Port url)]
+    (when (== port "")
+      (set! port (schemePort (.-Scheme url))))
+
+    (net/JoinHostPort (idnaASCIIFromURL url) port)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type bodyEOFSignal "bodyEOFSignal is used by the HTTP/1 transport when reading response\nbodies to make sure we see the end of a response body before\nproceeding and reading on the connection again.\n\nIt wraps a ReadCloser but runs fn (if non-nil) at most\nonce, right before its final (error-producing) Read or Close call\nreturns. fn should return the new error to return from Read or Close.\n\nIf earlyCloseFn is non-nil and Close is called before io.EOF is\nseen, earlyCloseFn is called instead of fn, and its return value is\nthe return value from Close.\n" (struct
+    ^{:line 3216 :tag io/ReadCloser} body
+    ^{:line 3217 :tag sync/Mutex} mu ; guards following 4 fields
+    ^{:line 3218 :tag bool} closed ; whether Close has been called
+    ^{:line 3219 :tag error} rerr ; sticky Read error
+    ^{:line 3220 :tag (func [error] [error])} fn ; err will be nil on Read io.EOF
+    ^{:line 3221 :tag (func [] [error])} earlyCloseFn)) ; optional alt Close func used if io.EOF not seen
+
+
+(go/var errReadOnClosedResBody (errors/New "http: read on closed response body"))
+(go/var errConcurrentReadOnResBody (errors/New "http: concurrent read on response body"))
+
+^{:go/end 3248} (go/method Read [^{:tag (* bodyEOFSignal)} es ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (.Lock (.-mu es))
+  (let [(values closed rerr) (values (.-closed es) (.-rerr es))]
+    (.Unlock (.-mu es))
+    (when closed
+      (return 0 errReadOnClosedResBody))
+
+    (when (!= rerr nil)
+      (return 0 rerr))
+
+
+    (set! (values n err) (.Read (.-body es) p))
+    (when (!= err nil)
+      (.Lock (.-mu es))
+      (defer (.Unlock (.-mu es)))
+      (when (== (.-rerr es) nil)
+        (set! (.-rerr es) err))
+
+      (set! err (.condfn es err)))
+
+    (return)))
+
+
+^{:go/end 3262} (go/method Close ^error [^{:tag (* bodyEOFSignal)} es]
+  (.Lock (.-mu es))
+  (defer (.Unlock (.-mu es)))
+  (when (.-closed es)
+    (return nil))
+
+  (set! (.-closed es) true)
+  (when (and (!= (.-earlyCloseFn es) nil) (!= (.-rerr es) io/EOF))
+    (return ((.-earlyCloseFn es))))
+
+  (let [err (.Close (.-body es))]
+    (.condfn es err)))
+
+
+
+^{:go/end 3272} (go/method condfn "caller must hold es.mu.\n" ^error [^{:tag (* bodyEOFSignal)} es ^error err]
+  (when (== (.-fn es) nil)
+    (return err))
+
+  (set! err ((.-fn es) err))
+  (set! (.-fn es) nil)
+  ^{:line 3271} err)
+
+
+
+
+
+
+(go/type gzipReader "gzipReader wraps a response body so it can lazily\nget gzip.Reader from the pool on the first call to Read.\nAfter Close is called it puts gzip.Reader to the pool immediately\nif there is no Read in progress or later when Read completes.\n" (struct
+    ^{:line 3279 :tag incomparable} _
+    ^{:line 3280 :tag (* bodyEOFSignal)} body ; underlying HTTP/1 response body framing
+    ^{:line 3281 :tag sync/Mutex} mu ; guards zr and zerr
+    ^{:line 3282 :tag (* gzip/Reader)} zr ; stores gzip reader from the pool between reads
+    ^{:line 3283 :tag error} zerr)) ; sticky gzip reader init error or sentinel value to detect concurrent read and read after close
+
+
+(go/type eofReader (struct))
+
+^{:go/end 3288} (go/method Read [eofReader (slice byte)] :results [int error] (return 0 io/EOF))
+^{:go/end 3289} (go/method ReadByte [eofReader] :results [byte error] (return 0 io/EOF))
+
+(go/var gzipPool (lit sync/Pool :New ^{:go/end 3291} (fn ^any [] (new gzip/Reader))))
+
+
+^{:go/end 3301} (go/func gzipPoolGet "gzipPoolGet gets a gzip.Reader from the pool and resets it to read from r.\n" [^io/Reader r] :results [(* gzip/Reader) error]
+  (let [zr (assert (* gzip/Reader) (.Get gzipPool))]
+    (when [err (.Reset zr r)] (!= err nil)
+      (gzipPoolPut zr)
+      (return nil err))
+
+    (return zr nil)))
+
+
+
+^{:go/end 3310} (go/func gzipPoolPut "gzipPoolPut puts a gzip.Reader back into the pool.\n" [^{:tag (* gzip/Reader)} zr]
+  ;; Reset will allocate bufio.Reader if we pass it anything
+  ;; other than a flate.Reader, so ensure that it's getting one.
+  (let [^flate/Reader r (lit eofReader)]
+    (.Reset zr r)
+    (.Put gzipPool zr)))
+
+
+
+
+^{:go/end 3344} (go/method acquire "acquire returns a gzip.Reader for reading response body.\nThe reader must be released after use.\n" [^{:tag (* gzipReader)} gz] :results [(* gzip/Reader) error]
+  (.Lock (.-mu gz))
+  (defer (.Unlock (.-mu gz)))
+  (when (!= (.-zerr gz) nil)
+    (return nil (.-zerr gz)))
+
+  (when (== (.-zr gz) nil)
+    ;; gzipPoolGet might block indefinitely since it reads the gzip header.
+    ;; Therefore, drop mu temporarily when using gzipPoolGet.
+    ;; We set zerr to errConcurrentReadOnResBody to prevent concurrent read
+    ;; even when mu is temporarily dropped.
+    (set! (.-zerr gz) errConcurrentReadOnResBody)
+    (.Unlock (.-mu gz))
+    (let [(values zr err) (gzipPoolGet (.-body gz))]
+      (.Lock (.-mu gz))
+      ;; Guard against Close being called while gzipPoolGet is running.
+      (when (!= (.-zerr gz) errConcurrentReadOnResBody)
+        (when (!= zr nil)
+          (gzipPoolPut zr))
+
+        (return nil (.-zerr gz)))
+
+      (set! (values (.-zr gz) (.-zerr gz)) (values zr err))
+      (when (!= (.-zerr gz) nil)
+        (return nil (.-zerr gz)))))
+
+
+  (let [ret (.-zr gz)]
+    (set! (values (.-zr gz) (.-zerr gz)) (values nil errConcurrentReadOnResBody))
+    (return ret nil)))
+
+
+
+^{:go/end 3355} (go/method release "release returns the gzip.Reader to the pool if Close was called during Read.\n" [^{:tag (* gzipReader)} gz ^{:tag (* gzip/Reader)} zr]
+  (.Lock (.-mu gz))
+  (defer (.Unlock (.-mu gz)))
+  (if (== (.-zerr gz) errConcurrentReadOnResBody)
+    (set! (values (.-zr gz) (.-zerr gz)) (values zr nil))
+    ;; errReadOnClosedResBody
+    (gzipPoolPut zr)))
+
+
+
+
+
+^{:go/end 3367} (go/method close "close returns the gzip.Reader to the pool immediately or\nsignals release to do so after Read completes.\n" [^{:tag (* gzipReader)} gz]
+  (.Lock (.-mu gz))
+  (defer (.Unlock (.-mu gz)))
+  (when (and (== (.-zerr gz) nil) (!= (.-zr gz) nil))
+    (gzipPoolPut (.-zr gz))
+    (set! (.-zr gz) nil))
+
+  (set! (.-zerr gz) errReadOnClosedResBody))
+
+
+^{:go/end 3377} (go/method Read [^{:tag (* gzipReader)} gz ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (let [(values zr ^:assign err) (.acquire gz)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (defer (.release gz zr))
+
+    (.Read zr p)))
+
+
+^{:go/end 3383} (go/method Close ^error [^{:tag (* gzipReader)} gz]
+  (.close gz)
+
+  (.Close (.-body gz)))
+
+
+(go/type tlsHandshakeTimeoutError (struct))
+
+^{:go/end 3387} (go/method Timeout ^bool [tlsHandshakeTimeoutError] true)
+^{:go/end 3388} (go/method Temporary ^bool [tlsHandshakeTimeoutError] true)
+^{:go/end 3389} (go/method Error ^string [tlsHandshakeTimeoutError] "net/http: TLS handshake timeout")
+
+
+
+
+(go/type fakeLocker "fakeLocker is a sync.Locker which does nothing. It's used to guard\ntest-only fields when not under test, to avoid runtime atomic\noverhead.\n" (struct))
+
+^{:go/end 3396} (go/method Lock [fakeLocker])
+^{:go/end 3397} (go/method Unlock [fakeLocker])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3417} (go/func ^{:go/linkname "cloneTLSConfig"} cloneTLSConfig "cloneTLSConfig returns a shallow clone of cfg, or a new zero tls.Config if\ncfg is nil. This is safe to call even if cfg is in active use by a TLS\nclient or server.\n\ncloneTLSConfig should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/searKing/golang\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^{:tag (* tls/Config)} [^{:tag (* tls/Config)} cfg]
+  (when (== cfg nil)
+    (return (addr (lit tls/Config))))
+
+  (.Clone cfg))
+
+
+(go/type connLRU (struct
+    ^{:line 3420 :tag (* list/List)} ll ; list.Element.Value type is of *persistConn
+    ^{:line 3421 :tag (map (* persistConn) (* list/Element))} m))
+
+
+
+^{:go/end 3435} (go/method add "add adds pc to the head of the linked list.\n" [^{:tag (* connLRU)} cl ^{:tag (* persistConn)} pc]
+  (when (== (.-ll cl) nil)
+    (set! (.-ll cl) (list/New))
+    (set! (.-m cl) (make (map (* persistConn) (* list/Element)))))
+
+  (let [ele (.PushFront (.-ll cl) pc)]
+    (when [(values _ ok) (aget (.-m cl) pc)] ok
+      (panic "persistConn was already in LRU"))
+
+    (aset (.-m cl) pc ele)))
+
+
+^{:go/end 3443} (go/method removeOldest ^{:tag (* persistConn)} [^{:tag (* connLRU)} cl]
+  (let [ele (.Back (.-ll cl))
+      ^{:line 3439} pc (assert (* persistConn) (.-Value ele))]
+    (.Remove (.-ll cl) ele)
+    (delete (.-m cl) pc)
+    ^{:line 3442} pc))
+
+
+
+^{:go/end 3451} (go/method remove "remove removes pc from cl.\n" [^{:tag (* connLRU)} cl ^{:tag (* persistConn)} pc]
+  (when [(values ele ok) (aget (.-m cl) pc)] ok
+    (.Remove (.-ll cl) ele)
+    (delete (.-m cl) pc)))
+
+
+
+
+^{:go/end 3456} (go/method len "len returns the number of items in the cache.\n" ^int [^{:tag (* connLRU)} cl]
+  (len (.-m cl)))

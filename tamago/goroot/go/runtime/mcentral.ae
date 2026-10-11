@@ -1,0 +1,258 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Central free lists.
+;;
+;; See malloc.go for an overview.
+;;
+;; The mcentral doesn't actually contain the list of free objects; the mspan does.
+;; Each mcentral is two lists of mspans: those with free objects (c->nonempty)
+;; and those that are completely allocated (c->empty).
+
+(in-ns 'go.runtime) (go/file "mcentral.go" :imports [
+
+
+    ^{:line 16} [atomic "internal/runtime/atomic"]
+    ^{:line 17} [gc "internal/runtime/gc"]
+    ^{:line 18} [sys "internal/runtime/sys"]])
+
+
+
+(go/type mcentral "Central list of free objects of a given size.\n" (struct
+    ^{:line 23 :tag sys/NotInHeap} _
+    ^{:line 24 :tag spanClass} spanclass
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 44 :tag (array 2 spanSet) :doc "partial and full contain two mspan sets: one of swept in-use\nspans, and one of unswept in-use spans. These two trade\nroles on each GC cycle. The unswept set is drained either by\nallocation or by the background sweeper in every GC cycle,\nso only two roles are necessary.\n\nsweepgen is increased by 2 on each GC cycle, so the swept\nspans are in partial[sweepgen/2%2] and the unswept spans are in\npartial[1-sweepgen/2%2]. Sweeping pops spans from the\nunswept set and pushes spans that are still in-use on the\nswept set. Likewise, allocating an in-use span pushes it\non the swept set.\n\nSome parts of the sweeper can sweep arbitrary spans, and hence\ncan't remove them from the unswept set, but will add the span\nto the appropriate swept list. As a result, the parts of the\nsweeper and mcentral that do consume from the unswept list may\nencounter swept spans, and these should be ignored.\n"} partial ; list of spans with a free object
+    ^{:line 45 :tag (array 2 spanSet)} full)) ; list of spans with no free objects
+
+
+
+^{:go/end 55} (go/method init "Initialize a single central free list.\n" [^{:tag (* mcentral)} c ^spanClass spc]
+  (set! (.-spanclass c) spc)
+  (lockInit (addr (.-spineLock (aget (.-partial c) 0))) lockRankSpanSetSpine)
+  (lockInit (addr (.-spineLock (aget (.-partial c) 1))) lockRankSpanSetSpine)
+  (lockInit (addr (.-spineLock (aget (.-full c) 0))) lockRankSpanSetSpine)
+  (lockInit (addr (.-spineLock (aget (.-full c) 1))) lockRankSpanSetSpine))
+
+
+
+
+^{:go/end 61} (go/method partialUnswept "partialUnswept returns the spanSet which holds partially-filled\nunswept spans for this sweepgen.\n" ^{:tag (* spanSet)} [^{:tag (* mcentral)} c ^uint32 sweepgen]
+  (addr (aget (.-partial c) (- 1 (% (/ sweepgen 2) 2)))))
+
+
+
+
+^{:go/end 67} (go/method partialSwept "partialSwept returns the spanSet which holds partially-filled\nswept spans for this sweepgen.\n" ^{:tag (* spanSet)} [^{:tag (* mcentral)} c ^uint32 sweepgen]
+  (addr (aget (.-partial c) (% (/ sweepgen 2) 2))))
+
+
+
+
+^{:go/end 73} (go/method fullUnswept "fullUnswept returns the spanSet which holds unswept spans without any\nfree slots for this sweepgen.\n" ^{:tag (* spanSet)} [^{:tag (* mcentral)} c ^uint32 sweepgen]
+  (addr (aget (.-full c) (- 1 (% (/ sweepgen 2) 2)))))
+
+
+
+
+^{:go/end 79} (go/method fullSwept "fullSwept returns the spanSet which holds swept spans without any\nfree slots for this sweepgen.\n" ^{:tag (* spanSet)} [^{:tag (* mcentral)} c ^uint32 sweepgen]
+  (addr (aget (.-full c) (% (/ sweepgen 2) 2))))
+
+
+
+^{:go/end 199} (go/method cacheSpan "Allocate a span to use in an mcache.\n" ^{:tag (* mspan)} [^{:tag (* mcentral)} c]
+  ;; Deduct credit for this span allocation and sweep if necessary.
+  (let [spanBytes (* (conv uintptr (aget gc/SizeClassToNPages (.sizeclass (.-spanclass c)))) pageSize)]
+    (deductSweepCredit spanBytes 0)
+
+    (let [traceDone false
+        ^{:line 88} trace (traceAcquire)]
+      (when (.ok trace)
+        (.GCSweepStart trace)
+        (traceRelease trace))
+
+
+      ;; If we sweep spanBudget spans without finding any free
+      ;; space, just allocate a fresh span. This limits the amount
+      ;; of time we can spend trying to find free space and
+      ;; amortizes the cost of small object sweeping over the
+      ;; benefit of having a full free span to allocate from. By
+      ;; setting this to 100, we limit the space overhead to 1%.
+      ;;
+      ;; TODO(austin,mknyszek): This still has bad worst-case
+      ;; throughput. For example, this could find just one free slot
+      ;; on the 100th swept span. That limits allocation latency, but
+      ;; still has very poor throughput. We could instead keep a
+      ;; running free-to-used budget and switch to fresh span
+      ;; allocation if the budget runs low.
+      (let [spanBudget 100
+
+          ^{:line 109 :tag (* mspan)} s (zero (* mspan))
+          ^{:line 110 :tag sweepLocker} sl (zero sweepLocker)
+
+          ;; Try partial swept spans first.
+          ^{:line 113} sg (.-sweepgen mheap_)]
+        (when [(set! s (.pop (.partialSwept c sg)))] (!= s nil)
+          (goto :havespan))
+
+
+        (set! sl (.begin (.-active sweep)))
+        (when (.-valid sl)
+          ;; Now try partial unswept spans.
+          (for [] (>= spanBudget 0) (dec! spanBudget)
+            (set! s (.pop (.partialUnswept c sg)))
+            (when (== s nil)
+              (break))
+
+            (when [(values s ok) (.tryAcquire sl s)] ok
+              ;; We got ownership of the span, so let's sweep it and use it.
+              (.sweep s true)
+              (.end (.-active sweep) sl)
+              (goto :havespan)))
+
+          ;; We failed to get ownership of the span, which means it's being or
+          ;; has been swept by an asynchronous sweeper that just couldn't remove it
+          ;; from the unswept list. That sweeper took ownership of the span and
+          ;; responsibility for either freeing it to the heap or putting it on the
+          ;; right swept list. Either way, we should just ignore it (and it's unsafe
+          ;; for us to do anything else).
+
+          ;; Now try full unswept spans, sweeping them and putting them into the
+          ;; right list if we fail to get a span.
+          (for [] (>= spanBudget 0) (dec! spanBudget)
+            (set! s (.pop (.fullUnswept c sg)))
+            (when (== s nil)
+              (break))
+
+            (when [(values s ok) (.tryAcquire sl s)] ok
+              ;; We got ownership of the span, so let's sweep it.
+              (.sweep s true)
+              ;; Check if there's any free space.
+              (let [freeIndex ^{:go/via [mspan]} (.nextFreeIndex s)]
+                (when (!= freeIndex ^{:go/via [mspan]} (.-nelems s))
+                  (set! ^{:go/via [mspan]} (.-freeindex s) freeIndex)
+                  (.end (.-active sweep) sl)
+                  (goto :havespan))
+
+                ;; Add it to the swept list, because sweeping didn't give us any free space.
+                (.push (.fullSwept c sg) (.-mspan s)))))
+
+          ;; See comment for partial unswept spans.
+
+          (.end (.-active sweep) sl))
+
+        (set! trace (traceAcquire))
+        (when (.ok trace)
+          (.GCSweepDone trace)
+          (set! traceDone true)
+          (traceRelease trace))
+
+
+        ;; We failed to get a span from the mcentral so get one from mheap.
+        (set! s (.grow c))
+        (when (== s nil)
+          (return nil))
+
+
+        ;; At this point s is a span that should have free slots.
+        (label :havespan
+          (when (not traceDone)
+            (let [trace (traceAcquire)]
+              (when (.ok trace)
+                (.GCSweepDone trace)
+                (traceRelease trace)))))
+
+
+        (let [n (- (conv int (.-nelems s)) (conv int (.-allocCount s)))]
+          (when (or (== n 0) (== (.-freeindex s) (.-nelems s)) (== (.-allocCount s) (.-nelems s)))
+            (throw "span has no free objects"))
+
+          (let [freeByteBase (bit-and-not (.-freeindex s) (- 64 1))
+              ^{:line 190} whichByte (/ freeByteBase 8)]
+            ;; Init alloc bits cache.
+            (.refillAllocCache s whichByte)
+
+            ;; Adjust the allocCache so that s.freeindex corresponds to the low bit in
+            ;; s.allocCache.
+            (set! (.-allocCache s) >> (% (.-freeindex s) 64))
+
+            ^{:line 198} s))))))
+
+
+
+
+
+
+^{:go/end 248} (go/method uncacheSpan "Return span from an mcache.\n\ns must have a span class corresponding to this\nmcentral and it must not be empty.\n" [^{:tag (* mcentral)} c ^{:tag (* mspan)} s]
+  (when (== (.-allocCount s) 0)
+    (throw "uncaching span but s.allocCount == 0"))
+
+
+  (let [sg (.-sweepgen mheap_)
+      ^{:line 211} stale (== (.-sweepgen s) (+ sg 1))]
+
+    ;; Fix up sweepgen.
+    (if stale
+      ;; Span was cached before sweep began. It's our
+      ;; responsibility to sweep it.
+      ;;
+      ;; Set sweepgen to indicate it's not cached but needs
+      ;; sweeping and can't be allocated from. sweep will
+      ;; set s.sweepgen to indicate s is swept.
+      (atomic/Store (addr (.-sweepgen s)) (- sg 1))
+
+      ;; Indicate that s is no longer cached.
+      (atomic/Store (addr (.-sweepgen s)) sg))
+
+
+    ;; Put the span in the appropriate place.
+    (if stale
+      ;; It's stale, so just sweep it. Sweeping will put it on
+      ;; the right list.
+      ;;
+      ;; We don't use a sweepLocker here. Stale cached spans
+      ;; aren't in the global sweep lists, so mark termination
+      ;; itself holds up sweep completion until all mcaches
+      ;; have been swept.
+      (let [ss (lit sweepLocked s)]
+        (.sweep ss false))
+      (do
+        (if (> (- (conv int (.-nelems s)) (conv int (.-allocCount s))) 0)
+          ;; Put it back on the partial swept list.
+          (.push (.partialSwept c sg) s)
+
+          ;; There's no free space and it's not stale, so put it on the
+          ;; full swept list.
+          (.push (.fullSwept c sg) s))))))
+
+
+
+
+
+^{:go/end 259} (go/method grow "grow allocates a new empty span from the heap and initializes it for c's size class.\n" ^{:tag (* mspan)} [^{:tag (* mcentral)} c]
+  (let [npages (conv uintptr (aget gc/SizeClassToNPages (.sizeclass (.-spanclass c))))
+      ^{:line 253} s (.alloc mheap_ npages (.-spanclass c))]
+    (when (== s nil)
+      (return nil))
+
+    (.initHeapBits s)
+    ^{:line 258} s))

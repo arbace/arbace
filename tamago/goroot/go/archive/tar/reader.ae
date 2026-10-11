@@ -1,0 +1,905 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.archive.tar) (go/file "reader.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [filepath "path/filepath"]
+    ^{:line 11} [strconv "strconv"]
+    ^{:line 12} [strings "strings"]
+    ^{:line 13} [time "time"]])
+
+
+
+
+
+(go/type Reader "Reader provides sequential access to the contents of a tar archive.\nReader.Next advances to the next file in the archive (including the first),\nand then Reader can be treated as an io.Reader to access the file's data.\n" (struct
+    ^{:line 20 :tag io/Reader} r
+    ^{:line 21 :tag int64} pad ; Amount of padding (ignored) after current file entry
+    ^{:line 22 :tag fileReader} curr ; Reader for current file entry
+    ^{:line 23 :tag block} blk ; Buffer to use as temporary local storage
+
+
+
+
+    ^{:line 28 :tag error :doc "err is a persistent error.\nIt is only the responsibility of every exported method of Reader to\nensure that this error is sticky.\n"} err))
+
+
+(go/type fileReader (interface
+    ^{:line 32} io/Reader
+    ^{:line 33} fileState
+
+    (WriteTo [io/Writer] :results [int64 error])))
+
+
+
+^{:go/end 41} (go/func NewReader "NewReader creates a new [Reader] reading from r.\n" ^{:tag (* Reader)} [^io/Reader r]
+  (addr (lit Reader :r r :curr (addr (lit regFileReader r 0)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 68} (go/method Next "Next advances to the next entry in the tar archive.\nThe Header.Size determines how many bytes can be read for the next file.\nAny remaining data in the current file is automatically discarded.\nAt the end of the archive, Next returns the error io.EOF.\n\nIf Next encounters a non-local file name (as defined by [filepath.IsLocal])\nand the GODEBUG environment variable contains `tarinsecurepath=0`,\nOnly file names are validated, not link targets.\nNext returns the header with an [ErrInsecurePath] error.\nA future version of Go may introduce this behavior by default.\nPrograms that want to accept non-local names can ignore\nthe [ErrInsecurePath] error and use the returned header.\n" [^{:tag (* Reader)} tr] :results [(* Header) error]
+  (when (!= (.-err tr) nil)
+    (return nil (.-err tr)))
+
+  (let [(values hdr err) (.next tr)]
+    (set! (.-err tr) err)
+    (when (and (== err nil) (not (filepath/IsLocal (.-Name hdr))))
+      (when (== (.Value tarinsecurepath) "0")
+        (.IncNonDefault tarinsecurepath)
+        (set! err ErrInsecurePath)))
+
+
+    (return hdr err)))
+
+
+^{:go/end 174} (go/method next [^{:tag (* Reader)} tr] :results [(* Header) error]
+  (let [^{:tag (map string string)} paxHdrs (zero (map string string))
+      (values ^string gnuLongName ^string gnuLongLink) (zero string)
+
+      ;; Externally, Next iterates through the tar archive as if it is a series of
+      ;; files. Internally, the tar format often uses fake "files" to add meta
+      ;; data that describes the next file. These meta data "files" should not
+      ;; normally be visible to the outside. As such, this loop iterates through
+      ;; one or more "header files" until it finds a "normal file".
+      ^{:line 79} format (bit-or FormatUSTAR FormatPAX FormatGNU)]
+    (while true
+      ;; Discard the remainder of the file and any padding.
+      (when [err (discard (.-r tr) (.physicalRemaining (.-curr tr)))] (!= err nil)
+        (return nil err))
+
+      (when [(values _ err) (tryReadFull (.-r tr) (subslice (.-blk tr) _ (.-pad tr)))] (!= err nil)
+        (return nil err))
+
+      (set! (.-pad tr) 0)
+
+      (let [(values hdr rawHdr err) (.readHeader tr)]
+        (when (!= err nil)
+          (return nil err))
+
+        (when [err (.handleRegularFile tr hdr)] (!= err nil)
+          (return nil err))
+
+        (.mayOnlyBe format (.-Format hdr))
+
+        ;; Check for PAX/GNU special headers and files.
+        (switch (.-Typeflag hdr)
+          (case [TypeXHeader TypeXGlobalHeader]
+            (.mayOnlyBe format FormatPAX)
+            (set! (values paxHdrs err) (parsePAX tr))
+            (when (!= err nil)
+              (return nil err))
+
+            (when (== (.-Typeflag hdr) TypeXGlobalHeader)
+              (mergePAX hdr paxHdrs)
+              ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6 8 10]} (lit Header
+                    :Name (.-Name hdr)
+                    :Typeflag (.-Typeflag hdr)
+                    :Xattrs (.-Xattrs hdr)
+                    :PAXRecords (.-PAXRecords hdr)
+                    :Format format))
+                nil))
+
+            (continue)) ; This is a meta header affecting the next header
+          (case [TypeGNULongName TypeGNULongLink]
+            (.mayOnlyBe format FormatGNU)
+            (let [(values realname err) (readSpecialFile tr)]
+              (when (!= err nil)
+                (return nil err))
+
+
+              (let [^parser p (zero parser)]
+                (switch (.-Typeflag hdr)
+                  (case [TypeGNULongName]
+                    (set! gnuLongName (.parseString p realname)))
+                  (case [TypeGNULongLink]
+                    (set! gnuLongLink (.parseString p realname))))
+
+                (continue)))) ; This is a meta header affecting the next header
+          (default
+            ;; The old GNU sparse format is handled here since it is technically
+            ;; just a regular file with additional attributes.
+
+            (when [err (mergePAX hdr paxHdrs)] (!= err nil)
+              (return nil err))
+
+            (when (!= gnuLongName "")
+              (set! (.-Name hdr) gnuLongName))
+
+            (when (!= gnuLongLink "")
+              (set! (.-Linkname hdr) gnuLongLink))
+
+            (when (== (.-Typeflag hdr) TypeRegA)
+              (if (strings/HasSuffix (.-Name hdr) "/")
+                (set! (.-Typeflag hdr) TypeDir) ; Legacy archives use trailing slash for directories
+
+                (set! (.-Typeflag hdr) TypeReg)))
+
+
+
+            ;; The extended headers may have updated the size.
+            ;; Thus, setup the regFileReader again after merging PAX headers.
+            (when [err (.handleRegularFile tr hdr)] (!= err nil)
+              (return nil err))
+
+
+            ;; Sparse formats rely on being able to read from the logical data
+            ;; section; there must be a preceding call to handleRegularFile.
+            (when [err (.handleSparseFile tr hdr rawHdr)] (!= err nil)
+              (return nil err))
+
+
+            ;; Set the final guess at the format.
+            (when (and (.has format FormatUSTAR) (.has format FormatPAX))
+              (.mayOnlyBe format FormatUSTAR))
+
+            (set! (.-Format hdr) format)
+            (return hdr nil))))))) ; This is a file, so stop
+
+
+
+
+
+
+
+^{:go/end 191} (go/method handleRegularFile "handleRegularFile sets up the current file reader and padding such that it\ncan only read the following logical data section. It will properly handle\nspecial headers that contain no data section.\n" ^error [^{:tag (* Reader)} tr ^{:tag (* Header)} hdr]
+  ^{:go/breaks [6]} (let [nb (.-Size hdr)]
+    (when (isHeaderOnlyType (.-Typeflag hdr))
+      (set! nb 0))
+
+    (when (< nb 0)
+      (return ErrHeader))
+
+
+    (set! (.-pad tr) (blockPadding nb))
+    (set! (.-curr tr) (addr (lit regFileReader :r (.-r tr) :nb nb)))
+    nil))
+
+
+
+
+^{:go/end 214} (go/method handleSparseFile "handleSparseFile checks if the current file is a sparse format of any type\nand sets the curr reader appropriately.\n" ^error [^{:tag (* Reader)} tr ^{:tag (* Header)} hdr ^{:tag (* block)} rawHdr]
+  (let [^sparseDatas spd (zero sparseDatas)
+      ^{:line 197 :tag error} err (zero error)]
+    (if (== (.-Typeflag hdr) TypeGNUSparse)
+      (set! (values spd err) (.readOldGNUSparseMap tr hdr rawHdr))
+
+      (set! (values spd err) (.readGNUSparsePAXHeaders tr hdr)))
+
+
+    ;; If sp is non-nil, then this is a sparse file.
+    ;; Note that it is possible for len(sp) == 0.
+    (when (and (== err nil) (!= spd nil))
+      (when (or (isHeaderOnlyType (.-Typeflag hdr)) (not (validateSparseEntries spd (.-Size hdr))))
+        (return ErrHeader))
+
+      (let [sph (invertSparseEntries spd (.-Size hdr))]
+        (set! (.-curr tr) (addr (lit sparseFileReader (.-curr tr) sph 0)))))
+
+    ^{:line 213} err))
+
+
+
+
+
+
+^{:go/end 259} (go/method readGNUSparsePAXHeaders "readGNUSparsePAXHeaders checks the PAX headers for GNU sparse headers.\nIf they are found, then this function reads the sparse map and returns it.\nThis assumes that 0.0 headers have already been converted to 0.1 headers\nby the PAX header parsing logic.\n" [^{:tag (* Reader)} tr ^{:tag (* Header)} hdr] :results [sparseDatas error]
+  ;; Identify the version of GNU headers.
+  (let [^bool is1x0 (zero bool)
+      (values major minor) (values (aget (.-PAXRecords hdr) paxGNUSparseMajor) (aget (.-PAXRecords hdr) paxGNUSparseMinor))]
+    (switch
+      (case [(and (== major "0") ^:go/paren (or (== minor "0") (== minor "1")))]
+        (set! is1x0 false))
+      (case [(and (== major "1") (== minor "0"))]
+        (set! is1x0 true))
+      (case [(or (!= major "") (!= minor ""))]
+        (return nil nil)) ; Unknown GNU sparse PAX version
+      (case [(!= (aget (.-PAXRecords hdr) paxGNUSparseMap) "")]
+        (set! is1x0 false)) ; 0.0 and 0.1 did not have explicit version records, so guess
+      (default
+        (return nil nil))) ; Not a PAX format GNU sparse file.
+
+    (.mayOnlyBe (.-Format hdr) FormatPAX)
+
+    ;; Update hdr from GNU sparse PAX headers.
+    (when [name (aget (.-PAXRecords hdr) paxGNUSparseName)] (!= name "")
+      (set! (.-Name hdr) name))
+
+    (let [size (aget (.-PAXRecords hdr) paxGNUSparseSize)]
+      (when (== size "")
+        (set! size (aget (.-PAXRecords hdr) paxGNUSparseRealSize)))
+
+      (when (!= size "")
+        (let [(values n err) (strconv/ParseInt size 10 64)]
+          (when (!= err nil)
+            (return nil ErrHeader))
+
+          (set! (.-Size hdr) n)))
+
+
+      ;; Read the sparse map according to the appropriate format.
+      (when is1x0
+        (return (readGNUSparseMap1x0 (.-curr tr))))
+
+      (readGNUSparseMap0x1 (.-PAXRecords hdr)))))
+
+
+
+^{:go/breaks [8] :go/end 305} (go/func mergePAX "mergePAX merges paxHdrs into hdr for all relevant fields of Header.\n" [^{:tag (* Header)} hdr ^{:tag (map string string)} paxHdrs] :results [^error err]
+  (range [k v paxHdrs]
+    (when (== v "")
+      (continue)) ; Keep the original USTAR value
+
+    (let [^int64 id64 (zero int64)]
+      (switch k
+        (case [paxPath]
+          (set! (.-Name hdr) v))
+        (case [paxLinkpath]
+          (set! (.-Linkname hdr) v))
+        (case [paxUname]
+          (set! (.-Uname hdr) v))
+        (case [paxGname]
+          (set! (.-Gname hdr) v))
+        (case [paxUid]
+          (set! (values id64 err) (strconv/ParseInt v 10 64))
+          (set! (.-Uid hdr) (conv int id64))) ; Integer overflow possible
+        (case [paxGid]
+          (set! (values id64 err) (strconv/ParseInt v 10 64))
+          (set! (.-Gid hdr) (conv int id64))) ; Integer overflow possible
+        (case [paxAtime]
+          (set! (values (.-AccessTime hdr) err) (parsePAXTime v)))
+        (case [paxMtime]
+          (set! (values (.-ModTime hdr) err) (parsePAXTime v)))
+        (case [paxCtime]
+          (set! (values (.-ChangeTime hdr) err) (parsePAXTime v)))
+        (case [paxSize]
+          (set! (values (.-Size hdr) err) (strconv/ParseInt v 10 64)))
+        (default
+          (when (strings/HasPrefix k paxSchilyXattr)
+            (when (== (.-Xattrs hdr) nil)
+              (set! (.-Xattrs hdr) (make (map string string))))
+
+            (aset (.-Xattrs hdr) (subslice k (len paxSchilyXattr)) v))))
+
+
+      (when (!= err nil)
+        (return ErrHeader))))
+
+
+  (set! (.-PAXRecords hdr) paxHdrs)
+  nil)
+
+
+
+
+^{:go/end 346} (go/func parsePAX "parsePAX parses PAX headers.\nIf an extended header (type 'x') is invalid, ErrHeader is returned.\n" [^io/Reader r] :results [(map string string) error]
+  (let [(values buf err) (readSpecialFile r)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [sbuf (conv string buf)
+
+        ;; For GNU PAX sparse format 0.0 support.
+        ;; This function transforms the sparse format 0.0 headers into format 0.1
+        ;; headers since 0.0 headers were not PAX compliant.
+        ^{:line 319 :tag (slice string)} sparseMap (zero (slice string))
+
+        ^{:line 321} paxHdrs (make (map string string))]
+      (while (> (len sbuf) 0)
+        (let [(values key value residual err) (parsePAXRecord sbuf)]
+          (when (!= err nil)
+            (return nil ErrHeader))
+
+          (set! sbuf residual)
+
+          (switch key
+            (case [paxGNUSparseOffset paxGNUSparseNumBytes]
+              ;; Validate sparse header order and value.
+              (when (or ^:go/paren (and (== (% (len sparseMap) 2) 0) (!= key paxGNUSparseOffset))
+                  ^:go/paren (and (== (% (len sparseMap) 2) 1) (!= key paxGNUSparseNumBytes))
+                  (strings/Contains value ","))
+                (return nil ErrHeader))
+
+              (set! sparseMap (append sparseMap value)))
+            (default
+              (aset paxHdrs key value)))))
+
+
+      (when (> (len sparseMap) 0)
+        (aset paxHdrs paxGNUSparseMap (strings/Join sparseMap ",")))
+
+      (return paxHdrs nil))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 468} (go/method readHeader "readHeader reads the next block header and assumes that the underlying reader\nis already aligned to a block boundary. It returns the raw block of the\nheader in case further processing is required.\n\nThe err will be set to io.EOF only when one of the following occurs:\n  - Exactly 0 bytes are read and EOF is hit.\n  - Exactly 1 block of zeros is read and EOF is hit.\n  - At least 2 blocks of zeros are read.\n" [^{:tag (* Reader)} tr] :results [(* Header) (* block) error]
+  ;; Two blocks of zero bytes marks the end of the archive.
+  (when [(values _ err) (io/ReadFull (.-r tr) (subslice (.-blk tr)))] (!= err nil)
+    (return nil nil err)) ; EOF is okay here; exactly 0 bytes read
+
+  (when (bytes/Equal (subslice (.-blk tr)) (subslice zeroBlock))
+    (when [(values _ err) (io/ReadFull (.-r tr) (subslice (.-blk tr)))] (!= err nil)
+      (return nil nil err)) ; EOF is okay here; exactly 1 block of zeros read
+
+    (when (bytes/Equal (subslice (.-blk tr)) (subslice zeroBlock))
+      (return nil nil io/EOF)) ; normal EOF; exactly 2 block of zeros read
+
+    (return nil nil ErrHeader)) ; Zero block and then non-zero block
+
+
+  ;; Verify the header matches a known format.
+  (let [format (.getFormat (.-blk tr))]
+    (when (== format FormatUnknown)
+      (return nil nil ErrHeader))
+
+
+    (let [^parser p (zero parser)
+        ^{:line 378} hdr (new Header)
+
+        ;; Unpack the V7 header.
+        ^{:line 381} v7 (.toV7 (.-blk tr))]
+      (set! (.-Typeflag hdr) (aget (.typeFlag v7) 0))
+      (set! (.-Name hdr) (.parseString p (.name v7)))
+      (set! (.-Linkname hdr) (.parseString p (.linkName v7)))
+      (set! (.-Size hdr) (.parseNumeric p (.size v7)))
+      (set! (.-Mode hdr) (.parseNumeric p (.mode v7)))
+      (set! (.-Uid hdr) (conv int (.parseNumeric p (.uid v7))))
+      (set! (.-Gid hdr) (conv int (.parseNumeric p (.gid v7))))
+      (set! (.-ModTime hdr) (time/Unix (.parseNumeric p (.modTime v7)) 0))
+
+      ;; Unpack format specific fields.
+      (when (> format formatV7)
+        (let [ustar (.toUSTAR (.-blk tr))]
+          (set! (.-Uname hdr) (.parseString p (.userName ustar)))
+          (set! (.-Gname hdr) (.parseString p (.groupName ustar)))
+          (set! (.-Devmajor hdr) (.parseNumeric p (.devMajor ustar)))
+          (set! (.-Devminor hdr) (.parseNumeric p (.devMinor ustar)))
+
+          (let [^string prefix (zero string)]
+            (switch
+              (case [(.has format (bit-or FormatUSTAR FormatPAX))]
+                (set! (.-Format hdr) format)
+                (let [ustar (.toUSTAR (.-blk tr))]
+                  (set! prefix (.parseString p (.prefix ustar)))
+
+                  ;; For Format detection, check if block is properly formatted since
+                  ;; the parser is more liberal than what USTAR actually permits.
+                  (let [notASCII ^{:go/end 408} (fn ^bool [^rune r] (>= r 0x80))]
+                    (when (>= (bytes/IndexFunc (subslice (.-blk tr)) notASCII) 0)
+                      (set! (.-Format hdr) FormatUnknown)) ; Non-ASCII characters in block.
+
+                    (let [nul ^{:go/end 412} (fn ^bool [^{:tag (slice byte)} b] (== (conv int (aget b (- (len b) 1))) 0))]
+                      (when (not (and (nul (.size v7)) (nul (.mode v7)) (nul (.uid v7)) (nul (.gid v7))
+                            (nul (.modTime v7)) (nul (.devMajor ustar)) (nul (.devMinor ustar))))
+                        (set! (.-Format hdr) FormatUnknown)))))) ; Numeric fields must end in NUL
+
+              (case [(.has format formatSTAR)]
+                (let [star (.toSTAR (.-blk tr))]
+                  (set! prefix (.parseString p (.prefix star)))
+                  (set! (.-AccessTime hdr) (time/Unix (.parseNumeric p (.accessTime star)) 0))
+                  (set! (.-ChangeTime hdr) (time/Unix (.parseNumeric p (.changeTime star)) 0))))
+              (case [(.has format FormatGNU)]
+                (set! (.-Format hdr) format)
+                (let [^parser p2 (zero parser)
+                    ^{:line 425} gnu (.toGNU (.-blk tr))]
+                  (when [b (.accessTime gnu)] (!= (aget b 0) 0)
+                    (set! (.-AccessTime hdr) (time/Unix (.parseNumeric p2 b) 0)))
+
+                  (when [b (.changeTime gnu)] (!= (aget b 0) 0)
+                    (set! (.-ChangeTime hdr) (time/Unix (.parseNumeric p2 b) 0)))
+
+
+                  ;; Prior to Go1.8, the Writer had a bug where it would output
+                  ;; an invalid tar file in certain rare situations because the logic
+                  ;; incorrectly believed that the old GNU format had a prefix field.
+                  ;; This is wrong and leads to an output file that mangles the
+                  ;; atime and ctime fields, which are often left unused.
+                  ;;
+                  ;; In order to continue reading tar files created by former, buggy
+                  ;; versions of Go, we skeptically parse the atime and ctime fields.
+                  ;; If we are unable to parse them and the prefix field looks like
+                  ;; an ASCII string, then we fallback on the pre-Go1.8 behavior
+                  ;; of treating these fields as the USTAR prefix field.
+                  ;;
+                  ;; Note that this will not use the fallback logic for all possible
+                  ;; files generated by a pre-Go1.8 toolchain. If the generated file
+                  ;; happened to have a prefix field that parses as valid
+                  ;; atime and ctime fields (e.g., when they are valid octal strings),
+                  ;; then it is impossible to distinguish between a valid GNU file
+                  ;; and an invalid pre-Go1.8 file.
+                  ;;
+                  ;; See https://golang.org/issues/12594
+                  ;; See https://golang.org/issues/21005
+                  (when (!= (.-err p2) nil)
+                    (set! (values (.-AccessTime hdr) (.-ChangeTime hdr)) (values (lit time/Time) (lit time/Time)))
+                    (let [ustar (.toUSTAR (.-blk tr))]
+                      (when [s (.parseString p (.prefix ustar))] (isASCII s)
+                        (set! prefix s))
+
+                      (set! (.-Format hdr) FormatUnknown)))))) ; Buggy file is not GNU
+
+
+            (when (> (len prefix) 0)
+              (set! (.-Name hdr) (+ prefix "/" (.-Name hdr)))))))
+
+
+      (return hdr (addr (.-blk tr)) (.-err p)))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 525} (go/method readOldGNUSparseMap "readOldGNUSparseMap reads the sparse map from the old GNU sparse format.\nThe sparse map is stored in the tar header if it's small enough.\nIf it's larger than four entries, then one or more extension headers are used\nto store the rest of the sparse map.\n\nThe Header.Size does not reflect the size of any extended headers used.\nThus, this function will read from the raw io.Reader to fetch extra headers.\nThis method mutates blk in the process.\n" [^{:tag (* Reader)} tr ^{:tag (* Header)} hdr ^{:tag (* block)} blk] :results [sparseDatas error]
+  ;; Make sure that the input format is GNU.
+  ;; Unfortunately, the STAR format also has a sparse header format that uses
+  ;; the same type flag but has a completely different layout.
+  (when (!= (.getFormat blk) FormatGNU)
+    (return nil ErrHeader))
+
+  (.mayOnlyBe (.-Format hdr) FormatGNU)
+
+  (let [^parser p (zero parser)]
+    (set! (.-Size hdr) (.parseNumeric p (.realSize (.toGNU blk))))
+    (when (!= (.-err p) nil)
+      (return nil (.-err p)))
+
+    (let [s (.sparse (.toGNU blk))
+        ^{:line 493} spd (make sparseDatas 0 (.maxEntries s))
+        ^{:line 494} totalSize (len s)]
+      (while (< totalSize maxSpecialFileSize)
+        (for [i 0] (< i (.maxEntries s)) (inc! i)
+          ;; This termination condition is identical to GNU and BSD tar.
+          (when (== (aget (.offset (.entry s i)) 0) 0x00)
+            (break)) ; Don't return, need to process extended headers (even if empty)
+
+          (let [offset (.parseNumeric p (.offset (.entry s i)))
+              ^{:line 502} length (.parseNumeric p (.length (.entry s i)))]
+            (when (!= (.-err p) nil)
+              (return nil (.-err p)))
+
+            (let [^error err (zero error)]
+              (set! (values spd err) (appendSparseEntry spd (lit sparseEntry :Offset offset :Length length)))
+              (when (!= err nil)
+                (return nil err)))))
+
+
+
+        (when (> (aget (.isExtended s) 0) 0)
+          ;; There are more entries. Read an extension header and parse its entries.
+          (when [(values _ err) (mustReadFull (.-r tr) (subslice blk))] (!= err nil)
+            (return nil err))
+
+          (set! s (.toSparse blk))
+          (set! totalSize + (len s))
+          (continue))
+
+        (return spd nil)) ; Done
+
+      (return nil errSparseTooLong))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 603} (go/func readGNUSparseMap1x0 "readGNUSparseMap1x0 reads the sparse map as stored in GNU's PAX sparse format\nversion 1.0. The format of the sparse map consists of a series of\nnewline-terminated numeric fields. The first field is the number of entries\nand is always present. Following this are the entries, consisting of two\nfields (offset, length). This function must stop reading at the end\nboundary of the block containing the last newline.\n\nNote that the GNU manual says that numeric values should be encoded in octal\nformat. However, the GNU tar utility itself outputs these values in decimal.\nAs such, this library treats values as being encoded in decimal.\n" [^io/Reader r] :results [sparseDatas error]
+  (let [
+      ^{:line 539 :tag int64} cntNewline (zero int64)
+      ^{:line 540 :tag bytes/Buffer} buf (zero bytes/Buffer)
+      ^{:line 541 :tag block} blk (zero block)
+      ^{:line 542 :tag int} totalSize (zero int)
+
+
+      ;; feedTokens copies data in blocks from r into buf until there are
+      ;; at least cnt newlines in buf. It will not read more blocks than needed.
+      ^{:line 547} feedTokens ^{:go/breaks [[3 563]] :go/end 564} (fn ^error [^int64 n]
+        (while (< cntNewline n)
+          (set! totalSize + (len blk))
+          (when (> totalSize maxSpecialFileSize)
+            (return errSparseTooLong))
+
+          (when [(values _ err) (mustReadFull r (subslice blk))] (!= err nil)
+            (return err))
+
+          (.Write buf (subslice blk))
+          (range [_ c blk]
+            (when (== c \newline)
+              (inc! cntNewline))))
+
+
+
+        nil)
+
+
+      ;; nextToken gets the next token delimited by a newline. This assumes that
+      ;; at least one newline exists in the buffer.
+      ^{:line 568} nextToken ^{:go/end 572} (fn ^string []
+        (dec! cntNewline)
+        (let [(values tok _) (.ReadString buf \newline)]
+          (strings/TrimRight tok "\n")))]
+
+
+    ;; Parse for the number of entries.
+    ;; Use integer overflow resistant math to check this.
+    (when [err (feedTokens 1)] (!= err nil)
+      (return nil err))
+
+    (let [(values numEntries err) (strconv/ParseInt (nextToken) 10 0)] ; Intentionally parse as native int
+      (when (or (!= err nil) (< numEntries 0) (< (conv int (* 2 numEntries)) (conv int numEntries)))
+        (return nil ErrHeader))
+
+
+      ;; Parse for all member entries.
+      ;; numEntries is trusted after this since feedTokens limits the number of
+      ;; tokens based on maxSpecialFileSize.
+      (when [err (feedTokens (* 2 numEntries))] (!= err nil)
+        (return nil err))
+
+      (let [spd (make sparseDatas 0 numEntries)]
+        (for [i (conv int64 0)] (< i numEntries) (inc! i)
+          (let [(values offset err1) (strconv/ParseInt (nextToken) 10 64)
+              (values length err2) (strconv/ParseInt (nextToken) 10 64)]
+            (when (or (!= err1 nil) (!= err2 nil))
+              (return nil ErrHeader))
+
+            (set! (values spd err) (appendSparseEntry spd (lit sparseEntry :Offset offset :Length length)))
+            (when (!= err nil)
+              (return nil err))))
+
+
+        (return spd nil)))))
+
+
+
+
+^{:go/end 641} (go/func readGNUSparseMap0x1 "readGNUSparseMap0x1 reads the sparse map as stored in GNU's PAX sparse format\nversion 0.1. The sparse map is stored in the PAX headers.\n" [^{:tag (map string string)} paxHdrs] :results [sparseDatas error]
+  ;; Get number of entries.
+  ;; Use integer overflow resistant math to check this.
+  (let [numEntriesStr (aget paxHdrs paxGNUSparseNumBlocks)
+      (values numEntries err) (strconv/ParseInt numEntriesStr 10 0)] ; Intentionally parse as native int
+    (when (or (!= err nil) (< numEntries 0) (< (conv int (* 2 numEntries)) (conv int numEntries)))
+      (return nil ErrHeader))
+
+
+    ;; There should be two numbers in sparseMap for each entry.
+    (let [sparseMap (strings/Split (aget paxHdrs paxGNUSparseMap) ",")]
+      (when (and (== (len sparseMap) 1) (== (aget sparseMap 0) ""))
+        (set! sparseMap (subslice sparseMap _ 0)))
+
+      (when (!= (conv int64 (len sparseMap)) (* 2 numEntries))
+        (return nil ErrHeader))
+
+
+      ;; Loop through the entries in the sparse map.
+      ;; numEntries is trusted now.
+      (let [spd (make sparseDatas 0 numEntries)]
+        (while (>= (len sparseMap) 2)
+          (let [(values offset err1) (strconv/ParseInt (aget sparseMap 0) 10 64)
+              (values length err2) (strconv/ParseInt (aget sparseMap 1) 10 64)]
+            (when (or (!= err1 nil) (!= err2 nil))
+              (return nil ErrHeader))
+
+            (set! (values spd err) (appendSparseEntry spd (lit sparseEntry :Offset offset :Length length)))
+            (when (!= err nil)
+              (return nil err))
+
+            (set! sparseMap (subslice sparseMap 2))))
+
+        (return spd nil)))))
+
+
+^{:go/end 648} (go/func appendSparseEntry [^sparseDatas spd ^sparseEntry ent] :results [sparseDatas error]
+  (when (>= (len spd) maxSparseFileEntries)
+    (return nil errSparseTooLong))
+
+  (return (append spd ent) nil))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 669} (go/method Read "Read reads from the current file in the tar archive.\nIt returns (0, io.EOF) when it reaches the end of that file,\nuntil [Next] is called to advance to the next file.\n\nIf the current file is sparse, then the regions marked as a hole\nare read back as NUL-bytes.\n\nCalling Read on special types like [TypeLink], [TypeSymlink], [TypeChar],\n[TypeBlock], [TypeDir], and [TypeFifo] returns (0, [io.EOF]) regardless of what\nthe [Header.Size] claims.\n" [^{:tag (* Reader)} tr ^{:tag (slice byte)} b] :results [int error]
+  (when (!= (.-err tr) nil)
+    (return 0 (.-err tr)))
+
+  (let [(values n err) (.Read (.-curr tr) b)]
+    (when (and (!= err nil) (!= err io/EOF))
+      (set! (.-err tr) err))
+
+    (return n err)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 690} (go/method writeTo "writeTo writes the content of the current file to w.\nThe bytes written matches the number of remaining bytes in the current file.\n\nIf the current file is sparse and w is an io.WriteSeeker,\nthen writeTo uses Seek to skip past holes defined in Header.SparseHoles,\nassuming that skipped regions are filled with NULs.\nThis always writes the last byte to ensure w is the right size.\n\nTODO(dsnet): Re-export this when adding sparse file support.\nSee https://golang.org/issue/22735\n" [^{:tag (* Reader)} tr ^io/Writer w] :results [int64 error]
+  (when (!= (.-err tr) nil)
+    (return 0 (.-err tr)))
+
+  (let [(values n err) (.WriteTo (.-curr tr) w)]
+    (when (!= err nil)
+      (set! (.-err tr) err))
+
+    (return n err)))
+
+
+
+(go/type regFileReader "regFileReader is a fileReader for reading data from a regular file entry.\n" (struct
+    ^{:line 694 :tag io/Reader} r ; Underlying Reader
+    ^{:line 695 :tag int64} nb)) ; Number of remaining bytes to read
+
+
+^{:go/end 714} (go/method Read [^{:tag (* regFileReader)} fr ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (when (> (conv int64 (len b)) (.-nb fr))
+    (set! b (subslice b _ (.-nb fr))))
+
+  (when (> (len b) 0)
+    (set! (values n err) (.Read (.-r fr) b))
+    (set! (.-nb fr) - (conv int64 n)))
+
+  (switch
+    (case [(and (== err io/EOF) (> (.-nb fr) 0))]
+      (return n io/ErrUnexpectedEOF))
+    (case [(and (== err nil) (== (.-nb fr) 0))]
+      (return n io/EOF))
+    (default
+      (return n err))))
+
+
+
+^{:go/end 718} (go/method WriteTo [^{:tag (* regFileReader)} fr ^io/Writer w] :results [int64 error]
+  (io/Copy w (lit (struct io/Reader) fr)))
+
+
+
+^{:go/end 723} (go/method logicalRemaining "logicalRemaining implements fileState.logicalRemaining.\n" ^int64 [^regFileReader fr]
+  (.-nb fr))
+
+
+
+^{:go/end 728} (go/method physicalRemaining "physicalRemaining implements fileState.physicalRemaining.\n" ^int64 [^regFileReader fr]
+  (.-nb fr))
+
+
+
+(go/type sparseFileReader "sparseFileReader is a fileReader for reading data from a sparse file entry.\n" (struct
+    ^{:line 732 :tag fileReader} fr ; Underlying fileReader
+    ^{:line 733 :tag sparseHoles} sp ; Normalized list of sparse holes
+    ^{:line 734 :tag int64} pos)) ; Current position in sparse file
+
+
+^{:go/end 775} (go/method Read [^{:tag (* sparseFileReader)} sr ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (let [finished (>= (conv int64 (len b)) (.logicalRemaining sr))]
+    (when finished
+      (set! b (subslice b _ (.logicalRemaining sr))))
+
+
+    (let [b0 b
+        ^{:line 744} endPos (+ (.-pos sr) (conv int64 (len b)))]
+      (while (and (> endPos (.-pos sr)) (== err nil))
+        (let [^int nf (zero int) ; Bytes read in fragment
+            (values holeStart holeEnd) (values (.-Offset (aget (.-sp sr) 0)) (.endOffset (aget (.-sp sr) 0)))]
+          (if (< (.-pos sr) holeStart) ; In a data fragment
+            (let [bf (subslice b _ (min (conv int64 (len b)) (- holeStart (.-pos sr))))]
+              (set! (values nf err) (tryReadFull (.-fr sr) bf)))
+            ;; In a hole fragment
+            (let [bf (subslice b _ (min (conv int64 (len b)) (- holeEnd (.-pos sr))))]
+              (set! (values nf err) (tryReadFull (lit zeroReader) bf))))
+
+          (set! b (subslice b nf))
+          (set! (.-pos sr) + (conv int64 nf))
+          (when (and (>= (.-pos sr) holeEnd) (> (len (.-sp sr)) 1))
+            (set! (.-sp sr) (subslice (.-sp sr) 1))))) ; Ensure last fragment always remains
+
+
+
+      (set! n (- (len b0) (len b)))
+      (switch
+        (case [(== err io/EOF)]
+          (return n errMissData)) ; Less data in dense file than sparse file
+        (case [(!= err nil)]
+          (return n err))
+        (case [(and (== (.logicalRemaining sr) 0) (> (.physicalRemaining sr) 0))]
+          (return n errUnrefData)) ; More data in dense file than sparse file
+        (case [finished]
+          (return n io/EOF))
+        (default
+          (return n nil))))))
+
+
+
+^{:go/end 828} (go/method WriteTo [^{:tag (* sparseFileReader)} sr ^io/Writer w] :results [^int64 n ^error err]
+  (let [(values ws ok) (assert io/WriteSeeker w)]
+    (when ok
+      (when [(values _ err) (.Seek ws 0 io/SeekCurrent)] (!= err nil)
+        (set! ok false))) ; Not all io.Seeker can really seek
+
+
+    (when (not ok)
+      (return (io/Copy w (lit (struct io/Reader) sr))))
+
+
+    (let [^bool writeLastByte (zero bool)
+        ^{:line 789} pos0 (.-pos sr)]
+      (while (and (> (.logicalRemaining sr) 0) (not writeLastByte) (== err nil))
+        (let [^int64 nf (zero int64) ; Size of fragment
+            (values holeStart holeEnd) (values (.-Offset (aget (.-sp sr) 0)) (.endOffset (aget (.-sp sr) 0)))]
+          (if (< (.-pos sr) holeStart) (do ; In a data fragment
+              (set! nf (- holeStart (.-pos sr)))
+              (set! (values nf err) (io/CopyN ws (.-fr sr) nf)))
+            (do ; In a hole fragment
+              (set! nf (- holeEnd (.-pos sr)))
+              (when (== (.physicalRemaining sr) 0)
+                (set! writeLastByte true)
+                (dec! nf))
+
+              (set! (values _ err) (.Seek ws nf io/SeekCurrent))))
+
+          (set! (.-pos sr) + nf)
+          (when (and (>= (.-pos sr) holeEnd) (> (len (.-sp sr)) 1))
+            (set! (.-sp sr) (subslice (.-sp sr) 1))))) ; Ensure last fragment always remains
+
+
+
+      ;; If the last fragment is a hole, then seek to 1-byte before EOF, and
+      ;; write a single byte to ensure the file is the right size.
+      (when (and writeLastByte (== err nil))
+        (set! (values _ err) (.Write ws (lit (slice byte) 0)))
+        (inc! (.-pos sr)))
+
+
+      (set! n (- (.-pos sr) pos0))
+      (switch
+        (case [(== err io/EOF)]
+          (return n errMissData)) ; Less data in dense file than sparse file
+        (case [(!= err nil)]
+          (return n err))
+        (case [(and (== (.logicalRemaining sr) 0) (> (.physicalRemaining sr) 0))]
+          (return n errUnrefData)) ; More data in dense file than sparse file
+        (default
+          (return n nil))))))
+
+
+
+^{:go/end 832} (go/method logicalRemaining ^int64 [^sparseFileReader sr]
+  (- (.endOffset (aget (.-sp sr) (- (len (.-sp sr)) 1))) (.-pos sr)))
+
+^{:go/end 835} (go/method physicalRemaining ^int64 [^sparseFileReader sr]
+  (.physicalRemaining (.-fr sr)))
+
+
+(go/type zeroReader (struct))
+
+^{:go/end 842} (go/method Read [zeroReader ^{:tag (slice byte)} b] :results [int error]
+  (clear b)
+  (return (len b) nil))
+
+
+
+
+^{:go/end 852} (go/func mustReadFull "mustReadFull is like io.ReadFull except it returns\nio.ErrUnexpectedEOF when io.EOF is hit before len(b) bytes are read.\n" [^io/Reader r ^{:tag (slice byte)} b] :results [int error]
+  (let [(values n err) (tryReadFull r b)]
+    (when (== err io/EOF)
+      (set! err io/ErrUnexpectedEOF))
+
+    (return n err)))
+
+
+
+
+^{:go/end 866} (go/func tryReadFull "tryReadFull is like io.ReadFull except it returns\nio.EOF when it is hit before len(b) bytes are read.\n" [^io/Reader r ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (while (and (> (len b) n) (== err nil))
+    (let [^int nn (zero int)]
+      (set! (values nn err) (.Read r (subslice b n)))
+      (set! n + nn)))
+
+  (when (and (== (len b) n) (== err io/EOF))
+    (set! err nil))
+
+  (return n err))
+
+
+
+
+^{:go/end 876} (go/func readSpecialFile "readSpecialFile is like io.ReadAll except it returns\nErrFieldTooLong if more than maxSpecialFileSize is read.\n" [^io/Reader r] :results [(slice byte) error]
+  (let [(values buf err) (io/ReadAll (io/LimitReader r (+ maxSpecialFileSize 1)))]
+    (when (> (len buf) maxSpecialFileSize)
+      (return nil ErrFieldTooLong))
+
+    (return buf err)))
+
+
+
+^{:go/end 906} (go/func discard "discard skips n bytes in r, reporting an error if unable to do so.\n" ^error [^io/Reader r ^int64 n]
+  ;; If possible, Seek to the last byte before the end of the data section.
+  ;; Do this because Seek is often lazy about reporting errors; this will mask
+  ;; the fact that the stream may be truncated. We can rely on the
+  ;; io.CopyN done shortly afterwards to trigger any IO errors.
+  (let [^int64 seekSkipped (zero int64)] ; Number of bytes skipped via Seek
+    (when [(values sr ok) (assert io/Seeker r)] (and ok (> n 1))
+      ;; Not all io.Seeker can actually Seek. For example, os.Stdin implements
+      ;; io.Seeker, but calling Seek always returns an error and performs
+      ;; no action. Thus, we try an innocent seek to the current position
+      ;; to see if Seek is really supported.
+      (let [(values pos1 err) (.Seek sr 0 io/SeekCurrent)]
+        (when (and (>= pos1 0) (== err nil))
+          ;; Seek seems supported, so perform the real Seek.
+          (let [(values pos2 err) (.Seek sr (- n 1) io/SeekCurrent)]
+            (when (or (< pos2 0) (!= err nil))
+              (return err))
+
+            (set! seekSkipped (- pos2 pos1))))))
+
+
+
+    (let [(values copySkipped err) (io/CopyN io/Discard r (- n seekSkipped))]
+      (when (and (== err io/EOF) (< (+ seekSkipped copySkipped) n))
+        (set! err io/ErrUnexpectedEOF))
+
+      ^{:line 905} err)))

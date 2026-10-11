@@ -1,0 +1,230 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.internal.http3) (go/file "body.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [net "net"]
+    ^{:line 12} [http "net/http"]
+    ^{:line 13} [textproto "net/textproto"]
+    ^{:line 14} [strings "strings"]
+    ^{:line 15} [sync "sync"]
+
+    ^{:line 17} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+
+
+
+^{:go/end 34} (go/func extractTrailerFromHeader "extractTrailerFromHeader extracts the \"Trailer\" header values from a header\nmap, and populates a trailer map with those values as keys. The extracted\nheader values will be canonicalized.\n" [^http/Header header ^http/Header trailer]
+  (range [_ names (aget header "Trailer")]
+    (set! names (textproto/TrimString names))
+    (range [name (strings/SplitSeq names ",")]
+      (set! name (textproto/CanonicalMIMEHeaderKey (textproto/TrimString name)))
+      (when (not (httpguts/ValidTrailerHeader name))
+        (continue))
+
+      (aset trailer name nil))))
+
+
+
+
+
+
+(go/type bodyWriter "A bodyWriter writes a request or response body to a stream\nas a series of DATA frames.\n" (struct
+    ^{:line 39 :tag (* stream)} st
+    ^{:line 40 :tag int64} remain ; -1 when content-length is not known
+    ^{:line 41 :tag bool} flush ; flush the stream after every write
+    ^{:line 42 :tag string} name ; "request" or "response"
+    ^{:line 43 :tag http/Header} trailer ; trailer headers that will be written once bodyWriter is closed.
+    ^{:line 44 :tag (* qpackEncoder)} enc)) ; QPACK encoder used by the connection.
+
+
+^{:go/end 83} (go/method write [^{:tag (* bodyWriter)} w & ^{:tag (slice (slice byte))} ps] :results [^int n ^error err]
+  (let [^int64 size (zero int64)]
+    (range [_ p ps]
+      (set! size + (conv int64 (len p))))
+
+    ;; If write is called with empty byte slices, just return instead of
+    ;; sending out a DATA frame containing nothing.
+    (when (== size 0)
+      (return 0 nil))
+
+    (when (and (>= (.-remain w) 0) (> size (.-remain w)))
+      (return 0 (addr ^{:go/breaks [2 4]} (lit streamError
+            :code errH3InternalError
+            :message (+ (.-name w) " body longer than specified content length")))))
+
+
+    (.writeVarint (.-st w) (conv int64 frameTypeData))
+    (.writeVarint (.-st w) size)
+    (range [_ p ps]
+      (let [^int n2 (zero int)]
+        (set! (values n2 err) (.Write (.-st w) p))
+        (set! n + n2)
+        (when (>= (.-remain w) 0)
+          (set! (.-remain w) - (conv int64 n)))
+
+        (when (!= err nil)
+          (break))))
+
+
+    (when (and (.-flush w) (== err nil))
+      (set! err (.Flush (.-st w))))
+
+    (when (!= err nil)
+      (set! err (fmt/Errorf "writing %v body: %w" (.-name w) err)))
+
+    (return n err)))
+
+
+^{:go/end 87} (go/method Write [^{:tag (* bodyWriter)} w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (.write w p))
+
+
+^{:go/breaks [[6 114]] :go/end 115} (go/method Close ^error [^{:tag (* bodyWriter)} w]
+  (when (> (.-remain w) 0)
+    (return (errors/New (+ (.-name w) " body shorter than specified content length"))))
+
+  (when (> (len (.-trailer w)) 0)
+    (let [encTrailer (.encode (.-enc w) ^{:go/end 106} (fn [^{:tag (func [^indexType itype ^string name ^string value])} f]
+            (range [name values (.-trailer w)]
+              (when (not (httpguts/ValidHeaderFieldName name))
+                (continue))
+
+              (range [_ val values]
+                (when (not (httpguts/ValidHeaderFieldValue val))
+                  (continue))
+
+                (f mayIndex name val)))))]
+
+
+
+      (.writeVarint (.-st w) (conv int64 frameTypeHeaders))
+      (.writeVarint (.-st w) (conv int64 (len encTrailer)))
+      (.Write (.-st w) encTrailer)))
+
+  (when (and (!= (.-st w) nil) (!= (.-stream (.-st w)) nil))
+    (.CloseWrite (.-stream (.-st w))))
+
+  nil)
+
+
+
+(go/type bodyReader "A bodyReader reads a request or response body from a stream.\n" (struct
+    ^{:line 119 :tag (* stream)} st
+
+    ^{:line 121 :tag sync/Mutex} mu
+    ^{:line 122 :tag int64} remain
+    ^{:line 123 :tag error} err
+
+
+
+    ^{:line 127 :tag (func []) :doc "If not nil, the body contains an \"Expect: 100-continue\" header, and\nsend100Continue should be called when Read is invoked for the first\ntime.\n"} send100Continue
+
+
+
+
+    ^{:line 132 :tag http/Header :doc "A map where the key represents the trailer header names we expect. If\nthere is a HEADERS frame after reading DATA frames to EOF, the value of\nthe headers will be written here, provided that the name of the header\nexists in the map already.\n"} trailer))
+
+
+^{:go/end 220} (go/method Read [^{:tag (* bodyReader)} r ^{:tag (slice byte)} p] :results [^int n ^error err]
+  ;; The HTTP/1 and HTTP/2 implementations both permit concurrent reads from a body,
+  ;; in the sense that the race detector won't complain.
+  ;; Use a mutex here to provide the same behavior.
+  (.Lock (.-mu r))
+  (defer (.Unlock (.-mu r)))
+  (when (!= (.-send100Continue r) nil)
+    ((.-send100Continue r))
+    (set! (.-send100Continue r) nil))
+
+  (when (!= (.-err r) nil)
+    (return 0 (.-err r)))
+
+  (defer (^{:go/end 152} (fn []
+        (when (!= err nil)
+          (set! (.-err r) err)))))
+
+
+  (when (== (.-lim (.-st r)) 0)
+    ;; We've finished reading the previous DATA frame, so end it.
+    (when [err (.endFrame (.-st r))] (!= err nil)
+      (return 0 err)))
+
+
+  ;; Read the next DATA frame header,
+  ;; if we aren't already in the middle of one.
+  (while (< (.-lim (.-st r)) 0)
+    (let [(values ftype err) (.readFrameHeader (.-st r))]
+      (when (and (== err io/EOF) (> (.-remain r) 0))
+        (return 0 (addr ^{:go/breaks [2 4]} (lit streamError
+              :code errH3MessageError
+              :message "body shorter than content-length"))))
+
+
+      (when (!= err nil)
+        (return 0 err))
+
+      (switch ftype
+        (case [frameTypeData]
+          (when (and (>= (.-remain r) 0) (> (.-lim (.-st r)) (.-remain r)))
+            (return 0 (addr ^{:go/breaks [2 4]} (lit streamError
+                  :code errH3MessageError
+                  :message "body longer than content-length")))))
+
+
+        ;; Fall out of the loop and process the frame body below.
+        (case [frameTypeHeaders]
+          ;; This HEADERS frame contains the message trailers.
+          (when (> (.-remain r) 0)
+            (return 0 (addr ^{:go/breaks [2 4]} (lit streamError
+                  :code errH3MessageError
+                  :message "body shorter than content-length"))))
+
+
+          (let [^qpackDecoder dec (zero qpackDecoder)]
+            (when [err (.decode dec (.-st r) ^{:go/breaks [[4 195]] :go/end 196} (fn ^error [^indexType _ ^string name ^string value]
+                    (set! name (textproto/CanonicalMIMEHeaderKey (textproto/TrimString name)))
+                    (when [(values _ ok) (aget (.-trailer r) name)] ok
+                      (.Add (.-trailer r) name value))
+
+                    nil))]
+              (!= err nil)
+              (return 0 err))
+
+            (when [err (.discardFrame (.-st r))] (!= err nil)
+              (return 0 err))
+
+            (return 0 io/EOF)))
+        (default
+          (when [err (.discardUnknownFrame (.-st r) ftype)] (!= err nil)
+            (return 0 err))))))
+
+
+
+  ;; We are now reading the content of a DATA frame.
+  ;; Fill the read buffer or read to the end of the frame,
+  ;; whichever comes first.
+  (when (> (conv int64 (len p)) (.-lim (.-st r)))
+    (set! p (subslice p _ (.-lim (.-st r)))))
+
+  (set! (values n err) (.Read (.-st r) p))
+  (when (> (.-remain r) 0)
+    (set! (.-remain r) - (conv int64 n)))
+
+  (return n err))
+
+
+^{:go/breaks [6] :go/end 231} (go/method Close ^error [^{:tag (* bodyReader)} r]
+  ;; Unlike the HTTP/1 and HTTP/2 body readers (at the time of this comment being written),
+  ;; calling Close concurrently with Read will interrupt the read.
+  (.CloseRead (.-stream (.-st r)))
+  ;; Make sure that any data that has already been written to bodyReader
+  ;; cannot be read after it has been closed.
+  (set! (.-err r) net/ErrClosed)
+  (set! (.-remain r) 0)
+  nil)

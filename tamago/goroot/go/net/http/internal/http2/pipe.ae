@@ -1,0 +1,183 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.internal.http2) (go/file "pipe.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [sync "sync"]])
+
+
+
+
+
+(go/type pipe "pipe is a goroutine-safe io.Reader/io.Writer pair. It's like\nio.Pipe except there are no PipeReader/PipeWriter halves, and the\nunderlying buffer is an interface. (io.Pipe is always unbuffered)\n" (struct
+    ^{:line 17 :tag sync/Mutex} mu
+    ^{:line 18 :tag sync/Cond} c ; c.L lazily initialized to &p.mu
+    ^{:line 19 :tag pipeBuffer} b ; nil when done reading
+    ^{:line 20 :tag int} unread ; bytes unread when done
+    ^{:line 21 :tag error} err ; read error once empty. non-nil means closed.
+    ^{:line 22 :tag error} breakErr ; immediate read error (caller doesn't see rest of b)
+    ^{:line 23 :tag (chan (struct))} donec ; closed on error
+    ^{:line 24 :tag (func [])} readFn)) ; optional code to run in Read before error
+
+
+(go/type pipeBuffer (interface
+    (Len ^int [])
+    ^{:line 29} io/Writer
+    ^{:line 30} io/Reader))
+
+
+
+
+^{:go/end 42} (go/method setBuffer "setBuffer initializes the pipe buffer.\nIt has no effect if the pipe is already closed.\n" [^{:tag (* pipe)} p ^pipeBuffer b]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (when (or (!= (.-err p) nil) (!= (.-breakErr p) nil))
+    (return))
+
+  (set! (.-b p) b))
+
+
+^{:go/end 51} (go/method Len ^int [^{:tag (* pipe)} p]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (when (== (.-b p) nil)
+    (return (.-unread p)))
+
+  (.Len (.-b p)))
+
+
+
+
+^{:go/end 78} (go/method Read "Read waits until data is available and copies bytes\nfrom the buffer into p.\n" [^{:tag (* pipe)} p ^{:tag (slice byte)} d] :results [^int n ^error err]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (when (== (.-L (.-c p)) nil)
+    (set! (.-L (.-c p)) (addr (.-mu p))))
+
+  (while true
+    (when (!= (.-breakErr p) nil)
+      (return 0 (.-breakErr p)))
+
+    (when (and (!= (.-b p) nil) (> (.Len (.-b p)) 0))
+      (return (.Read (.-b p) d)))
+
+    (when (!= (.-err p) nil)
+      (when (!= (.-readFn p) nil)
+        ((.-readFn p)) ; e.g. copy trailers
+        (set! (.-readFn p) nil)) ; not sticky like p.err
+
+      (set! (.-b p) nil)
+      (return 0 (.-err p)))
+
+    (.Wait (.-c p))))
+
+
+
+(go/var
+  ^{:line 81} [errClosedPipeWrite (errors/New "write on closed buffer")]
+  ^{:line 82} [errUninitializedPipeWrite (errors/New "write on uninitialized buffer")])
+
+
+
+
+^{:go/end 104} (go/method Write "Write copies bytes from p into the buffer and wakes a reader.\nIt is an error to write more data than the buffer can hold.\n" [^{:tag (* pipe)} p ^{:tag (slice byte)} d] :results [^int n ^error err]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (when (== (.-L (.-c p)) nil)
+    (set! (.-L (.-c p)) (addr (.-mu p))))
+
+  (defer (.Signal (.-c p)))
+  (when (or (!= (.-err p) nil) (!= (.-breakErr p) nil))
+    (return 0 errClosedPipeWrite))
+
+  ;; pipe.setBuffer is never invoked, leaving the buffer uninitialized.
+  ;; We shouldn't try to write to an uninitialized pipe,
+  ;; but returning an error is better than panicking.
+  (when (== (.-b p) nil)
+    (return 0 errUninitializedPipeWrite))
+
+  (.Write (.-b p) d))
+
+
+
+
+
+
+
+^{:go/end 111} (go/method CloseWithError "CloseWithError causes the next Read (waking up a current blocked\nRead if needed) to return the provided err after all data has been\nread.\n\nThe error must be non-nil.\n" [^{:tag (* pipe)} p ^error err] (.closeWithError p (addr (.-err p)) err nil))
+
+
+
+
+^{:go/end 116} (go/method BreakWithError "BreakWithError causes the next Read (waking up a current blocked\nRead if needed) to return the provided err immediately, without\nwaiting for unread data.\n" [^{:tag (* pipe)} p ^error err] (.closeWithError p (addr (.-breakErr p)) err nil))
+
+
+
+^{:go/end 120} (go/method closeWithErrorAndCode "closeWithErrorAndCode is like CloseWithError but also sets some code to run\nin the caller's goroutine before returning the error.\n" [^{:tag (* pipe)} p ^error err ^{:tag (func [])} fn] (.closeWithError p (addr (.-err p)) err fn))
+
+^{:go/end 145} (go/method closeWithError [^{:tag (* pipe)} p ^{:tag (* error)} dst ^error err ^{:tag (func [])} fn]
+  (when (== err nil)
+    (panic "err must be non-nil"))
+
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (when (== (.-L (.-c p)) nil)
+    (set! (.-L (.-c p)) (addr (.-mu p))))
+
+  (defer (.Signal (.-c p)))
+  (when (!= @dst nil)
+    ;; Already been done.
+    (return))
+
+  (set! (.-readFn p) fn)
+  (when (== dst (addr (.-breakErr p)))
+    (when (!= (.-b p) nil)
+      (set! (.-unread p) + (.Len (.-b p))))
+
+    (set! (.-b p) nil))
+
+  (set! @dst err)
+  (.closeDoneLocked p))
+
+
+
+^{:go/end 159} (go/method closeDoneLocked "requires p.mu be held.\n" [^{:tag (* pipe)} p]
+  (when (== (.-donec p) nil)
+    (return))
+
+  ;; Close if unclosed. This isn't racy since we always
+  ;; hold p.mu while closing.
+  (select
+    (case (<! (.-donec p)))
+    (default
+      (close (.-donec p)))))
+
+
+
+
+^{:go/end 169} (go/method Err "Err returns the error (if any) first set by BreakWithError or CloseWithError.\n" ^error [^{:tag (* pipe)} p]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (when (!= (.-breakErr p) nil)
+    (return (.-breakErr p)))
+
+  (.-err p))
+
+
+
+
+^{:go/end 184} (go/method Done "Done returns a channel which is closed if and when this pipe is closed\nwith CloseWithError.\n" ^{:tag (chan :recv (struct))} [^{:tag (* pipe)} p]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (when (== (.-donec p) nil)
+    (set! (.-donec p) (make (chan (struct))))
+    (when (or (!= (.-err p) nil) (!= (.-breakErr p) nil))
+      ;; Already hit an error.
+      (.closeDoneLocked p)))
+
+
+  (.-donec p))

@@ -1,0 +1,180 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; Package zlib implements reading and writing of zlib format compressed data,
+;; as specified in RFC 1950.
+;; 
+;; The implementation provides filters that uncompress during reading
+;; and compress during writing.  For example, to write compressed data
+;; to a buffer:
+;; 
+;; var b bytes.Buffer
+;; w := zlib.NewWriter(&b)
+;; w.Write([]byte("hello, world\n"))
+;; w.Close()
+;; 
+;; and to read that data back:
+;; 
+;; r, err := zlib.NewReader(&b)
+;; io.Copy(os.Stdout, r)
+;; r.Close()
+;; */
+(in-ns 'go.compress.zlib) (go/file "reader.go" :doc "Package zlib implements reading and writing of zlib format compressed data,\nas specified in RFC 1950.\n\nThe implementation provides filters that uncompress during reading\nand compress during writing.  For example, to write compressed data\nto a buffer:\n\n\tvar b bytes.Buffer\n\tw := zlib.NewWriter(&b)\n\tw.Write([]byte(\"hello, world\\n\"))\n\tw.Close()\n\nand to read that data back:\n\n\tr, err := zlib.NewReader(&b)\n\tio.Copy(os.Stdout, r)\n\tr.Close()\n" :imports [
+
+
+    ^{:line 27} [bufio "bufio"]
+    ^{:line 28} [flate "compress/flate"]
+    ^{:line 29} [binary "encoding/binary"]
+    ^{:line 30} [errors "errors"]
+    ^{:line 31} [hash "hash"]
+    ^{:line 32} [adler32 "hash/adler32"]
+    ^{:line 33} [io "io"]])
+
+
+(go/const
+  ^{:line 37} [^{:val 8} zlibDeflate 8]
+  ^{:line 38} [^{:val 7} zlibMaxWindow 7])
+
+
+(go/var
+
+  ^{:line 43} [^{:doc "ErrChecksum is returned when reading ZLIB data that has an invalid checksum.\n"} ErrChecksum (errors/New "zlib: invalid checksum")]
+
+  ^{:line 45} [^{:doc "ErrDictionary is returned when reading ZLIB data that has an invalid dictionary.\n"} ErrDictionary (errors/New "zlib: invalid dictionary")]
+
+  ^{:line 47} [^{:doc "ErrHeader is returned when reading ZLIB data that has an invalid header.\n"} ErrHeader (errors/New "zlib: invalid header")])
+
+
+(go/type reader (struct
+    ^{:line 51 :tag flate/Reader} r
+    ^{:line 52 :tag io/ReadCloser} decompressor
+    ^{:line 53 :tag hash/Hash32} digest
+    ^{:line 54 :tag error} err
+    ^{:line 55 :tag (array 4 byte)} scratch))
+
+
+
+
+
+(go/type Resetter "Resetter resets a ReadCloser returned by [NewReader] or [NewReaderDict]\nto switch to a new underlying Reader. This permits reusing a ReadCloser\ninstead of allocating a new one.\n" (interface
+
+
+    (^{:doc "Reset discards any buffered data and resets the Resetter as if it was\nnewly initialized with the given reader.\n"} Reset ^error [^io/Reader r ^{:tag (slice byte)} dict])))
+
+
+
+
+
+
+
+
+
+^{:go/end 76} (go/func NewReader "NewReader creates a new ReadCloser.\nReads from the returned ReadCloser read and decompress data from r.\nIf r does not implement [io.ByteReader], the decompressor may read more\ndata than necessary from r.\nIt is the caller's responsibility to call Close on the ReadCloser when done.\n\nThe [io.ReadCloser] returned by NewReader also implements [Resetter].\n" [^io/Reader r] :results [io/ReadCloser error]
+  (NewReaderDict r nil))
+
+
+
+
+
+
+
+^{:go/end 90} (go/func NewReaderDict "NewReaderDict is like [NewReader] but uses a preset dictionary.\nNewReaderDict ignores the dictionary if the compressed data does not refer to it.\nIf the compressed data refers to a different dictionary, NewReaderDict returns [ErrDictionary].\n\nThe ReadCloser returned by NewReaderDict also implements [Resetter].\n" [^io/Reader r ^{:tag (slice byte)} dict] :results [io/ReadCloser error]
+  (let [z (new reader)
+      ^{:line 85} err (.Reset z r dict)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return z nil)))
+
+
+^{:go/end 120} (go/method Read [^{:tag (* reader)} z ^{:tag (slice byte)} p] :results [int error]
+  (when (!= (.-err z) nil)
+    (return 0 (.-err z)))
+
+
+  (let [^int n (zero int)]
+    (set! (values n (.-err z)) (.Read (.-decompressor z) p))
+    (.Write (.-digest z) (subslice p 0 n))
+    (when (!= (.-err z) io/EOF)
+      ;; In the normal case we return here.
+      (return n (.-err z)))
+
+
+    ;; Finished file; check checksum.
+    (when [(values _ err) (io/ReadFull (.-r z) (subslice (.-scratch z) 0 4))] (!= err nil)
+      (when (== err io/EOF)
+        (set! err io/ErrUnexpectedEOF))
+
+      (set! (.-err z) err)
+      (return n (.-err z)))
+
+    ;; ZLIB (RFC 1950) is big-endian, unlike GZIP (RFC 1952).
+    (let [checksum (.Uint32 binary/BigEndian (subslice (.-scratch z) _ 4))]
+      (when (!= checksum (.Sum32 (.-digest z)))
+        (set! (.-err z) ErrChecksum)
+        (return n (.-err z)))
+
+      (return n io/EOF))))
+
+
+
+
+
+^{:go/end 131} (go/method Close "Calling Close does not close the wrapped [io.Reader] originally passed to [NewReader].\nIn order for the ZLIB checksum to be verified, the reader must be\nfully consumed until the [io.EOF].\n" ^error [^{:tag (* reader)} z]
+  (when (and (!= (.-err z) nil) (!= (.-err z) io/EOF))
+    (return (.-err z)))
+
+  (set! (.-err z) (.Close (.-decompressor z)))
+  (.-err z))
+
+
+^{:go/end 181} (go/method Reset ^error [^{:tag (* reader)} z ^io/Reader r ^{:tag (slice byte)} dict]
+  (set! @z (lit reader :decompressor (.-decompressor z)))
+  (if [(values fr ok) (assert flate/Reader r)] ok
+    (set! (.-r z) fr)
+
+    (set! (.-r z) (bufio/NewReader r)))
+
+
+  ;; Read the header (RFC 1950 section 2.2.).
+  (set! (values _ (.-err z)) (io/ReadFull (.-r z) (subslice (.-scratch z) 0 2)))
+  (when (!= (.-err z) nil)
+    (when (== (.-err z) io/EOF)
+      (set! (.-err z) io/ErrUnexpectedEOF))
+
+    (return (.-err z)))
+
+  (let [h (.Uint16 binary/BigEndian (subslice (.-scratch z) _ 2))]
+    (when (or ^:go/paren (!= (bit-and (aget (.-scratch z) 0) 0x0f) zlibDeflate) ^:go/paren (> (>> (aget (.-scratch z) 0) 4) zlibMaxWindow) ^:go/paren (!= (% h 31) 0))
+      (set! (.-err z) ErrHeader)
+      (return (.-err z)))
+
+    ^{:go/breaks [5]} (let [haveDict (!= (bit-and (aget (.-scratch z) 1) 0x20) 0)]
+      (when haveDict
+        (set! (values _ (.-err z)) (io/ReadFull (.-r z) (subslice (.-scratch z) 0 4)))
+        (when (!= (.-err z) nil)
+          (when (== (.-err z) io/EOF)
+            (set! (.-err z) io/ErrUnexpectedEOF))
+
+          (return (.-err z)))
+
+        (let [checksum (.Uint32 binary/BigEndian (subslice (.-scratch z) _ 4))]
+          (when (!= checksum (adler32/Checksum dict))
+            (set! (.-err z) ErrDictionary)
+            (return (.-err z)))))
+
+
+
+      (if (== (.-decompressor z) nil)
+        (if haveDict
+          (set! (.-decompressor z) (flate/NewReaderDict (.-r z) dict))
+
+          (set! (.-decompressor z) (flate/NewReader (.-r z))))
+
+
+        (.Reset (assert flate/Resetter (.-decompressor z)) (.-r z) dict))
+
+      (set! (.-digest z) (adler32/New))
+      nil)))

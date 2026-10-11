@@ -1,0 +1,138 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package bcache implements a GC-friendly cache (see [Cache]) for BoringCrypto.
+(in-ns 'go.crypto.internal.boring.bcache) (go/file "cache.go" :doc "Package bcache implements a GC-friendly cache (see [Cache]) for BoringCrypto.\n" :imports [
+
+
+    ^{:line 9} [atomic "sync/atomic"]
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Cache "A Cache is a GC-friendly concurrent map from unsafe.Pointer to\nunsafe.Pointer. It is meant to be used for maintaining shadow\nBoringCrypto state associated with certain allocated structs, in\nparticular public and private RSA and ECDSA keys.\n\nThe cache is GC-friendly in the sense that the keys do not\nindefinitely prevent the garbage collector from collecting them.\nInstead, at the start of each GC, the cache is cleared entirely. That\nis, the cache is lossy, and the loss happens at the start of each GC.\nThis means that clients need to be able to cope with cache entries\ndisappearing, but it also means that clients don't need to worry about\ncache entries keeping the keys from being collected.\n" :type-params [K ^:go/grouped V] (struct
+
+    ^{:line 27 :tag (atomic/Pointer (cacheTable K V)) :doc "The runtime atomically stores nil to ptable at the start of each GC.\n"} ptable))
+
+
+(go/type cacheTable :type-params [K ^:go/grouped V] (array cacheSize (atomic/Pointer (cacheEntry K V))))
+
+
+(go/type cacheEntry "A cacheEntry is a single entry in the linked list for a given hash table entry.\n" :type-params [K ^:go/grouped V] (struct
+    ^{:line 34 :tag (* K)} k ; immutable once created
+    ^{:line 35 :tag (atomic/Pointer V)} v ; read and written atomically to allow updates
+    ^{:line 36 :tag (* (cacheEntry K V))} next)) ; immutable once linked into table
+
+
+(go/func ^:extern registerCache [unsafe/Pointer]) ; provided by runtime
+
+
+
+
+^{:go/end 46} (go/method Register "Register registers the cache with the runtime,\nso that c.ptable can be cleared at the start of each GC.\nRegister must be called during package initialization.\n" [^{:tag (* (Cache K V))} c]
+  (registerCache (conv unsafe/Pointer (addr (.-ptable c)))))
+
+
+
+
+
+(go/const ^{:val 1021 :doc "cacheSize is the number of entries in the hash table.\nThe hash is the pointer value mod cacheSize, a prime.\nCollisions are resolved by maintaining a linked list in each hash slot.\n"} cacheSize 1021)
+
+
+
+^{:go/end 66} (go/method table "table returns a pointer to the current cache hash table,\ncoping with the possibility of the GC clearing it out from under us.\n" ^{:tag (* (cacheTable K V))} [^{:tag (* (Cache K V))} c]
+  (while true
+    (let [p (.Load (.-ptable c))]
+      (when (== p nil)
+        (set! p (new (inst cacheTable K V)))
+        (when (not (.CompareAndSwap (.-ptable c) nil p))
+          (continue)))
+
+
+      (return p))))
+
+
+
+
+
+
+^{:go/end 75} (go/method Clear "Clear clears the cache.\nThe runtime does this automatically at each garbage collection;\nthis method is exposed only for testing.\n" [^{:tag (* (Cache K V))} c]
+  ;; The runtime does this at the start of every garbage collection
+  ;; (itself, not by calling this function).
+  (.Store (.-ptable c) nil))
+
+
+
+
+
+^{:go/end 89} (go/method Get "Get returns the cached value associated with v,\nwhich is either the value v corresponding to the most recent call to Put(k, v)\nor nil if that cache entry has been dropped.\n" ^{:tag (* V)} [^{:tag (* (Cache K V))} c ^{:tag (* K)} k]
+  ^{:go/breaks [[3 88]]} (let [head (addr (aget (.table c) (% (conv uintptr (conv unsafe/Pointer k)) cacheSize)))
+      ^{:line 82} e (.Load head)]
+    (for [] (!= e nil) (set! e (.-next e))
+      (when (== (.-k e) k)
+        (return (.Load (.-v e)))))
+
+
+    nil))
+
+
+
+^{:go/end 140} (go/method Put "Put sets the cached value associated with k to v.\n" [^{:tag (* (Cache K V))} c ^{:tag (* K)} k ^{:tag (* V)} v]
+  (let [head (addr (aget (.table c) (% (conv uintptr (conv unsafe/Pointer k)) cacheSize)))
+
+      ;; Strategy is to walk the linked list at head,
+      ;; same as in Get, to look for existing entry.
+      ;; If we find one, we update v atomically in place.
+      ;; If not, then we race to replace the start = *head
+      ;; we observed with a new k, v entry.
+      ;; If we win that race, we're done.
+      ;; Otherwise, we try the whole thing again,
+      ;; with two optimizations:
+      ;;
+      ;;  1. We track in noK the start of the section of
+      ;;     the list that we've confirmed has no entry for k.
+      ;;     The next time down the list, we can stop at noK,
+      ;;     because new entries are inserted at the front of the list.
+      ;;     This guarantees we never traverse an entry
+      ;;     multiple times.
+      ;;
+      ;;  2. We only allocate the entry to be added once,
+      ;;     saving it in add for the next attempt.
+      (values ^{:tag (* (cacheEntry K V))} add ^{:tag (* (cacheEntry K V))} noK) (zero (* (cacheEntry K V)))
+      ^{:line 114} n 0]
+    (while true
+      (let [e (.Load head)
+          ^{:line 117} start e]
+        (for [] (and (!= e nil) (!= e noK)) (set! e (.-next e))
+          (when (== (.-k e) k)
+            (.Store (.-v e) v)
+            (return))
+
+          (inc! n))
+
+        (when (== add nil)
+          (set! add (addr (lit (cacheEntry K V) :k k)))
+          (.Store (.-v add) v))
+
+        (set! (.-next add) start)
+        (when (>= n 1000)
+          ;; If an individual list gets too long, which shouldn't happen,
+          ;; throw it away to avoid quadratic lookup behavior.
+          (set! (.-next add) nil))
+
+        (when (.CompareAndSwap head start add)
+          (return))
+
+        (set! noK start)))))

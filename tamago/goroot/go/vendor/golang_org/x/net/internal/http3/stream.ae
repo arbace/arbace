@@ -1,0 +1,259 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.internal.http3) (go/file "stream.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [io "io"]
+
+    ^{:line 11} [quic "golang.org/x/net/quic"]])
+
+
+
+(go/type stream "A stream wraps a QUIC stream, providing methods to read/write various values.\n" (struct
+    ^{:line 16 :tag (* quic/Stream)} stream
+
+
+
+
+
+
+    ^{:line 23 :tag int64 :doc "lim is the current read limit.\nReading a frame header sets the limit to the end of the frame.\nReading past the limit or reading less than the limit and ending the frame\nresults in an error.\n-1 indicates no limit.\n"} lim))
+
+
+
+
+
+
+
+
+^{:go/end 54} (go/func newConnStream "newConnStream creates a new stream on a connection.\nIt writes the stream header for unidirectional streams.\n\nThe stream returned by newStream is not flushed,\nand will not be sent to the peer until the caller calls\nFlush or writes enough data to the stream.\n" [^context/Context ctx ^{:tag (* quic/Conn)} qconn ^streamType stype] :results [(* stream) error]
+  (let [^{:tag (* quic/Stream)} qs (zero (* quic/Stream))
+      ^{:line 34 :tag error} err (zero error)]
+    (if (== stype streamTypeRequest)
+      ;; Request streams are bidirectional.
+      (set! (values qs err) (.NewStream qconn ctx))
+
+      ;; All other streams are unidirectional.
+      (set! (values qs err) (.NewSendOnlyStream qconn ctx)))
+
+    (when (!= err nil)
+      (return nil err))
+
+    (let [st (addr ^{:go/breaks [2 4]} (lit stream
+            :stream qs
+            :lim -1))] ; no limit
+
+      (when (!= stype streamTypeRequest)
+        ;; Unidirectional stream header.
+        (.writeVarint st (conv int64 stype)))
+
+      (return st err))))
+
+
+^{:go/end 61} (go/func newStream ^{:tag (* stream)} [^{:tag (* quic/Stream)} qs]
+  (addr ^{:go/breaks [2 4]} (lit stream
+      :stream qs
+      :lim -1))) ; no limit
+
+
+
+
+
+
+
+^{:go/end 82} (go/method readFrameHeader "readFrameHeader reads the type and length fields of an HTTP/3 frame.\nIt sets the read limit to the end of the frame.\n\nhttps://www.rfc-editor.org/rfc/rfc9114.html#section-7.1\n" [^{:tag (* stream)} st] :results [^frameType ftype ^error err]
+  (when (>= (.-lim st) 0)
+    ;; We shouldn't call readFrameHeader before ending the previous frame.
+    (return 0 errH3FrameError))
+
+  (set! (values ftype err) ((inst readVarint frameType) st))
+  (when (!= err nil)
+    (return 0 err))
+
+  (let [(values size ^:assign err) (.readVarint st)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (set! (.-lim st) size)
+    (return ftype nil)))
+
+
+
+
+^{:go/breaks [6] :go/end 95} (go/method endFrame "endFrame is called after reading a frame to reset the read limit.\nIt returns an error if the entire contents of a frame have not been read.\n" ^error [^{:tag (* stream)} st]
+  (when (!= (.-lim st) 0)
+    (return (addr ^{:go/breaks [2 4]} (lit connectionError
+          :code errH3FrameError
+          :message "invalid HTTP/3 frame"))))
+
+
+  (set! (.-lim st) -1)
+  nil)
+
+
+
+^{:go/end 109} (go/method readFrameData "readFrameData returns the remaining data in the current frame.\n" [^{:tag (* stream)} st] :results [(slice byte) error]
+  (when (< (.-lim st) 0)
+    (return nil errH3FrameError))
+
+  ;; TODO: Pool buffers to avoid allocation here.
+  (let [b (make (slice byte) (.-lim st))
+      (values _ err) (io/ReadFull st b)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return b nil)))
+
+
+
+^{:go/end 124} (go/method ReadByte "ReadByte reads one byte from the stream.\n" [^{:tag (* stream)} st] :results [^byte b ^error err]
+  (when [err (.recordBytesRead st 1)] (!= err nil)
+    (return 0 err))
+
+  (set! (values b err) (.ReadByte (.-stream st)))
+  (when (!= err nil)
+    (when (and (== err io/EOF) (< (.-lim st) 0))
+      (return 0 io/EOF))
+
+    (return 0 errH3FrameError))
+
+  (return b nil))
+
+
+
+^{:go/end 148} (go/method Read "Read reads from the stream.\n" [^{:tag (* stream)} st ^{:tag (slice byte)} b] :results [int error]
+  (let [(values n err) (.Read (.-stream st) b)]
+    (when [e2 (.recordBytesRead st n)] (!= e2 nil)
+      (return 0 e2))
+
+    (when (== err io/EOF)
+      (cond (== (.-lim st) 0)
+        ;; EOF at end of frame, ignore.
+        (return n nil)
+        (> (.-lim st) 0)
+        ;; EOF inside frame, error.
+        (return 0 errH3FrameError) :else
+
+        ;; EOF outside of frame, surface to caller.
+        (return n io/EOF)))
+
+
+    (when (!= err nil)
+      (return 0 errH3FrameError))
+
+    (return n nil)))
+
+
+
+
+
+
+
+^{:go/end 170} (go/method discardUnknownFrame "discardUnknownFrame discards an unknown frame.\n\nHTTP/3 requires that unknown frames be ignored on all streams.\nHowever, a known frame appearing in an unexpected place is a fatal error,\nso this returns an error if the frame is one we know.\n" ^error [^{:tag (* stream)} st ^frameType ftype]
+  (switch ftype
+    (case [frameTypeData
+        ^{:line 158} frameTypeHeaders
+        ^{:line 159} frameTypeCancelPush
+        ^{:line 160} frameTypeSettings
+        ^{:line 161} frameTypePushPromise
+        ^{:line 162} frameTypeGoaway
+        ^{:line 163} frameTypeMaxPushID]
+      (return (addr ^{:go/breaks [2 4]} (lit connectionError
+            :code errH3FrameUnexpected
+            :message (+ "unexpected " (.String ftype) " frame"))))))
+
+
+  (.discardFrame st))
+
+
+
+^{:go/breaks [6] :go/end 183} (go/method discardFrame "discardFrame discards any remaining data in the current frame and resets the read limit.\n" ^error [^{:tag (* stream)} st]
+  ;; TODO: Consider adding a *quic.Stream method to discard some amount of data.
+  (range [(.-lim st)]
+    (let [(values _ err) (.ReadByte (.-stream st))]
+      (when (!= err nil)
+        (return (addr (lit streamError errH3FrameError (.Error err)))))))
+
+
+  (set! (.-lim st) -1)
+  nil)
+
+
+
+^{:go/end 186} (go/method Write "Write writes to the stream.\n" [^{:tag (* stream)} st ^{:tag (slice byte)} b] :results [int error] (.Write (.-stream st) b))
+
+
+^{:go/end 189} (go/method Flush "Flush commits data written to the stream.\n" ^error [^{:tag (* stream)} st] (.Flush (.-stream st)))
+
+
+^{:go/end 210} (go/method readVarint "readVarint reads a QUIC variable-length integer from the stream.\n" [^{:tag (* stream)} st] :results [^int64 v ^error err]
+  (let [(values b ^:assign err) (.ReadByte (.-stream st))]
+    (when (!= err nil)
+      (return 0 err))
+
+    (set! v (conv int64 (bit-and b 0x3f)))
+    (let [n ^int (<< 1 (>> b 6))]
+      (for [i 1] (< i n) (inc! i)
+        (let [(values b err) (.ReadByte (.-stream st))]
+          (when (!= err nil)
+            (return 0 errH3FrameError))
+
+          (set! v (bit-or (<< v 8) (conv int64 b)))))
+
+      (when [err (.recordBytesRead st n)] (!= err nil)
+        (return 0 err))
+
+      (return v nil))))
+
+
+
+^{:go/end 216} (go/func readVarint "readVarint reads a varint of a particular type.\n" :type-params [^{:tag (| (tilde int64) (tilde uint64))} T] [^{:tag (* stream)} st] :results [T error]
+  (let [(values v err) (.readVarint st)]
+    (return (conv T v) err)))
+
+
+
+^{:go/end 243} (go/method writeVarint "writeVarint writes a QUIC variable-length integer to the stream.\n" [^{:tag (* stream)} st ^int64 v]
+  (switch
+    (case [(<= v (- (<< 1 6) 1))]
+      (.WriteByte (.-stream st) (conv byte v)))
+    (case [(<= v (- (<< 1 14) 1))]
+      (.WriteByte (.-stream st) (bit-or (<< 1 6) (conv byte (>> v 8))))
+      (.WriteByte (.-stream st) (conv byte v)))
+    (case [(<= v (- (<< 1 30) 1))]
+      (.WriteByte (.-stream st) (bit-or (<< 2 6) (conv byte (>> v 24))))
+      (.WriteByte (.-stream st) (conv byte (>> v 16)))
+      (.WriteByte (.-stream st) (conv byte (>> v 8)))
+      (.WriteByte (.-stream st) (conv byte v)))
+    (case [(<= v (- (<< 1 62) 1))]
+      (.WriteByte (.-stream st) (bit-or (<< 3 6) (conv byte (>> v 56))))
+      (.WriteByte (.-stream st) (conv byte (>> v 48)))
+      (.WriteByte (.-stream st) (conv byte (>> v 40)))
+      (.WriteByte (.-stream st) (conv byte (>> v 32)))
+      (.WriteByte (.-stream st) (conv byte (>> v 24)))
+      (.WriteByte (.-stream st) (conv byte (>> v 16)))
+      (.WriteByte (.-stream st) (conv byte (>> v 8)))
+      (.WriteByte (.-stream st) (conv byte v)))
+    (default
+      (panic "varint too large"))))
+
+
+
+
+
+^{:go/breaks [[7 259]] :go/end 260} (go/method recordBytesRead "recordBytesRead records that n bytes have been read.\nIt returns an error if the read passes the current limit.\n" ^error [^{:tag (* stream)} st ^int n]
+  (when (< (.-lim st) 0)
+    (return nil))
+
+  (set! (.-lim st) - (conv int64 n))
+  (when (< (.-lim st) 0)
+    (set! (.-stream st) nil) ; panic if we try to read again
+    (return (addr ^{:go/breaks [2 4]} (lit connectionError
+          :code errH3FrameError
+          :message "invalid HTTP/3 frame"))))
+
+
+  nil)

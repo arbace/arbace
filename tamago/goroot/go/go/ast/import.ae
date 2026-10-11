@@ -1,0 +1,256 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.ast) (go/file "import.go" :imports [
+
+
+    ^{:line 8} [cmp "cmp"]
+    ^{:line 9} [token "go/token"]
+    ^{:line 10} [slices "slices"]
+    ^{:line 11} [strconv "strconv"]])
+
+
+
+
+^{:go/end 64} (go/func SortImports "SortImports sorts runs of consecutive import lines in import blocks in f.\nIt also removes duplicate imports when it is possible to do so without data loss.\n" [^{:tag (* token/FileSet)} fset ^{:tag (* File)} f]
+  (range [_ d (.-Decls f)]
+    (let [(values d ok) (assert (* GenDecl) d)]
+      (when (or (not ok) (!= (.-Tok d) token/IMPORT))
+        ;; Not an import declaration, so we're done.
+        ;; Imports are always first.
+        (break))
+
+
+      (when (not (.IsValid (.-Lparen d)))
+        ;; Not a block: sorted by default.
+        (continue))
+
+
+      ;; Identify and sort runs of specs on successive lines.
+      (let [i 0
+          ^{:line 32} specs (subslice (.-Specs d) _ 0)]
+        (range [j s (.-Specs d)]
+          (when (and (> j i) (> (lineAt fset (.Pos s)) (+ 1 (lineAt fset (.End (aget (.-Specs d) (- j 1)))))))
+            ;; j begins a new run. End this one.
+            (set! specs (append specs (spread (sortSpecs fset f d (subslice (.-Specs d) i j)))))
+            (set! i j)))
+
+
+        (set! specs (append specs (spread (sortSpecs fset f d (subslice (.-Specs d) i)))))
+        (set! (.-Specs d) specs)
+
+        ;; Deduping can leave a blank line before the rparen; clean that up.
+        (when (> (len (.-Specs d)) 0)
+          (let [lastSpec (aget (.-Specs d) (- (len (.-Specs d)) 1))
+              ^{:line 46} lastLine (lineAt fset (.Pos lastSpec))
+              ^{:line 47} rParenLine (lineAt fset (.-Rparen d))]
+            (while (> rParenLine (+ lastLine 1))
+              (dec! rParenLine)
+              (.MergeLine (.File fset (.-Rparen d)) rParenLine)))))))
+
+
+
+
+  ;; Make File.Imports order consistent.
+  (set! (.-Imports f) (subslice (.-Imports f) _ 0))
+  (range [_ decl (.-Decls f)]
+    (when [(values decl ok) (assert (* GenDecl) decl)] (and ok (== (.-Tok decl) token/IMPORT))
+      (range [_ spec (.-Specs decl)]
+        (set! (.-Imports f) (append (.-Imports f) (assert (* ImportSpec) spec)))))))
+
+
+
+
+
+^{:go/end 68} (go/func lineAt ^int [^{:tag (* token/FileSet)} fset ^token/Pos pos]
+  (.-Line (.PositionFor fset pos false)))
+
+
+^{:go/end 76} (go/func importPath ^string [^Spec s]
+  ^{:go/breaks [[3 75]]} (let [(values t err) (strconv/Unquote (.-Value (.-Path (assert (* ImportSpec) s))))]
+    (when (== err nil)
+      (return t))
+
+    ""))
+
+
+^{:go/end 84} (go/func importName ^string [^Spec s]
+  (let [n (.-Name (assert (* ImportSpec) s))]
+    (when (== n nil)
+      (return ""))
+
+    (.-Name n)))
+
+
+^{:go/end 92} (go/func importComment ^string [^Spec s]
+  (let [c (.-Comment (assert (* ImportSpec) s))]
+    (when (== c nil)
+      (return ""))
+
+    (.Text c)))
+
+
+
+^{:go/end 100} (go/func collapse "collapse indicates whether prev may be removed, leaving only next.\n" ^bool [^Spec prev ^Spec next]
+  (when (or (!= (importPath next) (importPath prev)) (!= (importName next) (importName prev)))
+    (return false))
+
+  (== (.-Comment (assert (* ImportSpec) prev)) nil))
+
+
+(go/type posSpan (struct
+    ^{:line 103 :tag token/Pos} Start
+    ^{:line 104 :tag token/Pos} End))
+
+
+(go/type cgPos (struct
+    ^{:line 108 :tag bool} left ; true if comment is to the left of the spec, false otherwise.
+    ^{:line 109 :tag (* CommentGroup)} cg))
+
+
+^{:go/end 247} (go/func sortSpecs ^{:tag (slice Spec)} [^{:tag (* token/FileSet)} fset ^{:tag (* File)} f ^{:tag (* GenDecl)} d ^{:tag (slice Spec)} specs]
+  ;; Can't short-circuit here even if specs are already sorted,
+  ;; since they might yet need deduplication.
+  ;; A lone import, however, may be safely ignored.
+  (when (<= (len specs) 1)
+    (return specs))
+
+
+  ;; Record positions for specs.
+  (let [pos (make (slice posSpan) (len specs))]
+    (range [i s specs]
+      (aset pos i (lit posSpan (.Pos s) (.End s))))
+
+
+    ;; Identify comments in this range.
+    (let [begSpecs (.-Start (aget pos 0))
+        ^{:line 128} endSpecs (.-End (aget pos (- (len pos) 1)))
+        ^{:line 129} beg (.LineStart (.File fset begSpecs) (lineAt fset begSpecs))
+        ^{:line 130} endLine (lineAt fset endSpecs)
+        ^{:line 131} endFile (.File fset endSpecs)
+        ^{:line 132 :tag token/Pos} end (zero token/Pos)]
+      (if (== endLine (.LineCount endFile))
+        (set! end endSpecs)
+
+        (set! end (.LineStart endFile (+ endLine 1)))) ; beginning of next line
+
+      (let [first (len (.-Comments f))
+          ^{:line 139} last -1]
+        (range [i g (.-Comments f)]
+          (when (>= (.End g) end)
+            (break))
+
+          ;; g.End() < end
+          (when (<= beg (.Pos g))
+            ;; comment is within the range [beg, end[ of import declarations
+            (when (< i first)
+              (set! first i))
+
+            (when (> i last)
+              (set! last i))))
+
+
+
+
+        (let [^{:tag (slice (* CommentGroup))} comments (zero (slice (* CommentGroup)))]
+          (when (>= last 0)
+            (set! comments (subslice (.-Comments f) first (+ last 1))))
+
+
+          ;; Assign each comment to the import spec on the same line.
+          (let [importComments (lit (map (* ImportSpec) (slice cgPos)))
+              ^{:line 163} specIndex 0]
+            (range [_ g comments]
+              (while (and (< (+ specIndex 1) (len specs)) (<= (.-Start (aget pos (+ specIndex 1))) (.Pos g)))
+                (inc! specIndex))
+
+              (let [^bool left (zero bool)]
+                ;; A block comment can appear before the first import spec.
+                (cond (and (== specIndex 0) (> (.-Start (aget pos specIndex)) (.Pos g)))
+                  (set! left true)
+                  (and (< (+ specIndex 1) (len specs)) ; Or it can appear on the left of an import spec.
+                    (== (+ (lineAt fset (.-Start (aget pos specIndex))) 1) (lineAt fset (.Pos g)))) (do
+                    (inc! specIndex)
+                    (set! left true)))
+
+                (let [s (assert (* ImportSpec) (aget specs specIndex))]
+                  (aset importComments s (append (aget importComments s) (lit cgPos :left left :cg g))))))
+
+
+            ;; Sort the import specs by import path.
+            ;; Remove duplicates, when possible without data loss.
+            ;; Reassign the import paths to have the same position sequence.
+            ;; Reassign each comment to the spec on the same line.
+            ;; Sort the comments by new position.
+            (^{:inst [(slice Spec) Spec]} slices/SortFunc specs ^{:go/end 200} (fn ^int [^Spec a ^Spec b]
+                (let [ipath (importPath a)
+                    ^{:line 188} jpath (importPath b)
+                    ^{:line 189} r (^{:inst [string]} cmp/Compare ipath jpath)]
+                  (when (!= r 0)
+                    (return r))
+
+                  (let [iname (importName a)
+                      ^{:line 194} jname (importName b)]
+                    (set! r (^{:inst [string]} cmp/Compare iname jname))
+                    (when (!= r 0)
+                      (return r))
+
+                    (^{:inst [string]} cmp/Compare (importComment a) (importComment b))))))
+
+
+            ;; Dedup. Thanks to our sorting, we can just consider
+            ;; adjacent pairs of imports.
+            (let [deduped (subslice specs _ 0)]
+              (range [i s specs]
+                (if (or (== i (- (len specs) 1)) (not (collapse s (aget specs (+ i 1)))))
+                  (set! deduped (append deduped s))
+
+                  (let [p (.Pos s)]
+                    ;; This function is exited early when len(specs) <= 1,
+                    ;; so d.Rparen must be populated (d.Rparen.IsValid() == true).
+                    (when [l (lineAt fset p)] (!= l (lineAt fset (.-Rparen d)))
+                      (.MergeLine (.File fset p) l)))))
+
+
+
+              (set! specs deduped)
+
+              ;; Fix up comment positions
+              (range [i s specs]
+                (let [s (assert (* ImportSpec) s)]
+                  (when (!= (.-Name s) nil)
+                    (set! (.-NamePos (.-Name s)) (.-Start (aget pos i))))
+
+                  (updateBasicLitPos (.-Path s) (.-Start (aget pos i)))
+                  (set! (.-EndPos s) (.-End (aget pos i)))
+                  (range [_ g (aget importComments s)]
+                    (range [_ c (.-List (.-cg g))]
+                      (if (.-left g)
+                        (set! (.-Slash c) (- (.-Start (aget pos i)) 1))
+
+                        ;; An import spec can have both block comment and a line comment
+                        ;; to its right. In that case, both of them will have the same pos.
+                        ;; But while formatting the AST, the line comment gets moved to
+                        ;; after the block comment.
+                        (set! (.-Slash c) (.-End (aget pos i))))))))
+
+
+
+
+
+              (^{:inst [(slice (* CommentGroup)) (* CommentGroup)]} slices/SortFunc comments ^{:go/end 244} (fn ^int [^{:tag (* CommentGroup)} a ^{:tag (* CommentGroup)} b]
+                  (^{:inst [token/Pos]} cmp/Compare (.Pos a) (.Pos b))))
+
+
+              ^{:line 246} specs)))))))
+
+
+
+
+
+^{:go/end 258} (go/func updateBasicLitPos "updateBasicLitPos updates lit.Pos,\nensuring that lit.End is displaced by the same amount.\n(See https://go.dev/issue/76395.)\n" [^{:tag (* BasicLit)} lit ^token/Pos pos]
+  (let [len (- (.End lit) (.Pos lit))]
+    (set! (.-ValuePos lit) pos)
+    (when (.IsValid (.-ValueEnd lit))
+      (set! (.-ValueEnd lit) (+ pos len)))))

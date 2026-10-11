@@ -1,0 +1,631 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Software IEEE754 64-bit floating point.
+;; Only referred to (and thus linked in) by softfloat targets
+;; and by tests in this directory.
+
+(in-ns 'go.runtime) (go/file "softfloat64.go" :imports [])
+
+(go/const
+  ^{:line 12} [^{:tag uint :val 52} mantbits64 52]
+  ^{:line 13} [^{:tag uint :val 11} expbits64 11]
+  ^{:line 14} [^{:val -1023} bias64 (+ (<< -1 (- expbits64 1)) 1)]
+
+  ^{:line 16} [^{:tag uint64 :val 9221120237041090560} nan64 (+ (<< (- (<< 1 expbits64) 1) mantbits64) (<< 1 (- mantbits64 1)))] ; quiet NaN, 0 payload
+  ^{:line 17} [^{:tag uint64 :val 9218868437227405312} inf64 (<< (- (<< 1 expbits64) 1) mantbits64)]
+  ^{:line 18} [^{:tag uint64 :val 9223372036854775808N} neg64 (<< 1 (+ expbits64 mantbits64))]
+
+  ^{:line 20} [^{:tag uint :val 23} mantbits32 23]
+  ^{:line 21} [^{:tag uint :val 8} expbits32 8]
+  ^{:line 22} [^{:val -127} bias32 (+ (<< -1 (- expbits32 1)) 1)]
+
+  ^{:line 24} [^{:tag uint32 :val 2143289344} nan32 (+ (<< (- (<< 1 expbits32) 1) mantbits32) (<< 1 (- mantbits32 1)))] ; quiet NaN, 0 payload
+  ^{:line 25} [^{:tag uint32 :val 2139095040} inf32 (<< (- (<< 1 expbits32) 1) mantbits32)]
+  ^{:line 26} [^{:tag uint32 :val 2147483648} neg32 (<< 1 (+ expbits32 mantbits32))])
+
+
+^{:go/end 59} (go/func funpack64 [^uint64 f] :results [^uint64 sign ^uint64 mant ^int exp ^bool inf ^bool nan]
+  (set! sign (bit-and f (<< 1 (+ mantbits64 expbits64))))
+  (set! mant (bit-and f (- (<< 1 mantbits64) 1)))
+  (set! exp (bit-and (conv int (>> f mantbits64)) (- (<< 1 expbits64) 1)))
+
+  (switch exp
+    (case [(- (<< 1 expbits64) 1)]
+      (when (!= mant 0)
+        (set! nan true)
+        (return))
+
+      (set! inf true)
+      (return))
+
+    (case [0]
+      ;; denormalized
+      (when (!= mant 0)
+        (set! exp + (+ bias64 1))
+        (while (< mant (<< 1 mantbits64))
+          (set! mant << 1)
+          (dec! exp))))
+
+
+
+    (default
+      ;; add implicit top bit
+      (set! mant bit-or (<< 1 mantbits64))
+      (set! exp + bias64)))
+
+  (return))
+
+
+^{:go/end 91} (go/func funpack32 [^uint32 f] :results [^uint32 sign ^uint32 mant ^int exp ^bool inf ^bool nan]
+  (set! sign (bit-and f (<< 1 (+ mantbits32 expbits32))))
+  (set! mant (bit-and f (- (<< 1 mantbits32) 1)))
+  (set! exp (bit-and (conv int (>> f mantbits32)) (- (<< 1 expbits32) 1)))
+
+  (switch exp
+    (case [(- (<< 1 expbits32) 1)]
+      (when (!= mant 0)
+        (set! nan true)
+        (return))
+
+      (set! inf true)
+      (return))
+
+    (case [0]
+      ;; denormalized
+      (when (!= mant 0)
+        (set! exp + (+ bias32 1))
+        (while (< mant (<< 1 mantbits32))
+          (set! mant << 1)
+          (dec! exp))))
+
+
+
+    (default
+      ;; add implicit top bit
+      (set! mant bit-or (<< 1 mantbits32))
+      (set! exp + bias32)))
+
+  (return))
+
+
+^{:go/end 146} (go/func fpack64 ^uint64 [^uint64 sign ^uint64 mant ^int exp ^uint64 trunc]
+  (when (== mant 0)
+    (return sign))
+
+  (while (< mant (<< 1 mantbits64))
+    (set! mant << 1)
+    (dec! exp))
+
+  ;; Save the normalized mantissa; the denormal path below restores it and
+  ;; re-aligns to the subnormal exponent. Saving before this loop (as the
+  ;; code originally did) left a heavily-cancelled add/sub mantissa
+  ;; un-normalized, which that path then shifted the wrong way. See #79964.
+  (let [(values mant0 exp0 trunc0) (values mant exp trunc)]
+    (while (>= mant (<< 4 mantbits64))
+      (set! trunc bit-or (bit-and mant 1))
+      (set! mant >> 1)
+      (inc! exp))
+
+    (when (>= mant (<< 2 mantbits64))
+      (when (and (!= (bit-and mant 1) 0) ^:go/paren (or (!= trunc 0) (!= (bit-and mant 2) 0)))
+        (inc! mant)
+        (when (>= mant (<< 4 mantbits64))
+          (set! mant >> 1)
+          (inc! exp)))
+
+
+      (set! mant >> 1)
+      (inc! exp))
+
+    (when (>= exp (+ (- (<< 1 expbits64) 1) bias64))
+      (return (bit-xor sign inf64)))
+
+    (when (< exp (+ bias64 1))
+      (when (< exp (- bias64 (conv int mantbits64)))
+        (return (bit-or sign 0)))
+
+      ;; repeat expecting denormal
+      (set! (values mant exp trunc) (values mant0 exp0 trunc0))
+      (while (< exp bias64)
+        (set! trunc bit-or (bit-and mant 1))
+        (set! mant >> 1)
+        (inc! exp))
+
+      (when (and (!= (bit-and mant 1) 0) ^:go/paren (or (!= trunc 0) (!= (bit-and mant 2) 0)))
+        (inc! mant))
+
+      (set! mant >> 1)
+      (inc! exp)
+      (when (< mant (<< 1 mantbits64))
+        (return (bit-or sign mant))))
+
+
+    (bit-or sign (<< (conv uint64 (- exp bias64)) mantbits64) (bit-and mant (- (<< 1 mantbits64) 1)))))
+
+
+^{:go/end 198} (go/func fpack32 ^uint32 [^uint32 sign ^uint32 mant ^int exp ^uint32 trunc]
+  (when (== mant 0)
+    (return sign))
+
+  (while (< mant (<< 1 mantbits32))
+    (set! mant << 1)
+    (dec! exp))
+
+  ;; See fpack64: save the normalized mantissa for the denormal path below.
+  (let [(values mant0 exp0 trunc0) (values mant exp trunc)]
+    (while (>= mant (<< 4 mantbits32))
+      (set! trunc bit-or (bit-and mant 1))
+      (set! mant >> 1)
+      (inc! exp))
+
+    (when (>= mant (<< 2 mantbits32))
+      (when (and (!= (bit-and mant 1) 0) ^:go/paren (or (!= trunc 0) (!= (bit-and mant 2) 0)))
+        (inc! mant)
+        (when (>= mant (<< 4 mantbits32))
+          (set! mant >> 1)
+          (inc! exp)))
+
+
+      (set! mant >> 1)
+      (inc! exp))
+
+    (when (>= exp (+ (- (<< 1 expbits32) 1) bias32))
+      (return (bit-xor sign inf32)))
+
+    (when (< exp (+ bias32 1))
+      (when (< exp (- bias32 (conv int mantbits32)))
+        (return (bit-or sign 0)))
+
+      ;; repeat expecting denormal
+      (set! (values mant exp trunc) (values mant0 exp0 trunc0))
+      (while (< exp bias32)
+        (set! trunc bit-or (bit-and mant 1))
+        (set! mant >> 1)
+        (inc! exp))
+
+      (when (and (!= (bit-and mant 1) 0) ^:go/paren (or (!= trunc 0) (!= (bit-and mant 2) 0)))
+        (inc! mant))
+
+      (set! mant >> 1)
+      (inc! exp)
+      (when (< mant (<< 1 mantbits32))
+        (return (bit-or sign mant))))
+
+
+    (bit-or sign (<< (conv uint32 (- exp bias32)) mantbits32) (bit-and mant (- (<< 1 mantbits32) 1)))))
+
+
+^{:go/end 253} (go/func fadd64 ^uint64 [^uint64 f ^uint64 g]
+  (let [(values fs fm fe fi fn) (funpack64 f)
+      (values gs gm ge gi gn) (funpack64 g)]
+
+    ;; Special cases.
+    (switch
+      (case [(or fn gn)] ; NaN + x or x + NaN = NaN
+        (return nan64))
+
+      (case [(and fi gi (!= fs gs))] ; +Inf + -Inf or -Inf + +Inf = NaN
+        (return nan64))
+
+      (case [fi] ; ±Inf + g = ±Inf
+        (return f))
+
+      (case [gi] ; f + ±Inf = ±Inf
+        (return g))
+
+      (case [(and (== fm 0) (== gm 0) (!= fs 0) (!= gs 0))] ; -0 + -0 = -0
+        (return f))
+
+      (case [(== fm 0)] ; 0 + g = g but 0 + -0 = +0
+        (when (== gm 0)
+          (set! g bit-xor gs))
+
+        (return g))
+
+      (case [(== gm 0)] ; f + 0 = f
+        (return f)))
+
+
+
+    (when (or (< fe ge) (and (== fe ge) (< fm gm)))
+      (set! (values f g fs fm fe gs gm ge) (values g f gs gm ge fs fm fe)))
+
+
+    (let [shift (conv uint (- fe ge))]
+      (set! fm << 2)
+      (set! gm << 2)
+      (let [trunc (bit-and gm (- ^uint64 (<< 1 shift) 1))]
+        (set! gm >> shift)
+        (if (== fs gs)
+          (set! fm + gm)
+          (do
+            (set! fm - gm)
+            (when (!= trunc 0)
+              (dec! fm))))
+
+
+        (when (== fm 0)
+          (set! fs 0))
+
+        (fpack64 fs fm (- fe 2) trunc)))))
+
+
+^{:go/end 257} (go/func fsub64 ^uint64 [^uint64 f ^uint64 g]
+  (fadd64 f (fneg64 g)))
+
+
+^{:go/end 261} (go/func fneg64 ^uint64 [^uint64 f]
+  (bit-xor f (<< 1 (+ mantbits64 expbits64))))
+
+
+^{:go/end 291} (go/func fmul64 ^uint64 [^uint64 f ^uint64 g]
+  (let [(values fs fm fe fi fn) (funpack64 f)
+      (values gs gm ge gi gn) (funpack64 g)]
+
+    ;; Special cases.
+    (switch
+      (case [(or fn gn)] ; NaN * g or f * NaN = NaN
+        (return nan64))
+
+      (case [(and fi gi)] ; Inf * Inf = Inf (with sign adjusted)
+        (return (bit-xor f gs)))
+
+      (case [(and fi (== gm 0)) (and (== fm 0) gi)] ; 0 * Inf = Inf * 0 = NaN
+        (return nan64))
+
+      (case [(== fm 0)] ; 0 * x = 0 (with sign adjusted)
+        (return (bit-xor f gs)))
+
+      (case [(== gm 0)] ; x * 0 = 0 (with sign adjusted)
+        (return (bit-xor g fs))))
+
+
+    ;; 53-bit * 53-bit = 107- or 108-bit
+    (let [(values lo hi) (mullu fm gm)
+        ^{:line 287} shift (- mantbits64 1)
+        ^{:line 288} trunc (bit-and lo (- ^uint64 (<< 1 shift) 1))
+        ^{:line 289} mant (bit-or (<< hi (- 64 shift)) (>> lo shift))]
+      (fpack64 (bit-xor fs gs) mant (- (+ fe ge) 1) trunc))))
+
+
+^{:go/end 320} (go/func fdiv64 ^uint64 [^uint64 f ^uint64 g]
+  (let [(values fs fm fe fi fn) (funpack64 f)
+      (values gs gm ge gi gn) (funpack64 g)]
+
+    ;; Special cases.
+    (switch
+      (case [(or fn gn)] ; NaN / g = f / NaN = NaN
+        (return nan64))
+
+      (case [(and fi gi)] ; ±Inf / ±Inf = NaN
+        (return nan64))
+
+      (case [(and (not fi) (not gi) (== fm 0) (== gm 0))] ; 0 / 0 = NaN
+        (return nan64))
+
+      (case [fi (and (not gi) (== gm 0))] ; Inf / g = f / 0 = Inf
+        (return (bit-xor fs gs inf64)))
+
+      (case [gi (== fm 0)] ; f / Inf = 0 / g = Inf
+        (return (bit-xor fs gs 0))))
+
+    (set! (values _ _ _ _) (values fi fn gi gn))
+
+    ;; 53-bit<<54 / 53-bit = 53- or 54-bit.
+    (let [shift (+ mantbits64 2)
+        (values q r) (divlu (>> fm (- 64 shift)) (<< fm shift) gm)]
+      (fpack64 (bit-xor fs gs) q (- fe ge 2) r))))
+
+
+^{:go/end 333} (go/func f64to32 ^uint32 [^uint64 f]
+  (let [(values fs fm fe fi fn) (funpack64 f)]
+    (when fn
+      (return nan32))
+
+    (let [fs32 (conv uint32 (>> fs 32))]
+      (when fi
+        (return (bit-xor fs32 inf32)))
+
+      (let [^:const ^{:val 28} d (- mantbits64 mantbits32 1)]
+        (fpack32 fs32 (conv uint32 (>> fm d)) (- fe 1) (conv uint32 (bit-and fm (- (<< 1 d) 1))))))))
+
+
+^{:go/end 346} (go/func f32to64 ^uint64 [^uint32 f]
+  (let [^:const ^{:val 29} d (- mantbits64 mantbits32)
+      (values fs fm fe fi fn) (funpack32 f)]
+    (when fn
+      (return nan64))
+
+    (let [fs64 (<< (conv uint64 fs) 32)]
+      (when fi
+        (return (bit-xor fs64 inf64)))
+
+      (fpack64 fs64 (<< (conv uint64 fm) d) fe 0))))
+
+
+^{:go/end 377} (go/func fcmp64 [^uint64 f ^uint64 g] :results [^int32 cmp ^bool isnan]
+  (let [(values fs fm _ fi fn) (funpack64 f)
+      (values gs gm _ gi gn) (funpack64 g)]
+
+    (switch
+      (case [fn gn] ; flag NaN
+        (return 0 true))
+
+      (case [(and (not fi) (not gi) (== fm 0) (== gm 0))] ; ±0 == ±0
+        (return 0 false))
+
+      (case [(> fs gs)] ; f < 0, g > 0
+        (return -1 false))
+
+      (case [(< fs gs)] ; f > 0, g < 0
+        (return (+ 1) false))
+
+      ;; Same sign, not NaN.
+      ;; Can compare encodings directly now.
+      ;; Reverse for sign.
+      (case [(and (== fs 0) (< f g)) (and (!= fs 0) (> f g))]
+        (return -1 false))
+
+      (case [(and (== fs 0) (> f g)) (and (!= fs 0) (< f g))]
+        (return (+ 1) false)))
+
+
+    ;; f == g
+    (return 0 false)))
+
+
+^{:go/end 412} (go/func f64toint [^uint64 f] :results [^int64 val ^bool ok]
+  (let [(values fs fm fe fi fn) (funpack64 f)]
+
+    (switch
+      (case [fi fn] ; NaN
+        (return 0 false))
+
+      (case [(< fe -1)] ; f < 0.5
+        (return 0 false))
+
+      (case [(> fe 63)] ; f >= 2^63
+        (when (and (!= fs 0) (== fm 0)) ; f == -2^63
+          (return (<< -1 63) true))
+
+        (when (!= fs 0)
+          (return 0 false))
+
+        (return 0 false)))
+
+
+    (while (> fe (conv int mantbits64))
+      (dec! fe)
+      (set! fm << 1))
+
+    (while (< fe (conv int mantbits64))
+      (inc! fe)
+      (set! fm >> 1))
+
+    (set! val (conv int64 fm))
+    (when (!= fs 0)
+      (set! val (- val)))
+
+    (return val true)))
+
+
+^{:go/end 421} (go/func fintto64 [^int64 val] :results [^uint64 f]
+  (let [fs (bit-and (conv uint64 val) (<< 1 63))
+      ^{:line 416} mant (conv uint64 val)]
+    (when (!= fs 0)
+      (set! mant (- mant)))
+
+    (fpack64 fs mant (conv int mantbits64) 0)))
+
+^{:go/end 440} (go/func fintto32 [^int64 val] :results [^uint32 f]
+  (let [fs (bit-and (conv uint64 val) (<< 1 63))
+      ^{:line 424} mant (conv uint64 val)]
+    (when (!= fs 0)
+      (set! mant (- mant)))
+
+    ;; Reduce mantissa size until it fits into a uint32.
+    ;; Keep track of the bits we throw away, and if any are
+    ;; nonzero or them into the lowest bit.
+    (let [exp (conv int mantbits32)
+        ^{:line 432 :tag uint32} trunc (zero uint32)]
+      (while (>= mant (<< 1 32))
+        (set! trunc bit-or (bit-and (conv uint32 mant) 1))
+        (set! mant >> 1)
+        (inc! exp))
+
+
+      (fpack32 (conv uint32 (>> fs 32)) (conv uint32 mant) exp trunc))))
+
+
+
+
+^{:go/end 459} (go/func mullu "64x64 -> 128 multiply.\nadapted from hacker's delight.\n" [^uint64 u ^uint64 v] :results [^uint64 lo ^uint64 hi]
+  (let [
+      ^:const ^{:line 446 :val 32} s 32
+      ^:const ^:go/grouped ^{:line 447 :val 4294967295} mask (- (<< 1 s) 1)
+
+      ^{:line 449} u0 (bit-and u mask)
+      ^{:line 450} u1 (>> u s)
+      ^{:line 451} v0 (bit-and v mask)
+      ^{:line 452} v1 (>> v s)
+      ^{:line 453} w0 (* u0 v0)
+      ^{:line 454} t (+ (* u1 v0) (>> w0 s))
+      ^{:line 455} w1 (bit-and t mask)
+      ^{:line 456} w2 (>> t s)]
+    (set! w1 + (* u0 v1))
+    (return (* u v) (+ (* u1 v1) w2 (>> w1 s)))))
+
+
+
+
+^{:go/end 509} (go/func divlu "128/64 -> 64 quotient, 64 remainder.\nadapted from hacker's delight\n" [^uint64 u1 ^uint64 u0 ^uint64 v] :results [^uint64 q ^uint64 r]
+  (let [^:const ^{:val 4294967296} b (<< 1 32)]
+
+    (when (>= u1 v)
+      (return (- (<< 1 64) 1) (- (<< 1 64) 1)))
+
+
+    ;; s = nlz(v); v <<= s
+    (let [s (conv uint 0)]
+      (while (== (bit-and v (<< 1 63)) 0)
+        (inc! s)
+        (set! v << 1))
+
+
+      (let [vn1 (>> v 32)
+          ^{:line 478} vn0 (bit-and v (- (<< 1 32) 1))
+          ^{:line 479} un32 (bit-or (<< u1 s) (>> u0 (- 64 s)))
+          ^{:line 480} un10 (<< u0 s)
+          ^{:line 481} un1 (>> un10 32)
+          ^{:line 482} un0 (bit-and un10 (- (<< 1 32) 1))
+          ^{:line 483} q1 (/ un32 vn1)
+          ^{:line 484} rhat (- un32 (* q1 vn1))]
+
+        (label :again1
+          (when (or (>= q1 b) (> (* q1 vn0) (+ (* b rhat) un1)))
+            (dec! q1)
+            (set! rhat + vn1)
+            (when (< rhat b)
+              (goto :again1))))
+
+
+
+        (let [un21 (- (+ (* un32 b) un1) (* q1 v))
+            ^{:line 496} q0 (/ un21 vn1)]
+          (set! rhat (- un21 (* q0 vn1)))
+
+          (label :again2
+            (when (or (>= q0 b) (> (* q0 vn0) (+ (* b rhat) un0)))
+              (dec! q0)
+              (set! rhat + vn1)
+              (when (< rhat b)
+                (goto :again2))))
+
+
+
+          (return (+ (* q1 b) q0) (>> (- (+ (* un21 b) un0) (* q0 v)) s)))))))
+
+
+^{:go/end 513} (go/func fadd32 ^uint32 [^uint32 x ^uint32 y]
+  (f64to32 (fadd64 (f32to64 x) (f32to64 y))))
+
+
+^{:go/end 517} (go/func fmul32 ^uint32 [^uint32 x ^uint32 y]
+  (f64to32 (fmul64 (f32to64 x) (f32to64 y))))
+
+
+^{:go/end 522} (go/func fdiv32 ^uint32 [^uint32 x ^uint32 y]
+  ;; TODO: are there double-rounding problems here? See issue 48807.
+  (f64to32 (fdiv64 (f32to64 x) (f32to64 y))))
+
+
+^{:go/end 527} (go/func feq32 ^bool [^uint32 x ^uint32 y]
+  (let [(values cmp nan) (fcmp64 (f32to64 x) (f32to64 y))]
+    (and (== cmp 0) (not nan))))
+
+
+^{:go/end 532} (go/func fgt32 ^bool [^uint32 x ^uint32 y]
+  (let [(values cmp nan) (fcmp64 (f32to64 x) (f32to64 y))]
+    (and (>= cmp 1) (not nan))))
+
+
+^{:go/end 537} (go/func fge32 ^bool [^uint32 x ^uint32 y]
+  (let [(values cmp nan) (fcmp64 (f32to64 x) (f32to64 y))]
+    (and (>= cmp 0) (not nan))))
+
+
+^{:go/end 542} (go/func feq64 ^bool [^uint64 x ^uint64 y]
+  (let [(values cmp nan) (fcmp64 x y)]
+    (and (== cmp 0) (not nan))))
+
+
+^{:go/end 547} (go/func fgt64 ^bool [^uint64 x ^uint64 y]
+  (let [(values cmp nan) (fcmp64 x y)]
+    (and (>= cmp 1) (not nan))))
+
+
+^{:go/end 552} (go/func fge64 ^bool [^uint64 x ^uint64 y]
+  (let [(values cmp nan) (fcmp64 x y)]
+    (and (>= cmp 0) (not nan))))
+
+
+^{:go/end 556} (go/func fint32to32 ^uint32 [^int32 x]
+  (fintto32 (conv int64 x)))
+
+
+^{:go/end 560} (go/func fint32to64 ^uint64 [^int32 x]
+  (fintto64 (conv int64 x)))
+
+
+^{:go/end 564} (go/func fint64to32 ^uint32 [^int64 x]
+  (fintto32 x))
+
+
+^{:go/end 568} (go/func fint64to64 ^uint64 [^int64 x]
+  (fintto64 x))
+
+
+^{:go/end 573} (go/func f32toint32 ^int32 [^uint32 x]
+  (let [(values val _) (f64toint (f32to64 x))]
+    (conv int32 val)))
+
+
+^{:go/end 578} (go/func f32toint64 ^int64 [^uint32 x]
+  (let [(values val _) (f64toint (f32to64 x))]
+    ^{:line 577} val))
+
+
+^{:go/end 583} (go/func f64toint32 ^int32 [^uint64 x]
+  (let [(values val _) (f64toint x)]
+    (conv int32 val)))
+
+
+^{:go/end 588} (go/func f64toint64 ^int64 [^uint64 x]
+  (let [(values val _) (f64toint x)]
+    ^{:line 587} val))
+
+
+^{:go/end 598} (go/func f64touint64 ^uint64 [^uint64 x]
+  (let [^uint64 m 0x43e0000000000000] ; float64 1<<63
+    (when (fgt64 m x)
+      (return (conv uint64 (f64toint64 x))))
+
+    (let [y (fadd64 x (- m))
+        ^{:line 596} z (conv uint64 (f64toint64 y))]
+      (bit-or z (<< 1 63)))))
+
+
+^{:go/end 608} (go/func f32touint64 ^uint64 [^uint32 x]
+  (let [^uint32 m 0x5f000000] ; float32 1<<63
+    (when (fgt32 m x)
+      (return (conv uint64 (f32toint64 x))))
+
+    (let [y (fadd32 x (- m))
+        ^{:line 606} z (conv uint64 (f32toint64 y))]
+      (bit-or z (<< 1 63)))))
+
+
+^{:go/end 620} (go/func fuint64to64 ^uint64 [^uint64 x]
+  (when (>= (conv int64 x) 0)
+    (return (fint64to64 (conv int64 x))))
+
+  ;; See ../cmd/compile/internal/ssagen/ssa.go:uint64Tofloat
+  (let [y (bit-and x 1)
+      ^{:line 616} z (>> x 1)]
+    (set! z (bit-or z y))
+    (let [r (fint64to64 (conv int64 z))]
+      (fadd64 r r))))
+
+
+^{:go/end 632} (go/func fuint64to32 ^uint32 [^uint64 x]
+  (when (>= (conv int64 x) 0)
+    (return (fint64to32 (conv int64 x))))
+
+  ;; See ../cmd/compile/internal/ssagen/ssa.go:uint64Tofloat
+  (let [y (bit-and x 1)
+      ^{:line 628} z (>> x 1)]
+    (set! z (bit-or z y))
+    (let [r (fint64to32 (conv int64 z))]
+      (fadd32 r r))))

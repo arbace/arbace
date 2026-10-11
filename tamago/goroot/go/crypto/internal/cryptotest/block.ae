@@ -1,0 +1,253 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.cryptotest) (go/file "block.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [cipher "crypto/cipher"]
+    ^{:line 10} [testing "testing"]])
+
+
+(go/type MakeBlock (func [^{:tag (slice byte)} key] [cipher/Block error]))
+
+
+
+^{:go/end 69} (go/func TestBlock "TestBlock performs a set of tests on cipher.Block implementations, checking\nthe documented requirements of BlockSize, Encrypt, and Decrypt.\n" [^{:tag (* testing/T)} t ^int keySize ^MakeBlock mb]
+  ;; Generate random key
+  (let [key (make (slice byte) keySize)]
+    (.Read (newRandReader t) key)
+    ^{:go/via [common]} (.Logf t "Cipher key: 0x%x" key)
+
+    (let [(values block err) (mb key)]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+
+      (let [blockSize (.BlockSize block)]
+
+        (.Run t "Encryption" ^{:go/end 32} (fn [^{:tag (* testing/T)} t]
+            (testCipher t (.-Encrypt block) blockSize)))
+
+
+        (.Run t "Decryption" ^{:go/end 36} (fn [^{:tag (* testing/T)} t]
+            (testCipher t (.-Decrypt block) blockSize)))
+
+
+        ;; Checks baseline Encrypt/Decrypt functionality.  More thorough
+        ;; implementation-specific characterization/golden tests should be done
+        ;; for each block cipher implementation.
+        (.Run t "Roundtrip" ^{:go/end 67} (fn [^{:tag (* testing/T)} t]
+            (let [rng (newRandReader t)
+
+                ;; Check Decrypt inverts Encrypt
+                (values before ciphertext after) (values (make (slice byte) blockSize) (make (slice byte) blockSize) (make (slice byte) blockSize))]
+
+              (.Read rng before)
+
+              (.Encrypt block ciphertext before)
+              (.Decrypt block after ciphertext)
+
+              (when (not (bytes/Equal after before))
+                ^{:go/via [common]} (.Errorf t "plaintext is different after an encrypt/decrypt cycle; got %x, want %x" after before))
+
+
+              ;; Check Encrypt inverts Decrypt (assumes block ciphers are deterministic)
+              (let [(values ^:assign before plaintext ^:assign after) (values (make (slice byte) blockSize) (make (slice byte) blockSize) (make (slice byte) blockSize))]
+
+                (.Read rng before)
+
+                (.Decrypt block plaintext before)
+                (.Encrypt block after plaintext)
+
+                (when (not (bytes/Equal after before))
+                  ^{:go/via [common]} (.Errorf t "ciphertext is different after a decrypt/encrypt cycle; got %x, want %x" after before))))))))))
+
+
+
+
+
+^{:go/end 239} (go/func testCipher [^{:tag (* testing/T)} t ^{:tag (func [^{:tag (slice byte)} dst ^{:tag (slice byte)} src])} cipher ^int blockSize]
+  (.Run t "AlterInput" ^{:go/end 87} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          ;; Make long src that shouldn't be modified at all, within block
+          ;; size scope or beyond it
+          (values src before) (values (make (slice byte) (* blockSize 2)) (make (slice byte) (* blockSize 2)))]
+        (.Read rng src)
+        (copy before src)
+
+        (let [dst (make (slice byte) blockSize)]
+
+          (cipher dst src)
+          (when (not (bytes/Equal src before))
+            ^{:go/via [common]} (.Errorf t "block cipher modified src; got %x, want %x" src before))))))
+
+
+
+  (.Run t "Aliasing" ^{:go/end 104} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          (values buff expectedOutput) (values (make (slice byte) blockSize) (make (slice byte) blockSize))]
+
+        ;; Record what output is when src and dst are different
+        (.Read rng buff)
+        (cipher expectedOutput buff)
+
+        ;; Check that the same output is generated when src=dst alias to the same
+        ;; memory
+        (cipher buff buff)
+        (when (not (bytes/Equal buff expectedOutput))
+          ^{:go/via [common]} (.Errorf t "block cipher produced different output when dst = src; got %x, want %x" buff expectedOutput)))))
+
+
+
+  (.Run t "OutOfBoundsWrite" ^{:go/end 141} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          ^{:line 109} src (make (slice byte) blockSize)]
+        (.Read rng src)
+
+        ;; Make a buffer with dst in the middle and data on either end
+        (let [buff (make (slice byte) (* blockSize 3))
+            (values endOfPrefix startOfSuffix) (values blockSize (* blockSize 2))]
+          (.Read rng (subslice buff _ endOfPrefix))
+          (.Read rng (subslice buff startOfSuffix))
+          (let [dst (subslice buff endOfPrefix startOfSuffix)
+
+              ;; Record the prefix and suffix data to make sure they aren't written to
+              (values initPrefix initSuffix) (values (make (slice byte) blockSize) (make (slice byte) blockSize))]
+            (copy initPrefix (subslice buff _ endOfPrefix))
+            (copy initSuffix (subslice buff startOfSuffix))
+
+            ;; Write to dst (the middle of the buffer) and make sure it doesn't write
+            ;; beyond the dst slice
+            (cipher dst src)
+            (when (not (bytes/Equal (subslice buff startOfSuffix) initSuffix))
+              ^{:go/via [common]} (.Errorf t "block cipher did out of bounds write after end of dst slice; got %x, want %x" (subslice buff startOfSuffix) initSuffix))
+
+            (when (not (bytes/Equal (subslice buff _ endOfPrefix) initPrefix))
+              ^{:go/via [common]} (.Errorf t "block cipher did out of bounds write before beginning of dst slice; got %x, want %x" (subslice buff _ endOfPrefix) initPrefix))
+
+
+            ;; Check that dst isn't written to beyond BlockSize even if there is room
+            ;; in the slice
+            (set! dst (subslice buff endOfPrefix)) ; Extend dst to include suffix
+            (cipher dst src)
+            (when (not (bytes/Equal (subslice buff startOfSuffix) initSuffix))
+              ^{:go/via [common]} (.Errorf t "block cipher modified dst past BlockSize bytes; got %x, want %x" (subslice buff startOfSuffix) initSuffix)))))))
+
+
+
+  ;; Check that output of cipher isn't affected by adjacent data beyond input
+  ;; slice scope
+  ;; For encryption, this assumes block ciphers encrypt deterministically
+  (.Run t "OutOfBoundsRead" ^{:go/end 174} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          ^{:line 149} src (make (slice byte) blockSize)]
+        (.Read rng src)
+        (let [expectedDst (make (slice byte) blockSize)]
+          (cipher expectedDst src)
+
+          ;; Make a buffer with src in the middle and data on either end
+          (let [buff (make (slice byte) (* blockSize 3))
+              (values endOfPrefix startOfSuffix) (values blockSize (* blockSize 2))]
+
+            (copy (subslice buff endOfPrefix startOfSuffix) src)
+            (.Read rng (subslice buff _ endOfPrefix))
+            (.Read rng (subslice buff startOfSuffix))
+
+            (let [testDst (make (slice byte) blockSize)]
+              (cipher testDst (subslice buff endOfPrefix startOfSuffix))
+              (when (not (bytes/Equal testDst expectedDst))
+                ^{:go/via [common]} (.Errorf t "block cipher affected by data outside of src slice bounds; got %x, want %x" testDst expectedDst))
+
+
+              ;; Check that src isn't read from beyond BlockSize even if the slice is
+              ;; longer and contains data in the suffix
+              (cipher testDst (subslice buff endOfPrefix)) ; Input long src
+              (when (not (bytes/Equal testDst expectedDst))
+                ^{:go/via [common]} (.Errorf t "block cipher affected by src data beyond BlockSize bytes; got %x, want %x" (subslice buff startOfSuffix) expectedDst))))))))
+
+
+
+  (.Run t "NonZeroDst" ^{:go/end 197} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          ;; Record what the cipher writes into a destination of zeroes
+          ^{:line 180} src (make (slice byte) blockSize)]
+        (.Read rng src)
+        (let [expectedDst (make (slice byte) blockSize)]
+
+          (cipher expectedDst src)
+
+          ;; Make nonzero dst
+          (let [dst (make (slice byte) (* blockSize 2))]
+            (.Read rng dst)
+
+            ;; Remember the random suffix which shouldn't be written to
+            (set! expectedDst (append expectedDst (spread (subslice dst blockSize))))
+
+            (cipher dst src)
+            (when (not (bytes/Equal dst expectedDst))
+              ^{:go/via [common]} (.Errorf t "block cipher behavior differs when given non-zero dst; got %x, want %x" dst expectedDst)))))))
+
+
+
+  (.Run t "BufferOverlap" ^{:go/end 219} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          ^{:line 202} buff (make (slice byte) (* blockSize 2))]
+        (.Read rng buff)
+
+        ;; Make src and dst slices point to same array with inexact overlap
+        (let [src (subslice buff _ blockSize)
+            ^{:line 207} dst (subslice buff 1 (+ blockSize 1))]
+          (mustPanic t "invalid buffer overlap" ^{:go/end 208} (fn [] (cipher dst src)))
+
+          ;; Only overlap on one byte
+          (set! src (subslice buff _ blockSize))
+          (set! dst (subslice buff (- blockSize 1) (- (* 2 blockSize) 1)))
+          (mustPanic t "invalid buffer overlap" ^{:go/end 213} (fn [] (cipher dst src)))
+
+          ;; src comes after dst with one byte overlap
+          (set! src (subslice buff (- blockSize 1) (- (* 2 blockSize) 1)))
+          (set! dst (subslice buff _ blockSize))
+          (mustPanic t "invalid buffer overlap" ^{:go/end 218} (fn [] (cipher dst src)))))))
+
+
+  ;; Test short input/output.
+  ;; Assembly used to not notice.
+  ;; See issue 7928.
+  (.Run t "ShortBlock" ^{:go/end 238} (fn [^{:tag (* testing/T)} t]
+      ;; Returns slice of n bytes of an n+1 length array.  Lets us test that a
+      ;; slice is still considered too short even if the underlying array it
+      ;; points to is large enough
+      (let [byteSlice ^{:go/end 228} (fn ^{:tag (slice byte)} [^int n] (subslice (make (slice byte) (+ n 1)) 0 n))]
+
+        ;; Off by one byte
+        (mustPanic t "input not full block" ^{:go/end 231} (fn [] (cipher (byteSlice blockSize) (byteSlice (- blockSize 1)))))
+        (mustPanic t "output not full block" ^{:go/end 232} (fn [] (cipher (byteSlice (- blockSize 1)) (byteSlice blockSize))))
+
+        ;; Small slices
+        (mustPanic t "input not full block" ^{:go/end 235} (fn [] (cipher (byteSlice 1) (byteSlice 1))))
+        (mustPanic t "input not full block" ^{:go/end 236} (fn [] (cipher (byteSlice 100) (byteSlice 1))))
+        (mustPanic t "output not full block" ^{:go/end 237} (fn [] (cipher (byteSlice 1) (byteSlice 100))))))))
+
+
+
+^{:go/end 254} (go/func mustPanic [^{:tag (* testing/T)} t ^string msg ^{:tag (func [])} f]
+  ^{:go/via [common]} (.Helper t)
+
+  (defer (^{:go/end 252} (fn []
+        ^{:go/via [common]} (.Helper t)
+
+        (let [err (recover)]
+
+          (when (== err nil)
+            ^{:go/via [common]} (.Errorf t "function did not panic for %q" msg))))))
+
+
+  (f))

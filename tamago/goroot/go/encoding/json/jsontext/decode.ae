@@ -1,0 +1,1219 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.jsontext) (go/file "decode.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [io "io"]
+
+    ^{:line 14} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 15} [jsonopts "encoding/json/internal/jsonopts"]
+    ^{:line 16} [jsonwire "encoding/json/internal/jsonwire"]])
+
+
+;; NOTE: The logic for decoding is complicated by the fact that reading from
+;; an io.Reader into a temporary buffer means that the buffer may contain a
+;; truncated portion of some valid input, requiring the need to fetch more data.
+;;
+;; This file is structured in the following way:
+;;
+;;   - consumeXXX functions parse an exact JSON token from a []byte.
+;;     If the buffer appears truncated, then it returns io.ErrUnexpectedEOF.
+;;     The consumeSimpleXXX functions are so named because they only handle
+;;     a subset of the grammar for the JSON token being parsed.
+;;     They do not handle the full grammar to keep these functions inlinable.
+;;
+;;   - Decoder.consumeXXX methods parse the next JSON token from Decoder.buf,
+;;     automatically fetching more input if necessary. These methods take
+;;     a position relative to the start of Decoder.buf as an argument and
+;;     return the end of the consumed JSON token as a position,
+;;     also relative to the start of Decoder.buf.
+;;
+;;   - In the event of an I/O error or state machine violations,
+;;     the implementation avoids mutating the state of Decoder
+;;     (aside from the book-keeping needed to implement Decoder.fetch).
+;;     For this reason, only Decoder.ReadToken and Decoder.ReadValue are
+;;     responsible for updating Decoder.prevStart and Decoder.prevEnd.
+;;
+;;   - For performance, much of the implementation uses the pattern of calling
+;;     the inlinable consumeXXX functions first, and if more work is necessary,
+;;     then it calls the slower Decoder.consumeXXX methods.
+;;     TODO: Revisit this pattern if the Go compiler provides finer control
+;;     over exactly which calls are inlined or not.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Decoder "Decoder is a streaming decoder for raw JSON tokens and values.\nIt is used to read a stream of top-level JSON values,\neach separated by optional whitespace characters.\n\n[Decoder.ReadToken] and [Decoder.ReadValue] calls may be interleaved.\nFor example, the following JSON value:\n\n\t{\"name\":\"value\",\"array\":[null,false,true,3.14159],\"object\":{\"k\":\"v\"}}\n\ncan be parsed with the following calls (ignoring errors for brevity):\n\n\td.ReadToken() // {\n\td.ReadToken() // \"name\"\n\td.ReadToken() // \"value\"\n\td.ReadValue() // \"array\"\n\td.ReadToken() // [\n\td.ReadToken() // null\n\td.ReadToken() // false\n\td.ReadValue() // true\n\td.ReadToken() // 3.14159\n\td.ReadToken() // ]\n\td.ReadValue() // \"object\"\n\td.ReadValue() // {\"k\":\"v\"}\n\td.ReadToken() // }\n\nThe above is one of many possible sequences of calls and\nmay not represent the most sensible method to call for any given token/value.\nFor example, it is probably more common to call [Decoder.ReadToken] to obtain a\nstring token for object names.\n" (struct
+    ^{:line 79 :tag decoderState} s))
+
+
+
+
+(go/type decoderState "decoderState is the low-level state of Decoder.\nIt has exported fields and methods for use by the \"json\" package.\n" (struct
+    ^{:line 85} state
+    ^{:line 86} decodeBuffer
+    ^{:line 87} jsonopts/Struct
+
+    ^{:line 89 :tag (* (array 256 string))} StringCache)) ; only used when unmarshaling; identical to json.stringCache
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type decodeBuffer "decodeBuffer is a buffer split into 4 segments:\n\n  - buf[0:prevEnd]         // already read portion of the buffer\n  - buf[prevStart:prevEnd] // previously read value\n  - buf[prevEnd:len(buf)]  // unread portion of the buffer\n  - buf[len(buf):cap(buf)] // unused portion of the buffer\n\nInvariants:\n\n\t0 ≤ prevStart ≤ prevEnd ≤ len(buf) ≤ cap(buf)\n" (struct
+    ^{:line 103 :tag int} peekPos ; non-zero if valid offset into buf for start of next token
+    ^{:line 104 :tag error} peekErr ; implies peekPos is -1
+
+    ^{:line 106 :tag (slice byte)} buf ; may alias rd if it is a bytes.Buffer
+    ^{:line 107 :tag int} prevStart
+    ^{:line 108 :tag int} prevEnd
+
+
+
+    ^{:line 112 :tag int64 :doc "baseOffset is added to prevStart and prevEnd to obtain\nthe absolute offset relative to the start of io.Reader stream.\n"} baseOffset
+
+    ^{:line 114 :tag io/Reader} rd))
+
+
+
+
+
+
+
+^{:go/end 126} (go/func NewDecoder "NewDecoder constructs a new streaming decoder reading from r.\n\nIf r is a [bytes.Buffer], then the decoder parses directly from the buffer\nwithout first copying the contents to an intermediate buffer.\nAdditional writes to the buffer must not occur while the decoder is in use.\n" ^{:tag (* Decoder)} [^io/Reader r & ^{:tag (slice Options)} opts]
+  (let [d (new Decoder)]
+    (.Reset d r (spread opts))
+    ^{:line 125} d))
+
+
+
+
+
+
+^{:go/end 147} (go/method Reset "Reset resets a decoder such that it is reading afresh from r and\nconfigured with the provided options. Reset must not be called on\na Decoder passed to the [encoding/json/v2.UnmarshalerFrom.UnmarshalJSONFrom] method\nor the [encoding/json/v2.UnmarshalFromFunc] function.\n" [^{:tag (* Decoder)} d ^io/Reader r & ^{:tag (slice Options)} opts]
+  (switch
+    (case [(== d nil)]
+      (panic "jsontext: invalid nil Decoder"))
+    (case [(== r nil)]
+      (panic "jsontext: invalid nil io.Reader"))
+    (case [(.Get ^{:go/via [Struct]} (.-Flags (.-s d)) jsonflags/WithinArshalCall)]
+      (panic "jsontext: cannot reset Decoder passed to json.UnmarshalerFrom")))
+
+  ;; Reuse the buffer if it does not alias a previous [bytes.Buffer].
+  (let [b (subslice ^{:go/via [decodeBuffer]} (.-buf (.-s d)) _ 0)]
+    (when [(values _ ok) (assert (* bytes/Buffer) ^{:go/via [decodeBuffer]} (.-rd (.-s d)))] ok
+      (set! b nil))
+
+    (.reset (.-s d) b r (spread opts))))
+
+
+^{:go/end 155} (go/method reset [^{:tag (* decoderState)} d ^{:tag (slice byte)} b ^io/Reader r & ^{:tag (slice Options)} opts]
+  (.reset (.-state d))
+  (set! (.-decodeBuffer d) (lit decodeBuffer :buf b :rd r))
+  (let [opts2 (lit jsonopts/Struct)] ; avoid mutating d.Struct in case it is part of opts
+    (.Join opts2 (spread opts))
+    (set! (.-Struct d) opts2)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 167} (go/method Options "Options returns the options used to construct the decoder and\nmay additionally contain semantic options passed to a\n[encoding/json/v2.UnmarshalDecode] call.\n\nIf operating within\na [encoding/json/v2.UnmarshalerFrom.UnmarshalJSONFrom] method call or\na [encoding/json/v2.UnmarshalFromFunc] function call,\nthen the returned options are only valid within the call.\n" ^Options [^{:tag (* Decoder)} d]
+  (addr (.-Struct (.-s d))))
+
+
+^{:go/end 169} (go/method options ^{:tag (* jsonopts/Struct)} [^{:tag (* decoderState)} d] (addr (.-Struct d)))
+
+(go/var errBufferWriteAfterNext (errors/New "invalid bytes.Buffer.Write call after calling bytes.Buffer.Next"))
+
+
+
+^{:go/end 253} (go/method fetch "fetch reads at least 1 byte from the underlying io.Reader.\nIt returns io.ErrUnexpectedEOF if zero bytes were read and io.EOF was seen.\n" ^error [^{:tag (* decoderState)} d]
+  (when (== ^{:go/via [decodeBuffer]} (.-rd d) nil)
+    (return io/ErrUnexpectedEOF))
+
+
+  ;; Inform objectNameStack that we are about to fetch new buffer content.
+  (.copyQuotedBuffer ^{:go/via [state]} (.-Names d) ^{:go/via [decodeBuffer]} (.-buf d))
+
+  ;; Specialize bytes.Buffer for better performance.
+  (when [(values bb ok) (assert (* bytes/Buffer) ^{:go/via [decodeBuffer]} (.-rd d))] ok
+    (switch
+      (case [(== (.Len bb) 0)]
+        (return io/ErrUnexpectedEOF))
+      (case [(== (len ^{:go/via [decodeBuffer]} (.-buf d)) 0)]
+        (set! ^{:go/via [decodeBuffer]} (.-buf d) (.Next bb (.Len bb))) ; "read" all data in the buffer
+        (return nil))
+      (default
+        ;; This only occurs if a partially filled bytes.Buffer was provided
+        ;; and more data is written to it while Decoder is reading from it.
+        ;; This practice will lead to data corruption since future writes
+        ;; may overwrite the contents of the current buffer.
+        ;;
+        ;; The user is trying to use a bytes.Buffer as a pipe,
+        ;; but a bytes.Buffer is a poor implementation of a pipe,
+        ;; the purpose-built io.Pipe should be used instead.
+        (return (addr (lit ioError :action "read" :err errBufferWriteAfterNext))))))
+
+
+
+  ;; Allocate initial buffer if empty.
+  (when (== (cap ^{:go/via [decodeBuffer]} (.-buf d)) 0)
+    (set! ^{:go/via [decodeBuffer]} (.-buf d) (make (slice byte) 0 64)))
+
+
+  ;; Check whether to grow the buffer.
+  (let [^:const ^{:val 4096} maxBufferSize (<< 4 10)
+      ^:const ^{:line 211 :val 2} growthSizeFactor 2 ; higher value is faster
+      ^:const ^{:line 212 :val 2} growthRateFactor 2 ; higher value is slower
+      ;; By default, grow if below the maximum buffer size.
+      ^{:line 214} grow (<= (cap ^{:go/via [decodeBuffer]} (.-buf d)) (/ maxBufferSize growthSizeFactor))]
+    ;; Growing can be expensive, so only grow
+    ;; if a sufficient number of bytes have been processed.
+    (set! grow (and grow (< (conv int64 (cap ^{:go/via [decodeBuffer]} (.-buf d))) (/ ^{:go/via [decodeBuffer]} (.previousOffsetEnd d) growthRateFactor))))
+    ;; If prevStart==0, then fetch was called in order to fetch more data
+    ;; to finish consuming a large JSON value contiguously.
+    ;; Grow if less than 25% of the remaining capacity is available.
+    ;; Note that this may cause the input buffer to exceed maxBufferSize.
+    (set! grow (or grow ^:go/paren (and (== ^{:go/via [decodeBuffer]} (.-prevStart d) 0) (>= (len ^{:go/via [decodeBuffer]} (.-buf d)) (/ (* 3 (cap ^{:go/via [decodeBuffer]} (.-buf d))) 4)))))
+
+    (if grow
+      ;; Allocate a new buffer and copy the contents of the old buffer over.
+      ;; TODO: Provide a hard limit on the maximum internal buffer size?
+      (let [buf (make (slice byte) 0 (* (cap ^{:go/via [decodeBuffer]} (.-buf d)) growthSizeFactor))]
+        (set! ^{:go/via [decodeBuffer]} (.-buf d) (append buf (spread (subslice ^{:go/via [decodeBuffer]} (.-buf d) ^{:go/via [decodeBuffer]} (.-prevStart d))))))
+
+      ;; Move unread portion of the data to the front.
+      (let [n (copy (subslice ^{:go/via [decodeBuffer]} (.-buf d) _ (cap ^{:go/via [decodeBuffer]} (.-buf d))) (subslice ^{:go/via [decodeBuffer]} (.-buf d) ^{:go/via [decodeBuffer]} (.-prevStart d)))]
+        (set! ^{:go/via [decodeBuffer]} (.-buf d) (subslice ^{:go/via [decodeBuffer]} (.-buf d) _ n))))
+
+    (set! ^{:go/via [decodeBuffer]} (.-baseOffset d) + (conv int64 ^{:go/via [decodeBuffer]} (.-prevStart d)))
+    (set! ^{:go/via [decodeBuffer]} (.-prevEnd d) - ^{:go/via [decodeBuffer]} (.-prevStart d))
+    (set! ^{:go/via [decodeBuffer]} (.-prevStart d) 0)
+
+    ;; Read more data into the internal buffer.
+    (while true
+      (let [(values n err) (.Read ^{:go/via [decodeBuffer]} (.-rd d) (subslice ^{:go/via [decodeBuffer]} (.-buf d) (len ^{:go/via [decodeBuffer]} (.-buf d)) (cap ^{:go/via [decodeBuffer]} (.-buf d))))]
+        (switch
+          (case [(> n 0)]
+            (set! ^{:go/via [decodeBuffer]} (.-buf d) (subslice ^{:go/via [decodeBuffer]} (.-buf d) _ (+ (len ^{:go/via [decodeBuffer]} (.-buf d)) n)))
+            (return nil)) ; ignore errors if any bytes are read
+          (case [(== err io/EOF)]
+            (return io/ErrUnexpectedEOF))
+          (case [(!= err nil)]
+            (return (addr (lit ioError :action "read" :err err))))
+          (default
+            (continue))))))) ; Read returned (0, nil)
+
+
+
+
+(go/const ^{:val \#} invalidateBufferByte \#) ; invalid starting character for JSON grammar
+
+
+
+
+
+^{:go/end 272} (go/method invalidatePreviousRead "invalidatePreviousRead invalidates buffers returned by Peek and Read calls\nso that the first byte is an invalid character.\nThis Hyrum-proofs the API against faulty application code that assumes\nvalues returned by ReadValue remain valid past subsequent Read calls.\n" [^{:tag (* decodeBuffer)} d]
+  ;; Avoid mutating the buffer if d.rd is nil which implies that d.buf
+  ;; is provided by the user code and may not expect mutations.
+  (let [isBytesBuffer ^{:go/end 267} (fn ^bool [^io/Reader r]
+        (let [(values _ ok) (assert (* bytes/Buffer) r)]
+          ^{:line 266} ok))]
+
+    (when (and (!= (.-rd d) nil) (not (isBytesBuffer (.-rd d))) (< (.-prevStart d) (.-prevEnd d)) (< (conv uint (.-prevStart d)) (conv uint (len (.-buf d)))))
+      (aset (.-buf d) (.-prevStart d) invalidateBufferByte)
+      (set! (.-prevStart d) (.-prevEnd d)))))
+
+
+
+
+^{:go/end 278} (go/method needMore "needMore reports whether there are no more unread bytes.\n" ^bool [^{:tag (* decodeBuffer)} d ^int pos]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  (== pos (len (.-buf d))))
+
+
+^{:go/end 280} (go/method offsetAt ^int64 [^{:tag (* decodeBuffer)} d ^int pos] (+ (.-baseOffset d) (conv int64 pos)))
+^{:go/end 281} (go/method previousOffsetStart ^int64 [^{:tag (* decodeBuffer)} d] (+ (.-baseOffset d) (conv int64 (.-prevStart d))))
+^{:go/end 282} (go/method previousOffsetEnd ^int64 [^{:tag (* decodeBuffer)} d] (+ (.-baseOffset d) (conv int64 (.-prevEnd d))))
+^{:go/end 283} (go/method previousBuffer ^{:tag (slice byte)} [^{:tag (* decodeBuffer)} d] (subslice (.-buf d) (.-prevStart d) (.-prevEnd d)))
+^{:go/end 284} (go/method unreadBuffer ^{:tag (slice byte)} [^{:tag (* decodeBuffer)} d] (subslice (.-buf d) (.-prevEnd d) (len (.-buf d))))
+
+
+
+
+
+^{:go/end 307} (go/method PreviousTokenOrValue "PreviousTokenOrValue returns the previously read token or value\nunless it has been invalidated by a call to PeekKind.\nIf a token is just a delimiter, then this returns a 1-byte buffer.\nThis method is used for error reporting at the semantic layer.\n" ^{:tag (slice byte)} [^{:tag (* decodeBuffer)} d]
+  (let [b (.previousBuffer d)]
+    ;; If peek was called, then the previous token or buffer is invalidated.
+    (when (or (> (.-peekPos d) 0) (and (> (len b) 0) (== (aget b 0) invalidateBufferByte)))
+      (return nil))
+
+    ;; ReadToken does not preserve the buffer for null, bools, or delimiters.
+    ;; Manually re-construct that buffer.
+    (when (== (len b) 0)
+      (set! b (subslice (.-buf d) _ (.-prevEnd d))) ; entirety of the previous buffer
+      (range [_ tok (lit (slice string) "null" "false" "true" "{" "}" "[" "]")]
+        (when (and (>= (len b) (len tok)) (== (conv string (subslice b (- (len b) (len tok)))) tok))
+          (return (subslice b (- (len b) (len tok)))))))
+
+
+
+    ^{:line 306} b))
+
+
+
+
+
+
+
+^{:go/end 316} (go/method PeekKind "PeekKind retrieves the next token kind, but does not advance the read offset.\n\nIt returns [KindInvalid] if an error occurs. Any such error is cached until\nthe next read call and it is the caller's responsibility to eventually\nfollow up a PeekKind call with a read call.\n" ^Kind [^{:tag (* Decoder)} d]
+  (.PeekKind (.-s d)))
+
+^{:go/end 365} (go/method PeekKind ^Kind [^{:tag (* decoderState)} d]
+  ;; Check whether we have a cached peek result.
+  (when (> ^{:go/via [decodeBuffer]} (.-peekPos d) 0)
+    (return (.normalize (conv Kind (aget ^{:go/via [decodeBuffer]} (.-buf d) ^{:go/via [decodeBuffer]} (.-peekPos d))))))
+
+
+  (let [^error err (zero error)]
+    ^{:go/via [decodeBuffer]} (.invalidatePreviousRead d)
+    (let [pos ^{:go/via [decodeBuffer]} (.-prevEnd d)]
+
+      ;; Consume leading whitespace.
+      (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+      (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+        (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+          (when (and (== err io/ErrUnexpectedEOF) (== (.Depth ^{:go/via [state]} (.-Tokens d)) 1))
+            (set! err io/EOF)) ; EOF possibly if no Tokens present after top-level value
+
+          (set! (values ^{:go/via [decodeBuffer]} (.-peekPos d) ^{:go/via [decodeBuffer]} (.-peekErr d)) (values -1 (wrapSyntacticError d err pos 0)))
+          (return invalidKind)))
+
+
+
+      ;; Consume colon or comma.
+      (let [^byte delim (zero byte)]
+        (when [c (aget ^{:go/via [decodeBuffer]} (.-buf d) pos)] (or (== c \:) (== c \,))
+          (set! delim c)
+          (set! pos + 1)
+          (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+          (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+            (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+              (set! err (wrapSyntacticError d err pos 0))
+              (set! (values ^{:go/via [decodeBuffer]} (.-peekPos d) ^{:go/via [decodeBuffer]} (.-peekErr d)) (values -1 (.checkDelimBeforeIOError d delim err)))
+              (return invalidKind))))
+
+
+
+        (let [next (.normalize (conv Kind (aget ^{:go/via [decodeBuffer]} (.-buf d) pos)))]
+          (when (!= (.needDelim ^{:go/via [state]} (.-Tokens d) next) delim)
+            (set! (values ^{:go/via [decodeBuffer]} (.-peekPos d) ^{:go/via [decodeBuffer]} (.-peekErr d)) (values -1 (.checkDelim d delim next)))
+            (return invalidKind))
+
+
+          ;; This may set peekPos to zero, which is indistinguishable from
+          ;; the uninitialized state. While a small hit to performance, it is correct
+          ;; since ReadValue and ReadToken will disregard the cached result and
+          ;; recompute the next kind.
+          (set! (values ^{:go/via [decodeBuffer]} (.-peekPos d) ^{:go/via [decodeBuffer]} (.-peekErr d)) (values pos nil))
+          ^{:line 364} next)))))
+
+
+
+
+^{:go/end 380} (go/method checkDelimBeforeIOError "checkDelimBeforeIOError checks whether the delim is even valid\nbefore returning an IO error, which occurs after the delim.\n" ^error [^{:tag (* decoderState)} d ^byte delim ^error err]
+  ;; Since an IO error occurred, we do not know what the next kind is.
+  ;; However, knowing the next kind is necessary to validate
+  ;; whether the current delim is at least potentially valid.
+  ;; Since a JSON string is always valid as the next token,
+  ;; conservatively assume that is the next kind for validation.
+  (let [^:const ^{:val 34} next (conv Kind \")]
+    (when (!= (.needDelim ^{:go/via [state]} (.-Tokens d) next) delim)
+      (set! err (.checkDelim d delim next)))
+
+    ^{:line 379} err))
+
+
+
+
+
+^{:go/end 388} (go/method CountNextDelimWhitespace "CountNextDelimWhitespace counts the number of upcoming bytes of\ndelimiter or whitespace characters.\nThis method is used for error reporting at the semantic layer.\n" ^int [^{:tag (* decoderState)} d]
+  (.PeekKind d) ; populate unreadBuffer
+  (- (len ^{:go/via [decodeBuffer]} (.unreadBuffer d)) (len (bytes/TrimLeft ^{:go/via [decodeBuffer]} (.unreadBuffer d) ",: \n\r\t"))))
+
+
+
+^{:go/end 409} (go/method checkDelim "checkDelim checks whether delim is valid for the given next kind.\n" ^error [^{:tag (* decoderState)} d ^byte delim ^Kind next]
+  (let [where "at start of value"]
+    (switch (.needDelim ^{:go/via [state]} (.-Tokens d) next)
+      (case [delim]
+        (return nil))
+      (case [\:]
+        (set! where "after object name (expecting ':')"))
+      (case [\,]
+        (if (.isObject (.-Last ^{:go/via [state]} (.-Tokens d)))
+          (set! where "after object value (expecting ',' or '}')")
+
+          (set! where "after array element (expecting ',' or ']')"))))
+
+
+    (let [pos ^{:go/via [decodeBuffer]} (.-prevEnd d)] ; restore position to right after leading whitespace
+      (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+      (let [err (^{:inst [(slice byte)]} jsonwire/NewInvalidCharacterError (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) where)]
+        (wrapSyntacticError d err pos 0)))))
+
+
+
+
+^{:go/end 415} (go/method SkipValue "SkipValue is semantically equivalent to calling [Decoder.ReadValue] and discarding\nthe result, except that memory is not wasted trying to hold the entire result.\n" ^error [^{:tag (* Decoder)} d]
+  (.SkipValue (.-s d)))
+
+
+^{:go/end 440} (go/method SkipValue ^error [^{:tag (* decoderState)} d]
+  (switch (.PeekKind d)
+    (case [\{ \[]
+      ;; For JSON objects and arrays, keep skipping all tokens
+      ;; until the depth matches the starting depth.
+      (let [depth (.Depth ^{:go/via [state]} (.-Tokens d))]
+        (while true
+          (when [(values _ err) (.ReadToken d)] (!= err nil)
+            (return err))
+
+          (when (>= depth (.Depth ^{:go/via [state]} (.-Tokens d)))
+            (return nil)))))
+
+
+    (default
+      ;; Trying to skip a value when the next token is a '}' or ']'
+      ;; will result in an error being returned here.
+      (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)]
+        (when [(values _ err) (.ReadValue d (addr flags))] (!= err nil)
+          (return err))
+
+        (return nil)))))
+
+
+
+
+
+^{:go/breaks [[5 452]] :go/end 453} (go/method SkipValueRemainder "SkipValueRemainder skips the remainder of a value\nafter reading a '{' or '[' token.\n" ^error [^{:tag (* decoderState)} d]
+  (when (and (> (- (.Depth ^{:go/via [state]} (.-Tokens d)) 1) 0) (== (.Length (.-Last ^{:go/via [state]} (.-Tokens d))) 0))
+    (for [n (.Depth ^{:go/via [state]} (.-Tokens d))] (>= (.Depth ^{:go/via [state]} (.-Tokens d)) n) _
+      (when [(values _ err) (.ReadToken d)] (!= err nil)
+        (return err))))
+
+
+
+  nil)
+
+
+
+
+^{:go/breaks [[5 463]] :go/end 464} (go/method SkipUntil "SkipUntil skips all tokens until the state machine\nis at or past the specified depth and length.\n" ^error [^{:tag (* decoderState)} d ^int depth ^int64 length]
+  (while (or (> (.Depth ^{:go/via [state]} (.-Tokens d)) depth) ^:go/paren (and (== (.Depth ^{:go/via [state]} (.-Tokens d)) depth) (< (.Length (.-Last ^{:go/via [state]} (.-Tokens d))) length)))
+    (when [(values _ err) (.ReadToken d)] (!= err nil)
+      (return err)))
+
+
+  nil)
+
+
+
+
+
+^{:go/end 471} (go/method ReadToken "ReadToken reads the next [Token], advancing the read offset.\nThe returned token is only valid until the next Peek, Read, or Skip call.\nIt returns [io.EOF] if there are no more tokens.\n" [^{:tag (* Decoder)} d] :results [Token error]
+  (.ReadToken (.-s d)))
+
+^{:go/end 665} (go/method ReadToken [^{:tag (* decoderState)} d] :results [Token error]
+  ;; Determine the next kind.
+  (let [^error err (zero error)
+      ^{:line 475 :tag Kind} next (zero Kind)
+      ^{:line 476} pos ^{:go/via [decodeBuffer]} (.-peekPos d)]
+    (if (!= pos 0) (do
+        ;; Use cached peek result.
+        (when (!= ^{:go/via [decodeBuffer]} (.-peekErr d) nil)
+          (let [err ^{:go/via [decodeBuffer]} (.-peekErr d)]
+            (set! (values ^{:go/via [decodeBuffer]} (.-peekPos d) ^{:go/via [decodeBuffer]} (.-peekErr d)) (values 0 nil)) ; possibly a transient I/O error
+            (return (lit Token) err)))
+
+        (set! next (.normalize (conv Kind (aget ^{:go/via [decodeBuffer]} (.-buf d) pos))))
+        (set! ^{:go/via [decodeBuffer]} (.-peekPos d) 0)) ; reset cache
+      (do
+        ^{:go/via [decodeBuffer]} (.invalidatePreviousRead d)
+        (set! pos ^{:go/via [decodeBuffer]} (.-prevEnd d))
+
+        ;; Consume leading whitespace.
+        (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+        (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+          (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+            (when (and (== err io/ErrUnexpectedEOF) (== (.Depth ^{:go/via [state]} (.-Tokens d)) 1))
+              (set! err io/EOF)) ; EOF possibly if no Tokens present after top-level value
+
+            (return (lit Token) (wrapSyntacticError d err pos 0))))
+
+
+
+        ;; Consume colon or comma.
+        (let [^byte delim (zero byte)]
+          (when [c (aget ^{:go/via [decodeBuffer]} (.-buf d) pos)] (or (== c \:) (== c \,))
+            (set! delim c)
+            (set! pos + 1)
+            (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+            (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+              (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+                (set! err (wrapSyntacticError d err pos 0))
+                (return (lit Token) (.checkDelimBeforeIOError d delim err)))))
+
+
+
+          (set! next (.normalize (conv Kind (aget ^{:go/via [decodeBuffer]} (.-buf d) pos))))
+          (when (!= (.needDelim ^{:go/via [state]} (.-Tokens d) next) delim)
+            (return (lit Token) (.checkDelim d delim next))))))
+
+
+
+    ;; Handle the next token.
+    (let [^int n (zero int)]
+      (switch next
+        (case [\n]
+          (if (== (jsonwire/ConsumeNull (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)) 0) (do
+              (set! (values pos err) (.consumeLiteral d pos "null"))
+              (when (!= err nil)
+                (return (lit Token) (wrapSyntacticError d err pos (+ 1)))))
+
+
+            (set! pos + (len "null")))
+
+          (when [(set! err (.appendLiteral ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+            (return (lit Token) (wrapSyntacticError d err (- pos (len "null")) (+ 1)))) ; report position at start of literal
+
+          (set! (values ^{:go/via [decodeBuffer]} (.-prevStart d) ^{:go/via [decodeBuffer]} (.-prevEnd d)) (values pos pos))
+          (return Null nil))
+
+        (case [\f]
+          (if (== (jsonwire/ConsumeFalse (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)) 0) (do
+              (set! (values pos err) (.consumeLiteral d pos "false"))
+              (when (!= err nil)
+                (return (lit Token) (wrapSyntacticError d err pos (+ 1)))))
+
+
+            (set! pos + (len "false")))
+
+          (when [(set! err (.appendLiteral ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+            (return (lit Token) (wrapSyntacticError d err (- pos (len "false")) (+ 1)))) ; report position at start of literal
+
+          (set! (values ^{:go/via [decodeBuffer]} (.-prevStart d) ^{:go/via [decodeBuffer]} (.-prevEnd d)) (values pos pos))
+          (return False nil))
+
+        (case [\t]
+          (if (== (jsonwire/ConsumeTrue (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)) 0) (do
+              (set! (values pos err) (.consumeLiteral d pos "true"))
+              (when (!= err nil)
+                (return (lit Token) (wrapSyntacticError d err pos (+ 1)))))
+
+
+            (set! pos + (len "true")))
+
+          (when [(set! err (.appendLiteral ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+            (return (lit Token) (wrapSyntacticError d err (- pos (len "true")) (+ 1)))) ; report position at start of literal
+
+          (set! (values ^{:go/via [decodeBuffer]} (.-prevStart d) ^{:go/via [decodeBuffer]} (.-prevEnd d)) (values pos pos))
+          (return True nil))
+
+        (case [\"]
+          (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)] ; TODO: Preserve this in Token?
+            (if [(set! n (jsonwire/ConsumeSimpleString (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))] (== n 0)
+              (let [oldAbsPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+                (set! (values pos err) (.consumeString d (addr flags) pos))
+                (let [newAbsPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+                  (set! n (conv int (- newAbsPos oldAbsPos)))
+                  (when (!= err nil)
+                    (return (lit Token) (wrapSyntacticError d err pos (+ 1))))))
+
+
+              (set! pos + n))
+
+            (when (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens d)))
+              (when (not (.Get ^{:go/via [Struct]} (.-Flags d) jsonflags/AllowDuplicateNames))
+                (when (not (.isValidNamespace (.-Last ^{:go/via [state]} (.-Tokens d))))
+                  (return (lit Token) (wrapSyntacticError d errInvalidNamespace (- pos n) (+ 1))))
+
+                (when (and (.isActiveNamespace (.-Last ^{:go/via [state]} (.-Tokens d))) (not (.insertQuoted (.Last ^{:go/via [state]} (.-Namespaces d)) (subslice ^{:go/via [decodeBuffer]} (.-buf d) (- pos n) pos) (.IsVerbatim flags))))
+                  (set! err (wrapWithObjectName ErrDuplicateName (subslice ^{:go/via [decodeBuffer]} (.-buf d) (- pos n) pos)))
+                  (return (lit Token) (wrapSyntacticError d err (- pos n) (+ 1))))) ; report position at start of string
+
+
+              (.ReplaceLastQuotedOffset ^{:go/via [state]} (.-Names d) (- pos n))) ; only replace if insertQuoted succeeds
+
+            (when [(set! err (.appendString ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+              (return (lit Token) (wrapSyntacticError d err (- pos n) (+ 1)))) ; report position at start of string
+
+            (set! (values ^{:go/via [decodeBuffer]} (.-prevStart d) ^{:go/via [decodeBuffer]} (.-prevEnd d)) (values (- pos n) pos))
+            (return (lit Token :raw (addr (.-decodeBuffer d)) :num (conv uint64 ^{:go/via [decodeBuffer]} (.previousOffsetStart d))) nil)))
+
+        (case [\0]
+          ;; NOTE: Since JSON numbers are not self-terminating,
+          ;; we need to make sure that the next byte is not part of a number.
+          (if [(set! n (jsonwire/ConsumeSimpleNumber (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))] (or (== n 0) ^{:go/via [decodeBuffer]} (.needMore d (+ pos n)))
+            (let [oldAbsPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+              (set! (values pos err) (.consumeNumber d pos))
+              (let [newAbsPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+                (set! n (conv int (- newAbsPos oldAbsPos)))
+                (when (!= err nil)
+                  (return (lit Token) (wrapSyntacticError d err pos (+ 1))))))
+
+
+            (set! pos + n))
+
+          (when [(set! err (.appendNumber ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+            (return (lit Token) (wrapSyntacticError d err (- pos n) (+ 1)))) ; report position at start of number
+
+          (set! (values ^{:go/via [decodeBuffer]} (.-prevStart d) ^{:go/via [decodeBuffer]} (.-prevEnd d)) (values (- pos n) pos))
+          (return (lit Token :raw (addr (.-decodeBuffer d)) :num (conv uint64 ^{:go/via [decodeBuffer]} (.previousOffsetStart d))) nil))
+
+        (case [\{]
+          (when [(set! err (.pushObject ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+            (return (lit Token) (wrapSyntacticError d err pos (+ 1))))
+
+          (.push ^{:go/via [state]} (.-Names d))
+          (when (not (.Get ^{:go/via [Struct]} (.-Flags d) jsonflags/AllowDuplicateNames))
+            (.push ^{:go/via [state]} (.-Namespaces d)))
+
+          (.Clear ^{:go/via [Struct]} (.-Flags d) jsonflags/TagFlags) ; tags only apply to current depth
+          (set! pos + 1)
+          (set! (values ^{:go/via [decodeBuffer]} (.-prevStart d) ^{:go/via [decodeBuffer]} (.-prevEnd d)) (values pos pos))
+          (return BeginObject nil))
+
+        (case [\}]
+          (when [(set! err (.popObject ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+            (return (lit Token) (wrapSyntacticError d err pos (+ 1))))
+
+          (.pop ^{:go/via [state]} (.-Names d))
+          (when (not (.Get ^{:go/via [Struct]} (.-Flags d) jsonflags/AllowDuplicateNames))
+            (.pop ^{:go/via [state]} (.-Namespaces d)))
+
+          (set! pos + 1)
+          (set! (values ^{:go/via [decodeBuffer]} (.-prevStart d) ^{:go/via [decodeBuffer]} (.-prevEnd d)) (values pos pos))
+          (return EndObject nil))
+
+        (case [\[]
+          (when [(set! err (.pushArray ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+            (return (lit Token) (wrapSyntacticError d err pos (+ 1))))
+
+          (.Clear ^{:go/via [Struct]} (.-Flags d) jsonflags/TagFlags) ; tags only apply to current depth
+          (set! pos + 1)
+          (set! (values ^{:go/via [decodeBuffer]} (.-prevStart d) ^{:go/via [decodeBuffer]} (.-prevEnd d)) (values pos pos))
+          (return BeginArray nil))
+
+        (case [\]]
+          (when [(set! err (.popArray ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+            (return (lit Token) (wrapSyntacticError d err pos (+ 1))))
+
+          (set! pos + 1)
+          (set! (values ^{:go/via [decodeBuffer]} (.-prevStart d) ^{:go/via [decodeBuffer]} (.-prevEnd d)) (values pos pos))
+          (return EndArray nil))
+
+        (default
+          (set! err (^{:inst [(slice byte)]} jsonwire/NewInvalidCharacterError (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) "at start of value"))
+          (return (lit Token) (wrapSyntacticError d err pos (+ 1))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 680} (go/method ReadValue "ReadValue returns the next raw JSON value, advancing the read offset.\nThe value is stripped of any leading or trailing whitespace and\ncontains the exact bytes of the input, which may contain invalid UTF-8\nif [AllowInvalidUTF8] is specified.\n\nThe returned value is only valid until the next Peek, Read, or Skip call and\nmay not be mutated while the Decoder remains in use.\nIf the decoder is currently at the end token for an object or array,\nthen it reports a [SyntacticError] and the internal state remains unchanged.\nIt returns [io.EOF] if there are no more values.\n" [^{:tag (* Decoder)} d] :results [Value error]
+  (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)]
+    (.ReadValue (.-s d) (addr flags))))
+
+^{:go/end 778} (go/method ReadValue [^{:tag (* decoderState)} d ^{:tag (* jsonwire/ValueFlags)} flags] :results [Value error]
+  ;; Determine the next kind.
+  (let [^error err (zero error)
+      ^{:line 684 :tag Kind} next (zero Kind)
+      ^{:line 685} pos ^{:go/via [decodeBuffer]} (.-peekPos d)]
+    (if (!= pos 0) (do
+        ;; Use cached peek result.
+        (when (!= ^{:go/via [decodeBuffer]} (.-peekErr d) nil)
+          (let [err ^{:go/via [decodeBuffer]} (.-peekErr d)]
+            (set! (values ^{:go/via [decodeBuffer]} (.-peekPos d) ^{:go/via [decodeBuffer]} (.-peekErr d)) (values 0 nil)) ; possibly a transient I/O error
+            (return nil err)))
+
+        (set! next (.normalize (conv Kind (aget ^{:go/via [decodeBuffer]} (.-buf d) pos))))
+        (set! ^{:go/via [decodeBuffer]} (.-peekPos d) 0)) ; reset cache
+      (do
+        ^{:go/via [decodeBuffer]} (.invalidatePreviousRead d)
+        (set! pos ^{:go/via [decodeBuffer]} (.-prevEnd d))
+
+        ;; Consume leading whitespace.
+        (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+        (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+          (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+            (when (and (== err io/ErrUnexpectedEOF) (== (.Depth ^{:go/via [state]} (.-Tokens d)) 1))
+              (set! err io/EOF)) ; EOF possibly if no Tokens present after top-level value
+
+            (return nil (wrapSyntacticError d err pos 0))))
+
+
+
+        ;; Consume colon or comma.
+        (let [^byte delim (zero byte)]
+          (when [c (aget ^{:go/via [decodeBuffer]} (.-buf d) pos)] (or (== c \:) (== c \,))
+            (set! delim c)
+            (set! pos + 1)
+            (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+            (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+              (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+                (set! err (wrapSyntacticError d err pos 0))
+                (return nil (.checkDelimBeforeIOError d delim err)))))
+
+
+
+          (set! next (.normalize (conv Kind (aget ^{:go/via [decodeBuffer]} (.-buf d) pos))))
+          (when (!= (.needDelim ^{:go/via [state]} (.-Tokens d) next) delim)
+            (return nil (.checkDelim d delim next))))))
+
+
+
+    ;; Handle the next value.
+    (let [oldAbsPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+      (set! (values pos err) (.consumeValue d flags pos (.Depth ^{:go/via [state]} (.-Tokens d))))
+      (let [newAbsPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))
+          ^{:line 733} n (conv int (- newAbsPos oldAbsPos))]
+        (when (!= err nil)
+          (return nil (wrapSyntacticError d err pos (+ 1))))
+
+        (switch next
+          (case [\n \t \f]
+            (set! err (.appendLiteral ^{:go/via [state]} (.-Tokens d))))
+          (case [\"]
+            (when (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens d)))
+              (when (not (.Get ^{:go/via [Struct]} (.-Flags d) jsonflags/AllowDuplicateNames))
+                (when (not (.isValidNamespace (.-Last ^{:go/via [state]} (.-Tokens d))))
+                  (set! err errInvalidNamespace)
+                  (break))
+
+                (when (and (.isActiveNamespace (.-Last ^{:go/via [state]} (.-Tokens d))) (not (.insertQuoted (.Last ^{:go/via [state]} (.-Namespaces d)) (subslice ^{:go/via [decodeBuffer]} (.-buf d) (- pos n) pos) (.IsVerbatim flags))))
+                  (set! err (wrapWithObjectName ErrDuplicateName (subslice ^{:go/via [decodeBuffer]} (.-buf d) (- pos n) pos)))
+                  (break)))
+
+
+              (.ReplaceLastQuotedOffset ^{:go/via [state]} (.-Names d) (- pos n))) ; only replace if insertQuoted succeeds
+
+            (set! err (.appendString ^{:go/via [state]} (.-Tokens d))))
+          (case [\0]
+            (set! err (.appendNumber ^{:go/via [state]} (.-Tokens d))))
+          (case [\{]
+            (when [(set! err (.pushObject ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+              (break))
+
+            (when [(set! err (.popObject ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+              (panic (+ "BUG: popObject should never fail immediately after pushObject: " (.Error err)))))
+
+          (case [\[]
+            (when [(set! err (.pushArray ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+              (break))
+
+            (when [(set! err (.popArray ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+              (panic (+ "BUG: popArray should never fail immediately after pushArray: " (.Error err))))))
+
+
+        (when (!= err nil)
+          (return nil (wrapSyntacticError d err (- pos n) (+ 1)))) ; report position at start of value
+
+        (set! ^{:go/via [decodeBuffer]} (.-prevEnd d) pos)
+        (set! ^{:go/via [decodeBuffer]} (.-prevStart d) (- pos n))
+        (return (subslice ^{:go/via [decodeBuffer]} (.-buf d) (- pos n) pos pos) nil)))))
+
+
+
+
+
+^{:go/end 798} (go/method CheckNextValue "CheckNextValue checks whether the next value is syntactically valid,\nbut does not advance the read offset.\nIf last, it verifies that the stream cleanly terminates with [io.EOF].\n" ^error [^{:tag (* decoderState)} d ^bool last]
+  (.PeekKind d) ; populates d.peekPos and d.peekErr
+  (let [(values pos err) (values ^{:go/via [decodeBuffer]} (.-peekPos d) ^{:go/via [decodeBuffer]} (.-peekErr d))]
+    (set! (values ^{:go/via [decodeBuffer]} (.-peekPos d) ^{:go/via [decodeBuffer]} (.-peekErr d)) (values 0 nil))
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 797]]} (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)]
+      (if [(values pos err) (.consumeValue d (addr flags) pos (.Depth ^{:go/via [state]} (.-Tokens d)))] (!= err nil)
+        (return (wrapSyntacticError d err pos (+ 1)))
+        (when last
+          (return (.checkEOF d pos))))
+
+      nil)))
+
+
+
+^{:go/end 804} (go/method AtEOF "AtEOF reports whether the decoder is at EOF.\n" ^bool [^{:tag (* decoderState)} d]
+  (let [(values _ err) (.consumeWhitespace d ^{:go/via [decodeBuffer]} (.-prevEnd d))]
+    (== err io/ErrUnexpectedEOF)))
+
+
+
+^{:go/end 809} (go/method CheckEOF "CheckEOF verifies that the input has no more data.\n" ^error [^{:tag (* decoderState)} d]
+  (.checkEOF d ^{:go/via [decodeBuffer]} (.-prevEnd d)))
+
+^{:go/end 820} (go/method checkEOF ^error [^{:tag (* decoderState)} d ^int pos]
+  (switch [(values pos err) (.consumeWhitespace d pos)] err
+    (case [nil]
+      (let [err (^{:inst [(slice byte)]} jsonwire/NewInvalidCharacterError (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) "after top-level value")]
+        (return (wrapSyntacticError d err pos 0))))
+    (case [io/ErrUnexpectedEOF]
+      (return nil))
+    (default
+      (return err))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 853} (go/method consumeWhitespace "consumeWhitespace consumes all whitespace starting at d.buf[pos:].\nIt returns the new position in d.buf immediately after the last whitespace.\nIf it returns nil, there is guaranteed to at least be one unread byte.\n\nThe following pattern is common in this implementation:\n\n\tpos += jsonwire.ConsumeWhitespace(d.buf[pos:])\n\tif d.needMore(pos) {\n\t\tif pos, err = d.consumeWhitespace(pos); err != nil {\n\t\t\treturn ...\n\t\t}\n\t}\n\nIt is difficult to simplify this without sacrificing performance since\nconsumeWhitespace must be inlined. The body of the if statement is\nexecuted only in rare situations where we need to fetch more data.\nSince fetching may return an error, we also need to check the error.\n" [^{:tag (* decoderState)} d ^int pos] :results [^int newPos ^error err]
+  (while true
+    (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+    (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+      (let [absPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+        (set! err (.fetch d)) ; will mutate d.buf and invalidate pos
+        (set! pos (conv int (- absPos ^{:go/via [decodeBuffer]} (.-baseOffset d))))
+        (when (!= err nil)
+          (return pos err))
+
+        (continue)))
+
+    (return pos nil)))
+
+
+
+
+
+^{:go/end 905} (go/method consumeValue "consumeValue consumes a single JSON value starting at d.buf[pos:].\nIt returns the new position in d.buf immediately after the value.\n" [^{:tag (* decoderState)} d ^{:tag (* jsonwire/ValueFlags)} flags ^int pos ^int depth] :results [^int newPos ^error err]
+  (while true
+    (let [^int n (zero int)
+        ^{:line 860 :tag error} err (zero error)]
+      (switch [next (.normalize (conv Kind (aget ^{:go/via [decodeBuffer]} (.-buf d) pos)))] next
+        (case [\n]
+          (when [(set! n (jsonwire/ConsumeNull (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))] (== n 0)
+            (set! (values n err) (jsonwire/ConsumeLiteral (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) "null"))))
+
+        (case [\f]
+          (when [(set! n (jsonwire/ConsumeFalse (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))] (== n 0)
+            (set! (values n err) (jsonwire/ConsumeLiteral (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) "false"))))
+
+        (case [\t]
+          (when [(set! n (jsonwire/ConsumeTrue (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))] (== n 0)
+            (set! (values n err) (jsonwire/ConsumeLiteral (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) "true"))))
+
+        (case [\"]
+          (when [(set! n (jsonwire/ConsumeSimpleString (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))] (== n 0)
+            (return (.consumeString d flags pos))))
+
+        (case [\0]
+          ;; NOTE: Since JSON numbers are not self-terminating,
+          ;; we need to make sure that the next byte is not part of a number.
+          (when [(set! n (jsonwire/ConsumeSimpleNumber (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))] (or (== n 0) ^{:go/via [decodeBuffer]} (.needMore d (+ pos n)))
+            (return (.consumeNumber d pos))))
+
+        (case [\{]
+          (return (.consumeObject d flags pos depth)))
+        (case [\[]
+          (return (.consumeArray d flags pos depth)))
+        (default
+          (when (or ^:go/paren (and (.isObject (.-Last ^{:go/via [state]} (.-Tokens d))) (== next \])) ^:go/paren (and (.isArray (.-Last ^{:go/via [state]} (.-Tokens d))) (== next \})))
+            (return pos errMismatchDelim))
+
+          (return pos (^{:inst [(slice byte)]} jsonwire/NewInvalidCharacterError (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) "at start of value"))))
+
+      (when (== err io/ErrUnexpectedEOF)
+        (let [absPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+          (set! err (.fetch d)) ; will mutate d.buf and invalidate pos
+          (set! pos (conv int (- absPos ^{:go/via [decodeBuffer]} (.-baseOffset d))))
+          (when (!= err nil)
+            (return (+ pos n) err))
+
+          (continue)))
+
+      (return (+ pos n) err))))
+
+
+
+
+
+^{:go/end 923} (go/method consumeLiteral "consumeLiteral consumes a single JSON literal starting at d.buf[pos:].\nIt returns the new position in d.buf immediately after the literal.\n" [^{:tag (* decoderState)} d ^int pos ^string lit] :results [^int newPos ^error err]
+  (while true
+    (let [(values n err) (jsonwire/ConsumeLiteral (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) lit)]
+      (when (== err io/ErrUnexpectedEOF)
+        (let [absPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+          (set! err (.fetch d)) ; will mutate d.buf and invalidate pos
+          (set! pos (conv int (- absPos ^{:go/via [decodeBuffer]} (.-baseOffset d))))
+          (when (!= err nil)
+            (return (+ pos n) err))
+
+          (continue)))
+
+      (return (+ pos n) err))))
+
+
+
+
+
+^{:go/end 942} (go/method consumeString "consumeString consumes a single JSON string starting at d.buf[pos:].\nIt returns the new position in d.buf immediately after the string.\n" [^{:tag (* decoderState)} d ^{:tag (* jsonwire/ValueFlags)} flags ^int pos] :results [^int newPos ^error err]
+  (let [^int n (zero int)]
+    (while true
+      (set! (values n err) (jsonwire/ConsumeStringResumable flags (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) n (not (.Get ^{:go/via [Struct]} (.-Flags d) jsonflags/AllowInvalidUTF8))))
+      (when (== err io/ErrUnexpectedEOF)
+        (let [absPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+          (set! err (.fetch d)) ; will mutate d.buf and invalidate pos
+          (set! pos (conv int (- absPos ^{:go/via [decodeBuffer]} (.-baseOffset d))))
+          (when (!= err nil)
+            (return (+ pos n) err))
+
+          (continue)))
+
+      (return (+ pos n) err))))
+
+
+
+
+
+^{:go/end 968} (go/method consumeNumber "consumeNumber consumes a single JSON number starting at d.buf[pos:].\nIt returns the new position in d.buf immediately after the number.\n" [^{:tag (* decoderState)} d ^int pos] :results [^int newPos ^error err]
+  (let [^int n (zero int)
+      ^{:line 948 :tag jsonwire/ConsumeNumberState} state (zero jsonwire/ConsumeNumberState)]
+    (while true
+      (set! (values n state err) (jsonwire/ConsumeNumberResumable (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) n state))
+      ;; NOTE: Since JSON numbers are not self-terminating,
+      ;; we need to make sure that the next byte is not part of a number.
+      (when (or (== err io/ErrUnexpectedEOF) ^{:go/via [decodeBuffer]} (.needMore d (+ pos n)))
+        (let [mayTerminate (== err nil)
+            ^{:line 955} absPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+          (set! err (.fetch d)) ; will mutate d.buf and invalidate pos
+          (set! pos (conv int (- absPos ^{:go/via [decodeBuffer]} (.-baseOffset d))))
+          (when (!= err nil)
+            (when (and mayTerminate (== err io/ErrUnexpectedEOF))
+              (return (+ pos n) nil))
+
+            (return pos err))
+
+          (continue)))
+
+      (return (+ pos n) err))))
+
+
+
+
+
+^{:go/end 1071} (go/method consumeObject "consumeObject consumes a single JSON object starting at d.buf[pos:].\nIt returns the new position in d.buf immediately after the object.\n" [^{:tag (* decoderState)} d ^{:tag (* jsonwire/ValueFlags)} flags ^int pos ^int depth] :results [^int newPos ^error err]
+  (let [^int n (zero int)
+      ^{:line 974 :tag (* objectNamespace)} names (zero (* objectNamespace))]
+    (when (not (.Get ^{:go/via [Struct]} (.-Flags d) jsonflags/AllowDuplicateNames))
+      (.push ^{:go/via [state]} (.-Namespaces d))
+      (defer (.pop ^{:go/via [state]} (.-Namespaces d)))
+      (set! names (.Last ^{:go/via [state]} (.-Namespaces d))))
+
+
+    ;; Handle before start.
+    (cond (or (>= (conv uint pos) (conv uint (len ^{:go/via [decodeBuffer]} (.-buf d)))) (!= (aget ^{:go/via [decodeBuffer]} (.-buf d) pos) \{))
+      (panic "BUG: consumeObject must be called with a buffer that starts with '{'")
+      (== depth (+ maxNestingDepth 1))
+      (return pos errMaxDepth))
+
+    (inc! pos)
+
+    ;; Handle after start.
+    (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+    (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+      (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+        (return pos err)))
+
+
+    (when (== (aget ^{:go/via [decodeBuffer]} (.-buf d) pos) \})
+      (inc! pos)
+      (return pos nil))
+
+
+    (inc! depth)
+    (while true
+      ;; Handle before name.
+      (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+      (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+        (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+          (return pos err)))
+
+
+      (let [^jsonwire/ValueFlags flags2 (zero jsonwire/ValueFlags)]
+        (if [(set! n (jsonwire/ConsumeSimpleString (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))] (== n 0)
+          (let [oldAbsPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+            (set! (values pos err) (.consumeString d (addr flags2) pos))
+            (let [newAbsPos (+ ^{:go/via [decodeBuffer]} (.-baseOffset d) (conv int64 pos))]
+              (set! n (conv int (- newAbsPos oldAbsPos)))
+              (.Join flags flags2)
+              (when (!= err nil)
+                (return pos err))))
+
+
+          (set! pos + n))
+
+        (let [quotedName (subslice ^{:go/via [decodeBuffer]} (.-buf d) (- pos n) pos)]
+          (when (and (not (.Get ^{:go/via [Struct]} (.-Flags d) jsonflags/AllowDuplicateNames)) (not (.insertQuoted names quotedName (.IsVerbatim flags2))))
+            (return (- pos n) (wrapWithObjectName ErrDuplicateName quotedName)))
+
+
+          ;; Handle after name.
+          (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+          (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+            (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+              (return pos (wrapWithObjectName err quotedName))))
+
+
+          (when (!= (aget ^{:go/via [decodeBuffer]} (.-buf d) pos) \:)
+            (let [err (^{:inst [(slice byte)]} jsonwire/NewInvalidCharacterError (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) "after object name (expecting ':')")]
+              (return pos (wrapWithObjectName err quotedName))))
+
+          (inc! pos)
+
+          ;; Handle before value.
+          (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+          (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+            (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+              (return pos (wrapWithObjectName err quotedName))))
+
+
+          (set! (values pos err) (.consumeValue d flags pos depth))
+          (when (!= err nil)
+            (return pos (wrapWithObjectName err quotedName)))
+
+
+          ;; Handle after value.
+          (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+          (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+            (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+              (return pos err)))
+
+
+          (switch (aget ^{:go/via [decodeBuffer]} (.-buf d) pos)
+            (case [\,]
+              (inc! pos)
+              (continue))
+            (case [\}]
+              (inc! pos)
+              (return pos nil))
+            (default
+              (return pos (^{:inst [(slice byte)]} jsonwire/NewInvalidCharacterError (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) "after object value (expecting ',' or '}')")))))))))
+
+
+
+
+
+
+^{:go/end 1130} (go/method consumeArray "consumeArray consumes a single JSON array starting at d.buf[pos:].\nIt returns the new position in d.buf immediately after the array.\n" [^{:tag (* decoderState)} d ^{:tag (* jsonwire/ValueFlags)} flags ^int pos ^int depth] :results [^int newPos ^error err]
+  ;; Handle before start.
+  (cond (or (>= (conv uint pos) (conv uint (len ^{:go/via [decodeBuffer]} (.-buf d)))) (!= (aget ^{:go/via [decodeBuffer]} (.-buf d) pos) \[))
+    (panic "BUG: consumeArray must be called with a buffer that starts with '['")
+    (== depth (+ maxNestingDepth 1))
+    (return pos errMaxDepth))
+
+  (inc! pos)
+
+  ;; Handle after start.
+  (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+  (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+    (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+      (return pos err)))
+
+
+  (when (== (aget ^{:go/via [decodeBuffer]} (.-buf d) pos) \])
+    (inc! pos)
+    (return pos nil))
+
+
+  (let [^int64 idx (zero int64)]
+    (inc! depth)
+    (while true
+      ;; Handle before value.
+      (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+      (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+        (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+          (return pos err)))
+
+
+      (set! (values pos err) (.consumeValue d flags pos depth))
+      (when (!= err nil)
+        (return pos (wrapWithArrayIndex err idx)))
+
+
+      ;; Handle after value.
+      (set! pos + (jsonwire/ConsumeWhitespace (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos)))
+      (when ^{:go/via [decodeBuffer]} (.needMore d pos)
+        (when [(set! (values pos err) (.consumeWhitespace d pos))] (!= err nil)
+          (return pos err)))
+
+
+      (switch (aget ^{:go/via [decodeBuffer]} (.-buf d) pos)
+        (case [\,]
+          (inc! pos)
+          (inc! idx)
+          (continue))
+        (case [\]]
+          (inc! pos)
+          (return pos nil))
+        (default
+          (return pos (^{:inst [(slice byte)]} jsonwire/NewInvalidCharacterError (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) "after array element (expecting ',' or ']')")))))))
+
+
+
+
+
+
+
+
+^{:go/end 1138} (go/method InputOffset "InputOffset returns the current input byte offset. It gives the location\nof the next byte immediately after the most recently returned token or value.\nThe number of bytes actually read from the underlying [io.Reader] may be more\nthan this offset due to internal buffering.\n" ^int64 [^{:tag (* Decoder)} d]
+  ^{:go/via [decodeBuffer]} (.previousOffsetEnd (.-s d)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1157} (go/method UnreadBuffer "UnreadBuffer returns the data remaining in the unread buffer,\nwhich may contain zero or more bytes.\nThis is the data already consumed from the input [io.Reader],\nbut not yet read by a [Decoder.ReadToken] or [Decoder.ReadValue] call.\nIt may contain bytes that do not form valid JSON, since it has not yet\nbeen validated according to the JSON grammar.\nThe exact amount of buffered data is an implementation detail\nof the Decoder and may change over time.\n\nIt is the caller's responsibility to concatenate this buffer with\nthe remainder of the input Reader to obtain the full sequence\nof bytes after the last read JSON token or value.\n\nThe returned buffer must not be mutated while Decoder continues to be used.\nThe buffer contents are valid until the next Peek, Read, or Skip call.\n" ^{:tag (slice byte)} [^{:tag (* Decoder)} d]
+  ^{:go/via [decodeBuffer]} (.unreadBuffer (.-s d)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1186} (go/method StackDepth "StackDepth returns the depth of the state machine for JSON data\nthat has already been read.\nEach level on the stack represents a nested JSON object or array.\nIt is incremented whenever a [BeginObject] or [BeginArray] token is encountered\nand decremented whenever an [EndObject] or [EndArray] token is encountered.\n\nStackDepth returns 0 when not inside any object or array.\nIn particular, it returns 0 before any tokens have been read,\nafter any top-level value has been read, and between values\nwhen decoding a stream of top-level values (e.g., NDJSON).\nStackDepth returns 1 inside a top-level object or array,\n2 inside a nested object or array, and so on.\n\nFor example, consider decoding the following JSON:\n\n\t{\"a\": [1, 2], \"b\": {\"c\": 3}}\n\nWhile decoding, StackDepth would report the following:\n\n  - At the start, StackDepth reports 0.\n  - After decoding the outer '{', StackDepth reports 1.\n  - After decoding the inner '[', StackDepth reports 2.\n  - After decoding the inner ']', StackDepth reports 1.\n  - After decoding the outer '}', StackDepth reports 0.\n" ^int [^{:tag (* Decoder)} d]
+  ;; NOTE: Keep in sync with Encoder.StackDepth.
+  (- (.Depth ^{:go/via [state]} (.-Tokens (.-s d))) 1))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1210} (go/method StackIndex "StackIndex returns information about the specified stack level.\nIt must be a number between 0 and [Decoder.StackDepth], inclusive.\nFor each level, it reports the kind:\n\n  - [KindInvalid] for a level of zero,\n  - [KindBeginObject] for a level representing a JSON object, and\n  - [KindBeginArray] for a level representing a JSON array.\n\nIt also reports the length of that JSON object or array decoded so far.\nEach name and value in a JSON object is counted separately,\nso the effective number of members is half the length.\nA complete JSON object must have an even length.\n" [^{:tag (* Decoder)} d ^int i] :results [Kind int64]
+  ;; NOTE: Keep in sync with Encoder.StackIndex.
+  (switch [s (.index ^{:go/via [state]} (.-Tokens (.-s d)) i)]
+    (case [(and (> i 0) (.isObject s))]
+      (return \{ (.Length s)))
+    (case [(and (> i 0) (.isArray s))]
+      (return \[ (.Length s)))
+    (default
+      (return 0 (.Length s)))))
+
+
+
+
+^{:go/end 1215} (go/method StackPointer "StackPointer returns a JSON Pointer (RFC 6901) to the most recently read value.\n" ^Pointer [^{:tag (* Decoder)} d]
+  (conv Pointer (.AppendStackPointer (.-s d) nil -1)))
+
+
+^{:go/end 1220} (go/method AppendStackPointer ^{:tag (slice byte)} [^{:tag (* decoderState)} d ^{:tag (slice byte)} b ^int where]
+  (.copyQuotedBuffer ^{:go/via [state]} (.-Names d) ^{:go/via [decodeBuffer]} (.-buf d))
+  (.appendStackPointer (.-state d) b where))

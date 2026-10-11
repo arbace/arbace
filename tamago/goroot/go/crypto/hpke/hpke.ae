@@ -1,0 +1,261 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package hpke implements Hybrid Public Key Encryption (HPKE) as defined in
+;; [RFC 9180].
+;;
+;; [RFC 9180]: https://www.rfc-editor.org/rfc/rfc9180.html
+(in-ns 'go.crypto.hpke) (go/file "hpke.go" :doc "Package hpke implements Hybrid Public Key Encryption (HPKE) as defined in\n[RFC 9180].\n\n[RFC 9180]: https://www.rfc-editor.org/rfc/rfc9180.html\n" :imports [
+
+
+    ^{:line 12} [cipher "crypto/cipher"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [byteorder "internal/byteorder"]])
+
+
+(go/type context (struct
+    ^{:line 18 :tag (slice byte)} suiteID
+
+    ^{:line 20 :tag (func [string uint16] [(slice byte) error])} export
+
+    ^{:line 22 :tag cipher/AEAD} aead
+    ^{:line 23 :tag (slice byte)} baseNonce
+
+
+    ^{:line 26 :tag uint64 :doc "seqNum starts at zero and is incremented for each Seal/Open call.\n64 bits are enough not to overflow for 500 years at 1ns per operation.\n"} seqNum))
+
+
+
+
+
+(go/type Sender "Sender is a sending HPKE context. It is instantiated with a specific KEM\nencapsulation key (i.e. the public key), and it is stateful, incrementing the\nnonce counter for each [Sender.Seal] call.\n" (struct
+    (* context)))
+
+
+
+
+
+(go/type Recipient "Recipient is a receiving HPKE context. It is instantiated with a specific KEM\ndecapsulation key (i.e. the secret key), and it is stateful, incrementing the\nnonce counter for each successful [Recipient.Open] call.\n" (struct
+    (* context)))
+
+
+^{:go/end 124} (go/func newContext [^{:tag (slice byte)} sharedSecret ^uint16 kemID ^KDF kdf ^AEAD aead ^{:tag (slice byte)} info] :results [(* context) error]
+  (let [sid (suiteID kemID (.ID kdf) (.ID aead))]
+
+    (when (.oneStage kdf)
+      (let [secrets (make (slice byte) 0 (+ 2 2 (len sharedSecret)))]
+        (set! secrets (byteorder/BEAppendUint16 secrets 0)) ; empty psk
+        (set! secrets (byteorder/BEAppendUint16 secrets (conv uint16 (len sharedSecret))))
+        (set! secrets (append secrets (spread sharedSecret)))
+
+        (let [ksContext (make (slice byte) 0 (+ 1 2 2 (len info)))]
+          (set! ksContext (append ksContext 0)) ; mode 0
+          (set! ksContext (byteorder/BEAppendUint16 ksContext 0)) ; empty psk_id
+          (set! ksContext (byteorder/BEAppendUint16 ksContext (conv uint16 (len info))))
+          (set! ksContext (append ksContext (spread info)))
+
+          (let [(values secret err) (.labeledDerive kdf sid secrets "secret" ksContext
+                (conv uint16 (+ (.keySize aead) (.nonceSize aead) (.size kdf))))]
+            (when (!= err nil)
+              (return nil err))
+
+            (let [key (subslice secret _ (.keySize aead))
+                ^{:line 64} baseNonce (subslice secret (.keySize aead) (+ (.keySize aead) (.nonceSize aead)))
+                ^{:line 65} expSecret (subslice secret (+ (.keySize aead) (.nonceSize aead)))
+
+                (values a ^:assign err) (.aead aead key)]
+              (when (!= err nil)
+                (return nil err))
+
+              (let [export ^{:go/end 73} (fn [^string exporterContext ^uint16 length] :results [(slice byte) error]
+                    (.labeledDerive kdf sid expSecret "sec" (conv (slice byte) exporterContext) length))]
+
+
+                ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6 8]} (lit context
+                      :aead a
+                      :suiteID sid
+                      :export export
+                      :baseNonce baseNonce))
+                  nil)))))))
+
+
+    (let [(values pskIDHash err) (.labeledExtract kdf sid nil "psk_id_hash" nil)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values infoHash ^:assign err) (.labeledExtract kdf sid nil "info_hash" info)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [ksContext (append (lit (slice byte) 0) (spread pskIDHash))]
+          (set! ksContext (append ksContext (spread infoHash)))
+
+          (let [(values secret ^:assign err) (.labeledExtract kdf sid sharedSecret "secret" nil)]
+            (when (!= err nil)
+              (return nil err))
+
+            (let [(values key ^:assign err) (.labeledExpand kdf sid secret "key" ksContext (conv uint16 (.keySize aead)))]
+              (when (!= err nil)
+                (return nil err))
+
+              (let [(values a ^:assign err) (.aead aead key)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (let [(values baseNonce ^:assign err) (.labeledExpand kdf sid secret "base_nonce" ksContext (conv uint16 (.nonceSize aead)))]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (let [(values expSecret ^:assign err) (.labeledExpand kdf sid secret "exp" ksContext (conv uint16 (.size kdf)))]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (let [export ^{:go/end 116} (fn [^string exporterContext ^uint16 length] :results [(slice byte) error]
+                          (.labeledExpand kdf sid expSecret "sec" (conv (slice byte) exporterContext) length))]
+
+
+                      ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6 8]} (lit context
+                            :aead a
+                            :suiteID sid
+                            :export export
+                            :baseNonce baseNonce))
+                        nil))))))))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 145} (go/func NewSender "NewSender returns a sending HPKE context for the provided KEM encapsulation\nkey (i.e. the public key), and using the ciphersuite defined by the\ncombination of KEM, KDF, and AEAD.\n\nThe info parameter is additional public information that must match between\nsender and recipient.\n\nThe returned enc ciphertext can be used to instantiate a matching receiving\nHPKE context with the corresponding KEM decapsulation key.\n" [^PublicKey pk ^KDF kdf ^AEAD aead ^{:tag (slice byte)} info] :results [^{:tag (slice byte)} enc ^{:tag (* Sender)} s ^error err]
+  (let [(values sharedSecret encapsulatedKey ^:assign err) (.encap pk)]
+    (when (!= err nil)
+      (return nil nil err))
+
+    (let [(values context ^:assign err) (newContext sharedSecret (.ID (.KEM pk)) kdf aead info)]
+      (when (!= err nil)
+        (return nil nil err))
+
+      (return encapsulatedKey (addr (lit Sender context)) nil))))
+
+
+
+
+
+
+
+
+
+^{:go/end 164} (go/func NewRecipient "NewRecipient returns a receiving HPKE context for the provided KEM\ndecapsulation key (i.e. the secret key), and using the ciphersuite defined by\nthe combination of KEM, KDF, and AEAD.\n\nThe enc parameter must have been produced by a matching sending HPKE context\nwith the corresponding KEM encapsulation key. The info parameter is\nadditional public information that must match between sender and recipient.\n" [^{:tag (slice byte)} enc ^PrivateKey k ^KDF kdf ^AEAD aead ^{:tag (slice byte)} info] :results [(* Recipient) error]
+  (let [(values sharedSecret err) (.decap k enc)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values context ^:assign err) (newContext sharedSecret (.ID (.KEM k)) kdf aead info)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (addr (lit Recipient context)) nil))))
+
+
+
+
+
+
+
+^{:go/end 178} (go/method Seal "Seal encrypts the provided plaintext, optionally binding to the additional\npublic data aad.\n\nSeal uses incrementing counters for each call, and Open on the receiving side\nmust be called in the same order as Seal.\n" [^{:tag (* Sender)} s ^{:tag (slice byte)} aad ^{:tag (slice byte)} plaintext] :results [(slice byte) error]
+  (when (== ^{:go/via [context]} (.-aead s) nil)
+    (return nil (errors/New "export-only instantiation")))
+
+  (let [ciphertext (.Seal ^{:go/via [context]} (.-aead s) nil ^{:go/via [context]} (.nextNonce s) plaintext aad)]
+    (inc! ^{:go/via [context]} (.-seqNum s))
+    (return ciphertext nil)))
+
+
+
+
+
+^{:go/end 193} (go/func Seal "Seal instantiates a single-use HPKE sending HPKE context like [NewSender],\nand then encrypts the provided plaintext like [Sender.Seal] (with no aad).\nSeal returns the concatenation of the encapsulated key and the ciphertext.\n" [^PublicKey pk ^KDF kdf ^AEAD aead ^{:tag (slice byte)} info ^{:tag (slice byte)} plaintext] :results [(slice byte) error]
+  (let [(values enc s err) (NewSender pk kdf aead info)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values ct ^:assign err) (.Seal s nil plaintext)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (append enc (spread ct)) nil))))
+
+
+
+
+^{:go/end 202} (go/method Export "Export produces a secret value derived from the shared key between sender and\nrecipient. length must be at most 65,535.\n" [^{:tag (* Sender)} s ^string exporterContext ^int length] :results [(slice byte) error]
+  (when (or (< length 0) (> length 0xFFFF))
+    (return nil (errors/New "invalid length")))
+
+  (^{:go/via [context]} (.-export s) exporterContext (conv uint16 length)))
+
+
+
+
+
+
+
+^{:go/end 219} (go/method Open "Open decrypts the provided ciphertext, optionally binding to the additional\npublic data aad, or returns an error if decryption fails.\n\nOpen uses incrementing counters for each successful call, and must be called\nin the same order as Seal on the sending side.\n" [^{:tag (* Recipient)} r ^{:tag (slice byte)} aad ^{:tag (slice byte)} ciphertext] :results [(slice byte) error]
+  (when (== ^{:go/via [context]} (.-aead r) nil)
+    (return nil (errors/New "export-only instantiation")))
+
+  (let [(values plaintext err) (.Open ^{:go/via [context]} (.-aead r) nil ^{:go/via [context]} (.nextNonce r) ciphertext aad)]
+    (when (!= err nil)
+      (return nil err))
+
+    (inc! ^{:go/via [context]} (.-seqNum r))
+    (return plaintext nil)))
+
+
+
+
+
+^{:go/end 235} (go/func Open "Open instantiates a single-use HPKE receiving HPKE context like [NewRecipient],\nand then decrypts the provided ciphertext like [Recipient.Open] (with no aad).\nciphertext must be the concatenation of the encapsulated key and the actual ciphertext.\n" [^PrivateKey k ^KDF kdf ^AEAD aead ^{:tag (slice byte)} info ^{:tag (slice byte)} ciphertext] :results [(slice byte) error]
+  (let [encSize (.encSize (.KEM k))]
+    (when (< (len ciphertext) encSize)
+      (return nil (errors/New "ciphertext too short")))
+
+    (let [(values enc ^:assign ciphertext) (values (subslice ciphertext _ encSize) (subslice ciphertext encSize))
+        (values r err) (NewRecipient enc k kdf aead info)]
+      (when (!= err nil)
+        (return nil err))
+
+      (.Open r nil ciphertext))))
+
+
+
+
+^{:go/end 244} (go/method Export "Export produces a secret value derived from the shared key between sender and\nrecipient. length must be at most 65,535.\n" [^{:tag (* Recipient)} r ^string exporterContext ^int length] :results [(slice byte) error]
+  (when (or (< length 0) (> length 0xFFFF))
+    (return nil (errors/New "invalid length")))
+
+  (^{:go/via [context]} (.-export r) exporterContext (conv uint16 length)))
+
+
+^{:go/end 253} (go/method nextNonce ^{:tag (slice byte)} [^{:tag (* context)} ctx]
+  (let [nonce (make (slice byte) (.NonceSize (.-aead ctx)))]
+    (byteorder/BEPutUint64 (subslice nonce (- (len nonce) 8)) (.-seqNum ctx))
+    (range [i (.-baseNonce ctx)]
+      (set! (aget nonce i) bit-xor (aget (.-baseNonce ctx) i)))
+
+    ^{:line 252} nonce))
+
+
+^{:go/end 262} (go/func suiteID ^{:tag (slice byte)} [^uint16 kemID ^uint16 kdfID ^uint16 aeadID]
+  (let [suiteID (make (slice byte) 0 (+ 4 2 2 2))]
+    (set! suiteID (append suiteID (spread (conv (slice byte) "HPKE"))))
+    (set! suiteID (byteorder/BEAppendUint16 suiteID kemID))
+    (set! suiteID (byteorder/BEAppendUint16 suiteID kdfID))
+    (set! suiteID (byteorder/BEAppendUint16 suiteID aeadID))
+    ^{:line 261} suiteID))

@@ -1,0 +1,343 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package nettest provides utilities for network testing.
+(in-ns 'go.vendor.golang_org.x.net.nettest) (go/file "nettest.go" :doc "Package nettest provides utilities for network testing.\n" :imports [
+
+
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [net "net"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [exec "os/exec"]
+    ^{:line 14} [runtime "runtime"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [sync "sync"]
+    ^{:line 18} [time "time"]])
+
+
+(go/var
+  ^{:line 22} [^sync/Once stackOnce]
+  ^{:line 23} [^bool ipv4Enabled]
+  ^{:line 24} [^bool canListenTCP4OnLoopback]
+  ^{:line 25} [^bool ipv6Enabled]
+  ^{:line 26} [^bool canListenTCP6OnLoopback]
+  ^{:line 27} [^bool unStrmDgramEnabled]
+  ^{:line 28} [^bool rawSocketSess]
+
+  ^{:line 30} [aLongTimeAgo (time/Unix 233431200 0)]
+  ^{:line 31} [neverTimeout (lit time/Time)]
+
+  ^{:line 33} [errNoAvailableInterface (errors/New "no available interface")]
+  ^{:line 34} [errNoAvailableAddress (errors/New "no available address")])
+
+
+^{:go/end 66} (go/func probeStack []
+  (when [(values _ err) (RoutedInterface "ip4" net/FlagUp)] (== err nil)
+    (set! ipv4Enabled true))
+
+  (when [(values ln err) (net/Listen "tcp4" "127.0.0.1:0")] (== err nil)
+    (.Close ln)
+    (set! canListenTCP4OnLoopback true))
+
+  (when [(values _ err) (RoutedInterface "ip6" net/FlagUp)] (== err nil)
+    (set! ipv6Enabled true))
+
+  (when [(values ln err) (net/Listen "tcp6" "[::1]:0")] (== err nil)
+    (.Close ln)
+    (set! canListenTCP6OnLoopback true))
+
+  (set! rawSocketSess (supportsRawSocket))
+  (switch runtime/GOOS
+    (case ["aix"]
+      ;; Unix network isn't properly working on AIX 7.2 with
+      ;; Technical Level < 2.
+      (let [(values out _) (.Output (exec/Command "oslevel" "-s"))]
+        (when (>= (len out) (len "7200-XX-ZZ-YYMM")) ; AIX 7.2, Tech Level XX, Service Pack ZZ, date YYMM
+          (let [ver (conv string (subslice out _ 4))
+              (values tl _) (strconv/Atoi (conv string (subslice out 5 7)))]
+            (set! unStrmDgramEnabled (or (> ver "7200") ^:go/paren (and (== ver "7200") (>= tl 2))))))))
+
+    (default
+      (set! unStrmDgramEnabled true))))
+
+
+
+^{:go/end 71} (go/func unixStrmDgramEnabled ^bool []
+  (.Do stackOnce probeStack)
+  ^{:line 70} unStrmDgramEnabled)
+
+
+
+
+^{:go/end 78} (go/func SupportsIPv4 "SupportsIPv4 reports whether the platform supports IPv4 networking\nfunctionality.\n" ^bool []
+  (.Do stackOnce probeStack)
+  ^{:line 77} ipv4Enabled)
+
+
+
+
+^{:go/end 85} (go/func SupportsIPv6 "SupportsIPv6 reports whether the platform supports IPv6 networking\nfunctionality.\n" ^bool []
+  (.Do stackOnce probeStack)
+  ^{:line 84} ipv6Enabled)
+
+
+
+
+^{:go/end 92} (go/func SupportsRawSocket "SupportsRawSocket reports whether the current session is available\nto use raw sockets.\n" ^bool []
+  (.Do stackOnce probeStack)
+  ^{:line 91} rawSocketSess)
+
+
+
+
+
+
+^{:go/end 137} (go/func TestableNetwork "TestableNetwork reports whether network is testable on the current\nplatform configuration.\n\nSee func Dial of the standard library for the supported networks.\n" ^bool [^string network]
+  ^{:go/breaks [[4 136]]} (let [ss (strings/Split network ":")]
+    (switch (aget ss 0)
+      (case ["ip+nopriv"]
+        ;; This is an internal network name for testing on the
+        ;; package net of the standard library.
+        (switch runtime/GOOS
+          (case ["android" "fuchsia" "hurd" "ios" "js" "nacl" "plan9" "wasip1" "windows"]
+            (return false))))
+
+      (case ["ip" "ip4" "ip6"]
+        (switch runtime/GOOS
+          (case ["fuchsia" "hurd" "js" "nacl" "plan9" "wasip1"]
+            (return false))
+          (default
+            (when (!= (os/Getuid) 0)
+              (return false)))))
+
+
+      (case ["unix" "unixgram"]
+        (switch runtime/GOOS
+          (case ["android" "fuchsia" "hurd" "ios" "js" "nacl" "plan9" "wasip1" "windows"]
+            (return false))
+          (case ["aix"]
+            (return (unixStrmDgramEnabled)))))
+
+      (case ["unixpacket"]
+        (switch runtime/GOOS
+          (case ["aix" "android" "fuchsia" "hurd" "darwin" "ios" "js" "nacl" "plan9" "wasip1" "windows" "zos"]
+            (return false)))))
+
+
+    (switch (aget ss 0)
+      (case ["tcp4" "udp4" "ip4"]
+        (return (SupportsIPv4)))
+      (case ["tcp6" "udp6" "ip6"]
+        (return (SupportsIPv6))))
+
+    true))
+
+
+
+
+^{:go/breaks [[5 149]] :go/end 150} (go/func TestableAddress "TestableAddress reports whether address of network is testable on\nthe current platform configuration.\n" ^bool [^string network ^string address]
+  (switch [ss (strings/Split network ":")] (aget ss 0)
+    (case ["unix" "unixgram" "unixpacket"]
+      ;; Abstract unix domain sockets, a Linux-ism.
+      (when (and (== (aget address 0) \@) (!= runtime/GOOS "linux"))
+        (return false))))
+
+
+  true)
+
+
+
+
+
+
+
+^{:go/end 185} (go/func NewLocalListener "NewLocalListener returns a listener which listens to a loopback IP\naddress or local file system path.\n\nThe provided network must be \"tcp\", \"tcp4\", \"tcp6\", \"unix\" or\n\"unixpacket\".\n" [^string network] :results [net/Listener error]
+  (.Do stackOnce probeStack)
+  (switch network
+    (case ["tcp"]
+      (when canListenTCP4OnLoopback
+        (when [(values ln err) (net/Listen "tcp4" "127.0.0.1:0")] (== err nil)
+          (return ln nil)))
+
+
+      (when canListenTCP6OnLoopback
+        (return (net/Listen "tcp6" "[::1]:0"))))
+
+    (case ["tcp4"]
+      (when canListenTCP4OnLoopback
+        (return (net/Listen "tcp4" "127.0.0.1:0"))))
+
+    (case ["tcp6"]
+      (when canListenTCP6OnLoopback
+        (return (net/Listen "tcp6" "[::1]:0"))))
+
+    (case ["unix" "unixpacket"]
+      (let [(values path err) (LocalPath)]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (net/Listen network path)))))
+
+  (return nil (fmt/Errorf "%s is not supported on %s/%s" network runtime/GOOS runtime/GOARCH)))
+
+
+
+
+
+
+^{:go/end 219} (go/func NewLocalPacketListener "NewLocalPacketListener returns a packet listener which listens to a\nloopback IP address or local file system path.\n\nThe provided network must be \"udp\", \"udp4\", \"udp6\" or \"unixgram\".\n" [^string network] :results [net/PacketConn error]
+  (.Do stackOnce probeStack)
+  (switch network
+    (case ["udp"]
+      (when canListenTCP4OnLoopback
+        (when [(values c err) (net/ListenPacket "udp4" "127.0.0.1:0")] (== err nil)
+          (return c nil)))
+
+
+      (when canListenTCP6OnLoopback
+        (return (net/ListenPacket "udp6" "[::1]:0"))))
+
+    (case ["udp4"]
+      (when canListenTCP4OnLoopback
+        (return (net/ListenPacket "udp4" "127.0.0.1:0"))))
+
+    (case ["udp6"]
+      (when canListenTCP6OnLoopback
+        (return (net/ListenPacket "udp6" "[::1]:0"))))
+
+    (case ["unixgram"]
+      (let [(values path err) (LocalPath)]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (net/ListenPacket network path)))))
+
+  (return nil (fmt/Errorf "%s is not supported on %s/%s" network runtime/GOOS runtime/GOARCH)))
+
+
+
+
+^{:go/end 236} (go/func LocalPath "LocalPath returns a local path that can be used for Unix-domain\nprotocol testing.\n" [] :results [string error]
+  (let [dir ""]
+    (when (== runtime/GOOS "darwin")
+      (set! dir "/tmp"))
+
+    (let [(values f err) (os/CreateTemp dir "go-nettest")]
+      (when (!= err nil)
+        (return "" err))
+
+      (let [path (.Name f)]
+        (.Close f)
+        (os/Remove path)
+        (return path nil)))))
+
+
+
+
+
+
+^{:go/end 256} (go/func MulticastSource "MulticastSource returns a unicast IP address on ifi when ifi is an\nIP multicast-capable network interface.\n\nThe provided network must be \"ip\", \"ip4\" or \"ip6\".\n" [^string network ^{:tag (* net/Interface)} ifi] :results [net/IP error]
+  (switch network
+    (case ["ip" "ip4" "ip6"])
+    (default
+      (return nil errNoAvailableAddress)))
+
+  (when (or (== ifi nil) (== (bit-and (.-Flags ifi) net/FlagUp) 0) (== (bit-and (.-Flags ifi) net/FlagMulticast) 0))
+    (return nil errNoAvailableAddress))
+
+  (let [(values ip ok) (hasRoutableIP network ifi)]
+    (when (not ok)
+      (return nil errNoAvailableAddress))
+
+    (return ip nil)))
+
+
+
+
+^{:go/end 271} (go/func LoopbackInterface "LoopbackInterface returns an available logical network interface\nfor loopback test.\n" [] :results [(* net/Interface) error]
+  (let [(values ift err) (net/Interfaces)]
+    (when (!= err nil)
+      (return nil errNoAvailableInterface))
+
+    (range [_ ifi ift]
+      (when (and (!= (bit-and (.-Flags ifi) net/FlagLoopback) 0) (!= (bit-and (.-Flags ifi) net/FlagUp) 0))
+        (return (addr ifi) nil)))
+
+
+    (return nil errNoAvailableInterface)))
+
+
+
+
+
+
+^{:go/end 297} (go/func RoutedInterface "RoutedInterface returns a network interface that can route IP\ntraffic and satisfies flags.\n\nThe provided network must be \"ip\", \"ip4\" or \"ip6\".\n" [^string network ^net/Flags flags] :results [(* net/Interface) error]
+  (switch network
+    (case ["ip" "ip4" "ip6"])
+    (default
+      (return nil errNoAvailableInterface)))
+
+  (let [(values ift err) (net/Interfaces)]
+    (when (!= err nil)
+      (return nil errNoAvailableInterface))
+
+    (range [_ ifi ift]
+      (when (!= (bit-and (.-Flags ifi) flags) flags)
+        (continue))
+
+      (when [(values _ ok) (hasRoutableIP network (addr ifi))] (not ok)
+        (continue))
+
+      (return (addr ifi) nil))
+
+    (return nil errNoAvailableInterface)))
+
+
+^{:go/end 317} (go/func hasRoutableIP [^string network ^{:tag (* net/Interface)} ifi] :results [net/IP bool]
+  (let [(values ifat err) (.Addrs ifi)]
+    (when (!= err nil)
+      (return nil false))
+
+    (range [_ ifa ifat]
+      (type-switch [ifa ifa]
+        (case [(* net/IPAddr)]
+          (when [(values ip ok) (routableIP network (.-IP ifa))] ok
+            (return ip true)))
+
+        (case [(* net/IPNet)]
+          (when [(values ip ok) (routableIP network (.-IP ifa))] ok
+            (return ip true)))))
+
+
+
+    (return nil false)))
+
+
+^{:go/end 344} (go/func routableIP [^string network ^net/IP ip] :results [net/IP bool]
+  (when (and (not (.IsLoopback ip)) (not (.IsLinkLocalUnicast ip)) (not (.IsGlobalUnicast ip)))
+    (return nil false))
+
+  (switch network
+    (case ["ip4"]
+      (when [ip (.To4 ip)] (!= ip nil)
+        (return ip true)))
+
+    (case ["ip6"]
+      (when (.IsLoopback ip) ; addressing scope of the loopback address depends on each implementation
+        (return nil false))
+
+      (when [ip (.To16 ip)] (and (!= ip nil) (== (.To4 ip) nil))
+        (return ip true)))
+
+    (default
+      (when [ip (.To4 ip)] (!= ip nil)
+        (return ip true))
+
+      (when [ip (.To16 ip)] (!= ip nil)
+        (return ip true))))
+
+
+  (return nil false))

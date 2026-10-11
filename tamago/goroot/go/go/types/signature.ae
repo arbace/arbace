@@ -1,0 +1,516 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.types) (go/file "signature.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [ast "go/ast"]
+    ^{:line 10} [token "go/token"]
+    ^{:line 11} [. "internal/types/errors"]
+    ^{:line 12} [filepath "path/filepath"]
+    ^{:line 13} [strings "strings"]])
+
+
+;; ----------------------------------------------------------------------------
+;; API
+
+
+
+(go/type Signature "A Signature represents a (non-builtin) function or method type.\nThe receiver is ignored when comparing signatures for identity.\n" (struct
+
+
+
+
+    ^{:line 26 :tag (* TypeParamList) :doc "We need to keep the scope in Signature (rather than passing it around\nand store it in the Func Object) because when type-checking a function\nliteral we call the general type checker which returns a general Type.\nWe then unpack the *Signature and use the scope for the literal body.\n"} rparams ; receiver type parameters from left to right, or nil
+    ^{:line 27 :tag (* TypeParamList)} tparams ; type parameters from left to right, or nil
+    ^{:line 28 :tag (* Scope)} scope ; function scope for package-local and non-instantiated signatures; nil otherwise
+    ^{:line 29 :tag (* Var)} recv ; nil if not a method
+    ^{:line 30 :tag (* Var)} recvold ; receiver dropped via method selection; or nil
+    ^{:line 31 :tag (* Tuple)} params ; (incoming) parameters from left to right; or nil
+    ^{:line 32 :tag (* Tuple)} results ; (outgoing) results from left to right; or nil
+    ^{:line 33 :tag bool} variadic)) ; true if the last parameter's type is of the form ...T
+
+;; If recvold is the sentinel value [methExpr], then recvold should
+;; instead be sourced from params[0]. Otherwise, recvold points to
+;; the receiver of the original method signature from which this
+;; function signature was cloned via a selector expression.
+
+;; If variadic, the last element of params ordinarily has an
+;; unnamed Slice type. As a special case, in a call to append,
+;; it may be string, or a TypeParam T whose typeset ⊇ {string, []byte}.
+;; It may even be a named []byte type if a client instantiates
+;; T at such a type.
+
+
+
+(go/var ^{:doc "sentinel value for detecting method expressions\n"} methodExprSentinel (addr (lit Var)))
+
+
+
+
+
+
+
+
+
+^{:go/end 60} (go/func ^{:go/fix "inline"} NewSignature "NewSignature returns a new function type for the given receiver, parameters,\nand results, either of which may be nil. If variadic is set, the function\nis variadic, it must have at least one parameter, and the last parameter\nmust be of unnamed slice type.\n\nDeprecated: Use [NewSignatureType] instead which allows for type parameters.\n" ^{:tag (* Signature)} [^{:tag (* Var)} recv ^{:tag (* Tuple)} params ^{:tag (* Tuple)} results ^bool variadic]
+  (NewSignatureType recv nil nil params results variadic))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 128} (go/func NewSignatureType "NewSignatureType creates a new function type for the given receiver,\nreceiver type parameters, type parameters, parameters, and results.\n\nIf variadic is set, params must hold at least one parameter and the\nlast parameter must be an unnamed slice or a type parameter whose\ntype set has an unnamed slice as common underlying type.\n\nAs a special case, to support append([]byte, str...), for variadic\nsignatures the last parameter may also be a string type, or a type\nparameter containing a mix of byte slices and string types in its\ntype set. It may even be a named []byte slice type resulting from\ninstantiation of such a type parameter.\n\nIf recvTypeParams is non-empty, recv must be non-nil.\n" ^{:tag (* Signature)} [^{:tag (* Var)} recv ^{:tag (slice (* TypeParam))} recvTypeParams ^{:tag (slice (* TypeParam))} typeParams ^{:tag (* Tuple)} params ^{:tag (* Tuple)} results ^bool variadic]
+  (when variadic
+    (let [n (.Len params)]
+      (when (== n 0)
+        (panic "variadic function must have at least one parameter"))
+
+      (let [last ^{:go/via [object]} (.-typ (.At params (- n 1)))
+          ^{:line 83 :tag (* Slice)} S (zero (* Slice))]
+        (range [t (typeset last)]
+          (when (== t nil)
+            (break))
+
+          (let [^{:tag (* Slice)} s (zero (* Slice))]
+            (if (isString t)
+              (set! s (NewSlice universeByte))
+
+              ;; Variadic Go functions have a last parameter of type []T,
+              ;; suggesting we should reject a named slice type B here.
+              ;;
+              ;; However, a call to built-in append(slice, x...)
+              ;; where x has a TypeParam type [T ~string | ~[]byte],
+              ;; has the type func([]byte, T). Since a client may
+              ;; instantiate this type at T=B, we must permit
+              ;; named slice types, even when this results in a
+              ;; signature func([]byte, B) where type B []byte.
+              ;;
+              ;; (The caller of NewSignatureType may have no way to
+              ;; know that it is dealing with the append special case.)
+              (set! (values s _) (assert (* Slice) (.Underlying t))))
+
+            (cond (== S nil)
+              (set! S s)
+              (or (== s nil) (not (Identical S s))) (do
+                (set! S nil)
+                (break)))))
+
+
+        (when (== S nil)
+          (panic (fmt/Sprintf "got %s, want variadic parameter of slice or string type" last))))))
+
+
+  (let [sig (addr (lit Signature :recv recv :params params :results results :variadic variadic))]
+    (when (!= (len recvTypeParams) 0)
+      (when (== recv nil)
+        (panic "function with receiver type parameters must have a receiver"))
+
+      (set! (.-rparams sig) (bindTParams recvTypeParams)))
+
+    (when (!= (len typeParams) 0)
+      (set! (.-tparams sig) (bindTParams typeParams)))
+
+    ^{:line 127} sig))
+
+
+
+
+
+
+
+
+^{:go/end 136} (go/method Recv "Recv returns the receiver of signature s (if a method), or nil if a\nfunction. It is ignored when comparing signatures for identity.\n\nFor an abstract method, Recv returns the enclosing interface either\nas a *[Named] or an *[Interface]. Due to embedding, an interface may\ncontain methods whose receiver type is a different interface.\n" ^{:tag (* Var)} [^{:tag (* Signature)} s] (.-recv s))
+
+
+^{:go/end 139} (go/method TypeParams "TypeParams returns the type parameters of signature s, or nil.\n" ^{:tag (* TypeParamList)} [^{:tag (* Signature)} s] (.-tparams s))
+
+
+^{:go/end 142} (go/method RecvTypeParams "RecvTypeParams returns the receiver type parameters of signature s, or nil.\n" ^{:tag (* TypeParamList)} [^{:tag (* Signature)} s] (.-rparams s))
+
+
+
+^{:go/end 146} (go/method Params "Params returns the parameters of signature s, or nil.\nSee [NewSignatureType] for details of variadic functions.\n" ^{:tag (* Tuple)} [^{:tag (* Signature)} s] (.-params s))
+
+
+^{:go/end 149} (go/method Results "Results returns the results of signature s, or nil.\n" ^{:tag (* Tuple)} [^{:tag (* Signature)} s] (.-results s))
+
+
+^{:go/end 152} (go/method Variadic "Variadic reports whether the signature s is variadic.\n" ^bool [^{:tag (* Signature)} s] (.-variadic s))
+
+^{:go/end 154} (go/method Underlying ^Type [^{:tag (* Signature)} s] s)
+^{:go/end 155} (go/method String ^string [^{:tag (* Signature)} s] (TypeString s nil))
+
+;; ----------------------------------------------------------------------------
+;; Implementation
+
+
+^{:go/end 204} (go/method funcType "funcType type-checks a function or method type.\n" [^{:tag (* Checker)} check ^{:tag (* Signature)} sig ^{:tag (* ast/FieldList)} recvPar ^{:tag (* ast/FuncType)} ftyp]
+  (.openScope check ftyp "function")
+  (set! (.-isFunc ^{:go/via [environment]} (.-scope check)) true)
+  (.recordScope check ftyp ^{:go/via [environment]} (.-scope check))
+  (set! (.-scope sig) ^{:go/via [environment]} (.-scope check))
+  (defer (.closeScope check))
+
+  ;; collect method receiver, if any
+  (let [^{:tag (* Var)} recv (zero (* Var))
+      ^{:line 170 :tag (* TypeParamList)} rparams (zero (* TypeParamList))]
+    (when (and (!= recvPar nil) (> (.NumFields recvPar) 0))
+      ;; We have at least one receiver; make sure we don't have more than one.
+      (when [n (len (.-List recvPar))] (> n 1)
+        (.error check (aget (.-List recvPar) (- n 1)) InvalidRecv "method has multiple receivers"))
+      ;; continue with first one
+
+      ;; all type parameters' scopes start after the method name
+      (let [scopePos (.Pos ftyp)]
+        (set! (values recv rparams) (.collectRecv check (aget (.-List recvPar) 0) scopePos))))
+
+
+    ;; collect and declare function type parameters
+    (when (!= (.-TypeParams ftyp) nil)
+      (.collectTypeParams check (addr (.-tparams sig)) (.-TypeParams ftyp)))
+
+
+    ;; collect ordinary and result parameters
+    (let [(values pnames params variadic) (.collectParams check ParamVar (.-Params ftyp))
+        (values rnames results _) (.collectParams check ResultVar (.-Results ftyp))
+
+        ;; declare named receiver, ordinary, and result parameters
+        ^{:line 192} scopePos (.End ftyp)] ; all parameter's scopes start after the signature
+      (when (and (!= recv nil) (!= ^{:go/via [object]} (.-name recv) ""))
+        (.declare check ^{:go/via [environment]} (.-scope check) (aget (.-Names (aget (.-List recvPar) 0)) 0) recv scopePos))
+
+      (.declareParams check pnames params scopePos)
+      (.declareParams check rnames results scopePos)
+
+      (set! (.-recv sig) recv)
+      (set! (.-rparams sig) rparams)
+      (set! (.-params sig) (NewTuple (spread params)))
+      (set! (.-results sig) (NewTuple (spread results)))
+      (set! (.-variadic sig) variadic))))
+
+
+
+
+
+^{:go/end 355} (go/method collectRecv "collectRecv extracts the method receiver and its type parameters (if any) from rparam.\nIt declares the type parameters (but not the receiver) in the current scope, and\nreturns the receiver variable and its type parameter list (if any).\n" [^{:tag (* Checker)} check ^{:tag (* ast/Field)} rparam ^token/Pos scopePos] :results [(* Var) (* TypeParamList)]
+  ;; Unpack the receiver parameter which is of the form
+  ;;
+  ;;	"(" [rfield] ["*"] rbase ["[" rtparams "]"] ")"
+  ;;
+  ;; The receiver name rname, the pointer indirection, and the
+  ;; receiver type parameters rtparams may not be present.
+  (let [(values rptr rbase rtparams) (.unpackRecv check (.-Type rparam) true)
+
+      ;; Determine the receiver base type.
+      ^{:line 219 :tag Type} recvType (aget Typ Invalid)
+      ^{:line 220 :tag (* TypeParamList)} recvTParamsList (zero (* TypeParamList))]
+    (if (== rtparams nil) (do
+        ;; If there are no type parameters, we can simply typecheck rparam.Type.
+        ;; If that is a generic type, varType will complain.
+        ;; Further receiver constraints will be checked later, with validRecv.
+        ;; We use rparam.Type (rather than base) to correctly record pointer
+        ;; and parentheses in types.Info (was bug, see go.dev/issue/68639).
+        (set! recvType (.varType check (.-Type rparam)))
+        ;; Defining new methods on instantiated (alias or defined) types is not permitted.
+        ;; Follow literal pointer/alias type chain and check.
+        ;; (Correct code permits at most one pointer indirection, but for this check it
+        ;; doesn't matter if we have multiple pointers.)
+        (let [(values a _) (assert (* Alias) (unpointer recvType))] ; recvType is not generic per above
+          (while (!= a nil)
+            (let [baseType (unpointer (.-fromRHS a))]
+              (when [(values g _) (assert genericType baseType)] (and (!= g nil) (!= (.TypeParams g) nil))
+                (.errorf check rbase InvalidRecv "cannot define new methods on instantiated type %s" g)
+                (set! recvType (aget Typ Invalid)) ; avoid follow-on errors by Checker.validRecv
+                (break))
+
+              (set! (values a _) (assert (* Alias) baseType))))))
+
+
+      ;; If there are type parameters, rbase must denote a generic base type.
+      ;; Important: rbase must be resolved before declaring any receiver type
+      ;; parameters (which may have the same name, see below).
+      (let [^{:tag (* Named)} baseType (zero (* Named)) ; nil if not valid
+          ^{:line 247 :tag string} cause (zero string)]
+        (if [t (.genericType check rbase (addr cause))] (isValid t)
+          (type-switch [t t]
+            (case [(* Named)]
+              (set! baseType t))
+            (case [(* Alias)]
+              ;; Methods on generic aliases are not permitted.
+              ;; Only report an error if the alias type is valid.
+              (when (isValid t)
+                (.errorf check rbase InvalidRecv "cannot define new methods on generic alias type %s" t)))
+
+            ;; Ok to continue but do not set basetype in this case so that
+            ;; recvType remains invalid (was bug, see go.dev/issue/70417).
+            (default
+              (panic "unreachable")))
+
+          (do
+            (when (!= cause "")
+              (.errorf check rbase InvalidRecv "%s" cause))))
+
+        ;; Ok to continue but do not set baseType (see comment above).
+
+
+        ;; Collect the type parameters declared by the receiver (see also
+        ;; Checker.collectTypeParams). The scope of the type parameter T in
+        ;; "func (r T[T]) f() {}" starts after f, not at r, so we declare it
+        ;; after typechecking rbase (see go.dev/issue/52038).
+        (let [recvTParams (make (slice (* TypeParam)) (len rtparams))]
+          (range [i rparam rtparams]
+            (let [tpar (.declareTypeParam check rparam scopePos)]
+              (aset recvTParams i tpar)
+              ;; For historic reasons, type parameters in receiver type expressions
+              ;; are considered both definitions and uses and thus must be recorded
+              ;; in the Info.Uses and Info.Types maps (see go.dev/issue/68670).
+              (.recordUse check rparam (.-obj tpar))
+              (.recordTypeAndValue check rparam typexpr tpar nil)))
+
+          (set! recvTParamsList (bindTParams recvTParams))
+
+          ;; Get the type parameter bounds from the receiver base type
+          ;; and set them for the respective (local) receiver type parameters.
+          (when (!= baseType nil)
+            (let [baseTParams (.list (.TypeParams baseType))]
+              (if (== (len recvTParams) (len baseTParams))
+                (let [smap (makeRenameMap baseTParams recvTParams)]
+                  (range [i recvTPar recvTParams]
+                    (let [baseTPar (aget baseTParams i)]
+                      (.recordCanon (.-mono check) recvTPar baseTPar)
+                      ;; baseTPar.bound is possibly parameterized by other type parameters
+                      ;; defined by the generic base type. Substitute those parameters with
+                      ;; the receiver type parameters declared by the current method.
+                      (set! (.-bound recvTPar) (.subst check ^{:go/via [object]} (.-pos (.-obj recvTPar)) (.-bound baseTPar) smap nil (.context check))))))
+
+
+                (let [got (measure (len recvTParams) "type parameter")]
+                  (.errorf check rbase BadRecv "receiver declares %s, but receiver base type declares %d" got (len baseTParams))))
+
+
+              ;; The type parameters declared by the receiver also serve as
+              ;; type arguments for the receiver type. Instantiate the receiver.
+              (.verifyVersionf check rbase go1_18 "type instantiation")
+              (let [targs (make (slice Type) (len recvTParams))]
+                (range [i targ recvTParams]
+                  (aset targs i targ))
+
+                (set! recvType (.instance check (.Pos (.-Type rparam)) baseType targs nil (.context check)))
+                (.recordInstance check rbase targs recvType)
+
+                ;; Reestablish pointerness if needed (but avoid a pointer to an invalid type).
+                (when (and rptr (isValid recvType))
+                  (set! recvType (NewPointer recvType)))
+
+
+                (.recordParenthesizedRecvTypes check (.-Type rparam) recvType)))))))
+
+
+
+    ;; Make sure we have no more than one receiver name.
+    (let [^{:tag (* ast/Ident)} rname (zero (* ast/Ident))]
+      (when [n (len (.-Names rparam))] (>= n 1)
+        (when (> n 1)
+          (.error check (aget (.-Names rparam) (- n 1)) InvalidRecv "method has multiple receivers"))
+
+        (set! rname (aget (.-Names rparam) 0)))
+
+
+      ;; Create the receiver parameter.
+      ;; recvType is invalid if baseType was never set.
+      (let [^{:tag (* Var)} recv (zero (* Var))]
+        (if (and (!= rname nil) (!= (.-Name rname) ""))
+          ;; named receiver
+          (set! recv (newVar RecvVar (.Pos rname) (.-pkg check) (.-Name rname) recvType))
+          ;; In this case, the receiver is declared by the caller
+          ;; because it must be declared after any type parameters
+          ;; (otherwise it might shadow one of them).
+          (do
+            ;; anonymous receiver
+            (set! recv (newVar RecvVar (.Pos rparam) (.-pkg check) "" recvType))
+            (.recordImplicit check rparam recv)))
+
+
+        ;; Delay validation of receiver type as it may cause premature expansion of types
+        ;; the receiver type is dependent on (see go.dev/issue/51232, go.dev/issue/51233).
+        (.describef (.later check ^{:go/end 352} (fn []
+              (.validRecv check rbase recv)))
+          ^{:line 352} recv "validRecv(%s)" recv)
+
+        (return recv recvTParamsList)))))
+
+
+^{:go/end 365} (go/func unpointer ^Type [^Type t]
+  (while true
+    (let [(values p _) (assert (* Pointer) t)]
+      (when (== p nil)
+        (return t))
+
+      (set! t (.-base p)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 396} (go/method recordParenthesizedRecvTypes "recordParenthesizedRecvTypes records parenthesized intermediate receiver type\nexpressions that all map to the same type, by recursively unpacking expr and\nrecording the corresponding type for it. Example:\n\n\texpression  -->  type\n\t----------------------\n\t(*(T[P]))        *T[P]\n\t *(T[P])         *T[P]\n\t  (T[P])          T[P]\n\t   T[P]           T[P]\n" [^{:tag (* Checker)} check ^ast/Expr expr ^Type typ]
+  (while true
+    (.recordTypeAndValue check expr typexpr typ nil)
+    (type-switch [e expr]
+      (case [(* ast/ParenExpr)]
+        (set! expr (.-X e)))
+      (case [(* ast/StarExpr)]
+        (set! expr (.-X e))
+        ;; In a correct program, typ must be an unnamed
+        ;; pointer type. But be careful and don't panic.
+        (let [(values ptr _) (assert (* Pointer) typ)]
+          (when (== ptr nil)
+            (return)) ; something is wrong
+
+          (set! typ (.-base ptr))))
+      (default
+        (return))))) ; cannot unpack any further
+
+
+
+
+
+
+
+
+^{:go/end 460} (go/method collectParams "collectParams collects (but does not declare) all parameter/result\nvariables of list and returns the list of names and corresponding\nvariables, and whether the (parameter) list is variadic.\nAnonymous parameters are recorded with nil names.\n" [^{:tag (* Checker)} check ^VarKind kind ^{:tag (* ast/FieldList)} list] :results [^{:tag (slice (* ast/Ident))} names ^{:tag (slice (* Var))} params ^bool variadic]
+  (when (== list nil)
+    (return))
+
+
+  (let [(values ^bool named ^bool anonymous) (zero bool)]
+    (range [i field (.-List list)]
+      (let [ftype (.-Type field)]
+        (when [(values t _) (assert (* ast/Ellipsis) ftype)] (!= t nil)
+          (set! ftype (.-Elt t))
+          (if (and (== kind ParamVar) (== i (- (len (.-List list)) 1)) (<= (len (.-Names field)) 1))
+            (set! variadic true)
+
+            (.softErrorf check t InvalidSyntaxTree "invalid use of ...")))
+        ;; ignore ... and continue
+
+
+        (let [typ (.varType check ftype)]
+          ;; The parser ensures that f.Tag is nil and we don't
+          ;; care if a constructed AST contains a non-nil tag.
+          (if (> (len (.-Names field)) 0) (do
+              ;; named parameter
+              (range [_ name (.-Names field)]
+                (when (== (.-Name name) "")
+                  (.error check name InvalidSyntaxTree "anonymous parameter"))
+                ;; ok to continue
+
+                (let [par (newVar kind (.Pos name) (.-pkg check) (.-Name name) typ)]
+                  ;; named parameter is declared by caller
+                  (set! names (append names name))
+                  (set! params (append params par))))
+
+              (set! named true))
+
+            ;; anonymous parameter
+            (let [par (newVar kind (.Pos ftype) (.-pkg check) "" typ)]
+              (.recordImplicit check field par)
+              (set! names (append names nil))
+              (set! params (append params par))
+              (set! anonymous true))))))
+
+
+
+    (when (and named anonymous)
+      (.error check list InvalidSyntaxTree "list contains both named and anonymous parameters"))
+    ;; ok to continue
+
+
+    ;; For a variadic function, change the last parameter's type from T to []T.
+    ;; Since we type-checked T rather than ...T, we also need to retro-actively
+    ;; record the type for ...T.
+    (when variadic
+      (let [last (aget params (- (len params) 1))]
+        (set! ^{:go/via [object]} (.-typ last) (addr (lit Slice :elem ^{:go/via [object]} (.-typ last))))
+        (.recordTypeAndValue check (.-Type (aget (.-List list) (- (len (.-List list)) 1))) typexpr ^{:go/via [object]} (.-typ last) nil)))
+
+
+    (return)))
+
+
+
+^{:go/end 469} (go/method declareParams "declareParams declares each named parameter in the current scope.\n" [^{:tag (* Checker)} check ^{:tag (slice (* ast/Ident))} names ^{:tag (slice (* Var))} params ^token/Pos scopePos]
+  (range [i name names]
+    (when (and (!= name nil) (!= (.-Name name) ""))
+      (.declare check ^{:go/via [environment]} (.-scope check) name (aget params i) scopePos))))
+
+
+
+
+
+
+^{:go/end 511} (go/method validRecv "validRecv verifies that the receiver satisfies its respective spec requirements\nand reports an error otherwise.\n" [^{:tag (* Checker)} check ^positioner pos ^{:tag (* Var)} recv]
+  ;; spec: "The receiver type must be of the form T or *T where T is a type name."
+  (let [(values rtyp _) (go/call deref ^{:go/via [object]} (.-typ recv))
+      ^{:line 476} atyp (Unalias rtyp)]
+    (when (not (isValid atyp))
+      (return)) ; error was reported before
+
+    ;; spec: "The type denoted by T is called the receiver base type; it must not
+    ;; be a pointer or interface type and it must be declared in the same package
+    ;; as the method."
+    (type-switch [T atyp]
+      (case [(* Named)]
+        (when (or (!= ^{:go/via [object]} (.-pkg (.-obj T)) (.-pkg check)) (isCGoTypeObj (.-fset check) (.-obj T)))
+          (.errorf check pos InvalidRecv "cannot define new methods on non-local type %s" rtyp)
+          (break))
+
+        (let [^string cause (zero string)]
+          (type-switch [u (.Underlying T)]
+            (case [(* Basic)]
+              ;; unsafe.Pointer is treated like a regular pointer
+              (when (== (.-kind u) UnsafePointer)
+                (set! cause "unsafe.Pointer")))
+
+            (case [(* Pointer) (* Interface)]
+              (set! cause "pointer or interface type"))
+            (case [(* TypeParam)]
+              ;; The underlying type of a receiver base type cannot be a
+              ;; type parameter: "type T[P any] P" is not a valid declaration.
+              (panic "unreachable")))
+
+          (when (!= cause "")
+            (.errorf check pos InvalidRecv "invalid receiver type %s (%s)" rtyp cause))))
+
+      (case [(* Basic)]
+        (.errorf check pos InvalidRecv "cannot define new methods on non-local type %s" rtyp))
+      (default
+        (.errorf check pos InvalidRecv "invalid receiver type %s" ^{:go/via [object]} (.-typ recv))))))
+
+
+
+
+^{:go/end 517} (go/func isCGoTypeObj "isCGoTypeObj reports whether the given type name was created by cgo.\n" ^bool [^{:tag (* token/FileSet)} fset ^{:tag (* TypeName)} obj]
+  (or (strings/HasPrefix ^{:go/via [object]} (.-name obj) "_Ctype_")
+    (strings/HasPrefix (filepath/Base (.Name (.File fset ^{:go/via [object]} (.-pos obj)))) "_cgo_")))

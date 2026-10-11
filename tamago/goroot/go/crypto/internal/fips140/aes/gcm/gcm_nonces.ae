@@ -1,0 +1,286 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.aes.gcm) (go/file "gcm_nonces.go" :imports [
+
+
+    ^{:line 8} [fips140 "crypto/internal/fips140"]
+    ^{:line 9} [aes "crypto/internal/fips140/aes"]
+    ^{:line 10} [alias "crypto/internal/fips140/alias"]
+    ^{:line 11} [drbg "crypto/internal/fips140/drbg"]
+    ^{:line 12} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [math "math"]])
+
+
+
+
+
+
+
+
+
+
+^{:go/end 44} (go/func SealWithRandomNonce "SealWithRandomNonce encrypts plaintext to out, and writes a random nonce to\nnonce. nonce must be 12 bytes, and out must be 16 bytes longer than plaintext.\nout and plaintext may overlap exactly or not at all. additionalData and out\nmust not overlap.\n\nThis complies with FIPS 140-3 IG C.H Scenario 2.\n\nNote that this is NOT a [cipher.AEAD].Seal method.\n" [^{:tag (* GCM)} g ^{:tag (slice byte)} nonce ^{:tag (slice byte)} out ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} additionalData]
+  (when (> (conv uint64 (len plaintext)) (* (conv uint64 (- (<< 1 32) 2)) gcmBlockSize))
+    (panic "crypto/cipher: message too large for GCM"))
+
+  (when (!= (len nonce) gcmStandardNonceSize)
+    (panic "crypto/cipher: incorrect nonce length given to GCMWithRandomNonce"))
+
+  (when (!= (len out) (+ (len plaintext) gcmTagSize))
+    (panic "crypto/cipher: incorrect output length given to GCMWithRandomNonce"))
+
+  (when (alias/InexactOverlap out plaintext)
+    (panic "crypto/cipher: invalid buffer overlap of output and input"))
+
+  (when (alias/AnyOverlap out additionalData)
+    (panic "crypto/cipher: invalid buffer overlap of output and additional data"))
+
+  (fips140/RecordApproved)
+  (drbg/Read nonce)
+  (seal out g nonce plaintext additionalData))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 60} (go/func NewGCMWithCounterNonce "NewGCMWithCounterNonce returns a new AEAD that works like GCM, but enforces\nthe construction of deterministic nonces. The nonce must be 96 bits, the\nfirst 32 bits must be an encoding of the module name, and the last 64 bits\nmust be a counter. The starting value of the counter is set on the first call\nto Seal, and each subsequent call must increment it as a big-endian uint64.\nIf the counter reaches the starting value minus one, Seal will panic.\n\nThis complies with FIPS 140-3 IG C.H Scenario 3.\n" [^{:tag (* aes/Block)} cipher] :results [(* GCMWithCounterNonce) error]
+  (let [(values g err) (newGCM (addr (lit GCM)) cipher gcmStandardNonceSize gcmTagSize)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (addr (lit GCMWithCounterNonce :g @g)) nil)))
+
+
+
+
+
+
+
+^{:go/end 74} (go/func NewGCMForTLS12 "NewGCMForTLS12 returns a new AEAD that works like GCM, but enforces the\nconstruction of nonces as specified in RFC 5288, Section 3 and RFC 9325,\nSection 7.2.1.\n\nThis complies with FIPS 140-3 IG C.H Scenario 1.a.\n" [^{:tag (* aes/Block)} cipher] :results [(* GCMWithCounterNonce) error]
+  (let [(values g err) (newGCM (addr (lit GCM)) cipher gcmStandardNonceSize gcmTagSize)]
+    (when (!= err nil)
+      (return nil err))
+
+    ;; TLS 1.2 counters always start at zero.
+    (return (addr (lit GCMWithCounterNonce :g @g :startReady true)) nil)))
+
+
+
+
+
+
+^{:go/end 86} (go/func NewGCMForSSH "NewGCMForSSH returns a new AEAD that works like GCM, but enforces the\nconstruction of nonces as specified in RFC 5647.\n\nThis complies with FIPS 140-3 IG C.H Scenario 1.d.\n" [^{:tag (* aes/Block)} cipher] :results [(* GCMWithCounterNonce) error]
+  (let [(values g err) (newGCM (addr (lit GCM)) cipher gcmStandardNonceSize gcmTagSize)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (addr (lit GCMWithCounterNonce :g @g)) nil)))
+
+
+(go/type GCMWithCounterNonce (struct
+    ^{:line 89 :tag GCM} g
+    ^{:line 90 :tag bool} prefixReady
+    ^{:line 91 :tag uint32} prefix
+    ^{:line 92 :tag bool} startReady
+    ^{:line 93 :tag uint64} start
+    ^{:line 94 :tag uint64} next))
+
+
+^{:go/end 97} (go/method NonceSize ^int [^{:tag (* GCMWithCounterNonce)} g] gcmStandardNonceSize)
+
+^{:go/end 99} (go/method Overhead ^int [^{:tag (* GCMWithCounterNonce)} g] gcmTagSize)
+
+
+
+
+
+^{:go/end 140} (go/method Seal "Seal implements the [cipher.AEAD] interface, checking that the nonce prefix\nis stable and that the counter is strictly increasing.\n\nIt is not safe for concurrent use.\n" ^{:tag (slice byte)} [^{:tag (* GCMWithCounterNonce)} g ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} data]
+  (when (!= (len nonce) gcmStandardNonceSize)
+    (panic "crypto/cipher: incorrect nonce length given to GCM"))
+
+
+  (when fips140/Enabled
+    (when (not (.-prefixReady g))
+      ;; The first invocation sets the fixed prefix.
+      (set! (.-prefixReady g) true)
+      (set! (.-prefix g) (byteorder/BEUint32 (subslice nonce _ 4))))
+
+    (when (!= (.-prefix g) (byteorder/BEUint32 (subslice nonce _ 4)))
+      (panic "crypto/cipher: GCM nonce prefix changed"))
+
+
+    (let [counter (byteorder/BEUint64 (subslice nonce (- (len nonce) 8)))]
+      (when (not (.-startReady g))
+        ;; The first invocation sets the starting counter, if not fixed.
+        (set! (.-startReady g) true)
+        (set! (.-start g) counter))
+
+      (set! counter - (.-start g))
+
+      ;; Ensure the counter is strictly increasing.
+      (when (== counter math/MaxUint64)
+        (panic "crypto/cipher: counter exhausted"))
+
+      (when (< counter (.-next g))
+        (panic "crypto/cipher: counter decreased or remained the same"))
+
+      (set! (.-next g) (+ counter 1))))
+
+
+  (fips140/RecordApproved)
+  (.sealAfterIndicator (.-g g) dst nonce plaintext data))
+
+
+^{:go/end 145} (go/method Open [^{:tag (* GCMWithCounterNonce)} g ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} data] :results [(slice byte) error]
+  (fips140/RecordApproved)
+  (.Open (.-g g) dst nonce ciphertext data))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 163} (go/func NewGCMWithXORCounterNonce "NewGCMWithXORCounterNonce returns a new AEAD that works like GCM, but\nenforces the construction of deterministic nonces. The nonce must be 96 bits,\nthe first 32 bits must be an encoding of the module name, and the last 64\nbits must be a counter XOR'd with a fixed value. The module name and XOR mask\ncan be set with [GCMWithCounterNonce.SetNoncePrefixAndMask], or they are set\non the first call to Seal, assuming the counter starts at zero. Each\nsubsequent call must increment the counter as a big-endian uint64. If the\ncounter reaches 2⁶⁴ minus one, Seal will panic.\n\nThis complies with FIPS 140-3 IG C.H Scenario 3.\n" [^{:tag (* aes/Block)} cipher] :results [(* GCMWithXORCounterNonce) error]
+  (let [(values g err) (newGCM (addr (lit GCM)) cipher gcmStandardNonceSize gcmTagSize)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (addr (lit GCMWithXORCounterNonce :g @g)) nil)))
+
+
+
+
+
+
+^{:go/end 175} (go/func NewGCMForTLS13 "NewGCMForTLS13 returns a new AEAD that works like GCM, but enforces the\nconstruction of nonces as specified in RFC 8446, Section 5.3.\n\nThis complies with FIPS 140-3 IG C.H Scenario 1.a.\n" [^{:tag (* aes/Block)} cipher] :results [(* GCMWithXORCounterNonce) error]
+  (let [(values g err) (newGCM (addr (lit GCM)) cipher gcmStandardNonceSize gcmTagSize)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (addr (lit GCMWithXORCounterNonce :g @g)) nil)))
+
+
+
+
+
+
+^{:go/end 187} (go/func NewGCMForHPKE "NewGCMForHPKE returns a new AEAD that works like GCM, but enforces the\nconstruction of nonces as specified in RFC 9180, Section 5.2.\n\nThis complies with FIPS 140-3 IG C.H Scenario 5.\n" [^{:tag (* aes/Block)} cipher] :results [(* GCMWithXORCounterNonce) error]
+  (let [(values g err) (newGCM (addr (lit GCM)) cipher gcmStandardNonceSize gcmTagSize)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (addr (lit GCMWithXORCounterNonce :g @g)) nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 210} (go/func NewGCMForQUIC "NewGCMForQUIC returns a new AEAD that works like GCM, but enforces the\nconstruction of nonces as specified in RFC 9001, Section 5.3.\n\nUnlike in TLS 1.3, the QUIC nonce counter does not always start at zero, as\nthe packet number does not reset on key updates, so the XOR mask must be\nprovided explicitly instead of being learned on the first Seal call. Note\nthat the nonce passed to Seal must already be XOR'd with the IV, the IV is\nprovided here only to allow Seal to enforce that the counter is strictly\nincreasing.\n\nThis complies with FIPS 140-3 IG C.H Scenario 5.\n" [^{:tag (* aes/Block)} cipher ^{:tag (slice byte)} iv] :results [(* GCMWithXORCounterNonce) error]
+  (let [(values g err) (newGCM (addr (lit GCM)) cipher gcmStandardNonceSize gcmTagSize)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [gcm (addr (lit GCMWithXORCounterNonce :g @g))]
+      (when [err (.SetNoncePrefixAndMask gcm iv)] (!= err nil)
+        (return nil err))
+
+      (return gcm nil))))
+
+
+(go/type GCMWithXORCounterNonce (struct
+    ^{:line 213 :tag GCM} g
+    ^{:line 214 :tag bool} ready
+    ^{:line 215 :tag uint32} prefix
+    ^{:line 216 :tag uint64} mask
+    ^{:line 217 :tag uint64} next))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [9] :go/end 240} (go/method SetNoncePrefixAndMask "SetNoncePrefixAndMask sets the fixed prefix and XOR mask for the nonces used\nin Seal. It must be called before the first call to Seal.\n\nThe first 32 bits of nonce are used as the fixed prefix, and the last 64 bits\nare used as the XOR mask.\n\nNote that Seal expects the nonce to be already XOR'd with the mask. The mask\nis provided here only to allow Seal to enforce that the counter is strictly\nincreasing.\n" ^error [^{:tag (* GCMWithXORCounterNonce)} g ^{:tag (slice byte)} nonce]
+  (when (!= (len nonce) gcmStandardNonceSize)
+    (return (errors/New "crypto/cipher: incorrect nonce length given to SetNoncePrefixAndMask")))
+
+  (when (.-ready g)
+    (return (errors/New "crypto/cipher: SetNoncePrefixAndMask called twice or after first Seal")))
+
+  (set! (.-prefix g) (byteorder/BEUint32 (subslice nonce _ 4)))
+  (set! (.-mask g) (byteorder/BEUint64 (subslice nonce 4)))
+  (set! (.-ready g) true)
+  nil)
+
+
+^{:go/end 242} (go/method NonceSize ^int [^{:tag (* GCMWithXORCounterNonce)} g] gcmStandardNonceSize)
+
+^{:go/end 244} (go/method Overhead ^int [^{:tag (* GCMWithXORCounterNonce)} g] gcmTagSize)
+
+
+
+
+
+^{:go/end 282} (go/method Seal "Seal implements the [cipher.AEAD] interface, checking that the nonce prefix\nis stable and that the counter is strictly increasing.\n\nIt is not safe for concurrent use.\n" ^{:tag (slice byte)} [^{:tag (* GCMWithXORCounterNonce)} g ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} data]
+  (when (!= (len nonce) gcmStandardNonceSize)
+    (panic "crypto/cipher: incorrect nonce length given to GCM"))
+
+
+  (when fips140/Enabled
+    (let [counter (byteorder/BEUint64 (subslice nonce (- (len nonce) 8)))]
+      (when (not (.-ready g))
+        ;; In the first call, if [GCMWithXORCounterNonce.SetNoncePrefixAndMask]
+        ;; wasn't used, we assume the counter is zero to learn the XOR mask and
+        ;; fixed prefix.
+        (set! (.-ready g) true)
+        (set! (.-mask g) counter)
+        (set! (.-prefix g) (byteorder/BEUint32 (subslice nonce _ 4))))
+
+      (when (!= (.-prefix g) (byteorder/BEUint32 (subslice nonce _ 4)))
+        (panic "crypto/cipher: GCM nonce prefix changed"))
+
+      (set! counter bit-xor (.-mask g))
+
+      ;; Ensure the counter is strictly increasing.
+      (when (== counter math/MaxUint64)
+        (panic "crypto/cipher: counter exhausted"))
+
+      (when (< counter (.-next g))
+        (panic "crypto/cipher: counter decreased or remained the same"))
+
+      (set! (.-next g) (+ counter 1))))
+
+
+  (fips140/RecordApproved)
+  (.sealAfterIndicator (.-g g) dst nonce plaintext data))
+
+
+^{:go/end 287} (go/method Open [^{:tag (* GCMWithXORCounterNonce)} g ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} data] :results [(slice byte) error]
+  (fips140/RecordApproved)
+  (.Open (.-g g) dst nonce ciphertext data))

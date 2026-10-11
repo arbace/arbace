@@ -1,0 +1,355 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.internal.http3) (go/file "qpack.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [io "io"]
+
+    ^{:line 11} [httpguts "golang.org/x/net/http/httpguts"]
+    ^{:line 12} [hpack "golang.org/x/net/http2/hpack"]])
+
+
+;; QPACK (RFC 9204) header compression wire encoding.
+;; https://www.rfc-editor.org/rfc/rfc9204.html
+
+
+
+
+
+
+(go/type tableType "tableType is the static or dynamic table.\n\nThe T bit in QPACK instructions indicates whether a table index refers to\nthe dynamic (T=0) or static (T=1) table. tableTypeForTBit and tableType.tbit\nconvert a T bit from the wire encoding to/from a tableType.\n" byte)
+
+(go/const
+  ^{:line 26} [^{:val 0} dynamicTable 0x00] ; T=0, dynamic table
+  ^{:line 27} [^{:val 255} staticTable 0xff]) ; T=1, static table
+
+
+
+
+^{:go/end 37} (go/func tableTypeForTbit "tableTypeForTbit returns the table type corresponding to a T bit value.\nThe input parameter contains a byte masked to contain only the T bit.\n" ^tableType [^byte bit]
+  (when (== bit 0)
+    (return dynamicTable))
+
+  ^{:line 36} staticTable)
+
+
+
+
+
+^{:go/end 44} (go/method tbit "tbit produces the T bit corresponding to the table type.\nThe input parameter contains a byte with the T bit set to 1,\nand the return is either the input or 0 depending on the table type.\n" ^byte [^tableType t ^byte bit]
+  (bit-and bit (conv byte t)))
+
+
+
+
+
+
+
+
+
+
+(go/type indexType "indexType indicates a literal's indexing status.\n\nThe N bit in QPACK instructions indicates whether a literal is \"never-indexed\".\nA never-indexed literal (N=1) must not be encoded as an indexed literal if it\nforwarded on another connection.\n\n(See https://www.rfc-editor.org/rfc/rfc9204.html#section-7.1 for details on the\nsecurity reasons for never-indexed literals.)\n" byte)
+
+(go/const
+  ^{:line 57} [^{:val 0} mayIndex 0x00] ; N=0, not a never-indexed literal
+  ^{:line 58} [^{:val 255} neverIndex 0xff]) ; N=1, never-indexed literal
+
+
+
+
+^{:go/end 68} (go/func indexTypeForNBit "indexTypeForNBit returns the index type corresponding to a N bit value.\nThe input parameter contains a byte masked to contain only the N bit.\n" ^indexType [^byte bit]
+  (when (== bit 0)
+    (return mayIndex))
+
+  ^{:line 67} neverIndex)
+
+
+
+
+
+^{:go/end 75} (go/method nbit "nbit produces the N bit corresponding to the table type.\nThe input parameter contains a byte with the N bit set to 1,\nand the return is either the input or 0 depending on the table type.\n" ^byte [^indexType t ^byte bit]
+  (bit-and bit (conv byte t)))
+
+
+;; Indexed Field Line:
+;;
+;;       0   1   2   3   4   5   6   7
+;;     +---+---+---+---+---+---+---+---+
+;;     | 1 | T |      Index (6+)       |
+;;     +---+---+-----------------------+
+;;
+;; https://www.rfc-editor.org/rfc/rfc9204.html#section-4.5.2
+
+^{:go/end 89} (go/func appendIndexedFieldLine ^{:tag (slice byte)} [^{:tag (slice byte)} b ^tableType ttype ^int index]
+  (let [^:const ^{:val 64} tbit 2r01000000]
+    (appendPrefixedInt b (bit-or 2r10000000 (.tbit ttype tbit)) 6 (conv int64 index))))
+
+
+^{:go/end 106} (go/method decodeIndexedFieldLine [^{:tag (* stream)} st ^byte b] :results [^indexType itype ^string name ^string value ^error err]
+  (let [(values index ^:assign err) (.readPrefixedIntWithByte st b 6)]
+    (when (!= err nil)
+      (return 0 "" "" err))
+
+    (let [^:const ^{:val 64} tbit 2r01000000]
+      (if (== (tableTypeForTbit (bit-and b tbit)) staticTable)
+        (let [(values ent err) (staticTableEntry index)]
+          (when (!= err nil)
+            (return 0 "" "" err))
+
+          (return mayIndex (.-name ent) (.-value ent) nil))
+
+        (return 0 "" "" (errors/New "dynamic table is not supported yet"))))))
+
+
+
+;; Literal Field Line With Name Reference:
+;;
+;;      0   1   2   3   4   5   6   7
+;;     +---+---+---+---+---+---+---+---+
+;;     | 0 | 1 | N | T |Name Index (4+)|
+;;     +---+---+---+---+---------------+
+;;     | H |     Value Length (7+)     |
+;;     +---+---------------------------+
+;;     |  Value String (Length bytes)  |
+;;     +-------------------------------+
+;;
+;; https://www.rfc-editor.org/rfc/rfc9204.html#section-4.5.4
+
+^{:go/end 127} (go/func appendLiteralFieldLineWithNameReference ^{:tag (slice byte)} [^{:tag (slice byte)} b ^tableType ttype ^indexType itype ^int nameIndex ^string value]
+  (let [^:const ^{:val 16} tbit 2r00010000
+      ^:const ^{:line 123 :val 32} nbit 2r00100000]
+    (set! b (appendPrefixedInt b (bit-or 2r01000000 (.nbit itype nbit) (.tbit ttype tbit)) 4 (conv int64 nameIndex)))
+    (set! b (appendPrefixedString b 0 7 value))
+    ^{:line 126} b))
+
+
+^{:go/end 155} (go/method decodeLiteralFieldLineWithNameReference [^{:tag (* stream)} st ^byte b] :results [^indexType itype ^string name ^string value ^error err]
+  (let [(values nameIndex ^:assign err) (.readPrefixedIntWithByte st b 4)]
+    (when (!= err nil)
+      (return 0 "" "" err))
+
+
+    (let [^:const ^{:val 16} tbit 2r00010000]
+      (if (== (tableTypeForTbit (bit-and b tbit)) staticTable)
+        (let [(values ent err) (staticTableEntry nameIndex)]
+          (when (!= err nil)
+            (return 0 "" "" err))
+
+          (set! name (.-name ent)))
+
+        (return 0 "" "" (errors/New "dynamic table is not supported yet")))
+
+
+      (set! (values _ value err) (.readPrefixedString st 7))
+      (when (!= err nil)
+        (return 0 "" "" err))
+
+
+      (let [^:const ^{:val 32} nbit 2r00100000]
+        (set! itype (indexTypeForNBit (bit-and b nbit)))
+
+        (return itype name value nil)))))
+
+
+;; Literal Field Line with Literal Name:
+;;
+;;       0   1   2   3   4   5   6   7
+;;     +---+---+---+---+---+---+---+---+
+;;     | 0 | 0 | 1 | N | H |NameLen(3+)|
+;;     +---+---+---+---+---+-----------+
+;;     |  Name String (Length bytes)   |
+;;     +---+---------------------------+
+;;     | H |     Value Length (7+)     |
+;;     +---+---------------------------+
+;;     |  Value String (Length bytes)  |
+;;     +-------------------------------+
+;;
+;; https://www.rfc-editor.org/rfc/rfc9204.html#section-4.5.6
+
+^{:go/end 177} (go/func appendLiteralFieldLineWithLiteralName ^{:tag (slice byte)} [^{:tag (slice byte)} b ^indexType itype ^string name ^string value]
+  (let [^:const ^{:val 16} nbit 2r00010000]
+    (set! b (appendPrefixedString b (bit-or 2r00100000 (.nbit itype nbit)) 3 name))
+    (set! b (appendPrefixedString b 0 7 value))
+    ^{:line 176} b))
+
+
+^{:go/end 191} (go/method decodeLiteralFieldLineWithLiteralName [^{:tag (* stream)} st ^byte b] :results [^indexType itype ^string name ^string value ^error err]
+  (set! (values name err) (.readPrefixedStringWithByte st b 3))
+  (when (!= err nil)
+    (return 0 "" "" err))
+
+  (set! (values _ value err) (.readPrefixedString st 7))
+  (when (!= err nil)
+    (return 0 "" "" err))
+
+  (let [^:const ^{:val 16} nbit 2r00010000]
+    (set! itype (indexTypeForNBit (bit-and b nbit)))
+    (return itype name value nil)))
+
+
+;; Prefixed-integer encoding from RFC 7541, section 5.1
+;;
+;; Prefixed integers consist of some number of bits of data,
+;; N bits of encoded integer, and 0 or more additional bytes of
+;; encoded integer.
+;;
+;; The RFCs represent this as, for example:
+;;
+;;       0   1   2   3   4   5   6   7
+;;     +---+---+---+---+---+---+---+---+
+;;     | 0 | 0 | 1 |   Capacity (5+)   |
+;;     +---+---+---+-------------------+
+;;
+;; "Capacity" is an integer with a 5-bit prefix.
+;;
+;; In the following functions, a "prefixLen" parameter is the number
+;; of integer bits in the first byte (5 in the above example), and
+;; a "firstByte" parameter is a byte containing the first byte of
+;; the encoded value (0x001x_xxxx in the above example).
+;;
+;; https://www.rfc-editor.org/rfc/rfc9204.html#section-4.1.1
+;; https://www.rfc-editor.org/rfc/rfc7541#section-5.1
+
+
+^{:go/end 224} (go/method readPrefixedInt "readPrefixedInt reads an RFC 7541 prefixed integer from st.\n" [^{:tag (* stream)} st ^uint8 prefixLen] :results [^byte firstByte ^int64 v ^error err]
+  (set! (values firstByte err) (.ReadByte st))
+  (when (!= err nil)
+    (return 0 0 errQPACKDecompressionFailed))
+
+  (set! (values v err) (.readPrefixedIntWithByte st firstByte prefixLen))
+  (return firstByte v err))
+
+
+
+
+^{:go/end 247} (go/method readPrefixedIntWithByte "readPrefixedIntWithByte reads an RFC 7541 prefixed integer from st.\nThe first byte has already been read from the stream.\n" [^{:tag (* stream)} st ^byte firstByte ^uint8 prefixLen] :results [^int64 v ^error err]
+  (let [prefixMask (- (<< (conv byte 1) prefixLen) 1)]
+    (set! v (conv int64 (bit-and firstByte prefixMask)))
+    (when (!= v (conv int64 prefixMask))
+      (return v nil))
+
+    (let [m 0]
+      (while true
+        (let [(values b err) (.ReadByte st)]
+          (when (!= err nil)
+            (return 0 errQPACKDecompressionFailed))
+
+          (set! v + (<< (conv int64 (bit-and b 127)) m))
+          (set! m + 7)
+          (when (== (bit-and b 128) 0)
+            (break))))
+
+
+      (return v err))))
+
+
+
+
+
+
+^{:go/end 266} (go/func appendPrefixedInt "appendPrefixedInt appends an RFC 7541 prefixed integer to b.\n\nThe firstByte parameter includes the non-integer bits of the first byte.\nThe other bits must be zero.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^byte firstByte ^uint8 prefixLen ^int64 i]
+  (let [u (conv uint64 i)
+      ^{:line 255} prefixMask (- (<< (conv uint64 1) prefixLen) 1)]
+    (when (< u prefixMask)
+      (return (append b (bit-or firstByte (conv byte u)))))
+
+    (set! b (append b (bit-or firstByte (conv byte prefixMask))))
+    (set! u - prefixMask)
+    (while (>= u 128)
+      (set! b (append b (bit-or 0x80 (conv byte (bit-and u 0x7f)))))
+      (set! u >> 7))
+
+    (append b (conv byte u))))
+
+
+;; String literal encoding from RFC 7541, section 5.2
+;;
+;; String literals consist of a single bit flag indicating
+;; whether the string is Huffman-encoded, a prefixed integer (see above),
+;; and the string.
+;;
+;; https://www.rfc-editor.org/rfc/rfc9204.html#section-4.1.2
+;; https://www.rfc-editor.org/rfc/rfc7541#section-5.2
+
+
+^{:go/end 285} (go/method readPrefixedString "readPrefixedString reads an RFC 7541 string from st.\n" [^{:tag (* stream)} st ^uint8 prefixLen] :results [^byte firstByte ^string s ^error err]
+  (set! (values firstByte err) (.ReadByte st))
+  (when (!= err nil)
+    (return 0 "" errQPACKDecompressionFailed))
+
+  (set! (values s err) (.readPrefixedStringWithByte st firstByte prefixLen))
+  (return firstByte s err))
+
+
+
+
+^{:go/end 314} (go/method readPrefixedStringWithByte "readPrefixedStringWithByte reads an RFC 7541 string from st.\nThe first byte has already been read from the stream.\n" [^{:tag (* stream)} st ^byte firstByte ^uint8 prefixLen] :results [^string s ^error err]
+  (let [(values size ^:assign err) (.readPrefixedIntWithByte st firstByte prefixLen)]
+    (when (!= err nil)
+      (return "" errQPACKDecompressionFailed))
+
+
+    (let [hbit (<< (conv byte 1) prefixLen)
+        ^{:line 296} isHuffman (!= (bit-and firstByte hbit) 0)
+
+        ;; TODO: Avoid allocating here.
+        ^{:line 299} data (make (slice byte) size)]
+      (when [(values _ err) (io/ReadFull st data)] (!= err nil)
+        (return "" errQPACKDecompressionFailed))
+
+      (when isHuffman
+        ;; TODO: Move Huffman functions into a new package that hpack (HTTP/2)
+        ;; and this package can both import. Most of the hpack package isn't
+        ;; relevant to HTTP/3.
+        (let [(values s err) (hpack/HuffmanDecodeToString data)]
+          (when (!= err nil)
+            (return "" errQPACKDecompressionFailed))
+
+          (return s nil)))
+
+      (return (conv string data) nil))))
+
+
+
+
+
+
+
+
+^{:go/end 333} (go/func appendPrefixedString "appendPrefixedString appends an RFC 7541 string to st,\napplying Huffman encoding and setting the H bit (indicating Huffman encoding)\nwhen appropriate.\n\nThe firstByte parameter includes the non-integer bits of the first byte.\nThe other bits must be zero.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^byte firstByte ^uint8 prefixLen ^string s]
+  (let [huffmanLen (hpack/HuffmanEncodeLength s)]
+    (if (< huffmanLen (conv uint64 (len s)))
+      (let [hbit (<< (conv byte 1) prefixLen)]
+        (set! b (appendPrefixedInt b (bit-or firstByte hbit) prefixLen (conv int64 huffmanLen)))
+        (set! b (hpack/AppendHuffmanString b s)))
+      (do
+        (set! b (appendPrefixedInt b firstByte prefixLen (conv int64 (len s))))
+        (set! b (append b (spread s)))))
+
+    ^{:line 332} b))
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 355]] :go/end 356} (go/func validWireHeaderFieldName "validWireHeaderFieldName reports whether v is a valid header field\nname (key). See httpguts.ValidHeaderFieldName for the base rules.\n\nFurther, http3 says:\n\"A request or response containing uppercase characters in field names MUST\nbe treated as malformed.\"\n\nThis function does not validate whether a pseudo-header field name is valid.\n" ^bool [^string v]
+  (when (== (len v) 0)
+    (return false))
+
+  (range [_ r v]
+    (when (not (httpguts/IsTokenRune r))
+      (return false))
+
+    (when (and (<= \A r) (<= r \Z))
+      (return false)))
+
+
+  true)

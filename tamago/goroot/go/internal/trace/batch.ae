@@ -1,0 +1,119 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace) (go/file "batch.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+
+    ^{:line 13} [tracev2 "internal/trace/tracev2"]
+    ^{:line 14} [version "internal/trace/version"]])
+
+
+
+(go/type timestamp "timestamp is an unprocessed timestamp.\n" uint64)
+
+
+
+(go/type batch "batch represents a batch of trace events.\nIt is unparsed except for its header.\n" (struct
+    ^{:line 23 :tag ThreadID} m
+    ^{:line 24 :tag timestamp} time
+    ^{:line 25 :tag (slice byte)} data
+    ^{:line 26 :tag tracev2/Experiment} exp))
+
+
+^{:go/end 31} (go/method isStringsBatch ^bool [^{:tag (* batch)} b]
+  (and (== (.-exp b) tracev2/NoExperiment) (> (len (.-data b)) 0) (== (conv tracev2/EventType (aget (.-data b) 0)) tracev2/EvStrings)))
+
+
+^{:go/end 35} (go/method isStacksBatch ^bool [^{:tag (* batch)} b]
+  (and (== (.-exp b) tracev2/NoExperiment) (> (len (.-data b)) 0) (== (conv tracev2/EventType (aget (.-data b) 0)) tracev2/EvStacks)))
+
+
+^{:go/end 39} (go/method isCPUSamplesBatch ^bool [^{:tag (* batch)} b]
+  (and (== (.-exp b) tracev2/NoExperiment) (> (len (.-data b)) 0) (== (conv tracev2/EventType (aget (.-data b) 0)) tracev2/EvCPUSamples)))
+
+
+^{:go/end 45} (go/method isSyncBatch ^bool [^{:tag (* batch)} b ^version/Version ver]
+  (and ^:go/paren (and (== (.-exp b) tracev2/NoExperiment) (> (len (.-data b)) 0))
+    ^:go/paren (or ^:go/paren (and (== (conv tracev2/EventType (aget (.-data b) 0)) tracev2/EvFrequency) (< ver version/Go125))
+      ^:go/paren (and (== (conv tracev2/EventType (aget (.-data b) 0)) tracev2/EvSync) (>= ver version/Go125)))))
+
+
+^{:go/end 49} (go/method isEndOfGeneration ^bool [^{:tag (* batch)} b]
+  (and (== (.-exp b) tracev2/NoExperiment) (> (len (.-data b)) 0) (== (conv tracev2/EventType (aget (.-data b) 0)) tracev2/EvEndOfGeneration)))
+
+
+
+^{:go/end 120} (go/func readBatch "readBatch reads the next full batch from r.\n" [^{:tag (interface io/Reader io/ByteReader)} r] :results [
+
+
+    ^{:line 55} batch uint64 error]
+  ;; Read batch header byte.
+  (let [(values b err) (.ReadByte r)]
+    (when (!= err nil)
+      (return (lit batch) 0 err))
+
+    (when [typ (conv tracev2/EventType b)] (== typ tracev2/EvEndOfGeneration)
+      (return (lit batch :m NoThread :exp tracev2/NoExperiment :data (lit (slice byte) b)) 0 nil))
+
+    (when [typ (conv tracev2/EventType b)] (and (!= typ tracev2/EvEventBatch) (!= typ tracev2/EvExperimentalBatch))
+      (return (lit batch) 0 (fmt/Errorf "expected batch event, got event %d" typ)))
+
+
+    ;; Read the experiment of we have one.
+    (let [exp tracev2/NoExperiment]
+      (when (== (conv tracev2/EventType b) tracev2/EvExperimentalBatch)
+        (let [(values e err) (.ReadByte r)]
+          (when (!= err nil)
+            (return (lit batch) 0 err))
+
+          (set! exp (conv tracev2/Experiment e))))
+
+
+      ;; Read the batch header: gen (generation), thread (M) ID, base timestamp
+      ;; for the batch.
+      (let [(values gen ^:assign err) (binary/ReadUvarint r)]
+        (when (!= err nil)
+          (return (lit batch) gen (fmt/Errorf "error reading batch gen: %w" err)))
+
+        (let [(values m ^:assign err) (binary/ReadUvarint r)]
+          (when (!= err nil)
+            (return (lit batch) gen (fmt/Errorf "error reading batch M ID: %w" err)))
+
+          (let [(values ts ^:assign err) (binary/ReadUvarint r)]
+            (when (!= err nil)
+              (return (lit batch) gen (fmt/Errorf "error reading batch timestamp: %w" err)))
+
+
+            ;; Read in the size of the batch to follow.
+            (let [(values size ^:assign err) (binary/ReadUvarint r)]
+              (when (!= err nil)
+                (return (lit batch) gen (fmt/Errorf "error reading batch size: %w" err)))
+
+              (when (> size tracev2/MaxBatchSize)
+                (return (lit batch) gen (fmt/Errorf "invalid batch size %d, maximum is %d" size tracev2/MaxBatchSize)))
+
+
+              ;; Copy out the batch for later processing.
+              (let [^bytes/Buffer data (zero bytes/Buffer)]
+                (.Grow data (conv int size))
+                (let [(values n ^:assign err) (io/CopyN (addr data) r (conv int64 size))]
+                  (when (!= n (conv int64 size))
+                    (return (lit batch) gen (fmt/Errorf "failed to read full batch: read %d but wanted %d" n size)))
+
+                  (when (!= err nil)
+                    (return (lit batch) gen (fmt/Errorf "copying batch data: %w" err)))
+
+
+                  ;; Return the batch.
+                  (return ^{:go/breaks [2 4 6 8]} (lit batch
+                      :m (conv ThreadID m)
+                      :time (conv timestamp ts)
+                      :data (.Bytes data)
+                      :exp exp)
+                    ^{:line 119} gen nil))))))))))

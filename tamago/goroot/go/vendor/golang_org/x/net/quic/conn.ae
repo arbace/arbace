@@ -1,0 +1,432 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "conn.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^:alias ^{:line 9} [cryptorand "crypto/rand"]
+    ^{:line 10} [tls "crypto/tls"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [slog "log/slog"]
+    ^{:line 14} [rand "math/rand/v2"]
+    ^{:line 15} [netip "net/netip"]
+    ^{:line 16} [time "time"]])
+
+
+
+
+
+(go/type Conn "A Conn is a QUIC connection.\n\nMultiple goroutines may invoke methods on a Conn simultaneously.\n" (struct
+    ^{:line 23 :tag connSide} side
+    ^{:line 24 :tag (* Endpoint)} endpoint
+    ^{:line 25 :tag (* Config)} config
+    ^{:line 26 :tag connTestHooks} testHooks
+    ^{:line 27 :tag netip/AddrPort} peerAddr
+    ^{:line 28 :tag netip/AddrPort} localAddr
+    ^{:line 29 :tag (* rand/Rand)} prng
+
+    ^{:line 31 :tag (chan any)} msgc
+    ^{:line 32 :tag (chan (struct))} donec ; closed when conn loop exits
+
+    ^{:line 34 :tag packetWriter} w
+    ^{:line 35 :tag (array numberSpaceCount ackState)} acks ; indexed by number space
+    ^{:line 36 :tag lifetimeState} lifetime
+    ^{:line 37 :tag idleState} idle
+    ^{:line 38 :tag connIDState} connIDState
+    ^{:line 39 :tag lossState} loss
+    ^{:line 40 :tag streamsState} streams
+    ^{:line 41 :tag pathState} path
+    ^{:line 42 :tag skipState} skip
+
+
+    ^{:line 45 :tag fixedKeyPair :doc "Packet protection keys, CRYPTO streams, and TLS state.\n"} keysInitial
+    ^{:line 46 :tag fixedKeyPair} keysHandshake
+    ^{:line 47 :tag updatingKeyPair} keysAppData
+    ^{:line 48 :tag (array numberSpaceCount cryptoStream)} crypto
+    ^{:line 49 :tag (* tls/QUICConn)} tls
+
+
+    ^{:line 52 :tag (slice byte) :doc "retryToken is the token provided by the peer in a Retry packet.\n"} retryToken
+
+
+
+    ^{:line 56 :tag sentVal :doc "handshakeConfirmed is set when the handshake is confirmed.\nFor server connections, it tracks sending HANDSHAKE_DONE.\n"} handshakeConfirmed
+
+    ^{:line 58 :tag int8} peerAckDelayExponent ; -1 when unknown
+
+
+    ^{:line 61 :tag numberSpace :doc "Tests only: Send a PING in a specific number space.\n"} testSendPingSpace
+    ^{:line 62 :tag sentVal} testSendPing
+
+    ^{:line 64 :tag (* slog/Logger)} log))
+
+
+
+(go/type connTestHooks "connTestHooks override conn behavior in tests.\n" (interface
+
+    (^{:doc "init is called after a conn is created.\n"} init [^bool first])
+
+
+    (^{:doc "handleTLSEvent is called with each TLS event.\n"} handleTLSEvent [tls/QUICEvent])
+
+
+
+    (^{:doc "newConnID is called to generate a new connection ID.\nPermits tests to generate consistent connection IDs rather than random ones.\n"} newConnID [^int64 seq] :results [(slice byte) error])))
+
+
+
+(go/type newServerConnIDs "newServerConnIDs is connection IDs associated with a new server connection.\n" (struct
+    ^{:line 82 :tag (slice byte)} srcConnID ; source from client's current Initial
+    ^{:line 83 :tag (slice byte)} dstConnID ; destination from client's current Initial
+    ^{:line 84 :tag (slice byte)} originalDstConnID ; destination from client's first Initial
+    ^{:line 85 :tag (slice byte)} retrySrcConnID)) ; source from server's Retry
+
+
+^{:go/end 172} (go/func newConn [^time/Time now ^connSide side ^newServerConnIDs cids ^string peerHostname ^netip/AddrPort peerAddr ^{:tag (* Config)} config ^{:tag (* Endpoint)} e] :results [^{:tag (* Conn)} conn ^error _]
+  (let [c (addr ^{:go/breaks [2 4 6 8 10 12]} (lit Conn
+          :side side
+          :endpoint e
+          :config config
+          :peerAddr (unmapAddrPort peerAddr)
+          :donec (make (chan (struct)))
+          :peerAckDelayExponent -1))]
+
+    (defer (^{:go/end 104} (fn []
+          ;; If we hit an error in newConn, close donec so tests don't get stuck waiting for it.
+          ;; This is only relevant if we've got a bug, but it makes tracking that bug down
+          ;; much easier.
+          (when (== conn nil)
+            (close (.-donec c))))))
+
+
+
+    ;; A one-element buffer allows us to wake a Conn's event loop as a
+    ;; non-blocking operation.
+    (set! (.-msgc c) (make (chan any) 1))
+
+    (when (!= (.-testHooks e) nil)
+      (.newConn (.-testHooks e) c cids))
+
+
+    ;; initialConnID is the connection ID used to generate Initial packet protection keys.
+    (let [^{:tag (slice byte)} initialConnID (zero (slice byte))]
+      (if (== (.-side c) clientSide) (do
+          (when [err (.initClient (.-connIDState c) c)] (!= err nil)
+            (return nil err))
+
+          (set! (values initialConnID _) (.dstConnID (.-connIDState c))))
+        (do
+          (set! initialConnID (.-originalDstConnID cids))
+          (when (!= (.-retrySrcConnID cids) nil)
+            (set! initialConnID (.-retrySrcConnID cids)))
+
+          (when [err (.initServer (.-connIDState c) c cids)] (!= err nil)
+            (return nil err))))
+
+
+
+      ;; A per-conn ChaCha8 PRNG is probably more than we need,
+      ;; but at least it's fairly small.
+      (let [^{:tag (array 32 byte)} seed (zero (array 32 byte))]
+        (when [(values _ err) (cryptorand/Read (subslice seed))] (!= err nil)
+          (panic err))
+
+        (set! (.-prng c) (rand/New (rand/NewChaCha8 seed)))
+
+        ;; TODO: PMTU discovery.
+        (.logConnectionStarted c (.-originalDstConnID cids) peerAddr)
+        (.init (.-keysAppData c))
+        (.init (.-loss c) (.-side c) smallestMaxDatagramSize now)
+        (.streamsInit c)
+        (.lifetimeInit c)
+        (.restartIdleTimer c now)
+        (.init (.-skip c) c)
+
+        (when [err (.startTLS c now initialConnID peerHostname ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26 28]} (lit transportParameters
+                :initialSrcConnID (.srcConnID (.-connIDState c))
+                :originalDstConnID (.-originalDstConnID cids)
+                :retrySrcConnID (.-retrySrcConnID cids)
+                :ackDelayExponent ackDelayExponent
+                :maxUDPPayloadSize maxUDPPayloadSize
+                :maxAckDelay maxAckDelay
+                :disableActiveMigration true
+                :initialMaxData (.maxConnReadBufferSize config)
+                :initialMaxStreamDataBidiLocal (.maxStreamReadBufferSize config)
+                :initialMaxStreamDataBidiRemote (.maxStreamReadBufferSize config)
+                :initialMaxStreamDataUni (.maxStreamReadBufferSize config)
+                :initialMaxStreamsBidi (.-max (aget (.-remoteLimit (.-streams c)) bidiStream))
+                :initialMaxStreamsUni (.-max (aget (.-remoteLimit (.-streams c)) uniStream))
+                :activeConnIDLimit activeConnIDLimit))]
+          (!= err nil)
+          (return nil err))
+
+
+        (when (!= (.-testHooks c) nil)
+          (.init (.-testHooks c) true))
+
+        (go (.loop c now))
+        (return c nil)))))
+
+
+^{:go/end 176} (go/method String ^string [^{:tag (* Conn)} c]
+  (fmt/Sprintf "quic.Conn(%v,->%v)" (.-side c) (.-peerAddr c)))
+
+
+
+^{:go/end 181} (go/method LocalAddr "LocalAddr returns the local network address, if known.\n" ^netip/AddrPort [^{:tag (* Conn)} c]
+  (.-localAddr c))
+
+
+
+^{:go/end 186} (go/method RemoteAddr "RemoteAddr returns the remote network address, if known.\n" ^netip/AddrPort [^{:tag (* Conn)} c]
+  (.-peerAddr c))
+
+
+
+^{:go/end 191} (go/method ConnectionState "ConnectionState returns basic TLS details about the connection.\n" ^tls/ConnectionState [^{:tag (* Conn)} c]
+  (.ConnectionState (.-tls c)))
+
+
+
+
+^{:go/end 218} (go/method confirmHandshake "confirmHandshake is called when the handshake is confirmed.\nhttps://www.rfc-editor.org/rfc/rfc9001#section-4.1.2\n" [^{:tag (* Conn)} c ^time/Time now]
+  ;; If handshakeConfirmed is unset, the handshake is not confirmed.
+  ;; If it is unsent, the handshake is confirmed and we need to send a HANDSHAKE_DONE.
+  ;; If it is sent, we have sent a HANDSHAKE_DONE.
+  ;; If it is received, the handshake is confirmed and we do not need to send anything.
+  (when (.isSet (.-handshakeConfirmed c))
+    (return)) ; already confirmed
+
+  (if (== (.-side c) serverSide) (do
+      ;; When the server confirms the handshake, it sends a HANDSHAKE_DONE.
+      (.setUnsent (.-handshakeConfirmed c))
+      (.serverConnEstablished (.-endpoint c) c))
+
+    ;; The client never sends a HANDSHAKE_DONE, so we set handshakeConfirmed
+    ;; to the received state, indicating that the handshake is confirmed and we
+    ;; don't need to send anything.
+    (.setReceived (.-handshakeConfirmed c)))
+
+  (.restartIdleTimer c now)
+  (.confirmHandshake (.-loss c))
+  ;; "An endpoint MUST discard its Handshake keys when the TLS handshake is confirmed"
+  ;; https://www.rfc-editor.org/rfc/rfc9001#section-4.9.2-1
+  (.discardKeys c now handshakeSpace))
+
+
+
+
+^{:go/end 233} (go/method discardKeys "discardKeys discards unused packet protection keys.\nhttps://www.rfc-editor.org/rfc/rfc9001#section-4.9\n" [^{:tag (* Conn)} c ^time/Time now ^numberSpace space]
+  (when [err (.discardKeys (aget (.-crypto c) space))] (!= err nil)
+    (.abort c now err))
+
+  (switch space
+    (case [initialSpace]
+      (.discard (.-keysInitial c)))
+    (case [handshakeSpace]
+      (.discard (.-keysHandshake c))))
+
+  (.discardKeys (.-loss c) now (.-log c) space))
+
+
+
+^{:go/end 269} (go/method receiveTransportParameters "receiveTransportParameters applies transport parameters sent by the peer.\n" ^error [^{:tag (* Conn)} c ^transportParameters p]
+  ^{:go/breaks [[14 268]]} (let [isRetry (!= (.-retryToken c) nil)]
+    (when [err (.validateTransportParameters (.-connIDState c) c isRetry p)] (!= err nil)
+      (return err))
+
+    (.setMaxData (.-outflow (.-streams c)) (.-initialMaxData p))
+    (.setMax (aget (.-localLimit (.-streams c)) bidiStream) (.-initialMaxStreamsBidi p))
+    (.setMax (aget (.-localLimit (.-streams c)) uniStream) (.-initialMaxStreamsUni p))
+    (set! (.-peerInitialMaxStreamDataBidiLocal (.-streams c)) (.-initialMaxStreamDataBidiLocal p))
+    (aset (.-peerInitialMaxStreamDataRemote (.-streams c)) bidiStream (.-initialMaxStreamDataBidiRemote p))
+    (aset (.-peerInitialMaxStreamDataRemote (.-streams c)) uniStream (.-initialMaxStreamDataUni p))
+    (.receivePeerMaxIdleTimeout c (.-maxIdleTimeout p))
+    (set! (.-peerAckDelayExponent c) (.-ackDelayExponent p))
+    (.setMaxAckDelay (.-loss c) (.-maxAckDelay p))
+    (when [err (.setPeerActiveConnIDLimit (.-connIDState c) c (.-activeConnIDLimit p))] (!= err nil)
+      (return err))
+
+    (when (!= (.-preferredAddrConnID p) nil)
+      (let [
+          ^{:line 255 :tag int64} seq 1 ; sequence number of this conn id is 1
+          ^{:line 256 :tag int64} retirePriorTo 0 ; retire nothing
+          ^{:line 257 :tag (array 16 byte)} resetToken (zero (array 16 byte))]
+
+        (copy (subslice resetToken) (.-preferredAddrResetToken p))
+        (when [err (.handleNewConnID (.-connIDState c) c seq retirePriorTo (.-preferredAddrConnID p) resetToken)] (!= err nil)
+          (return err))))
+
+
+    ;; TODO: stateless_reset_token
+    ;; TODO: max_udp_payload_size
+    ;; TODO: disable_active_migration
+    ;; TODO: preferred_address
+    nil))
+
+
+(go/type
+  ^{:line 272} [timerEvent (struct)]
+  ^{:line 273} [wakeEvent (struct)])
+
+
+(go/var errIdleTimeout (errors/New "idle timeout"))
+
+
+
+
+
+
+
+^{:go/end 362} (go/method loop "loop is the connection main loop.\n\nExcept where otherwise noted, all connection state is owned by the loop goroutine.\n\nThe loop processes messages from c.msgc and timer events.\nOther goroutines may examine or modify conn state by sending the loop funcs to execute.\n" [^{:tag (* Conn)} c ^time/Time now]
+  (defer (.cleanup c))
+
+  ;; The connection timer sends a message to the connection loop on expiry.
+  ;; We need to give it an expiry when creating it, so set the initial timeout to
+  ;; an arbitrary large value. The timer will be reset before this expires (and it
+  ;; isn't a problem if it does anyway).
+  (let [^time/Time lastTimeout (zero time/Time)
+      ^{:line 292} timer (time/AfterFunc (* 1 time/Hour) ^{:go/end 294} (fn []
+          (.sendMsg c (lit timerEvent))))]
+
+    (defer (.Stop timer))
+
+    (while (!= (.-state (.-lifetime c)) connStateDone)
+      (let [sendTimeout (.maybeSend c now) ; try sending
+
+          ;; Note that we only need to consider the ack timer for the App Data space,
+          ;; since the Initial and Handshake spaces always ack immediately.
+          ^{:line 302} nextTimeout sendTimeout]
+        (set! nextTimeout (firstTime nextTimeout (.-nextTimeout (.-idle c))))
+        (if (.isAlive c) (do
+            (set! nextTimeout (firstTime nextTimeout (.-timer (.-loss c))))
+            (set! nextTimeout (firstTime nextTimeout (.-nextAck (aget (.-acks c) appDataSpace)))))
+
+          (set! nextTimeout (firstTime nextTimeout (.-drainEndTime (.-lifetime c)))))
+
+
+        (let [^any m (zero any)]
+          (if (and (not (.IsZero nextTimeout)) (.Before nextTimeout now)) (do
+              ;; A connection timer has expired.
+              (set! now (time/Now))
+              (set! m (lit timerEvent)))
+            (do
+              ;; Reschedule the connection timer if necessary
+              ;; and wait for the next event.
+              (when (and (not (.Equal nextTimeout lastTimeout)) (not (.IsZero nextTimeout)))
+                ;; Resetting a timer created with time.AfterFunc guarantees
+                ;; that the timer will run again. We might generate a spurious
+                ;; timer event under some circumstances, but that's okay.
+                (.Reset timer (.Sub nextTimeout now))
+                (set! lastTimeout nextTimeout))
+
+              (set! m (<! (.-msgc c)))
+              (set! now (time/Now))))
+
+          (type-switch [m m]
+            (case [(* datagram)]
+              (when (not (.handleDatagram c now m))
+                (when (.logEnabled c QLogLevelPacket)
+                  (.logPacketDropped c m)))
+
+
+              (.recycle m))
+            (case [timerEvent]
+              ;; A connection timer has expired.
+              (when (.idleAdvance c now)
+                ;; The connection idle timer has expired.
+                (.abortImmediately c now errIdleTimeout)
+                (return))
+
+              (.advance (.-loss c) now (.-handleAckOrLoss c))
+              (when (.lifetimeAdvance c now)
+                ;; The connection has completed the draining period,
+                ;; and may be shut down.
+                (return)))
+
+            (case [wakeEvent])
+            ;; We're being woken up to try sending some frames.
+            (case [(func [time/Time (* Conn)])]
+              ;; Send a func to msgc to run it on the main Conn goroutine
+              (m now c))
+            (case [(func [^time/Time now ^time/Time next ^{:tag (* Conn)} _])]
+              ;; Send a func to msgc to run it on the main Conn goroutine
+              (m now nextTimeout c))
+            (default
+              (panic (fmt/Sprintf "quic: unrecognized conn message %T" m)))))))))
+
+
+
+
+^{:go/end 369} (go/method cleanup [^{:tag (* Conn)} c]
+  (.logConnectionClosed c)
+  (.connDrained (.-endpoint c) c)
+  (.Close (.-tls c))
+  (close (.-donec c)))
+
+
+
+
+
+^{:go/end 379} (go/method sendMsg "sendMsg sends a message to the conn's loop.\nIt does not wait for the message to be processed.\nThe conn may close before processing the message, in which case it is lost.\n" [^{:tag (* Conn)} c ^any m]
+  (select
+    (case (>! (.-msgc c) m))
+    (case (<! (.-donec c)))))
+
+
+
+
+^{:go/end 387} (go/method wake "wake wakes up the conn's loop.\n" [^{:tag (* Conn)} c]
+  (select
+    (case (>! (.-msgc c) (lit wakeEvent)))
+    (default)))
+
+
+
+
+^{:go/end 403} (go/method runOnLoop "runOnLoop executes a function within the conn's loop goroutine.\n" ^error [^{:tag (* Conn)} c ^context/Context ctx ^{:tag (func [^time/Time now ^{:tag (* Conn)} c])} f]
+  ^{:go/breaks [[4 402]]} (let [donec (make (chan (struct)))
+      ^{:line 392} msg ^{:go/end 395} (fn [^time/Time now ^{:tag (* Conn)} c]
+        (defer (close donec))
+        (f now c))]
+
+    (.sendMsg c msg)
+    (select
+      (case (<! donec))
+      (case (<! (.-donec c))
+        (return (errors/New "quic: connection closed"))))
+
+    nil))
+
+
+^{:go/breaks [[5 419]] :go/end 420} (go/method waitOnDone ^error [^{:tag (* Conn)} c ^context/Context ctx ^{:tag (chan :recv (struct))} ch]
+  ;; Check the channel before the context.
+  ;; We always prefer to return results when available,
+  ;; even when provided with an already-canceled context.
+  (select
+    (case (<! ch)
+      (return nil))
+    (default))
+
+  (select
+    (case (<! ch))
+    (case (<! (.Done ctx))
+      (return (.Err ctx))))
+
+  nil)
+
+
+
+^{:go/end 434} (go/func firstTime "firstTime returns the earliest non-zero time, or zero if both times are zero.\n" ^time/Time [^time/Time a ^time/Time b]
+  (switch
+    (case [(.IsZero a)]
+      (return b))
+    (case [(.IsZero b)]
+      (return a))
+    (case [(.Before a b)]
+      (return a))
+    (default
+      (return b))))

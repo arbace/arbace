@@ -1,0 +1,217 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.path) (go/file "match.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [bytealg "internal/bytealg"]
+    ^{:line 10} [utf8 "unicode/utf8"]])
+
+
+
+(go/var ^{:doc "ErrBadPattern indicates a pattern was malformed.\n"} ErrBadPattern (errors/New "syntax error in pattern"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 88} (go/func Match "Match reports whether name matches the shell pattern.\nThe pattern syntax is:\n\n\tpattern:\n\t\t{ term }\n\tterm:\n\t\t'*'         matches any sequence of non-/ characters\n\t\t'?'         matches any single non-/ character\n\t\t'[' [ '^' ] { character-range } ']'\n\t\t            character class (must be non-empty)\n\t\tc           matches character c (c != '*', '?', '\\\\', '[')\n\t\t'\\\\' c      matches character c\n\n\tcharacter-range:\n\t\tc           matches character c (c != '\\\\', '-', ']')\n\t\t'\\\\' c      matches character c\n\t\tlo '-' hi   matches character c for lo <= c <= hi\n\nMatch requires pattern to match all of name, not just a substring.\nThe only possible returned error is [ErrBadPattern], when pattern\nis malformed.\n" [^string pattern ^string name] :results [^bool matched ^error err]
+  (label :Pattern
+    (while (> (len pattern) 0)
+      (let [^bool star (zero bool)
+          ^{:line 41 :tag string} chunk (zero string)]
+        (set! (values star chunk pattern) (scanChunk pattern))
+        (when (and star (== chunk ""))
+          ;; Trailing * matches rest of string unless it has a /.
+          (return (< (bytealg/IndexByteString name \/) 0) nil))
+
+        ;; Look for match at current position.
+        (let [(values t ok err) (matchChunk chunk name)]
+          ;; if we're the last chunk, make sure we've exhausted the name
+          ;; otherwise we'll give a false result even if we could still match
+          ;; using the star
+          (when (and ok ^:go/paren (or (== (len t) 0) (> (len pattern) 0)))
+            (set! name t)
+            (continue))
+
+          (when (!= err nil)
+            (return false err))
+
+          (when star
+            ;; Look for match skipping i+1 bytes.
+            ;; Cannot skip /.
+            (for [i 0] (and (< i (len name)) (!= (aget name i) \/)) (inc! i)
+              (let [(values t ok err) (matchChunk chunk (subslice name (+ i 1)))]
+                (when ok
+                  ;; if we're the last chunk, make sure we exhausted the name
+                  (when (and (== (len pattern) 0) (> (len t) 0))
+                    (continue))
+
+                  (set! name t)
+                  (continue :Pattern))
+
+                (when (!= err nil)
+                  (return false err)))))
+
+
+
+          ;; Before returning false with no error,
+          ;; check that the remainder of the pattern is syntactically valid.
+          (while (> (len pattern) 0)
+            (set! (values _ chunk pattern) (scanChunk pattern))
+            (when [(values _ _ err) (matchChunk chunk "")] (!= err nil)
+              (return false err)))
+
+
+          (return false nil)))))
+
+  (return (== (len name) 0) nil))
+
+
+
+
+^{:go/end 116} (go/func scanChunk "scanChunk gets the next segment of pattern, which is a non-star string\npossibly preceded by a star.\n" [^string pattern] :results [^bool star ^string chunk ^string rest]
+  (while (and (> (len pattern) 0) (== (aget pattern 0) \*))
+    (set! pattern (subslice pattern 1))
+    (set! star true))
+
+  (let [inrange false]
+    (for [i 0] (< i (len pattern)) (inc! i)
+      (switch (aget pattern i)
+        (case [\\]
+          ;; error check handled in matchChunk: bad pattern.
+          (when (< (+ i 1) (len pattern))
+            (inc! i)))
+
+        (case [\[]
+          (set! inrange true))
+        (case [\]]
+          (set! inrange false))
+        (case [\*]
+          (when (not inrange)
+            (return star (subslice pattern _ i) (subslice pattern i))))))
+
+
+
+    (return star pattern "")))
+
+
+
+
+
+^{:go/end 194} (go/func matchChunk "matchChunk checks whether chunk matches the beginning of s.\nIf so, it returns the remainder of s (after the match).\nChunk is all single-character operators: literals, char classes, and ?.\n" [^string chunk ^string s] :results [^string rest ^bool ok ^error err]
+  ;; failed records whether the match has failed.
+  ;; After the match fails, the loop continues on processing chunk,
+  ;; checking that the pattern is well-formed but no longer reading s.
+  (let [failed false]
+    (while (> (len chunk) 0)
+      (set! failed (or failed (== (len s) 0)))
+      (switch (aget chunk 0)
+        (case [\[]
+          ;; character class
+          (let [^rune r (zero rune)]
+            (when (not failed)
+              (let [^int n (zero int)]
+                (set! (values r n) (utf8/DecodeRuneInString s))
+                (set! s (subslice s n))))
+
+            (set! chunk (subslice chunk 1))
+            ;; possibly negated
+            (let [negated false]
+              (when (and (> (len chunk) 0) (== (aget chunk 0) \^))
+                (set! negated true)
+                (set! chunk (subslice chunk 1)))
+
+              ;; parse all ranges
+              (let [match false
+                  ^{:line 146} nrange 0]
+                (while true
+                  (when (and (> (len chunk) 0) (== (aget chunk 0) \]) (> nrange 0))
+                    (set! chunk (subslice chunk 1))
+                    (break))
+
+                  (let [(values ^rune lo ^rune hi) (zero rune)]
+                    (when [(set! (values lo chunk err) (getEsc chunk))] (!= err nil)
+                      (return "" false err))
+
+                    (set! hi lo)
+                    (when (== (aget chunk 0) \-)
+                      (when [(set! (values hi chunk err) (getEsc (subslice chunk 1)))] (!= err nil)
+                        (return "" false err)))
+
+
+                    (set! match (or match (and (<= lo r) (<= r hi))))
+                    (inc! nrange)))
+
+                (set! failed (or failed (== match negated)))))))
+
+        (case [\?]
+          (when (not failed)
+            (set! failed (== (aget s 0) \/))
+            (let [(values _ n) (utf8/DecodeRuneInString s)]
+              (set! s (subslice s n))))
+
+          (set! chunk (subslice chunk 1)))
+
+        (case [\\]
+          (set! chunk (subslice chunk 1))
+          (when (== (len chunk) 0)
+            (return "" false ErrBadPattern))
+
+          (fallthrough))
+
+        (default
+          (when (not failed)
+            (set! failed (!= (aget chunk 0) (aget s 0)))
+            (set! s (subslice s 1)))
+
+          (set! chunk (subslice chunk 1)))))
+
+
+    (when failed
+      (return "" false nil))
+
+    (return s true nil)))
+
+
+
+^{:go/end 218} (go/func getEsc "getEsc gets a possibly-escaped character from chunk, for a character class.\n" [^string chunk] :results [^rune r ^string nchunk ^error err]
+  (when (or (== (len chunk) 0) (== (aget chunk 0) \-) (== (aget chunk 0) \]))
+    (set! err ErrBadPattern)
+    (return))
+
+  (when (== (aget chunk 0) \\)
+    (set! chunk (subslice chunk 1))
+    (when (== (len chunk) 0)
+      (set! err ErrBadPattern)
+      (return)))
+
+
+  (let [(values ^:assign r n) (utf8/DecodeRuneInString chunk)]
+    (when (and (== r utf8/RuneError) (== n 1))
+      (set! err ErrBadPattern))
+
+    (set! nchunk (subslice chunk n))
+    (when (== (len nchunk) 0)
+      (set! err ErrBadPattern))
+
+    (return)))

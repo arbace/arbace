@@ -1,0 +1,106 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Trace string management.
+
+(in-ns 'go.runtime) (go/file "tracestring.go" :imports [
+
+    ^{:line 9} [tracev2 "internal/trace/tracev2"]])
+
+;; Trace strings.
+
+
+
+
+
+(go/type traceStringTable "traceStringTable is map of string -> unique ID that also manages\nwriting strings out into the trace.\n\nID 0 is reserved for the empty string.\n" (struct
+
+    ^{:line 19 :tag mutex :doc "lock protects buf.\n"} lock
+    ^{:line 20 :tag (* traceBuf)} buf ; string batches to write out to the trace.
+
+
+    ^{:line 23 :tag traceMap :doc "tab is a mapping of string -> unique ID.\n"} tab))
+
+
+
+^{:go/end 43} (go/method put "put adds a string to the table, emits it, and returns a unique ID for it.\n" ^uint64 [^{:tag (* traceStringTable)} t ^uintptr gen ^string s]
+  ;; Truncate the string now to avoid wasting space in the
+  ;; traceMap and to stay within traceRegionAlloc's block size limit.
+  (when (> (len s) tracev2/MaxEventTrailerDataSize)
+    (set! s (subslice s _ tracev2/MaxEventTrailerDataSize)))
+
+  ;; Put the string in the table.
+  (let [ss (stringStructOf (addr s))
+      (values id added) (.put (.-tab t) (.-str ss) (conv uintptr (.-len ss)))]
+    (when added
+      ;; Write the string to the buffer.
+      (systemstack ^{:go/end 40} (fn []
+          (.writeString t gen id s))))
+
+
+    ^{:line 42} id))
+
+
+
+^{:go/end 56} (go/method emit "emit emits a string and creates an ID for it, but doesn't add it to the table. Returns the ID.\n" ^uint64 [^{:tag (* traceStringTable)} t ^uintptr gen ^string s]
+  (when (== (len s) 0)
+    (return 0)) ; Empty strings are implicitly assigned ID 0 already.
+
+  ;; Grab an ID and write the string to the buffer.
+  (let [id (.stealID (.-tab t))]
+    (systemstack ^{:go/end 54} (fn []
+        (.writeString t gen id s)))
+
+    ^{:line 55} id))
+
+
+
+
+
+
+
+^{:go/end 89} (go/method ^:go/systemstack writeString "writeString writes the string to t.buf.\n\nMust run on the systemstack because it acquires t.lock.\n" [^{:tag (* traceStringTable)} t ^uintptr gen ^uint64 id ^string s]
+  ;; Truncate the string if necessary.
+  (when (> (len s) tracev2/MaxEventTrailerDataSize)
+    (set! s (subslice s _ tracev2/MaxEventTrailerDataSize)))
+
+
+  (lock (addr (.-lock t)))
+  (let [w (unsafeTraceWriter gen (.-buf t))
+
+      ;; Ensure we have a place to write to.
+      ^{:line 73 :tag bool} flushed (zero bool)]
+    (set! (values w flushed) (.ensure w (+ 2 (* 2 traceBytesPerNumber) (len s)))) ; /* tracev2.EvStrings + tracev2.EvString + ID + len + string data */
+    (when flushed
+      ;; Annotate the batch as containing strings.
+      ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvStrings)))
+
+
+    ;; Write out the string.
+    ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvString))
+    ^{:go/via [traceBuf]} (.varint w id)
+    ^{:go/via [traceBuf]} (.varint w (conv uint64 (len s)))
+    ^{:go/via [traceBuf]} (.stringData w s)
+
+    ;; Store back buf in case it was updated during ensure.
+    (set! (.-buf t) (.-traceBuf w))
+    (unlock (addr (.-lock t)))))
+
+
+
+
+
+
+^{:go/end 107} (go/method reset "reset clears the string table and flushes any buffers it has.\n\nMust be called only once the caller is certain nothing else will be\nadded to this table.\n" [^{:tag (* traceStringTable)} t ^uintptr gen]
+  (when (!= (.-buf t) nil)
+    (systemstack ^{:go/end 101} (fn []
+        (lock (addr (.-lock trace)))
+        (traceBufFlush (.-buf t) gen)
+        (unlock (addr (.-lock trace)))))
+
+    (set! (.-buf t) nil))
+
+
+  ;; Reset the table.
+  (.reset (.-tab t)))

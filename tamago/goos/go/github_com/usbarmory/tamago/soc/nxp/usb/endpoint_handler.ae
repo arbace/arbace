@@ -1,0 +1,124 @@
+;; USB device mode support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.usb) (go/file "endpoint_handler.go" :imports [
+
+
+    ^{:line 12} [runtime "runtime"]
+    ^{:line 13} [sync "sync"]
+
+    ^{:line 15} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/type endpoint "Endpoint represents a USB 2.0 endpoint.\n" (struct
+    ^{:line 20} sync/Mutex
+
+    ^{:line 22 :tag (* USB)} bus
+    ^{:line 23 :tag (* EndpointDescriptor)} desc
+
+    ^{:line 25 :tag int} n
+    ^{:line 26 :tag int} dir
+
+    ^{:line 28 :tag (slice byte)} res
+    ^{:line 29 :tag error} err))
+
+
+^{:go/end 40} (go/method rx [^{:tag (* endpoint)} ep]
+  (let [^{:tag (slice byte)} buf (zero (slice byte))]
+
+    (set! (values buf (.-err ep)) (.rx (.-bus ep) (.-n ep) (.-res ep)))
+
+    (when (and (== (.-err ep) nil) (!= (len buf) 0))
+      (set! (values (.-res ep) (.-err ep)) ((.-Function (.-desc ep)) buf (.-err ep))))))
+
+
+
+^{:go/end 48} (go/method tx [^{:tag (* endpoint)} ep]
+  (set! (values (.-res ep) (.-err ep)) ((.-Function (.-desc ep)) nil (.-err ep)))
+
+  (when (and (== (.-err ep) nil) (!= (len (.-res ep)) 0))
+    (set! (.-err ep) (.tx (.-bus ep) (.-n ep) (.-res ep)))))
+
+
+
+
+^{:go/end 57} (go/method Init "Init initializes an endpoint.\n" [^{:tag (* endpoint)} ep]
+  (set! (.-n ep) (.Number (.-desc ep)))
+  (set! (.-dir ep) (.Direction (.-desc ep)))
+
+  (.set (.-bus ep) (.-n ep) (.-dir ep) (conv int (.-MaxPacketSize (.-desc ep))) (.-Zero (.-desc ep)) 0)
+  (.enable (.-bus ep) (.-n ep) (.-dir ep) (.TransferType (.-desc ep))))
+
+
+
+^{:go/end 62} (go/method Flush "Flush clears the endpoint receive and transmit buffers.\n" [^{:tag (* endpoint)} ep]
+  (reg/Set (.-flush (.-bus ep)) (+ (* (.-dir ep) 16) (.-n ep))))
+
+
+
+^{:go/end 99} (go/method Start "Start initializes and runs an USB endpoint.\n" [^{:tag (* endpoint)} ep]
+  (when (== (.-Function (.-desc ep)) nil)
+    (return))
+
+
+  ^{:go/via [Mutex]} (.Lock ep)
+
+  (defer (^{:go/end 76} (fn []
+        (.Flush ep)
+        (.Done (.-wg (.-bus ep)))
+        ^{:go/via [Mutex]} (.Unlock ep))))
+
+
+  (.Init ep)
+
+  (while true
+    (runtime/Gosched)
+
+    (if (== (.-dir ep) OUT)
+      (.rx ep)
+
+      (.tx ep))
+
+
+    (when (!= (.-err ep) nil)
+      (.stall (.-bus ep) (.-n ep) (.-dir ep)))
+
+
+    (select
+      (case (<! (.-exit (.-bus ep)))
+        (return))
+      (default))))
+
+
+
+
+^{:go/end 128} (go/method startEndpoints [^{:tag (* USB)} hw]
+  (when (== (.-ConfigurationValue (.-Device hw)) 0)
+    (return))
+
+
+  (set! (.-exit hw) (make (chan (struct))))
+
+  (range [_ conf (.-Configurations (.-Device hw))]
+    (when (!= (.-ConfigurationValue (.-Device hw)) (.-ConfigurationValue conf))
+      (continue))
+
+
+    (range [_ iface (.-Interfaces conf)]
+      (range [_ desc (.-Endpoints iface)]
+        (let [ep (addr ^{:go/breaks [2 4]} (lit endpoint
+                :bus hw
+                :desc desc))]
+
+
+          (.Add (.-wg hw) 1)
+
+          (go (^{:go/end 124} (fn [^{:tag (* endpoint)} ep]
+                (.Start ep))
+              ^{:line 124} ep)))))))

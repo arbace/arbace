@@ -1,0 +1,457 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.text.unicode.norm) (go/file "iter.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [utf8 "unicode/utf8"]])
+
+
+
+
+(go/const ^{:val 128 :doc "MaxSegmentSize is the maximum size of a byte buffer needed to consider any\nsequence of starter and non-starter runes for the purpose of normalization.\n"} MaxSegmentSize maxByteBufferSize)
+
+
+
+(go/type Iter "An Iter iterates over a string or byte slice, while normalizing it\nto a given Form.\n" (struct
+    ^{:line 19 :tag reorderBuffer} rb
+    ^{:line 20 :tag (array maxByteBufferSize byte)} buf
+    ^{:line 21 :tag Properties} info ; first character saved from previous iteration
+    ^{:line 22 :tag iterFunc} next ; implementation of next depends on form
+    ^{:line 23 :tag iterFunc} asciiF
+
+    ^{:line 25 :tag int} p ; current position in input source
+    ^{:line 26 :tag (slice byte)} multiSeg)) ; remainder of multi-segment decomposition
+
+
+(go/type iterFunc (func [(* Iter)] [(slice byte)]))
+
+
+^{:go/end 45} (go/method Init "Init initializes i to iterate over src after normalizing it to Form f.\n" [^{:tag (* Iter)} i ^Form f ^{:tag (slice byte)} src]
+  (set! (.-p i) 0)
+  (when (== (len src) 0)
+    (.setDone i)
+    (set! (.-nsrc (.-rb i)) 0)
+    (return))
+
+  (set! (.-multiSeg i) nil)
+  (.init (.-rb i) f src)
+  (set! (.-next i) (.-nextMain (.-f (.-rb i))))
+  (set! (.-asciiF i) nextASCIIBytes)
+  (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+  (.first (.-ss (.-rb i)) (.-info i)))
+
+
+
+^{:go/end 61} (go/method InitString "InitString initializes i to iterate over src after normalizing it to Form f.\n" [^{:tag (* Iter)} i ^Form f ^string src]
+  (set! (.-p i) 0)
+  (when (== (len src) 0)
+    (.setDone i)
+    (set! (.-nsrc (.-rb i)) 0)
+    (return))
+
+  (set! (.-multiSeg i) nil)
+  (.initString (.-rb i) f src)
+  (set! (.-next i) (.-nextMain (.-f (.-rb i))))
+  (set! (.-asciiF i) nextASCIIString)
+  (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+  (.first (.-ss (.-rb i)) (.-info i)))
+
+
+
+
+
+^{:go/end 91} (go/method Seek "Seek sets the segment to be returned by the next call to Next to start\nat position p.  It is the responsibility of the caller to set p to the\nstart of a segment.\n" [^{:tag (* Iter)} i ^int64 offset ^int whence] :results [int64 error]
+  (let [^int64 abs (zero int64)]
+    (switch whence
+      (case [0]
+        (set! abs offset))
+      (case [1]
+        (set! abs (+ (conv int64 (.-p i)) offset)))
+      (case [2]
+        (set! abs (+ (conv int64 (.-nsrc (.-rb i))) offset)))
+      (default
+        (return 0 (fmt/Errorf "norm: invalid whence"))))
+
+    (when (< abs 0)
+      (return 0 (fmt/Errorf "norm: negative position")))
+
+    (when (>= (conv int abs) (.-nsrc (.-rb i)))
+      (.setDone i)
+      (return (conv int64 (.-p i)) nil))
+
+    (set! (.-p i) (conv int abs))
+    (set! (.-multiSeg i) nil)
+    (set! (.-next i) (.-nextMain (.-f (.-rb i))))
+    (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+    (.first (.-ss (.-rb i)) (.-info i))
+    (return abs nil)))
+
+
+
+
+
+
+^{:go/end 102} (go/method returnSlice "returnSlice returns a slice of the underlying input type as a byte slice.\nIf the underlying is of type []byte, it will simply return a slice.\nIf the underlying is of type string, it will copy the slice to the buffer\nand return that.\n" ^{:tag (slice byte)} [^{:tag (* Iter)} i ^int a ^int b]
+  (when (== (.-bytes (.-src (.-rb i))) nil)
+    (return (subslice (.-buf i) _ (copy (subslice (.-buf i)) (subslice (.-str (.-src (.-rb i))) a b)))))
+
+  (subslice (.-bytes (.-src (.-rb i))) a b))
+
+
+
+^{:go/end 107} (go/method Pos "Pos returns the byte position at which the next call to Next will commence processing.\n" ^int [^{:tag (* Iter)} i]
+  (.-p i))
+
+
+^{:go/end 112} (go/method setDone [^{:tag (* Iter)} i]
+  (set! (.-next i) nextDone)
+  (set! (.-p i) (.-nsrc (.-rb i))))
+
+
+
+^{:go/end 117} (go/method Done "Done returns true if there is no more input to process.\n" ^bool [^{:tag (* Iter)} i]
+  (>= (.-p i) (.-nsrc (.-rb i))))
+
+
+
+
+
+
+
+^{:go/end 126} (go/method Next "Next returns f(i.input[i.Pos():n]), where n is a boundary of i.input.\nFor any input a and b for which f(a) == f(b), subsequent calls\nto Next will return the same segments.\nModifying runes are grouped together with the preceding starter, if such a starter exists.\nAlthough not guaranteed, n will typically be the smallest possible n.\n" ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  ((.-next i) i))
+
+
+^{:go/end 143} (go/func nextASCIIBytes ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  (let [p (+ (.-p i) 1)]
+    (when (>= p (.-nsrc (.-rb i)))
+      (let [p0 (.-p i)]
+        (.setDone i)
+        (return (subslice (.-bytes (.-src (.-rb i))) p0 p))))
+
+    (when (< (aget (.-bytes (.-src (.-rb i))) p) utf8/RuneSelf)
+      (let [p0 (.-p i)]
+        (set! (.-p i) p)
+        (return (subslice (.-bytes (.-src (.-rb i))) p0 p))))
+
+    (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+    (set! (.-next i) (.-nextMain (.-f (.-rb i))))
+    ((.-next i) i)))
+
+
+^{:go/end 160} (go/func nextASCIIString ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  (let [p (+ (.-p i) 1)]
+    (when (>= p (.-nsrc (.-rb i)))
+      (aset (.-buf i) 0 (aget (.-str (.-src (.-rb i))) (.-p i)))
+      (.setDone i)
+      (return (subslice (.-buf i) _ 1)))
+
+    (when (< (aget (.-str (.-src (.-rb i))) p) utf8/RuneSelf)
+      (aset (.-buf i) 0 (aget (.-str (.-src (.-rb i))) (.-p i)))
+      (set! (.-p i) p)
+      (return (subslice (.-buf i) _ 1)))
+
+    (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+    (set! (.-next i) (.-nextMain (.-f (.-rb i))))
+    ((.-next i) i)))
+
+
+^{:go/end 175} (go/func nextHangul ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  (let [p (.-p i)
+      ^{:line 164} next (+ p hangulUTF8Size)]
+    (cond (>= next (.-nsrc (.-rb i)))
+      (.setDone i)
+      (== (.hangul (.-src (.-rb i)) next) 0) (do
+        (.next (.-ss (.-rb i)) (.-info i))
+        (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+        (set! (.-next i) (.-nextMain (.-f (.-rb i))))
+        (return ((.-next i) i))))
+
+    (set! (.-p i) next)
+    (subslice (.-buf i) _ (decomposeHangul (subslice (.-buf i)) (.hangul (.-src (.-rb i)) p)))))
+
+
+^{:go/breaks [3] :go/end 179} (go/func nextDone ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  nil)
+
+
+
+
+^{:go/end 200} (go/func nextMulti "nextMulti is used for iterating over multi-segment decompositions\nfor decomposing normal forms.\n" ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  (let [j 0
+      ^{:line 185} d (.-multiSeg i)]
+    ;; skip first rune
+    (for [(set! j 1)] (and (< j (len d)) (not (utf8/RuneStart (aget d j)))) (inc! j))
+
+    (while (< j (len d))
+      (let [info ((.-info (.-f (.-rb i))) (lit input :bytes d) j)]
+        (when (.BoundaryBefore info)
+          (set! (.-multiSeg i) (subslice d j))
+          (return (subslice d _ j)))
+
+        (set! j + (conv int (.-size info)))))
+
+    ;; treat last segment as normal decomposition
+    (set! (.-next i) (.-nextMain (.-f (.-rb i))))
+    ((.-next i) i)))
+
+
+
+
+^{:go/end 222} (go/func nextMultiNorm "nextMultiNorm is used for iterating over multi-segment decompositions\nfor composing normal forms.\n" ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  (let [j 0
+      ^{:line 206} d (.-multiSeg i)]
+    (while (< j (len d))
+      (let [info ((.-info (.-f (.-rb i))) (lit input :bytes d) j)]
+        (when (.BoundaryBefore info)
+          (.compose (.-rb i))
+          (let [seg (subslice (.-buf i) _ (.flushCopy (.-rb i) (subslice (.-buf i))))]
+            (.insertUnsafe (.-rb i) (lit input :bytes d) j info)
+            (set! (.-multiSeg i) (subslice d (+ j (conv int (.-size info)))))
+            (return seg)))
+
+        (.insertUnsafe (.-rb i) (lit input :bytes d) j info)
+        (set! j + (conv int (.-size info)))))
+
+    (set! (.-multiSeg i) nil)
+    (set! (.-next i) nextComposed)
+    (doNormComposed i)))
+
+
+
+^{:go/end 339} (go/func nextDecomposed "nextDecomposed is the implementation of Next for forms NFD and NFKD.\n" [^{:tag (* Iter)} i] :results [^{:tag (slice byte)} next]
+  (let [outp 0
+      (values inCopyStart outCopyStart) (values (.-p i) 0)]
+    (while true
+      (if [sz (conv int (.-size (.-info i)))] (<= sz 1) (do
+          (set! (.-ss (.-rb i)) 0)
+          (let [p (.-p i)]
+            (inc! (.-p i)) ; ASCII or illegal byte.  Either way, advance by 1.
+            (cond (>= (.-p i) (.-nsrc (.-rb i))) (do
+                (.setDone i)
+                (return (.returnSlice i p (.-p i))))
+              (< (._byte (.-src (.-rb i)) (.-p i)) utf8/RuneSelf) (do
+                (set! (.-next i) (.-asciiF i))
+                (return (.returnSlice i p (.-p i)))))
+
+            (inc! outp)))
+        (if [d (.Decomposition (.-info i))] (!= d nil)
+          ;; Note: If leading CCC != 0, then len(d) == 2 and last is also non-zero.
+          ;; Case 1: there is a leftover to copy.  In this case the decomposition
+          ;; must begin with a modifier and should always be appended.
+          ;; Case 2: no leftover. Simply return d if followed by a ccc == 0 value.
+          (let [p (+ outp (len d))]
+            (cond (> outp 0) (do
+                (.copySlice (.-src (.-rb i)) (subslice (.-buf i) outCopyStart) inCopyStart (.-p i))
+                ;; TODO: this condition should not be possible, but we leave it
+                ;; in for defensive purposes.
+                (when (> p (len (.-buf i)))
+                  (return (subslice (.-buf i) _ outp))))
+
+              (.multiSegment (.-info i)) (do
+                ;; outp must be 0 as multi-segment decompositions always
+                ;; start a new segment.
+                (when (== (.-multiSeg i) nil)
+                  (set! (.-multiSeg i) d)
+                  (set! (.-next i) nextMulti)
+                  (return (nextMulti i)))
+
+                ;; We are in the last segment.  Treat as normal decomposition.
+                (set! d (.-multiSeg i))
+                (set! (.-multiSeg i) nil)
+                (set! p (len d))))
+
+            (let [prevCC (.-tccc (.-info i))]
+              (if [(set! (.-p i) + sz)] (>= (.-p i) (.-nsrc (.-rb i))) (do
+                  (.setDone i)
+                  (set! (.-info i) (lit Properties))) ; Force BoundaryBefore to succeed.
+
+                (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i))))
+
+              (switch (.next (.-ss (.-rb i)) (.-info i))
+                (case [ssOverflow]
+                  (set! (.-next i) nextCGJDecompose)
+                  (fallthrough))
+                (case [ssStarter]
+                  (when (> outp 0)
+                    (copy (subslice (.-buf i) outp) d)
+                    (return (subslice (.-buf i) _ p)))
+
+                  (return d)))
+
+              (copy (subslice (.-buf i) outp) d)
+              (set! outp p)
+              (set! (values inCopyStart outCopyStart) (values (.-p i) outp))
+              (when (< (.-ccc (.-info i)) prevCC)
+                (goto :doNorm))
+
+              (continue)))
+          (if [r (.hangul (.-src (.-rb i)) (.-p i))] (!= r 0) (do
+              (set! outp (decomposeHangul (subslice (.-buf i)) r))
+              (set! (.-p i) + hangulUTF8Size)
+              (set! (values inCopyStart outCopyStart) (values (.-p i) outp))
+              (cond (>= (.-p i) (.-nsrc (.-rb i))) (do
+                  (.setDone i)
+                  (break))
+                (!= (.hangul (.-src (.-rb i)) (.-p i)) 0) (do
+                  (set! (.-next i) nextHangul)
+                  (return (subslice (.-buf i) _ outp)))))
+
+
+            (let [p (+ outp sz)]
+              (when (> p (len (.-buf i)))
+                (break))
+
+              (set! outp p)
+              (set! (.-p i) + sz)))))
+
+      (when (>= (.-p i) (.-nsrc (.-rb i)))
+        (.setDone i)
+        (break))
+
+      (let [prevCC (.-tccc (.-info i))]
+        (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+        (if [v (.next (.-ss (.-rb i)) (.-info i))] (== v ssStarter)
+          (break)
+          (when (== v ssOverflow)
+            (set! (.-next i) nextCGJDecompose)
+            (break)))
+
+        (when (< (.-ccc (.-info i)) prevCC)
+          (goto :doNorm))))
+
+
+    (cond (== outCopyStart 0)
+      (return (.returnSlice i inCopyStart (.-p i)))
+      (< inCopyStart (.-p i))
+      (.copySlice (.-src (.-rb i)) (subslice (.-buf i) outCopyStart) inCopyStart (.-p i)))
+
+    (return (subslice (.-buf i) _ outp))
+    (label :doNorm
+      ;; Insert what we have decomposed so far in the reorderBuffer.
+      ;; As we will only reorder, there will always be enough room.
+      (.copySlice (.-src (.-rb i)) (subslice (.-buf i) outCopyStart) inCopyStart (.-p i)))
+    (.insertDecomposed (.-rb i) (subslice (.-buf i) 0 outp))
+    (doNormDecomposed i)))
+
+
+^{:go/end 359} (go/func doNormDecomposed ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  (while true
+    (.insertUnsafe (.-rb i) (.-src (.-rb i)) (.-p i) (.-info i))
+    (when [(set! (.-p i) + (conv int (.-size (.-info i))))] (>= (.-p i) (.-nsrc (.-rb i)))
+      (.setDone i)
+      (break))
+
+    (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+    (when (== (.-ccc (.-info i)) 0)
+      (break))
+
+    (when [s (.next (.-ss (.-rb i)) (.-info i))] (== s ssOverflow)
+      (set! (.-next i) nextCGJDecompose)
+      (break)))
+
+
+  ;; new segment or too many combining characters: exit normalization
+  (subslice (.-buf i) _ (.flushCopy (.-rb i) (subslice (.-buf i)))))
+
+
+^{:go/end 368} (go/func nextCGJDecompose ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  (set! (.-ss (.-rb i)) 0)
+  (.insertCGJ (.-rb i))
+  (set! (.-next i) nextDecomposed)
+  (.first (.-ss (.-rb i)) (.-info i))
+  (let [buf (doNormDecomposed i)]
+    ^{:line 367} buf))
+
+
+
+^{:go/end 425} (go/func nextComposed "nextComposed is the implementation of Next for forms NFC and NFKC.\n" ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  (let [(values outp startp) (values 0 (.-p i))
+      ^{:line 373 :tag uint8} prevCC (zero uint8)]
+    (while true
+      (when (not (.isYesC (.-info i)))
+        (goto :doNorm))
+
+      (set! prevCC (.-tccc (.-info i)))
+      (let [sz (conv int (.-size (.-info i)))]
+        (when (== sz 0)
+          (set! sz 1)) ; illegal rune: copy byte-by-byte
+
+        (let [p (+ outp sz)]
+          (when (> p (len (.-buf i)))
+            (break))
+
+          (set! outp p)
+          (set! (.-p i) + sz)
+          (cond (>= (.-p i) (.-nsrc (.-rb i))) (do
+              (.setDone i)
+              (break))
+            (< (._byte (.-src (.-rb i)) (.-p i)) utf8/RuneSelf) (do
+              (set! (.-ss (.-rb i)) 0)
+              (set! (.-next i) (.-asciiF i))
+              (break)))
+
+          (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+          (if [v (.next (.-ss (.-rb i)) (.-info i))] (== v ssStarter)
+            (break)
+            (when (== v ssOverflow)
+              (set! (.-next i) nextCGJCompose)
+              (break)))
+
+          (when (< (.-ccc (.-info i)) prevCC)
+            (goto :doNorm)))))
+
+
+    (return (.returnSlice i startp (.-p i)))
+    (label :doNorm
+      ;; reset to start position
+      (set! (.-p i) startp))
+    (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+    (.first (.-ss (.-rb i)) (.-info i))
+    (when (.multiSegment (.-info i))
+      (let [d (.Decomposition (.-info i))
+          ^{:line 416} info ((.-info (.-f (.-rb i))) (lit input :bytes d) 0)]
+        (.insertUnsafe (.-rb i) (lit input :bytes d) 0 info)
+        (set! (.-multiSeg i) (subslice d (conv int (.-size info))))
+        (set! (.-next i) nextMultiNorm)
+        (return (nextMultiNorm i))))
+
+    (.first (.-ss (.-rb i)) (.-info i))
+    (.insertUnsafe (.-rb i) (.-src (.-rb i)) (.-p i) (.-info i))
+    (doNormComposed i)))
+
+
+^{:go/end 446} (go/func doNormComposed ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  ;; First rune should already be inserted.
+  (while true
+    (when [(set! (.-p i) + (conv int (.-size (.-info i))))] (>= (.-p i) (.-nsrc (.-rb i)))
+      (.setDone i)
+      (break))
+
+    (set! (.-info i) ((.-info (.-f (.-rb i))) (.-src (.-rb i)) (.-p i)))
+    (if [s (.next (.-ss (.-rb i)) (.-info i))] (== s ssStarter)
+      (break)
+      (when (== s ssOverflow)
+        (set! (.-next i) nextCGJCompose)
+        (break)))
+
+    (.insertUnsafe (.-rb i) (.-src (.-rb i)) (.-p i) (.-info i)))
+
+  (.compose (.-rb i))
+  (let [seg (subslice (.-buf i) _ (.flushCopy (.-rb i) (subslice (.-buf i))))]
+    ^{:line 445} seg))
+
+
+^{:go/end 458} (go/func nextCGJCompose ^{:tag (slice byte)} [^{:tag (* Iter)} i]
+  (set! (.-ss (.-rb i)) 0) ; instead of first
+  (.insertCGJ (.-rb i))
+  (set! (.-next i) nextComposed)
+  ;; Note that we treat any rune with nLeadingNonStarters > 0 as a non-starter,
+  ;; even if they are not. This is particularly dubious for U+FF9E and UFF9A.
+  ;; If we ever change that, insert a check here.
+  (.first (.-ss (.-rb i)) (.-info i))
+  (.insertUnsafe (.-rb i) (.-src (.-rb i)) (.-p i) (.-info i))
+  (doNormComposed i))

@@ -1,0 +1,224 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "pkcs8.go" :imports [
+
+
+    ^{:line 8} [ecdh "crypto/ecdh"]
+    ^{:line 9} [ecdsa "crypto/ecdsa"]
+    ^{:line 10} [ed25519 "crypto/ed25519"]
+    ^{:line 11} [mldsa "crypto/mldsa"]
+    ^{:line 12} [rsa "crypto/rsa"]
+    ^{:line 13} [pkix "crypto/x509/pkix"]
+    ^{:line 14} [asn1 "encoding/asn1"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [fmt "fmt"]])
+
+
+
+
+
+(go/type pkcs8 "pkcs8 reflects an ASN.1, PKCS #8 PrivateKey. See\nftp://ftp.rsasecurity.com/pub/pkcs/pkcs-8/pkcs-8v1_2.asn\nand RFC 5208.\n" (struct
+    ^{:line 23 :tag int} Version
+    ^{:line 24 :tag pkix/AlgorithmIdentifier} Algo
+    ^{:line 25 :tag (slice byte)} PrivateKey))
+;; optional attributes omitted.
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 126} (go/func ParsePKCS8PrivateKey "ParsePKCS8PrivateKey parses an unencrypted private key in PKCS #8, ASN.1 DER form.\n\nIt returns a *[rsa.PrivateKey], an *[ecdsa.PrivateKey], an [ed25519.PrivateKey] (not\na pointer), a *[mldsa.PrivateKey], or an *[ecdh.PrivateKey] (for X25519).\nMore types might be supported in the future.\n\nThis kind of key is commonly encoded in PEM blocks of type \"PRIVATE KEY\".\n\nBefore Go 1.24, the CRT parameters of RSA keys were ignored and recomputed.\nTo restore the old behavior, use the GODEBUG=x509rsacrt=0 environment variable.\n" [^{:tag (slice byte)} der] :results [^any key ^error err]
+  (let [^pkcs8 privKey (zero pkcs8)]
+    (when [(values _ err) (asn1/Unmarshal der (addr privKey))] (!= err nil)
+      (when [(values _ err) (asn1/Unmarshal der (addr (lit ecPrivateKey)))] (== err nil)
+        (return nil (errors/New "x509: failed to parse private key (use ParseECPrivateKey instead for this key format)")))
+
+      (when [(values _ err) (asn1/Unmarshal der (addr (lit pkcs1PrivateKey)))] (== err nil)
+        (return nil (errors/New "x509: failed to parse private key (use ParsePKCS1PrivateKey instead for this key format)")))
+
+      (return nil err))
+
+    (switch
+      (case [(.Equal (.-Algorithm (.-Algo privKey)) oidPublicKeyRSA)]
+        (set! (values key err) (ParsePKCS1PrivateKey (.-PrivateKey privKey)))
+        (when (!= err nil)
+          (return nil (errors/New (+ "x509: failed to parse RSA private key embedded in PKCS#8: " (.Error err)))))
+
+        (return key nil))
+
+      (case [(.Equal (.-Algorithm (.-Algo privKey)) oidPublicKeyECDSA)]
+        (let [bytes (.-FullBytes (.-Parameters (.-Algo privKey)))
+            ^{:line 60} namedCurveOID (new asn1/ObjectIdentifier)]
+          (when [(values _ err) (asn1/Unmarshal bytes namedCurveOID)] (!= err nil)
+            (set! namedCurveOID nil))
+
+          (set! (values key err) (parseECPrivateKey namedCurveOID (.-PrivateKey privKey)))
+          (when (!= err nil)
+            (return nil (errors/New (+ "x509: failed to parse EC private key embedded in PKCS#8: " (.Error err)))))
+
+          (return key nil)))
+
+      (case [(.Equal (.-Algorithm (.-Algo privKey)) oidPublicKeyEd25519)]
+        (when [l (len (.-FullBytes (.-Parameters (.-Algo privKey))))] (!= l 0)
+          (return nil (errors/New "x509: invalid Ed25519 private key parameters")))
+
+        (let [^{:tag (slice byte)} curvePrivateKey (zero (slice byte))]
+          (when [(values _ err) (asn1/Unmarshal (.-PrivateKey privKey) (addr curvePrivateKey))] (!= err nil)
+            (return nil (fmt/Errorf "x509: invalid Ed25519 private key: %v" err)))
+
+          (when [l (len curvePrivateKey)] (!= l ed25519/SeedSize)
+            (return nil (fmt/Errorf "x509: invalid Ed25519 private key length: %d" l)))
+
+          (return (ed25519/NewKeyFromSeed curvePrivateKey) nil)))
+
+      (case [(.Equal (.-Algorithm (.-Algo privKey)) oidPublicKeyMLDSA44)
+          (.Equal (.-Algorithm (.-Algo privKey)) oidPublicKeyMLDSA65)
+          (.Equal (.-Algorithm (.-Algo privKey)) oidPublicKeyMLDSA87)]
+        (when [l (len (.-FullBytes (.-Parameters (.-Algo privKey))))] (!= l 0)
+          (return nil (errors/New "x509: invalid ML-DSA private key parameters")))
+
+        (when [l (len (.-PrivateKey privKey))] (== l 0)
+          (return nil (fmt/Errorf "x509: invalid ML-DSA private key length: %d" l)))
+
+        (switch (aget (.-PrivateKey privKey) 0)
+          (case [0x80]) ; IMPLICIT [0] OCTET STRING (seed)
+          (case [0x04] ; OCTET STRING (expandedKey)
+            (return nil (errors/New "x509: semi-expanded ML-DSA private keys without seed are not supported")))
+          (case [0x30] ; SEQUENCE (both)
+            (return nil (errors/New "x509: ML-DSA private keys with both seed and expanded key are not supported, use e.g. \"openssl pkey -provparam ml-dsa.output_formats=seed-only\" to convert to a seed-only key")))
+          (default
+            (return nil (fmt/Errorf "x509: invalid ML-DSA private key: invalid ASN.1 tag %02x" (aget (.-PrivateKey privKey) 0)))))
+
+        (when [l (len (.-PrivateKey privKey))] (!= l (+ 2 mldsa/PrivateKeySize))
+          (return nil (fmt/Errorf "x509: invalid ML-DSA private key length: %d" l)))
+
+        (when (!= (aget (.-PrivateKey privKey) 1) mldsa/PrivateKeySize)
+          (return nil (fmt/Errorf "x509: invalid ML-DSA private key ASN.1 encoding")))
+
+        (let [(values params ok) (mldsaParametersFromOID (.-Algorithm (.-Algo privKey)))]
+          (when (not ok)
+            (return nil (errors/New "x509: unknown ML-DSA parameters")))
+
+          (return (mldsa/NewPrivateKey params (subslice (.-PrivateKey privKey) 2)))))
+
+      (case [(.Equal (.-Algorithm (.-Algo privKey)) oidPublicKeyX25519)]
+        (when [l (len (.-FullBytes (.-Parameters (.-Algo privKey))))] (!= l 0)
+          (return nil (errors/New "x509: invalid X25519 private key parameters")))
+
+        (let [^{:tag (slice byte)} curvePrivateKey (zero (slice byte))]
+          (when [(values _ err) (asn1/Unmarshal (.-PrivateKey privKey) (addr curvePrivateKey))] (!= err nil)
+            (return nil (fmt/Errorf "x509: invalid X25519 private key: %v" err)))
+
+          (return (.NewPrivateKey (ecdh/X25519) curvePrivateKey))))
+
+      (default
+        (return nil (fmt/Errorf "x509: PKCS#8 wrapping contained private key with unknown algorithm: %v" (.-Algorithm (.-Algo privKey))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 225} (go/func MarshalPKCS8PrivateKey "MarshalPKCS8PrivateKey converts a private key to PKCS #8, ASN.1 DER form.\n\nThe following key types are currently supported: *[rsa.PrivateKey],\n*[ecdsa.PrivateKey], [ed25519.PrivateKey] (not a pointer), *[mldsa.PrivateKey],\nand *[ecdh.PrivateKey]. Unsupported key types result in an error.\n\nThis kind of key is commonly encoded in PEM blocks of type \"PRIVATE KEY\".\n\nMarshalPKCS8PrivateKey runs [rsa.PrivateKey.Precompute] on RSA keys.\n" [^any key] :results [(slice byte) error]
+  (let [^pkcs8 privKey (zero pkcs8)]
+
+    (type-switch [k key]
+      (case [(* rsa/PrivateKey)]
+        (set! (.-Algo privKey) ^{:go/breaks [2 4]} (lit pkix/AlgorithmIdentifier
+            :Algorithm oidPublicKeyRSA
+            :Parameters asn1/NullRawValue))
+
+        (.Precompute k)
+        (when [err (.Validate k)] (!= err nil)
+          (return nil err))
+
+        (set! (.-PrivateKey privKey) (MarshalPKCS1PrivateKey k)))
+
+      (case [(* ecdsa/PrivateKey)]
+        (let [(values oid ok) (oidFromNamedCurve ^{:go/via [PublicKey]} (.-Curve k))]
+          (when (not ok)
+            (return nil (errors/New "x509: unknown curve while marshaling to PKCS#8")))
+
+          (let [(values oidBytes err) (asn1/Marshal oid)]
+            (when (!= err nil)
+              (return nil (errors/New (+ "x509: failed to marshal curve OID: " (.Error err)))))
+
+            (set! (.-Algo privKey) ^{:go/breaks [2 4]} (lit pkix/AlgorithmIdentifier
+                :Algorithm oidPublicKeyECDSA
+                :Parameters ^{:go/breaks [2]} (lit asn1/RawValue
+                  :FullBytes oidBytes)))
+
+
+            (when [(set! (values (.-PrivateKey privKey) err) (marshalECPrivateKeyWithOID k nil))] (!= err nil)
+              (return nil (errors/New (+ "x509: failed to marshal EC private key while building PKCS#8: " (.Error err))))))))
+
+
+      (case [ed25519/PrivateKey]
+        (set! (.-Algo privKey) ^{:go/breaks [2]} (lit pkix/AlgorithmIdentifier
+            :Algorithm oidPublicKeyEd25519))
+
+        (let [(values curvePrivateKey err) (asn1/Marshal (.Seed k))]
+          (when (!= err nil)
+            (return nil (fmt/Errorf "x509: failed to marshal private key: %v" err)))
+
+          (set! (.-PrivateKey privKey) curvePrivateKey)))
+
+      (case [(* mldsa/PrivateKey)]
+        (let [(values oid ok) (oidFromMLDSAParameters (.Parameters (.PublicKey k)))]
+          (when (not ok)
+            (return nil (errors/New "x509: unknown ML-DSA parameters while marshaling to PKCS#8")))
+
+          (set! (.-Algo privKey) ^{:go/breaks [2]} (lit pkix/AlgorithmIdentifier
+              :Algorithm oid))
+
+          (set! (.-PrivateKey privKey) (append (lit (slice byte) 0x80 mldsa/PrivateKeySize) (spread (.Bytes k))))))
+
+      (case [(* ecdh/PrivateKey)]
+        (if (== (.Curve k) (ecdh/X25519)) (do
+            (set! (.-Algo privKey) ^{:go/breaks [2]} (lit pkix/AlgorithmIdentifier
+                :Algorithm oidPublicKeyX25519))
+
+            (let [^error err (zero error)]
+              (when [(set! (values (.-PrivateKey privKey) err) (asn1/Marshal (.Bytes k)))] (!= err nil)
+                (return nil (fmt/Errorf "x509: failed to marshal private key: %v" err)))))
+
+
+          (let [(values oid ok) (oidFromECDHCurve (.Curve k))]
+            (when (not ok)
+              (return nil (errors/New "x509: unknown curve while marshaling to PKCS#8")))
+
+            (let [(values oidBytes err) (asn1/Marshal oid)]
+              (when (!= err nil)
+                (return nil (errors/New (+ "x509: failed to marshal curve OID: " (.Error err)))))
+
+              (set! (.-Algo privKey) ^{:go/breaks [2 4]} (lit pkix/AlgorithmIdentifier
+                  :Algorithm oidPublicKeyECDSA
+                  :Parameters ^{:go/breaks [2]} (lit asn1/RawValue
+                    :FullBytes oidBytes)))
+
+
+              (when [(set! (values (.-PrivateKey privKey) err) (marshalECDHPrivateKey k))] (!= err nil)
+                (return nil (errors/New (+ "x509: failed to marshal EC private key while building PKCS#8: " (.Error err)))))))))
+
+
+
+      (default
+        (return nil (fmt/Errorf "x509: unknown key type while marshaling PKCS#8: %T" key))))
+
+
+    (asn1/Marshal privKey)))

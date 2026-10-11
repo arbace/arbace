@@ -1,0 +1,560 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements multi-precision rational numbers.
+
+(in-ns 'go.math.big) (go/file "rat.go" :imports [
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [math "math"]])
+
+
+
+
+
+
+
+
+
+
+
+(go/type Rat "A Rat represents a quotient a/b of arbitrary precision.\nThe zero value for a Rat represents the value 0.\n\nOperations always take pointer arguments (*Rat) rather\nthan Rat values, and each unique Rat value requires\nits own unique *Rat pointer. To \"copy\" a Rat value,\nan existing (or newly allocated) Rat must be set to\na new value using the [Rat.Set] method; shallow copies\nof Rats are not supported and may lead to errors.\n" (struct
+
+
+
+
+
+    ^{:line 29 :tag Int :doc "To make zero values for Rat work w/o initialization,\na zero value of b (len(b) == 0) acts like b == 1. At\nthe earliest opportunity (when an assignment to the Rat\nis made), such uninitialized denominators are set to 1.\na.neg determines the sign of the Rat, b.neg is ignored.\n"} a ^{:tag Int :doc "To make zero values for Rat work w/o initialization,\na zero value of b (len(b) == 0) acts like b == 1. At\nthe earliest opportunity (when an assignment to the Rat\nis made), such uninitialized denominators are set to 1.\na.neg determines the sign of the Rat, b.neg is ignored.\n"} b))
+
+
+
+^{:go/end 35} (go/func NewRat "NewRat creates a new [Rat] with numerator a and denominator b.\n" ^{:tag (* Rat)} [^int64 a ^int64 b]
+  (.SetFrac64 (new Rat) a b))
+
+
+
+
+^{:go/end 71} (go/method SetFloat64 "SetFloat64 sets z to exactly f and returns z.\nIf f is not finite, SetFloat returns nil.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^float64 f]
+  (let [^:const ^{:val 2047} expMask (- (<< 1 11) 1)
+      ^{:line 41} bits (math/Float64bits f)
+      ^{:line 42} mantissa (bit-and bits (- (<< 1 52) 1))
+      ^{:line 43} exp (conv int (bit-and (>> bits 52) expMask))]
+    (switch exp
+      (case [expMask] ; non-finite
+        (return nil))
+      (case [0] ; denormal
+        (set! exp - 1022))
+      (default ; normal
+        (set! mantissa bit-or (<< 1 52))
+        (set! exp - 1023)))
+
+
+    (let [shift (- 52 exp)]
+
+      ;; Optimization (?): partially pre-normalise.
+      (while (and (== (bit-and mantissa 1) 0) (> shift 0))
+        (set! mantissa >> 1)
+        (dec! shift))
+
+
+      (.SetUint64 (.-a z) mantissa)
+      (set! (.-neg (.-a z)) (< f 0))
+      (.Set (.-b z) intOne)
+      (if (> shift 0)
+        (.Lsh (.-b z) (addr (.-b z)) (conv uint shift))
+
+        (.Lsh (.-a z) (addr (.-a z)) (conv uint (- shift))))
+
+      (.norm z))))
+
+
+
+
+
+
+^{:go/end 169} (go/func quotToFloat32 "quotToFloat32 returns the non-negative float32 value\nnearest to the quotient a/b, using round-to-even in\nhalfway cases. It does not mutate its arguments.\nPreconditions: b is non-zero; a and b have no common factors.\n" [^{:tag (* stack)} stk ^nat a ^nat b] :results [^float32 f ^bool exact]
+  (let [
+      ;; float size in bits
+      ^:const ^{:line 80 :val 32} Fsize 32
+
+      ;; mantissa
+      ^:const ^:go/grouped ^{:line 83 :val 23} Msize 23
+      ^:const ^:go/grouped ^{:line 84 :val 24} Msize1 (+ Msize 1) ; incl. implicit 1
+      ^:const ^:go/grouped ^{:line 85 :val 25} Msize2 (+ Msize1 1)
+
+      ;; exponent
+      ^:const ^:go/grouped ^{:line 88 :val 8} Esize (- Fsize Msize1)
+      ^:const ^:go/grouped ^{:line 89 :val 127} Ebias (- (<< 1 (- Esize 1)) 1)
+      ^:const ^:go/grouped ^{:line 90 :val -126} Emin (- 1 Ebias)
+      ^:const ^:go/grouped ^{:line 91 :val 127} Emax Ebias
+
+
+      ;; TODO(adonovan): specialize common degenerate cases: 1.0, integers.
+      ^{:line 95} alen (.bitLen a)]
+    (when (== alen 0)
+      (return 0 true))
+
+    (let [blen (.bitLen b)]
+      (when (== blen 0)
+        (panic "division by zero"))
+
+
+      ;; 1. Left-shift A or B such that quotient A/B is in [1<<Msize1, 1<<(Msize2+1)
+      ;; (Msize2 bits if A < B when they are left-aligned, Msize2+1 bits if A >= B).
+      ;; This is 2 or 3 more than the float32 mantissa field width of Msize:
+      ;; - the optional extra bit is shifted away in step 3 below.
+      ;; - the high-order 1 is omitted in "normal" representation;
+      ;; - the low-order 1 will be used during rounding then discarded.
+      (let [exp (- alen blen)
+          (values ^nat a2 ^nat b2) (zero nat)]
+        (set! a2 (.set a2 a))
+        (set! b2 (.set b2 b))
+        (if [shift (- Msize2 exp)] (> shift 0)
+          (set! a2 (.lsh a2 a2 (conv uint shift)))
+          (when (< shift 0)
+            (set! b2 (.lsh b2 b2 (conv uint (- shift))))))
+
+
+        ;; 2. Compute quotient and remainder (q, r).  NB: due to the
+        ;; extra shift, the low-order bit of q is logically the
+        ;; high-order bit of r.
+        (let [^nat q (zero nat)
+            (values ^:assign q r) (.div q stk a2 a2 b2) ; (recycle a2)
+            ^{:line 125} mantissa (low32 q)
+            ^{:line 126} haveRem (> (len r) 0)] ; mantissa&1 && !haveRem => remainder is exactly half
+
+          ;; 3. If quotient didn't fit in Msize2 bits, redo division by b2<<1
+          ;; (in effect---we accomplish this incrementally).
+          (when (== (>> mantissa Msize2) 1)
+            (when (== (bit-and mantissa 1) 1)
+              (set! haveRem true))
+
+            (set! mantissa >> 1)
+            (inc! exp))
+
+          (when (!= (>> mantissa Msize1) 1)
+            (panic (fmt/Sprintf "expected exactly %d bits of result" Msize2)))
+
+
+          ;; 4. Rounding.
+          (when (and (<= (- Emin Msize) exp) (<= exp Emin))
+            ;; Denormal case; lose 'shift' bits of precision.
+            (let [shift (conv uint (- Emin (- exp 1))) ; [1..Esize1)
+                ^{:line 145} lostbits (bit-and mantissa (- ^uint32 (<< 1 shift) 1))]
+              (set! haveRem (or haveRem (!= lostbits 0)))
+              (set! mantissa >> shift)
+              (set! exp (- 2 Ebias)))) ; == exp + shift
+
+          ;; Round q using round-half-to-even.
+          (set! exact (not haveRem))
+          (when (!= (bit-and mantissa 1) 0)
+            (set! exact false)
+            (when (or haveRem (!= (bit-and mantissa 2) 0))
+              (when [(inc! mantissa)] (>= mantissa (<< 1 Msize2))
+                ;; Complete rollover 11...1 => 100...0, so shift is safe
+                (set! mantissa >> 1)
+                (inc! exp))))
+
+
+
+          (set! mantissa >> 1) ; discard rounding bit.  Mantissa now scaled by 1<<Msize1.
+
+          (set! f (conv float32 (math/Ldexp (conv float64 mantissa) (- exp Msize1))))
+          (when (math/IsInf (conv float64 f) 0)
+            (set! exact false))
+
+          (return))))))
+
+
+
+
+
+
+^{:go/end 267} (go/func quotToFloat64 "quotToFloat64 returns the non-negative float64 value\nnearest to the quotient a/b, using round-to-even in\nhalfway cases. It does not mutate its arguments.\nPreconditions: b is non-zero; a and b have no common factors.\n" [^{:tag (* stack)} stk ^nat a ^nat b] :results [^float64 f ^bool exact]
+  (let [
+      ;; float size in bits
+      ^:const ^{:line 178 :val 64} Fsize 64
+
+      ;; mantissa
+      ^:const ^:go/grouped ^{:line 181 :val 52} Msize 52
+      ^:const ^:go/grouped ^{:line 182 :val 53} Msize1 (+ Msize 1) ; incl. implicit 1
+      ^:const ^:go/grouped ^{:line 183 :val 54} Msize2 (+ Msize1 1)
+
+      ;; exponent
+      ^:const ^:go/grouped ^{:line 186 :val 11} Esize (- Fsize Msize1)
+      ^:const ^:go/grouped ^{:line 187 :val 1023} Ebias (- (<< 1 (- Esize 1)) 1)
+      ^:const ^:go/grouped ^{:line 188 :val -1022} Emin (- 1 Ebias)
+      ^:const ^:go/grouped ^{:line 189 :val 1023} Emax Ebias
+
+
+      ;; TODO(adonovan): specialize common degenerate cases: 1.0, integers.
+      ^{:line 193} alen (.bitLen a)]
+    (when (== alen 0)
+      (return 0 true))
+
+    (let [blen (.bitLen b)]
+      (when (== blen 0)
+        (panic "division by zero"))
+
+
+      ;; 1. Left-shift A or B such that quotient A/B is in [1<<Msize1, 1<<(Msize2+1)
+      ;; (Msize2 bits if A < B when they are left-aligned, Msize2+1 bits if A >= B).
+      ;; This is 2 or 3 more than the float64 mantissa field width of Msize:
+      ;; - the optional extra bit is shifted away in step 3 below.
+      ;; - the high-order 1 is omitted in "normal" representation;
+      ;; - the low-order 1 will be used during rounding then discarded.
+      (let [exp (- alen blen)
+          (values ^nat a2 ^nat b2) (zero nat)]
+        (set! a2 (.set a2 a))
+        (set! b2 (.set b2 b))
+        (if [shift (- Msize2 exp)] (> shift 0)
+          (set! a2 (.lsh a2 a2 (conv uint shift)))
+          (when (< shift 0)
+            (set! b2 (.lsh b2 b2 (conv uint (- shift))))))
+
+
+        ;; 2. Compute quotient and remainder (q, r).  NB: due to the
+        ;; extra shift, the low-order bit of q is logically the
+        ;; high-order bit of r.
+        (let [^nat q (zero nat)
+            (values ^:assign q r) (.div q stk a2 a2 b2) ; (recycle a2)
+            ^{:line 223} mantissa (low64 q)
+            ^{:line 224} haveRem (> (len r) 0)] ; mantissa&1 && !haveRem => remainder is exactly half
+
+          ;; 3. If quotient didn't fit in Msize2 bits, redo division by b2<<1
+          ;; (in effect---we accomplish this incrementally).
+          (when (== (>> mantissa Msize2) 1)
+            (when (== (bit-and mantissa 1) 1)
+              (set! haveRem true))
+
+            (set! mantissa >> 1)
+            (inc! exp))
+
+          (when (!= (>> mantissa Msize1) 1)
+            (panic (fmt/Sprintf "expected exactly %d bits of result" Msize2)))
+
+
+          ;; 4. Rounding.
+          (when (and (<= (- Emin Msize) exp) (<= exp Emin))
+            ;; Denormal case; lose 'shift' bits of precision.
+            (let [shift (conv uint (- Emin (- exp 1))) ; [1..Esize1)
+                ^{:line 243} lostbits (bit-and mantissa (- ^uint64 (<< 1 shift) 1))]
+              (set! haveRem (or haveRem (!= lostbits 0)))
+              (set! mantissa >> shift)
+              (set! exp (- 2 Ebias)))) ; == exp + shift
+
+          ;; Round q using round-half-to-even.
+          (set! exact (not haveRem))
+          (when (!= (bit-and mantissa 1) 0)
+            (set! exact false)
+            (when (or haveRem (!= (bit-and mantissa 2) 0))
+              (when [(inc! mantissa)] (>= mantissa (<< 1 Msize2))
+                ;; Complete rollover 11...1 => 100...0, so shift is safe
+                (set! mantissa >> 1)
+                (inc! exp))))
+
+
+
+          (set! mantissa >> 1) ; discard rounding bit.  Mantissa now scaled by 1<<Msize1.
+
+          (set! f (math/Ldexp (conv float64 mantissa) (- exp Msize1)))
+          (when (math/IsInf f 0)
+            (set! exact false))
+
+          (return))))))
+
+
+
+
+
+
+^{:go/end 285} (go/method Float32 "Float32 returns the nearest float32 value for x and a bool indicating\nwhether f represents x exactly. If the magnitude of x is too large to\nbe represented by a float32, f is an infinity and exact is false.\nThe sign of f always matches the sign of x, even if f == 0.\n" [^{:tag (* Rat)} x] :results [^float32 f ^bool exact]
+  (let [b (.-abs (.-b x))]
+    (when (== (len b) 0)
+      (set! b natOne))
+
+    (let [stk (getStack)]
+      (defer (.free stk))
+      (set! (values f exact) (quotToFloat32 stk (.-abs (.-a x)) b))
+      (when (.-neg (.-a x))
+        (set! f (- f)))
+
+      (return))))
+
+
+
+
+
+
+^{:go/end 303} (go/method Float64 "Float64 returns the nearest float64 value for x and a bool indicating\nwhether f represents x exactly. If the magnitude of x is too large to\nbe represented by a float64, f is an infinity and exact is false.\nThe sign of f always matches the sign of x, even if f == 0.\n" [^{:tag (* Rat)} x] :results [^float64 f ^bool exact]
+  (let [b (.-abs (.-b x))]
+    (when (== (len b) 0)
+      (set! b natOne))
+
+    (let [stk (getStack)]
+      (defer (.free stk))
+      (set! (values f exact) (quotToFloat64 stk (.-abs (.-a x)) b))
+      (when (.-neg (.-a x))
+        (set! f (- f)))
+
+      (return))))
+
+
+
+
+^{:go/end 319} (go/method SetFrac "SetFrac sets z to a/b and returns z.\nIf b == 0, SetFrac panics.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Int)} a ^{:tag (* Int)} b]
+  (set! (.-neg (.-a z)) (!= (.-neg a) (.-neg b)))
+  (let [babs (.-abs b)]
+    (when (== (len babs) 0)
+      (panic "division by zero"))
+
+    (when (or (== (addr (.-a z)) b) (alias (.-abs (.-a z)) babs))
+      (set! babs (.set (conv nat nil) babs))) ; make a copy
+
+    (set! (.-abs (.-a z)) (.set (.-abs (.-a z)) (.-abs a)))
+    (set! (.-abs (.-b z)) (.set (.-abs (.-b z)) babs))
+    (.norm z)))
+
+
+
+
+^{:go/end 334} (go/method SetFrac64 "SetFrac64 sets z to a/b and returns z.\nIf b == 0, SetFrac64 panics.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^int64 a ^int64 b]
+  (when (== b 0)
+    (panic "division by zero"))
+
+  (.SetInt64 (.-a z) a)
+  (when (< b 0)
+    (set! b (- b))
+    (set! (.-neg (.-a z)) (not (.-neg (.-a z)))))
+
+  (set! (.-abs (.-b z)) (.setUint64 (.-abs (.-b z)) (conv uint64 b)))
+  (.norm z))
+
+
+
+^{:go/end 341} (go/method SetInt "SetInt sets z to x (by making a copy of x) and returns z.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Int)} x]
+  (.Set (.-a z) x)
+  (set! (.-abs (.-b z)) (.setWord (.-abs (.-b z)) 1))
+  ^{:line 340} z)
+
+
+
+^{:go/end 348} (go/method SetInt64 "SetInt64 sets z to x and returns z.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^int64 x]
+  (.SetInt64 (.-a z) x)
+  (set! (.-abs (.-b z)) (.setWord (.-abs (.-b z)) 1))
+  ^{:line 347} z)
+
+
+
+^{:go/end 355} (go/method SetUint64 "SetUint64 sets z to x and returns z.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^uint64 x]
+  (.SetUint64 (.-a z) x)
+  (set! (.-abs (.-b z)) (.setWord (.-abs (.-b z)) 1))
+  ^{:line 354} z)
+
+
+
+^{:go/end 367} (go/method Set "Set sets z to x (by making a copy of x) and returns z.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Rat)} x]
+  (when (!= z x)
+    (.Set (.-a z) (addr (.-a x)))
+    (.Set (.-b z) (addr (.-b x))))
+
+  (when (== (len (.-abs (.-b z))) 0)
+    (set! (.-abs (.-b z)) (.setWord (.-abs (.-b z)) 1)))
+
+  ^{:line 366} z)
+
+
+
+^{:go/end 374} (go/method Abs "Abs sets z to |x| (the absolute value of x) and returns z.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Rat)} x]
+  (.Set z x)
+  (set! (.-neg (.-a z)) false)
+  ^{:line 373} z)
+
+
+
+^{:go/end 381} (go/method Neg "Neg sets z to -x and returns z.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Rat)} x]
+  (.Set z x)
+  (set! (.-neg (.-a z)) (and (> (len (.-abs (.-a z))) 0) (not (.-neg (.-a z))))) ; 0 has no sign
+  ^{:line 380} z)
+
+
+
+
+^{:go/end 392} (go/method Inv "Inv sets z to 1/x and returns z.\nIf x == 0, Inv panics.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Rat)} x]
+  (when (== (len (.-abs (.-a x))) 0)
+    (panic "division by zero"))
+
+  (.Set z x)
+  (set! (values (.-abs (.-a z)) (.-abs (.-b z))) (values (.-abs (.-b z)) (.-abs (.-a z))))
+  ^{:line 391} z)
+
+
+
+
+
+
+^{:go/end 400} (go/method Sign "Sign returns:\n  - -1 if x < 0;\n  - 0 if x == 0;\n  - +1 if x > 0.\n" ^int [^{:tag (* Rat)} x]
+  (.Sign (.-a x)))
+
+
+
+^{:go/end 405} (go/method IsInt "IsInt reports whether the denominator of x is 1.\n" ^bool [^{:tag (* Rat)} x]
+  (or (== (len (.-abs (.-b x))) 0) (== (.cmp (.-abs (.-b x)) natOne) 0)))
+
+
+
+
+
+
+^{:go/end 413} (go/method Num "Num returns the numerator of x; it may be <= 0.\nThe result is a reference to x's numerator; it\nmay change if a new value is assigned to x, and vice versa.\nThe sign of the numerator corresponds to the sign of x.\n" ^{:tag (* Int)} [^{:tag (* Rat)} x]
+  (addr (.-a x)))
+
+
+
+
+
+
+
+
+
+^{:go/end 431} (go/method Denom "Denom returns the denominator of x; it is always > 0.\nThe result is a reference to x's denominator, unless\nx is an uninitialized (zero value) [Rat], in which case\nthe result is a new [Int] of value 1. (To initialize x,\nany operation that sets x will do, including x.Set(x).)\nIf the result is a reference to x's denominator it\nmay change if a new value is assigned to x, and vice versa.\n" ^{:tag (* Int)} [^{:tag (* Rat)} x]
+  ;; Note that x.b.neg is guaranteed false.
+  (when (== (len (.-abs (.-b x))) 0)
+    ;; Note: If this proves problematic, we could
+    ;;       panic instead and require the Rat to
+    ;;       be explicitly initialized.
+    (return (addr (lit Int :abs (lit nat 1)))))
+
+  (addr (.-b x)))
+
+
+^{:go/end 456} (go/method norm ^{:tag (* Rat)} [^{:tag (* Rat)} z]
+  (switch
+    (case [(== (len (.-abs (.-a z))) 0)]
+      ;; z == 0; normalize sign and denominator
+      (set! (.-neg (.-a z)) false)
+      (fallthrough))
+    (case [(== (len (.-abs (.-b z))) 0)]
+      ;; z is integer; normalize denominator
+      (set! (.-abs (.-b z)) (.setWord (.-abs (.-b z)) 1)))
+    (default
+      ;; z is fraction; normalize numerator and denominator
+      (let [stk (getStack)]
+        (defer (.free stk))
+        (let [neg (.-neg (.-a z))]
+          (set! (.-neg (.-a z)) false)
+          (set! (.-neg (.-b z)) false)
+          (when [f (.lehmerGCD (NewInt 0) nil nil (addr (.-a z)) (addr (.-b z)))] (!= (.Cmp f intOne) 0)
+            (set! (values (.-abs (.-a z)) _) (.div (.-abs (.-a z)) stk nil (.-abs (.-a z)) (.-abs f)))
+            (set! (values (.-abs (.-b z)) _) (.div (.-abs (.-b z)) stk nil (.-abs (.-b z)) (.-abs f))))
+
+          (set! (.-neg (.-a z)) neg)))))
+
+  ^{:line 455} z)
+
+
+
+
+
+^{:go/end 471} (go/func mulDenom "mulDenom sets z to the denominator product x*y (by taking into\naccount that 0 values for x or y must be interpreted as 1) and\nreturns z.\n" ^nat [^{:tag (* stack)} stk ^nat z ^nat x ^nat y]
+  (switch
+    (case [(and (== (len x) 0) (== (len y) 0))]
+      (return (.setWord z 1)))
+    (case [(== (len x) 0)]
+      (return (.set z y)))
+    (case [(== (len y) 0)]
+      (return (.set z x))))
+
+  (.mul z stk x y))
+
+
+
+
+^{:go/end 482} (go/method scaleDenom "scaleDenom sets z to the product x*f.\nIf f == 0 (zero value of denominator), z is set to (a copy of) x.\n" [^{:tag (* Int)} z ^{:tag (* stack)} stk ^{:tag (* Int)} x ^nat f]
+  (when (== (len f) 0)
+    (.Set z x)
+    (return))
+
+  (set! (.-abs z) (.mul (.-abs z) stk (.-abs x) f))
+  (set! (.-neg z) (.-neg x)))
+
+
+
+
+
+
+^{:go/end 495} (go/method Cmp "Cmp compares x and y and returns:\n  - -1 if x < y;\n  - 0 if x == y;\n  - +1 if x > y.\n" ^int [^{:tag (* Rat)} x ^{:tag (* Rat)} y]
+  (let [(values ^Int a ^Int b) (zero Int)
+      ^{:line 490} stk (getStack)]
+    (defer (.free stk))
+    (.scaleDenom a stk (addr (.-a x)) (.-abs (.-b y)))
+    (.scaleDenom b stk (addr (.-a y)) (.-abs (.-b x)))
+    (.Cmp a (addr b))))
+
+
+
+^{:go/end 508} (go/method Add "Add sets z to the sum x+y and returns z.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Rat)} x ^{:tag (* Rat)} y]
+  (let [stk (getStack)]
+    (defer (.free stk))
+
+    (let [(values ^Int a1 ^Int a2) (zero Int)]
+      (.scaleDenom a1 stk (addr (.-a x)) (.-abs (.-b y)))
+      (.scaleDenom a2 stk (addr (.-a y)) (.-abs (.-b x)))
+      (.Add (.-a z) (addr a1) (addr a2))
+      (set! (.-abs (.-b z)) (mulDenom stk (.-abs (.-b z)) (.-abs (.-b x)) (.-abs (.-b y))))
+      (.norm z))))
+
+
+
+^{:go/end 521} (go/method Sub "Sub sets z to the difference x-y and returns z.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Rat)} x ^{:tag (* Rat)} y]
+  (let [stk (getStack)]
+    (defer (.free stk))
+
+    (let [(values ^Int a1 ^Int a2) (zero Int)]
+      (.scaleDenom a1 stk (addr (.-a x)) (.-abs (.-b y)))
+      (.scaleDenom a2 stk (addr (.-a y)) (.-abs (.-b x)))
+      (.Sub (.-a z) (addr a1) (addr a2))
+      (set! (.-abs (.-b z)) (mulDenom stk (.-abs (.-b z)) (.-abs (.-b x)) (.-abs (.-b y))))
+      (.norm z))))
+
+
+
+^{:go/end 543} (go/method Mul "Mul sets z to the product x*y and returns z.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Rat)} x ^{:tag (* Rat)} y]
+  (let [stk (getStack)]
+    (defer (.free stk))
+
+    (when (== x y)
+      ;; a squared Rat is positive and can't be reduced (no need to call norm())
+      (set! (.-neg (.-a z)) false)
+      (set! (.-abs (.-a z)) (.sqr (.-abs (.-a z)) stk (.-abs (.-a x))))
+      (if (== (len (.-abs (.-b x))) 0)
+        (set! (.-abs (.-b z)) (.setWord (.-abs (.-b z)) 1))
+
+        (set! (.-abs (.-b z)) (.sqr (.-abs (.-b z)) stk (.-abs (.-b x)))))
+
+      (return z))
+
+
+    (.mul (.-a z) stk (addr (.-a x)) (addr (.-a y)))
+    (set! (.-abs (.-b z)) (mulDenom stk (.-abs (.-b z)) (.-abs (.-b x)) (.-abs (.-b y))))
+    (.norm z)))
+
+
+
+
+^{:go/end 561} (go/method Quo "Quo sets z to the quotient x/y and returns z.\nIf y == 0, Quo panics.\n" ^{:tag (* Rat)} [^{:tag (* Rat)} z ^{:tag (* Rat)} x ^{:tag (* Rat)} y]
+  (let [stk (getStack)]
+    (defer (.free stk))
+
+    (when (== (len (.-abs (.-a y))) 0)
+      (panic "division by zero"))
+
+    (let [(values ^Int a ^Int b) (zero Int)]
+      (.scaleDenom a stk (addr (.-a x)) (.-abs (.-b y)))
+      (.scaleDenom b stk (addr (.-a y)) (.-abs (.-b x)))
+      (set! (.-abs (.-a z)) (.-abs a))
+      (set! (.-abs (.-b z)) (.-abs b))
+      (set! (.-neg (.-a z)) (!= (.-neg a) (.-neg b)))
+      (.norm z))))

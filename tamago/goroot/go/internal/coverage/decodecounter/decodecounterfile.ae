@@ -1,0 +1,372 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.coverage.decodecounter) (go/file "decodecounterfile.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [coverage "internal/coverage"]
+    ^{:line 11} [slicereader "internal/coverage/slicereader"]
+    ^{:line 12} [stringtab "internal/coverage/stringtab"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [unsafe "unsafe"]])
+
+
+;; This file contains helpers for reading counter data files created
+;; during the executions of a coverage-instrumented binary.
+
+(go/type CounterDataReader (struct
+    ^{:line 23 :tag (* stringtab/Reader)} stab
+    ^{:line 24 :tag (map string string)} args
+    ^{:line 25 :tag (slice string)} osargs
+    ^{:line 26 :tag string} goarch ; GOARCH setting from run that produced counter data
+    ^{:line 27 :tag string} goos ; GOOS setting from run that produced counter data
+    ^{:line 28 :tag io/ReadSeeker} mr
+    ^{:line 29 :tag coverage/CounterFileHeader} hdr
+    ^{:line 30 :tag coverage/CounterFileFooter} ftr
+    ^{:line 31 :tag coverage/CounterSegmentHeader} shdr
+    ^{:line 32 :tag (slice byte)} u32b
+    ^{:line 33 :tag (slice byte)} u8b
+    ^{:line 34 :tag uint32} fcnCount
+    ^{:line 35 :tag uint32} segCount
+    ^{:line 36 :tag bool} debug))
+
+
+^{:go/end 73} (go/func NewCounterDataReader [^string fn ^io/ReadSeeker rs] :results [(* CounterDataReader) error]
+  (let [cdr (addr ^{:go/breaks [2 4 6]} (lit CounterDataReader
+          :mr rs
+          :u32b (make (slice byte) 4)
+          :u8b (make (slice byte) 1)))]
+
+    ;; Read header
+    (when [err (binary/Read rs binary/LittleEndian (addr (.-hdr cdr)))] (!= err nil)
+      (return nil err))
+
+    (when (.-debug cdr)
+      (fmt/Fprintf os/Stderr "=-= counter file header: %+v\n" (.-hdr cdr)))
+
+    (when (not (checkMagic (.-Magic (.-hdr cdr))))
+      (return nil (fmt/Errorf "invalid magic string: not a counter data file")))
+
+    (when (> (.-Version (.-hdr cdr)) coverage/CounterFileVersion)
+      (return nil (fmt/Errorf "version data incompatibility: reader is %d data is %d" coverage/CounterFileVersion (.-Version (.-hdr cdr)))))
+
+
+    ;; Read footer.
+    (when [err (.readFooter cdr)] (!= err nil)
+      (return nil err))
+
+    ;; Seek back to just past the file header.
+    (let [hsz (conv int64 (unsafe/Sizeof (.-hdr cdr)))]
+      (when [(values _ err) (.Seek (.-mr cdr) hsz io/SeekStart)] (!= err nil)
+        (return nil err))
+
+      ;; Read preamble for first segment.
+      (when [err (.readSegmentPreamble cdr)] (!= err nil)
+        (return nil err))
+
+      (return cdr nil))))
+
+
+^{:go/end 78} (go/func checkMagic ^bool [^{:tag (array 4 byte)} v]
+  (let [g coverage/CovCounterMagic]
+    (and (== (aget v 0) (aget g 0)) (== (aget v 1) (aget g 1)) (== (aget v 2) (aget g 2)) (== (aget v 3) (aget g 3)))))
+
+
+^{:go/end 95} (go/method readFooter ^error [^{:tag (* CounterDataReader)} cdr]
+  ^{:go/breaks [[6 94]]} (let [ftrSize (conv int64 (unsafe/Sizeof (.-ftr cdr)))]
+    (when [(values _ err) (.Seek (.-mr cdr) (- ftrSize) io/SeekEnd)] (!= err nil)
+      (return err))
+
+    (when [err (binary/Read (.-mr cdr) binary/LittleEndian (addr (.-ftr cdr)))] (!= err nil)
+      (return err))
+
+    (when (not (checkMagic (.-Magic (.-ftr cdr))))
+      (return (fmt/Errorf "invalid magic string (not a counter data file)")))
+
+    (when (== (.-NumSegments (.-ftr cdr)) 0)
+      (return (fmt/Errorf "invalid counter data file (no segments)")))
+
+    nil))
+
+
+
+
+^{:go/breaks [[9 129]] :go/end 130} (go/method readSegmentPreamble "readSegmentPreamble reads and consumes the segment header, segment string\ntable, and segment args table.\n" ^error [^{:tag (* CounterDataReader)} cdr]
+  ;; Read segment header.
+  (when [err (binary/Read (.-mr cdr) binary/LittleEndian (addr (.-shdr cdr)))] (!= err nil)
+    (return err))
+
+  (when (.-debug cdr)
+    (fmt/Fprintf os/Stderr "=-= read counter segment header: %+v" (.-shdr cdr))
+    (fmt/Fprintf os/Stderr " FcnEntries=0x%x StrTabLen=0x%x ArgsLen=0x%x\n"
+      (.-FcnEntries (.-shdr cdr)) (.-StrTabLen (.-shdr cdr)) (.-ArgsLen (.-shdr cdr))))
+
+
+  ;; Read string table and args.
+  (when [err (.readStringTable cdr)] (!= err nil)
+    (return err))
+
+  (when [err (.readArgs cdr)] (!= err nil)
+    (return err))
+
+  ;; Seek past any padding to bring us up to a 4-byte boundary.
+  (if [(values of err) (.Seek (.-mr cdr) 0 io/SeekCurrent)] (!= err nil)
+    (return err)
+
+    (let [rem (% of 4)]
+      (when (!= rem 0)
+        (let [pad (- 4 rem)]
+          (when [(values _ err) (.Seek (.-mr cdr) pad io/SeekCurrent)] (!= err nil)
+            (return err))))))
+
+
+
+  nil)
+
+
+^{:go/end 145} (go/method readStringTable ^error [^{:tag (* CounterDataReader)} cdr]
+  (let [b (make (slice byte) (.-StrTabLen (.-shdr cdr)))
+      (values nr err) (.Read (.-mr cdr) b)]
+    (when (!= err nil)
+      (return err))
+
+    (when (!= nr (conv int (.-StrTabLen (.-shdr cdr))))
+      (return (fmt/Errorf "error: short read on string table")))
+
+    ^{:go/breaks [4]} (let [slr (slicereader/NewReader b false)] ; /* not readonly */
+      (set! (.-stab cdr) (stringtab/NewReader slr))
+      (.Read (.-stab cdr))
+      nil)))
+
+
+^{:go/end 198} (go/method readArgs ^error [^{:tag (* CounterDataReader)} cdr]
+  (let [b (make (slice byte) (.-ArgsLen (.-shdr cdr)))
+      (values nr err) (.Read (.-mr cdr) b)]
+    (when (!= err nil)
+      (return err))
+
+    (when (!= nr (conv int (.-ArgsLen (.-shdr cdr))))
+      (return (fmt/Errorf "error: short read on args table")))
+
+    ^{:go/breaks [[7 197]]} (let [slr (slicereader/NewReader b false) ; /* not readonly */
+        ^{:line 157} sget ^{:go/end 163} (fn [] :results [string error]
+          (let [kidx (.ReadULEB128 slr)]
+            (when (>= (conv int kidx) (.Entries (.-stab cdr)))
+              (return "" (fmt/Errorf "malformed string table ref")))
+
+            (return (.Get (.-stab cdr) (conv uint32 kidx)) nil)))
+
+        ^{:line 164} nents (.ReadULEB128 slr)]
+      (set! (.-args cdr) (make (map string string) (conv int nents)))
+      (for [i (conv uint64 0)] (< i nents) (inc! i)
+        (let [(values k errk) (sget)]
+          (when (!= errk nil)
+            (return errk))
+
+          (let [(values v errv) (sget)]
+            (when (!= errv nil)
+              (return errv))
+
+            (when [(values _ ok) (aget (.-args cdr) k)] ok
+              (return (fmt/Errorf "malformed args table")))
+
+            (aset (.-args cdr) k v))))
+
+      (when [(values argcs ok) (aget (.-args cdr) "argc")] ok
+        (let [(values argc err) (strconv/Atoi argcs)]
+          (when (!= err nil)
+            (return (fmt/Errorf "malformed argc in counter data file args section")))
+
+          (set! (.-osargs cdr) (make (slice string) 0 argc))
+          (for [i 0] (< i argc) (inc! i)
+            (let [arg (aget (.-args cdr) (fmt/Sprintf "argv%d" i))]
+              (set! (.-osargs cdr) (append (.-osargs cdr) arg))))))
+
+
+      (when [(values goos ok) (aget (.-args cdr) "GOOS")] ok
+        (set! (.-goos cdr) goos))
+
+      (when [(values goarch ok) (aget (.-args cdr) "GOARCH")] ok
+        (set! (.-goarch cdr) goarch))
+
+      nil)))
+
+
+
+
+
+
+
+
+^{:go/end 208} (go/method OsArgs "OsArgs returns the program arguments (saved from os.Args during\nthe run of the instrumented binary) read from the counter\ndata file. Not all coverage data files will have os.Args values;\nfor example, if a data file is produced by merging coverage\ndata from two distinct runs, no os args will be available (an\nempty list is returned).\n" ^{:tag (slice string)} [^{:tag (* CounterDataReader)} cdr]
+  (.-osargs cdr))
+
+
+
+
+
+
+^{:go/end 216} (go/method Goos "Goos returns the GOOS setting in effect for the \"-cover\" binary\nthat produced this counter data file. The GOOS value may be\nempty in the case where the counter data file was produced\nfrom a merge in which more than one GOOS value was present.\n" ^string [^{:tag (* CounterDataReader)} cdr]
+  (.-goos cdr))
+
+
+
+
+
+
+^{:go/end 224} (go/method Goarch "Goarch returns the GOARCH setting in effect for the \"-cover\" binary\nthat produced this counter data file. The GOARCH value may be\nempty in the case where the counter data file was produced\nfrom a merge in which more than one GOARCH value was present.\n" ^string [^{:tag (* CounterDataReader)} cdr]
+  (.-goarch cdr))
+
+
+
+
+(go/type FuncPayload "FuncPayload encapsulates the counter data payload for a single\nfunction as read from a counter data file.\n" (struct
+    ^{:line 229 :tag uint32} PkgIdx
+    ^{:line 230 :tag uint32} FuncIdx
+    ^{:line 231 :tag (slice uint32)} Counters))
+
+
+
+^{:go/end 237} (go/method NumSegments "NumSegments returns the number of execution segments in the file.\n" ^uint32 [^{:tag (* CounterDataReader)} cdr]
+  (.-NumSegments (.-ftr cdr)))
+
+
+
+
+
+
+^{:go/end 259} (go/method BeginNextSegment "BeginNextSegment sets up the reader to read the next segment,\nreturning TRUE if we do have another segment to read, or FALSE\nif we're done with all the segments (also an error if\nsomething went wrong).\n" [^{:tag (* CounterDataReader)} cdr] :results [bool error]
+  (when (>= (.-segCount cdr) (.-NumSegments (.-ftr cdr)))
+    (return false nil))
+
+  (inc! (.-segCount cdr))
+  (set! (.-fcnCount cdr) 0)
+  ;; Seek past footer from last segment.
+  (let [ftrSize (conv int64 (unsafe/Sizeof (.-ftr cdr)))]
+    (when [(values _ err) (.Seek (.-mr cdr) ftrSize io/SeekCurrent)] (!= err nil)
+      (return false err))
+
+    ;; Read preamble for this segment.
+    (when [err (.readSegmentPreamble cdr)] (!= err nil)
+      (return false err))
+
+    (return true nil)))
+
+
+
+
+^{:go/end 265} (go/method NumFunctionsInSegment "NumFunctionsInSegment returns the number of live functions\nin the currently selected segment.\n" ^uint32 [^{:tag (* CounterDataReader)} cdr]
+  (conv uint32 (.-FcnEntries (.-shdr cdr))))
+
+
+(go/const ^{:val false} supportDeadFunctionsInCounterData false)
+
+
+
+
+
+
+^{:go/end 373} (go/method NextFunc "NextFunc reads data for the next function in this current segment\ninto \"p\", returning TRUE if the read was successful or FALSE\nif we've read all the functions already (also an error if\nsomething went wrong with the read or we hit a premature\nEOF).\n" [^{:tag (* CounterDataReader)} cdr ^{:tag (* FuncPayload)} p] :results [bool error]
+  (when (>= (.-fcnCount cdr) (conv uint32 (.-FcnEntries (.-shdr cdr))))
+    (return false nil))
+
+  (inc! (.-fcnCount cdr))
+  (let [^{:tag (func [] [uint32 error])} rdu32 (zero (func [] [uint32 error]))]
+    (cond (== (.-CFlavor (.-hdr cdr)) coverage/CtrULeb128)
+      (set! rdu32 ^{:go/end 297} (fn [] :results [uint32 error]
+          (let [^uint shift (zero uint)
+              ^{:line 283 :tag uint64} value (zero uint64)]
+            (while true
+              (let [(values _ err) (.Read (.-mr cdr) (.-u8b cdr))]
+                (when (!= err nil)
+                  (return 0 err))
+
+                (let [b (aget (.-u8b cdr) 0)]
+                  (set! value bit-or (<< (conv uint64 (bit-and b 0x7F)) shift))
+                  (when (== (bit-and b 0x80) 0)
+                    (break))
+
+                  (set! shift + 7))))
+
+            (return (conv uint32 value) nil))))
+
+      (== (.-CFlavor (.-hdr cdr)) coverage/CtrRaw)
+      (if (.-BigEndian (.-hdr cdr))
+        (set! rdu32 ^{:go/end 309} (fn [] :results [uint32 error]
+            (let [(values n err) (.Read (.-mr cdr) (.-u32b cdr))]
+              (when (!= err nil)
+                (return 0 err))
+
+              (when (!= n 4)
+                (return 0 io/EOF))
+
+              (return (.Uint32 binary/BigEndian (.-u32b cdr)) nil))))
+
+
+        (set! rdu32 ^{:go/end 320} (fn [] :results [uint32 error]
+            (let [(values n err) (.Read (.-mr cdr) (.-u32b cdr))]
+              (when (!= err nil)
+                (return 0 err))
+
+              (when (!= n 4)
+                (return 0 io/EOF))
+
+              (return (.Uint32 binary/LittleEndian (.-u32b cdr)) nil))))) :else
+
+
+
+      (panic "internal error: unknown counter flavor"))
+
+
+    ;; Alternative/experimental path: one way we could handling writing
+    ;; out counter data would be to just memcpy the counter segment
+    ;; out to a file, meaning that a region in the counter memory
+    ;; corresponding to a dead (never-executed) function would just be
+    ;; zeroes. The code path below handles this case.
+    (let [^uint32 nc (zero uint32)
+        ^{:line 332 :tag error} err (zero error)]
+      (if supportDeadFunctionsInCounterData
+        (while true
+          (set! (values nc err) (rdu32))
+          (cond (== err io/EOF)
+            (return false io/EOF)
+            (!= err nil)
+            (break))
+
+          (when (!= nc 0)
+            (break)))
+
+
+
+        (set! (values nc err) (rdu32)))
+
+      (when (!= err nil)
+        (return false err))
+
+
+      ;; Read package and func indices.
+      (set! (values (.-PkgIdx p) err) (rdu32))
+      (when (!= err nil)
+        (return false err))
+
+      (set! (values (.-FuncIdx p) err) (rdu32))
+      (when (!= err nil)
+        (return false err))
+
+      (when (< (cap (.-Counters p)) 1024)
+        (set! (.-Counters p) (make (slice uint32) 0 1024)))
+
+      (set! (.-Counters p) (subslice (.-Counters p) _ 0))
+      (for [i (conv uint32 0)] (< i nc) (inc! i)
+        (let [(values v err) (rdu32)]
+          (when (!= err nil)
+            (return false err))
+
+          (set! (.-Counters p) (append (.-Counters p) v))))
+
+      (return true nil))))

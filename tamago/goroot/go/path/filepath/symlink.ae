@@ -1,0 +1,149 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.path.filepath) (go/file "symlink.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [filepathlite "internal/filepathlite"]
+    ^{:line 10} [fs "io/fs"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [runtime "runtime"]
+    ^{:line 13} [syscall "syscall"]])
+
+
+^{:go/end 150} (go/func walkSymlinks [^string path] :results [string error]
+  (let [volLen (filepathlite/VolumeNameLen path)
+      ^{:line 18} pathSeparator (conv string os/PathSeparator)]
+
+    (when (and (< volLen (len path)) (os/IsPathSeparator (aget path volLen)))
+      (inc! volLen))
+
+    (let [vol (subslice path _ volLen)
+        ^{:line 24} dest vol
+        ^{:line 25} linksWalked 0]
+      (for [(values start end) (values volLen volLen)] (< start (len path)) (set! start end)
+        (while (and (< start (len path)) (os/IsPathSeparator (aget path start)))
+          (inc! start))
+
+        (set! end start)
+        (while (and (< end (len path)) (not (os/IsPathSeparator (aget path end))))
+          (inc! end))
+
+
+        ;; On Windows, "." can be a symlink.
+        ;; We look it up, and use the value if it is absolute.
+        ;; If not, we just return ".".
+        (let [isWindowsDot (and (== runtime/GOOS "windows") (== (subslice path (filepathlite/VolumeNameLen path)) "."))]
+
+          ;; The next path component is in path[start:end].
+          (cond (== end start)
+            ;; No more path components.
+            (break)
+            (and (== (subslice path start end) ".") (not isWindowsDot))
+            ;; Ignore path component ".".
+            (continue)
+            (== (subslice path start end) "..")
+            ;; Back up to previous component if possible.
+            ;; Note that volLen includes any leading slash.
+
+            ;; Set r to the index of the last slash in dest,
+            ;; after the volume.
+            (let [^int r (zero int)]
+              (for [(set! r (- (len dest) 1))] (>= r volLen) (dec! r)
+                (when (os/IsPathSeparator (aget dest r))
+                  (break)))
+
+
+              (if (or (< r volLen) (== (subslice dest (+ r 1)) "..")) (do
+                  ;; Either path has no slashes
+                  ;; (it's empty or just "C:")
+                  ;; or it ends in a ".." we had to keep.
+                  ;; Either way, keep this "..".
+                  (when (> (len dest) volLen)
+                    (set! dest + pathSeparator))
+
+                  (set! dest + ".."))
+
+                ;; Discard everything since the last slash.
+                (set! dest (subslice dest _ r)))
+
+              (continue)))
+
+
+          ;; Ordinary path component. Add it to result.
+
+          (when (and (> (len dest) (filepathlite/VolumeNameLen dest)) (not (os/IsPathSeparator (aget dest (- (len dest) 1)))))
+            (set! dest + pathSeparator))
+
+
+          (set! dest + (subslice path start end))
+
+          ;; Resolve symlink.
+
+          (let [(values fi err) (os/Lstat dest)]
+            (when (!= err nil)
+              (return "" err))
+
+
+            (when (== (bit-and (.Mode fi) fs/ModeSymlink) 0)
+              (when (and (not (.IsDir (.Mode fi))) (< end (len path)))
+                (return "" syscall/ENOTDIR))
+
+              (continue))
+
+
+            ;; Found symlink.
+
+            (inc! linksWalked)
+            (when (> linksWalked 255)
+              (return "" (errors/New "EvalSymlinks: too many links")))
+
+
+            (let [(values link ^:assign err) (os/Readlink dest)]
+              (when (!= err nil)
+                (return "" err))
+
+
+              (when (and isWindowsDot (not (IsAbs link)))
+                ;; On Windows, if "." is a relative symlink,
+                ;; just return ".".
+                (break))
+
+
+              (set! path (+ link (subslice path end)))
+
+              (let [v (filepathlite/VolumeNameLen link)]
+                (cond (> v 0) (do
+                    ;; Symlink to drive name is an absolute path.
+                    (when (and (< v (len link)) (os/IsPathSeparator (aget link v)))
+                      (inc! v))
+
+                    (set! vol (subslice link _ v))
+                    (set! dest vol)
+                    (set! end (len vol)))
+                  (and (> (len link) 0) (os/IsPathSeparator (aget link 0))) (do
+                    ;; Symlink to absolute path.
+                    (set! dest (subslice link _ 1))
+                    (set! end 1)
+                    (set! vol (subslice link _ 1))
+                    (set! volLen 1)) :else
+
+                  ;; Symlink to relative path; replace last
+                  ;; path component in dest.
+                  (let [^int r (zero int)]
+                    (for [(set! r (- (len dest) 1))] (>= r volLen) (dec! r)
+                      (when (os/IsPathSeparator (aget dest r))
+                        (break)))
+
+
+                    (if (< r volLen)
+                      (set! dest vol)
+
+                      (set! dest (subslice dest _ r)))
+
+                    (set! end 0))))))))
+
+
+      (return (Clean dest) nil))))

@@ -1,0 +1,225 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.ecdh) (go/file "nist.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [boring "crypto/internal/boring"]
+    ^{:line 10} [ecdh "crypto/internal/fips140/ecdh"]
+    ^{:line 11} [fips140only "crypto/internal/fips140only"]
+    ^{:line 12} [rand "crypto/internal/rand"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [io "io"]])
+
+
+(go/type nistCurve (struct
+    ^{:line 18 :tag string} name
+    ^{:line 19 :tag (func [io/Reader] [(* ecdh/PrivateKey) error])} generate
+    ^{:line 20 :tag (func [(slice byte)] [(* ecdh/PrivateKey) error])} newPrivateKey
+    ^{:line 21 :tag (func [^{:tag (slice byte)} publicKey] [(* ecdh/PublicKey) error])} newPublicKey
+    ^{:line 22 :tag (func [(* ecdh/PrivateKey) (* ecdh/PublicKey)] [^{:tag (slice byte)} sharedSecret ^error err])} sharedSecret))
+
+
+^{:go/end 27} (go/method String ^string [^{:tag (* nistCurve)} c]
+  (.-name c))
+
+
+^{:go/end 82} (go/method GenerateKey [^{:tag (* nistCurve)} c ^io/Reader r] :results [(* PrivateKey) error]
+  (when (and boring/Enabled (rand/IsDefaultReader r))
+    (let [(values key bytes err) (boring/GenerateKeyECDH (.-name c))]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values pub ^:assign err) (.PublicKey key)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [k (addr ^{:go/breaks [2 4 6 8]} (lit PrivateKey
+                :curve c
+                :privateKey bytes
+                :publicKey (addr (lit PublicKey :curve c :publicKey (.Bytes pub) :boring pub))
+                :boring key))]
+
+          (return k nil)))))
+
+
+  (set! r (rand/CustomReader r))
+
+  (when (and (fips140only/Enforced) (not (fips140only/ApprovedRandomReader r)))
+    (return nil (errors/New "crypto/ecdh: only crypto/rand.Reader is allowed in FIPS 140-only mode")))
+
+
+  (let [(values privateKey err) ((.-generate c) r)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [k (addr ^{:go/breaks [2 4 6 8]} (lit PrivateKey
+            :curve c
+            :privateKey (.Bytes privateKey)
+            :fips privateKey
+            :publicKey (addr ^{:go/breaks [2 4 6]} (lit PublicKey
+                :curve c
+                :publicKey (.Bytes (.PublicKey privateKey))
+                :fips (.PublicKey privateKey)))))]
+
+
+      (when boring/Enabled
+        (let [(values bk err) (boring/NewPrivateKeyECDH (.-name c) (.-privateKey k))]
+          (when (!= err nil)
+            (return nil err))
+
+          (let [(values pub ^:assign err) (.PublicKey bk)]
+            (when (!= err nil)
+              (return nil err))
+
+            (set! (.-boring k) bk)
+            (set! (.-boring (.-publicKey k)) pub))))
+
+      (return k nil))))
+
+
+^{:go/end 118} (go/method NewPrivateKey [^{:tag (* nistCurve)} c ^{:tag (slice byte)} key] :results [(* PrivateKey) error]
+  (when boring/Enabled
+    (let [(values bk err) (boring/NewPrivateKeyECDH (.-name c) key)]
+      (when (!= err nil)
+        (return nil (errors/New "crypto/ecdh: invalid private key")))
+
+      (let [(values pub ^:assign err) (.PublicKey bk)]
+        (when (!= err nil)
+          (return nil (errors/New "crypto/ecdh: invalid private key")))
+
+        (let [k (addr ^{:go/breaks [2 4 6 8]} (lit PrivateKey
+                :curve c
+                :privateKey (bytes/Clone key)
+                :publicKey (addr (lit PublicKey :curve c :publicKey (.Bytes pub) :boring pub))
+                :boring bk))]
+
+          (return k nil)))))
+
+
+  (let [(values fk err) ((.-newPrivateKey c) key)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [k (addr ^{:go/breaks [2 4 6 8]} (lit PrivateKey
+            :curve c
+            :privateKey (bytes/Clone key)
+            :fips fk
+            :publicKey (addr ^{:go/breaks [2 4 6]} (lit PublicKey
+                :curve c
+                :publicKey (.Bytes (.PublicKey fk))
+                :fips (.PublicKey fk)))))]
+
+
+      (return k nil))))
+
+
+^{:go/end 144} (go/method NewPublicKey [^{:tag (* nistCurve)} c ^{:tag (slice byte)} key] :results [(* PublicKey) error]
+  ;; Reject the point at infinity and compressed encodings.
+  ;; Note that boring.NewPublicKeyECDH would accept them.
+  (when (or (== (len key) 0) (!= (aget key 0) 4))
+    (return nil (errors/New "crypto/ecdh: invalid public key")))
+
+  (let [k (addr ^{:go/breaks [2 4]} (lit PublicKey
+          :curve c
+          :publicKey (bytes/Clone key)))]
+
+    (if boring/Enabled
+      (let [(values bk err) (boring/NewPublicKeyECDH (.-name c) (.-publicKey k))]
+        (when (!= err nil)
+          (return nil (errors/New "crypto/ecdh: invalid public key")))
+
+        (set! (.-boring k) bk))
+
+      (let [(values fk err) ((.-newPublicKey c) key)]
+        (when (!= err nil)
+          (return nil err))
+
+        (set! (.-fips k) fk)))
+
+    (return k nil)))
+
+
+^{:go/end 158} (go/method ecdh [^{:tag (* nistCurve)} c ^{:tag (* PrivateKey)} local ^{:tag (* PublicKey)} remote] :results [(slice byte) error]
+  ;; Note that this function can't return an error, as NewPublicKey rejects
+  ;; invalid points and the point at infinity, and NewPrivateKey rejects
+  ;; invalid scalars and the zero value. BytesX returns an error for the point
+  ;; at infinity, but in a prime order group such as the NIST curves that can
+  ;; only be the result of a scalar multiplication if one of the inputs is the
+  ;; zero scalar or the point at infinity.
+
+  (when boring/Enabled
+    (return (boring/ECDH (.-boring local) (.-boring remote))))
+
+  ((.-sharedSecret c) (.-fips local) (.-fips remote)))
+
+
+
+
+
+
+
+^{:go/end 165} (go/func P256 "P256 returns a [Curve] which implements NIST P-256 (FIPS 186-3, section D.2.3),\nalso known as secp256r1 or prime256v1.\n\nMultiple invocations of this function will return the same value, which can\nbe used for equality checks and switch statements.\n" ^Curve [] p256)
+
+(go/var p256 (addr ^{:go/breaks [2 4 [6 172] [8 175] [10 178]]} (lit nistCurve
+      :name "P-256"
+      :generate ^{:go/end 171} (fn [^io/Reader r] :results [(* ecdh/PrivateKey) error]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P256Point)]} ecdh/GenerateKey (ecdh/P256) r))
+
+      :newPrivateKey ^{:go/end 174} (fn [^{:tag (slice byte)} b] :results [(* ecdh/PrivateKey) error]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P256Point)]} ecdh/NewPrivateKey (ecdh/P256) b))
+
+      :newPublicKey ^{:go/end 177} (fn [^{:tag (slice byte)} publicKey] :results [(* ecdh/PublicKey) error]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P256Point)]} ecdh/NewPublicKey (ecdh/P256) publicKey))
+
+      :sharedSecret ^{:go/end 180} (fn [^{:tag (* ecdh/PrivateKey)} priv ^{:tag (* ecdh/PublicKey)} pub] :results [^{:tag (slice byte)} sharedSecret ^error err]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P256Point)]} ecdh/ECDH (ecdh/P256) priv pub)))))
+
+
+
+
+
+
+
+
+^{:go/end 188} (go/func P384 "P384 returns a [Curve] which implements NIST P-384 (FIPS 186-3, section D.2.4),\nalso known as secp384r1.\n\nMultiple invocations of this function will return the same value, which can\nbe used for equality checks and switch statements.\n" ^Curve [] p384)
+
+(go/var p384 (addr ^{:go/breaks [2 4 [6 195] [8 198] [10 201]]} (lit nistCurve
+      :name "P-384"
+      :generate ^{:go/end 194} (fn [^io/Reader r] :results [(* ecdh/PrivateKey) error]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P384Point)]} ecdh/GenerateKey (ecdh/P384) r))
+
+      :newPrivateKey ^{:go/end 197} (fn [^{:tag (slice byte)} b] :results [(* ecdh/PrivateKey) error]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P384Point)]} ecdh/NewPrivateKey (ecdh/P384) b))
+
+      :newPublicKey ^{:go/end 200} (fn [^{:tag (slice byte)} publicKey] :results [(* ecdh/PublicKey) error]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P384Point)]} ecdh/NewPublicKey (ecdh/P384) publicKey))
+
+      :sharedSecret ^{:go/end 203} (fn [^{:tag (* ecdh/PrivateKey)} priv ^{:tag (* ecdh/PublicKey)} pub] :results [^{:tag (slice byte)} sharedSecret ^error err]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P384Point)]} ecdh/ECDH (ecdh/P384) priv pub)))))
+
+
+
+
+
+
+
+
+^{:go/end 211} (go/func P521 "P521 returns a [Curve] which implements NIST P-521 (FIPS 186-3, section D.2.5),\nalso known as secp521r1.\n\nMultiple invocations of this function will return the same value, which can\nbe used for equality checks and switch statements.\n" ^Curve [] p521)
+
+(go/var p521 (addr ^{:go/breaks [2 4 [6 218] [8 221] [10 224]]} (lit nistCurve
+      :name "P-521"
+      :generate ^{:go/end 217} (fn [^io/Reader r] :results [(* ecdh/PrivateKey) error]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P521Point)]} ecdh/GenerateKey (ecdh/P521) r))
+
+      :newPrivateKey ^{:go/end 220} (fn [^{:tag (slice byte)} b] :results [(* ecdh/PrivateKey) error]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P521Point)]} ecdh/NewPrivateKey (ecdh/P521) b))
+
+      :newPublicKey ^{:go/end 223} (fn [^{:tag (slice byte)} publicKey] :results [(* ecdh/PublicKey) error]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P521Point)]} ecdh/NewPublicKey (ecdh/P521) publicKey))
+
+      :sharedSecret ^{:go/end 226} (fn [^{:tag (* ecdh/PrivateKey)} priv ^{:tag (* ecdh/PublicKey)} pub] :results [^{:tag (slice byte)} sharedSecret ^error err]
+        (^{:inst [(* go.crypto.internal.fips140.nistec/P521Point)]} ecdh/ECDH (ecdh/P521) priv pub)))))

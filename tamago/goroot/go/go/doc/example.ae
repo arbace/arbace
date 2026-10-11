@@ -1,0 +1,733 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Extract example functions from file ASTs.
+
+(in-ns 'go.go.doc) (go/file "example.go" :imports [
+
+
+    ^{:line 10} [cmp "cmp"]
+    ^{:line 11} [ast "go/ast"]
+    ^{:line 12} [token "go/token"]
+    ^{:line 13} [lazyregexp "internal/lazyregexp"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [unicode "unicode"]
+    ^{:line 18} [utf8 "unicode/utf8"]])
+
+
+
+(go/type Example "An Example represents an example function found in a test source file.\n" (struct
+    ^{:line 23 :tag string} Name ; name of the item being exemplified (including optional suffix)
+    ^{:line 24 :tag string} Suffix ; example suffix, without leading '_' (only populated by NewFromFiles)
+    ^{:line 25 :tag string} Doc ; example function doc string
+    ^{:line 26 :tag ast/Node} Code
+    ^{:line 27 :tag (* ast/File)} Play ; a whole program version of the example
+    ^{:line 28 :tag (slice (* ast/CommentGroup))} Comments
+    ^{:line 29 :tag string} Output ; expected output
+    ^{:line 30 :tag bool} Unordered
+    ^{:line 31 :tag bool} EmptyOutput ; expect empty output
+    ^{:line 32 :tag int} Order)) ; original source code order
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 114} (go/func Examples "Examples returns the examples found in testFiles, sorted by Name field.\nThe Order fields record the order in which the examples were encountered.\nThe Suffix field is not populated when Examples is called directly, it is\nonly populated by [NewFromFiles] for examples it finds in _test.go files.\n\nPlayable Examples must be in a package whose name ends in \"_test\".\nAn Example is \"playable\" (the Play field is non-nil) in either of these\ncircumstances:\n  - The example function is self-contained: the function references only\n    identifiers from other packages (or predeclared identifiers, such as\n    \"int\") and the test file does not include a dot import.\n  - The entire test file is the example: the file contains exactly one\n    example function, zero test, fuzz test, or benchmark function, and at\n    least one top-level function, type, variable, or constant declaration\n    other than the example function.\n" ^{:tag (slice (* Example))} [& ^{:tag (slice (* ast/File))} testFiles]
+  (let [^{:tag (slice (* Example))} list (zero (slice (* Example)))]
+    (range [_ file testFiles]
+      (let [hasTests false ; file contains tests, fuzz test, or benchmarks
+          ^{:line 54} numDecl 0 ; number of non-import declarations in the file
+          ^{:line 55 :tag (slice (* Example))} flist (zero (slice (* Example)))]
+        (range [_ decl (.-Decls file)]
+          (when [(values g ok) (assert (* ast/GenDecl) decl)] (and ok (!= (.-Tok g) token/IMPORT))
+            (inc! numDecl)
+            (continue))
+
+          (let [(values f ok) (assert (* ast/FuncDecl) decl)]
+            (when (or (not ok) (!= (.-Recv f) nil))
+              (continue))
+
+            (inc! numDecl)
+            (let [name (.-Name (.-Name f))]
+              (when (or (isTest name "Test") (isTest name "Benchmark") (isTest name "Fuzz"))
+                (set! hasTests true)
+                (continue))
+
+              (when (not (isTest name "Example"))
+                (continue))
+
+              (when [params (.-Params (.-Type f))] (!= (len (.-List params)) 0)
+                (continue)) ; function has params; not a valid example
+
+              (when [results (.-Results (.-Type f))] (and (!= results nil) (!= (len (.-List results)) 0))
+                (continue)) ; function has results; not a valid example
+
+              (when (== (.-Body f) nil) ; ast.File.Body nil dereference (see issue 28044)
+                (continue))
+
+              (let [^string doc (zero string)]
+                (when (!= (.-Doc f) nil)
+                  (set! doc (.Text (.-Doc f))))
+
+                (let [(values output unordered hasOutput) (exampleOutput (.-Body f) (.-Comments file))]
+                  (set! flist (append flist (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit Example
+                          :Name (subslice name (len "Example"))
+                          :Doc doc
+                          :Code (.-Body f)
+                          :Play (playExample file f)
+                          :Comments (.-Comments file)
+                          :Output output
+                          :Unordered unordered
+                          :EmptyOutput (and (== output "") hasOutput)
+                          :Order (len flist))))))))))
+
+
+        (when (and (not hasTests) (> numDecl 1) (== (len flist) 1))
+          ;; If this file only has one example function, some
+          ;; other top-level declarations, and no tests or
+          ;; benchmarks, use the whole file as the example.
+          (set! (.-Code (aget flist 0)) file)
+          (set! (.-Play (aget flist 0)) (playExampleFile file)))
+
+        (set! list (append list (spread flist)))))
+
+    ;; sort by name
+    (^{:inst [(slice (* Example)) (* Example)]} slices/SortFunc list ^{:go/end 112} (fn ^int [^{:tag (* Example)} a ^{:tag (* Example)} b]
+        (^{:inst [string]} cmp/Compare (.-Name a) (.-Name b))))
+
+    ^{:line 113} list))
+
+
+(go/var outputPrefix (lazyregexp/New "(?i)^[[:space:]]*(unordered )?output:"))
+
+
+^{:go/end 137} (go/func exampleOutput "Extracts the expected output and whether there was a valid output comment.\n" [^{:tag (* ast/BlockStmt)} b ^{:tag (slice (* ast/CommentGroup))} comments] :results [^string output ^bool unordered ^bool ok]
+  (when [(values _ last) (lastComment b comments)] (!= last nil)
+    ;; test that it begins with the correct prefix
+    (let [text (.Text last)]
+      (when [loc (.FindStringSubmatchIndex outputPrefix text)] (!= loc nil)
+        (when (!= (aget loc 2) -1)
+          (set! unordered true))
+
+        (set! text (subslice text (aget loc 1)))
+        ;; Strip zero or more spaces followed by \n or a single space.
+        (set! text (strings/TrimLeft text " "))
+        (when (and (> (len text) 0) (== (aget text 0) \newline))
+          (set! text (subslice text 1)))
+
+        (return text unordered true))))
+
+
+  (return "" false false)) ; no suitable comment found
+
+
+
+
+
+^{:go/end 151} (go/func isTest "isTest tells whether name looks like a test, example, fuzz test, or\nbenchmark. It is a Test (say) if there is a character after Test that is not\na lower-case letter. (We don't want Testiness.)\n" ^bool [^string name ^string prefix]
+  (when (not (strings/HasPrefix name prefix))
+    (return false))
+
+  (when (== (len name) (len prefix)) ; "Test" is ok
+    (return true))
+
+  (let [(values rune _) (utf8/DecodeRuneInString (subslice name (len prefix)))]
+    (not (unicode/IsLower rune))))
+
+
+
+
+^{:go/end 328} (go/func playExample "playExample synthesizes a new *ast.File based on the provided\nfile with the provided function body as the body of main.\n" ^{:tag (* ast/File)} [^{:tag (* ast/File)} file ^{:tag (* ast/FuncDecl)} f]
+  (let [body (.-Body f)]
+
+    (when (not (strings/HasSuffix (.-Name (.-Name file)) "_test"))
+      ;; We don't support examples that are part of the
+      ;; greater package (yet).
+      (return nil))
+
+
+    ;; Collect top-level declarations in the file.
+    (let [topDecls (make (map (* ast/Object) ast/Decl))
+        ^{:line 166} typMethods (make (map string (slice ast/Decl)))]
+
+      (range [_ decl (.-Decls file)]
+        (type-switch [d decl]
+          (case [(* ast/FuncDecl)]
+            (if (== (.-Recv d) nil)
+              (aset topDecls (.-Obj (.-Name d)) d)
+              (do
+                (when (== (len (.-List (.-Recv d))) 1)
+                  (let [t (.-Type (aget (.-List (.-Recv d)) 0))
+                      (values tname _) (baseTypeName t)]
+                    (aset typMethods tname (append (aget typMethods tname) d)))))))
+
+
+          (case [(* ast/GenDecl)]
+            (range [_ spec (.-Specs d)]
+              (type-switch [s spec]
+                (case [(* ast/TypeSpec)]
+                  (aset topDecls (.-Obj (.-Name s)) d))
+                (case [(* ast/ValueSpec)]
+                  (range [_ name (.-Names s)]
+                    (aset topDecls (.-Obj name) d))))))))
+
+
+
+
+
+
+      ;; Find unresolved identifiers and uses of top-level declarations.
+      (let [(values depDecls unresolved) (findDeclsAndUnresolved body topDecls typMethods)
+
+          ;; Use unresolved identifiers to determine the imports used by this
+          ;; example. The heuristic assumes package names match base import
+          ;; paths for imports w/o renames (should be good enough most of the time).
+          ^{:line 200 :tag (slice ast/Spec)} namedImports (zero (slice ast/Spec))
+          ^{:line 201 :tag (slice ast/Spec)} blankImports (zero (slice ast/Spec)) ; _ imports
+
+          ;; To preserve the blank lines between groups of imports, find the
+          ;; start position of each group, and assign that position to all
+          ;; imports from that group.
+          ^{:line 206} groupStarts (findImportGroupStarts (.-Imports file))
+          ^{:line 207} groupStart ^{:go/end 214} (fn ^token/Pos [^{:tag (* ast/ImportSpec)} s]
+            (range [i start groupStarts]
+              (when (< (.-ValuePos (.-Path s)) start)
+                (return (aget groupStarts (- i 1)))))
+
+
+            (aget groupStarts (- (len groupStarts) 1)))]
+
+
+        (range [_ s (.-Imports file)]
+          (let [(values p err) (strconv/Unquote (.-Value (.-Path s)))]
+            (when (!= err nil)
+              (continue))
+
+            (when (== p "syscall/js")
+              ;; We don't support examples that import syscall/js,
+              ;; because the package syscall/js is not available in the playground.
+              (return nil))
+
+            (let [n (assumedPackageName p)]
+              (when (!= (.-Name s) nil)
+                (set! n (.-Name (.-Name s)))
+                (switch n
+                  (case ["_"]
+                    (set! blankImports (append blankImports s))
+                    (continue))
+                  (case ["."]
+                    ;; We can't resolve dot imports (yet).
+                    (return nil))))
+
+
+              (when (aget unresolved n)
+                ;; Copy the spec and its path to avoid modifying the original.
+                (let [spec @s
+                    ^{:line 241} path @(.-Path s)]
+                  (set! (.-Path spec) (addr path))
+                  (updateBasicLitPos (.-Path spec) (groupStart (addr spec)))
+                  (set! namedImports (append namedImports (addr spec)))
+                  (delete unresolved n))))))
+
+
+
+        ;; Remove predeclared identifiers from unresolved list.
+        (range [n unresolved]
+          (when (or (aget predeclaredTypes n) (aget predeclaredConstants n) (aget predeclaredFuncs n))
+            (delete unresolved n)))
+
+
+
+        ;; If there are other unresolved identifiers, give up because this
+        ;; synthesized file is not going to build.
+        (when (> (len unresolved) 0)
+          (return nil))
+
+
+        ;; Include documentation belonging to blank imports.
+        (let [^{:tag (slice (* ast/CommentGroup))} comments (zero (slice (* ast/CommentGroup)))]
+          (range [_ s blankImports]
+            (when [c (.-Doc (assert (* ast/ImportSpec) s))] (!= c nil)
+              (set! comments (append comments c))))
+
+
+
+          ;; Include comments that are inside the function body.
+          (range [_ c (.-Comments file)]
+            (when (and (<= (.Pos body) (.Pos c)) (<= (.End c) (.End body)))
+              (set! comments (append comments c))))
+
+
+
+          ;; Strip the "Output:" or "Unordered output:" comment and adjust body
+          ;; end position.
+          (set! (values body comments) (stripOutputComment body comments))
+
+          ;; Include documentation belonging to dependent declarations.
+          (range [_ d depDecls]
+            (type-switch [d d]
+              (case [(* ast/GenDecl)]
+                (when (!= (.-Doc d) nil)
+                  (set! comments (append comments (.-Doc d)))))
+
+              (case [(* ast/FuncDecl)]
+                (when (!= (.-Doc d) nil)
+                  (set! comments (append comments (.-Doc d)))))))
+
+
+
+
+          ;; Synthesize import declaration.
+          (let [importDecl (addr ^{:go/breaks [2 4 6]} (lit ast/GenDecl
+                  :Tok token/IMPORT
+                  :Lparen 1 ; Need non-zero Lparen and Rparen so that printer
+                  :Rparen 1))] ; treats this as a factored import.
+
+            (set! (.-Specs importDecl) (append namedImports (spread blankImports)))
+
+            ;; Synthesize main function.
+            (let [funcDecl (addr ^{:go/breaks [2 4 6]} (lit ast/FuncDecl
+                    :Name (ast/NewIdent "main")
+                    :Type (.-Type f)
+                    :Body body))
+
+
+                ^{:line 310} decls (make (slice ast/Decl) 0 (+ 2 (len depDecls)))]
+              (set! decls (append decls importDecl))
+              (set! decls (append decls (spread depDecls)))
+              (set! decls (append decls funcDecl))
+
+              (^{:inst [(slice ast/Decl) ast/Decl]} slices/SortFunc decls ^{:go/end 317} (fn ^int [^ast/Decl a ^ast/Decl b]
+                  (^{:inst [token/Pos]} cmp/Compare (.Pos a) (.Pos b))))
+
+              (^{:inst [(slice (* ast/CommentGroup)) (* ast/CommentGroup)]} slices/SortFunc comments ^{:go/end 320} (fn ^int [^{:tag (* ast/CommentGroup)} a ^{:tag (* ast/CommentGroup)} b]
+                  (^{:inst [token/Pos]} cmp/Compare (.Pos a) (.Pos b))))
+
+
+              ;; Synthesize file.
+              (addr ^{:go/breaks [2 4 6]} (lit ast/File
+                  :Name (ast/NewIdent "main")
+                  :Decls decls
+                  :Comments comments)))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 493} (go/func findDeclsAndUnresolved "findDeclsAndUnresolved returns all the top-level declarations mentioned in\nthe body, and a set of unresolved symbols (those that appear in the body but\nhave no declaration in the program).\n\ntopDecls maps objects to the top-level declaration declaring them (not\nnecessarily obj.Decl, as obj.Decl will be a Spec for GenDecls, but\ntopDecls[obj] will be the GenDecl itself).\n" [^ast/Node body ^{:tag (map (* ast/Object) ast/Decl)} topDecls ^{:tag (map string (slice ast/Decl))} typMethods] :results [(slice ast/Decl) (map string bool)]
+  ;; This function recursively finds every top-level declaration used
+  ;; transitively by the body, populating usedDecls and usedObjs. Then it
+  ;; trims down the declarations to include only the symbols actually
+  ;; referenced by the body.
+
+  (let [unresolved (make (map string bool))
+      ^{:line 344 :tag (slice ast/Decl)} depDecls (zero (slice ast/Decl))
+      ^{:line 345} usedDecls (make (map ast/Decl bool)) ; set of top-level decls reachable from the body
+      ^{:line 346} usedObjs (make (map (* ast/Object) bool)) ; set of objects reachable from the body (each declared by a usedDecl)
+
+      ^{:line 348 :tag (func [ast/Node] [bool])} inspectFunc (zero (func [ast/Node] [bool]))]
+    (set! inspectFunc ^{:go/breaks [[3 376]] :go/end 377} (fn ^bool [^ast/Node n]
+        (type-switch [e n]
+          (case [(* ast/Ident)]
+            (if (and (== (.-Obj e) nil) (!= (.-Name e) "_"))
+              (aset unresolved (.-Name e) true)
+              (when [d (aget topDecls (.-Obj e))] (!= d nil)
+
+                (aset usedObjs (.-Obj e) true)
+                (when (not (aget usedDecls d))
+                  (aset usedDecls d true)
+                  (set! depDecls (append depDecls d)))))
+
+
+            (return true))
+          (case [(* ast/SelectorExpr)]
+            ;; For selector expressions, only inspect the left hand side.
+            ;; (For an expression like fmt.Println, only add "fmt" to the
+            ;; set of unresolved names, not "Println".)
+            (ast/Inspect (.-X e) inspectFunc)
+            (return false))
+          (case [(* ast/KeyValueExpr)]
+            ;; For key value expressions, only inspect the value
+            ;; as the key should be resolved by the type of the
+            ;; composite literal.
+            (ast/Inspect (.-Value e) inspectFunc)
+            (return false)))
+
+        true))
+
+
+    (let [inspectFieldList ^{:go/end 385} (fn [^{:tag (* ast/FieldList)} fl]
+          (when (!= fl nil)
+            (range [_ f (.-List fl)]
+              (ast/Inspect (.-Type f) inspectFunc))))]
+
+
+
+
+      ;; Find the decls immediately referenced by body.
+      (ast/Inspect body inspectFunc)
+      ;; Now loop over them, adding to the list when we find a new decl that the
+      ;; body depends on. Keep going until we don't find anything new.
+      (for [i 0] (< i (len depDecls)) (inc! i)
+        (type-switch [d (aget depDecls i)]
+          (case [(* ast/FuncDecl)]
+            ;; Inspect type parameters.
+            (inspectFieldList (.-TypeParams (.-Type d)))
+            ;; Inspect types of parameters and results. See #28492.
+            (inspectFieldList (.-Params (.-Type d)))
+            (inspectFieldList (.-Results (.-Type d)))
+
+            ;; Functions might not have a body. See #42706.
+            (when (!= (.-Body d) nil)
+              (ast/Inspect (.-Body d) inspectFunc)))
+
+          (case [(* ast/GenDecl)]
+            (range [_ spec (.-Specs d)]
+              (type-switch [s spec]
+                (case [(* ast/TypeSpec)]
+                  (inspectFieldList (.-TypeParams s))
+                  (ast/Inspect (.-Type s) inspectFunc)
+                  (set! depDecls (append depDecls (spread (aget typMethods (.-Name (.-Name s)))))))
+                (case [(* ast/ValueSpec)]
+                  (when (!= (.-Type s) nil)
+                    (ast/Inspect (.-Type s) inspectFunc))
+
+                  (range [_ val (.-Values s)]
+                    (ast/Inspect val inspectFunc))))))))
+
+
+
+
+
+
+      ;; Some decls include multiple specs, such as a variable declaration with
+      ;; multiple variables on the same line, or a parenthesized declaration. Trim
+      ;; the declarations to include only the specs that are actually mentioned.
+      ;; However, if there is a constant group with iota, leave it all: later
+      ;; constant declarations in the group may have no value and so cannot stand
+      ;; on their own, and removing any constant from the group could change the
+      ;; values of subsequent ones.
+      ;; See testdata/examples/iota.go for a minimal example.
+      (let [^{:tag (slice ast/Decl)} ds (zero (slice ast/Decl))]
+        (range [_ d depDecls]
+          (type-switch [d d]
+            (case [(* ast/FuncDecl)]
+              (set! ds (append ds d)))
+            (case [(* ast/GenDecl)]
+              (let [containsIota false ; does any spec have iota?
+                  ;; Collect all Specs that were mentioned in the example.
+                  ^{:line 439 :tag (slice ast/Spec)} specs (zero (slice ast/Spec))]
+                (range [_ s (.-Specs d)]
+                  (type-switch [s s]
+                    (case [(* ast/TypeSpec)]
+                      (when (aget usedObjs (.-Obj (.-Name s)))
+                        (set! specs (append specs s))))
+
+                    (case [(* ast/ValueSpec)]
+                      (when (not containsIota)
+                        (set! containsIota (hasIota s)))
+
+                      ;; A ValueSpec may have multiple names (e.g. "var a, b int").
+                      ;; Keep only the names that were mentioned in the example.
+                      ;; Exception: the multiple names have a single initializer (which
+                      ;; would be a function call with multiple return values). In that
+                      ;; case, keep everything.
+                      (when (and (> (len (.-Names s)) 1) (== (len (.-Values s)) 1))
+                        (set! specs (append specs s))
+                        (continue))
+
+                      (let [ns @s]
+                        (set! (.-Names ns) nil)
+                        (set! (.-Values ns) nil)
+                        (range [i n (.-Names s)]
+                          (when (aget usedObjs (.-Obj n))
+                            (set! (.-Names ns) (append (.-Names ns) n))
+                            (when (!= (.-Values s) nil)
+                              (set! (.-Values ns) (append (.-Values ns) (aget (.-Values s) i))))))
+
+
+
+                        (when (> (len (.-Names ns)) 0)
+                          (set! specs (append specs (addr ns))))))))
+
+
+
+                (when (> (len specs) 0)
+                  ;; Constant with iota? Keep it all.
+                  (if (and (== (.-Tok d) token/CONST) containsIota)
+                    (set! ds (append ds d))
+
+                    ;; Synthesize a GenDecl with just the Specs we need.
+                    (let [nd @d] ; copy the GenDecl
+                      (set! (.-Specs nd) specs)
+                      (when (== (len specs) 1)
+                        ;; Remove grouping parens if there is only one spec.
+                        (set! (.-Lparen nd) 0))
+
+                      (set! ds (append ds (addr nd))))))))))
+
+
+
+
+        (return ds unresolved)))))
+
+
+^{:go/breaks [[4 503]] :go/end 504} (go/func hasIota ^bool [^ast/Spec s]
+  (range [n (ast/Preorder s)]
+    ;; Check that this is the special built-in "iota" identifier, not
+    ;; a user-defined shadow.
+    (when [(values id ok) (assert (* ast/Ident) n)] (and ok (== (.-Name id) "iota") (== (.-Obj id) nil))
+      (return true)))
+
+
+  false)
+
+
+
+
+^{:go/end 515} (go/func findImportGroupStarts "findImportGroupStarts finds the start positions of each sequence of import\nspecs that are not separated by a blank line.\n" ^{:tag (slice token/Pos)} [^{:tag (slice (* ast/ImportSpec))} imps]
+  (let [startImps (findImportGroupStarts1 imps)
+      ^{:line 510} groupStarts (make (slice token/Pos) (len startImps))]
+    (range [i imp startImps]
+      (aset groupStarts i (.Pos imp)))
+
+    ^{:line 514} groupStarts))
+
+
+
+^{:go/end 541} (go/func findImportGroupStarts1 "Helper for findImportGroupStarts to ease testing.\n" ^{:tag (slice (* ast/ImportSpec))} [^{:tag (slice (* ast/ImportSpec))} origImps]
+  ;; Copy to avoid mutation.
+  (let [imps (make (slice (* ast/ImportSpec)) (len origImps))]
+    (copy imps origImps)
+    ;; Assume the imports are sorted by position.
+    (^{:inst [(slice (* ast/ImportSpec)) (* ast/ImportSpec)]} slices/SortFunc imps ^{:go/end 525} (fn ^int [^{:tag (* ast/ImportSpec)} a ^{:tag (* ast/ImportSpec)} b]
+        (^{:inst [token/Pos]} cmp/Compare (.Pos a) (.Pos b))))
+
+    ;; Assume gofmt has been applied, so there is a blank line between adjacent imps
+    ;; if and only if they are more than 2 positions apart (newline, tab).
+    (let [^{:tag (slice (* ast/ImportSpec))} groupStarts (zero (slice (* ast/ImportSpec)))
+        ^{:line 529} prevEnd (conv token/Pos -2)]
+      (range [_ imp imps]
+        (when (> (- (.Pos imp) prevEnd) 2)
+          (set! groupStarts (append groupStarts imp)))
+
+        (set! prevEnd (.End imp))
+        ;; Account for end-of-line comments.
+        (when (!= (.-Comment imp) nil)
+          (set! prevEnd (.End (.-Comment imp)))))
+
+
+      ^{:line 540} groupStarts)))
+
+
+
+
+^{:go/end 571} (go/func playExampleFile "playExampleFile takes a whole file example and synthesizes a new *ast.File\nsuch that the example is function main in package main.\n" ^{:tag (* ast/File)} [^{:tag (* ast/File)} file]
+  ;; Strip copyright comment if present.
+  (let [comments (.-Comments file)]
+    (when (and (> (len comments) 0) (strings/HasPrefix (.Text (aget comments 0)) "Copyright"))
+      (set! comments (subslice comments 1)))
+
+
+    ;; Copy declaration slice, rewriting the ExampleX function to main.
+    (let [^{:tag (slice ast/Decl)} decls (zero (slice ast/Decl))]
+      (range [_ d (.-Decls file)]
+        (when [(values f ok) (assert (* ast/FuncDecl) d)] (and ok (isTest (.-Name (.-Name f)) "Example"))
+          ;; Copy the FuncDecl, as it may be used elsewhere.
+          (let [newF @f]
+            (set! (.-Name newF) (ast/NewIdent "main"))
+            (set! (values (.-Body newF) comments) (stripOutputComment (.-Body f) comments))
+            (set! d (addr newF))))
+
+        (set! decls (append decls d)))
+
+
+      ;; Copy the File, as it may be used elsewhere.
+      (let [f @file]
+        (set! (.-Name f) (ast/NewIdent "main"))
+        (set! (.-Decls f) decls)
+        (set! (.-Comments f) comments)
+        (addr f)))))
+
+
+
+
+^{:go/end 592} (go/func stripOutputComment "stripOutputComment finds and removes the \"Output:\" or \"Unordered output:\"\ncomment from body and comments, and adjusts the body block's end position.\n" [^{:tag (* ast/BlockStmt)} body ^{:tag (slice (* ast/CommentGroup))} comments] :results [(* ast/BlockStmt) (slice (* ast/CommentGroup))]
+  ;; Do nothing if there is no "Output:" or "Unordered output:" comment.
+  (let [(values i last) (lastComment body comments)]
+    (when (or (== last nil) (not (.MatchString outputPrefix (.Text last))))
+      (return body comments))
+
+
+    ;; Copy body and comments, as the originals may be used elsewhere.
+    (let [newBody (addr ^{:go/breaks [2 4 6]} (lit ast/BlockStmt
+            :Lbrace (.-Lbrace body)
+            :List (.-List body)
+            :Rbrace (.Pos last)))
+
+        ^{:line 588} newComments (make (slice (* ast/CommentGroup)) (- (len comments) 1))]
+      (copy newComments (subslice comments _ i))
+      (copy (subslice newComments i) (subslice comments (+ i 1)))
+      (return newBody newComments))))
+
+
+
+^{:go/end 610} (go/func lastComment "lastComment returns the last comment inside the provided block.\n" [^{:tag (* ast/BlockStmt)} b ^{:tag (slice (* ast/CommentGroup))} c] :results [^int i ^{:tag (* ast/CommentGroup)} last]
+  (when (== b nil)
+    (return))
+
+  (let [(values pos end) (values (.Pos b) (.End b))]
+    (range [j cg c]
+      (when (< (.Pos cg) pos)
+        (continue))
+
+      (when (> (.End cg) end)
+        (break))
+
+      (set! (values i last) (values j cg)))
+
+    (return)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 684} (go/func classifyExamples "classifyExamples classifies examples and assigns them to the Examples field\nof the relevant Func, Type, or Package that the example is associated with.\n\nThe classification process is ambiguous in some cases:\n\n  - ExampleFoo_Bar matches a type named Foo_Bar\n    or a method named Foo.Bar.\n  - ExampleFoo_bar matches a type named Foo_bar\n    or Foo (with a \"bar\" suffix).\n\nExamples with malformed names are not associated with anything.\n" [^{:tag (* Package)} p ^{:tag (slice (* Example))} examples]
+  (when (== (len examples) 0)
+    (return))
+
+  ;; Mapping of names for funcs, types, and methods to the example listing.
+  (let [ids (make (map string (* (slice (* Example)))))]
+    (aset ids "" (addr (.-Examples p))) ; package-level examples have an empty name
+    (range [_ f (.-Funcs p)]
+      (when (not (token/IsExported (.-Name f)))
+        (continue))
+
+      (aset ids (.-Name f) (addr (.-Examples f))))
+
+    (range [_ t (.-Types p)]
+      (when (not (token/IsExported (.-Name t)))
+        (continue))
+
+      (aset ids (.-Name t) (addr (.-Examples t)))
+      (range [_ f (.-Funcs t)]
+        (when (not (token/IsExported (.-Name f)))
+          (continue))
+
+        (aset ids (.-Name f) (addr (.-Examples f))))
+
+      (range [_ m (.-Methods t)]
+        (when (not (token/IsExported (.-Name m)))
+          (continue))
+
+        (aset ids (+ (strings/TrimPrefix (nameWithoutInst (.-Recv m)) "*") "_" (.-Name m)) (addr (.-Examples m)))))
+
+
+
+    ;; Group each example with the associated func, type, or method.
+    (range [_ ex examples]
+      ;; Consider all possible split points for the suffix
+      ;; by starting at the end of string (no suffix case),
+      ;; then trying all positions that contain a '_' character.
+      ;;
+      ;; An association is made on the first successful match.
+      ;; Examples with malformed names that match nothing are skipped.
+      (for [i (len (.-Name ex))] (>= i 0) (set! i (strings/LastIndexByte (subslice (.-Name ex) _ i) \_))
+        (let [(values prefix suffix ok) (splitExampleName (.-Name ex) i)]
+          (when (not ok)
+            (continue))
+
+          (let [(values exs ^:assign ok) (aget ids prefix)]
+            (when (not ok)
+              (continue))
+
+            (set! (.-Suffix ex) suffix)
+            (set! @exs (append @exs ex))
+            (break)))))
+
+
+
+    ;; Sort list of example according to the user-specified suffix name.
+    (range [_ exs ids]
+      (^{:inst [(slice (* Example)) (* Example)]} slices/SortFunc @exs ^{:go/end 682} (fn ^int [^{:tag (* Example)} a ^{:tag (* Example)} b]
+          (^{:inst [string]} cmp/Compare (.-Suffix a) (.-Suffix b)))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 702} (go/func nameWithoutInst "nameWithoutInst returns name if name has no brackets. If name contains\nbrackets, then it returns name with all the contents between (and including)\nthe outermost left and right bracket removed.\n\nAdapted from debug/gosym/symtab.go:Sym.nameWithoutInst.\n" ^string [^string name]
+  (let [start (strings/Index name "[")]
+    (when (< start 0)
+      (return name))
+
+    (let [end (strings/LastIndex name "]")]
+      (when (< end 0)
+        ;; Malformed name, should contain closing bracket too.
+        (return name))
+
+      (+ (subslice name 0 start) (subslice name (+ end 1))))))
+
+
+
+
+
+
+
+
+^{:go/end 719} (go/func splitExampleName "splitExampleName attempts to split example name s at index i,\nand reports if that produces a valid split. The suffix may be\nabsent. Otherwise, it must start with a lower-case letter and\nbe preceded by '_'.\n\nOne of i == len(s) or s[i] == '_' must be true.\n" [^string s ^int i] :results [^string prefix ^string suffix ^bool ok]
+  (when (== i (len s))
+    (return s "" true))
+
+  (when (== i (- (len s) 1))
+    (return "" "" false))
+
+  (set! (values prefix suffix) (values (subslice s _ i) (subslice s (+ i 1))))
+  (return prefix suffix (isExampleSuffix suffix)))
+
+
+^{:go/end 724} (go/func isExampleSuffix ^bool [^string s]
+  (let [(values r size) (utf8/DecodeRuneInString s)]
+    (and (> size 0) (unicode/IsLower r))))
+
+
+
+
+
+^{:go/end 735} (go/func updateBasicLitPos "updateBasicLitPos updates lit.Pos,\nensuring that lit.End is displaced by the same amount.\n(See https://go.dev/issue/76395.)\n" [^{:tag (* ast/BasicLit)} lit ^token/Pos pos]
+  (let [len (- (.End lit) (.Pos lit))]
+    (set! (.-ValuePos lit) pos)
+    (when (.IsValid (.-ValueEnd lit))
+      (set! (.-ValueEnd lit) (+ pos len)))))

@@ -1,0 +1,213 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.debug.pe) (go/file "symbol.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [saferio "internal/saferio"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+(go/const ^{:val 18} COFFSymbolSize 18)
+
+
+(go/type COFFSymbol "COFFSymbol represents single COFF symbol table record.\n" (struct
+    ^{:line 20 :tag (array 8 uint8)} Name
+    ^{:line 21 :tag uint32} Value
+    ^{:line 22 :tag int16} SectionNumber
+    ^{:line 23 :tag uint16} Type
+    ^{:line 24 :tag uint8} StorageClass
+    ^{:line 25 :tag uint8} NumberOfAuxSymbols))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 96} (go/func readCOFFSymbols "readCOFFSymbols reads in the symbol table for a PE file, returning\na slice of COFFSymbol objects. The PE format includes both primary\nsymbols (whose fields are described by COFFSymbol above) and\nauxiliary symbols; all symbols are 18 bytes in size. The auxiliary\nsymbols for a given primary symbol are placed following it in the\narray, e.g.\n\n\t...\n\tk+0:  regular sym k\n\tk+1:    1st aux symbol for k\n\tk+2:    2nd aux symbol for k\n\tk+3:  regular sym k+3\n\tk+4:    1st aux symbol for k+3\n\tk+5:  regular sym k+5\n\tk+6:  regular sym k+6\n\nThe PE format allows for several possible aux symbol formats. For\nmore info see:\n\n\thttps://docs.microsoft.com/en-us/windows/win32/debug/pe-format#auxiliary-symbol-records\n\nAt the moment this package only provides APIs for looking at\naux symbols of format 5 (associated with section definition symbols).\n" [^{:tag (* FileHeader)} fh ^io/ReadSeeker r] :results [(slice COFFSymbol) error]
+  (when (== (.-PointerToSymbolTable fh) 0)
+    (return nil nil))
+
+  (when (<= (.-NumberOfSymbols fh) 0)
+    (return nil nil))
+
+  (let [(values _ err) (.Seek r (conv int64 (.-PointerToSymbolTable fh)) io/SeekStart)]
+    (when (!= err nil)
+      (return nil (fmt/Errorf "fail to seek to symbol table: %v" err)))
+
+    (let [c ((inst saferio/SliceCap COFFSymbol) (conv uint64 (.-NumberOfSymbols fh)))]
+      (when (< c 0)
+        (return nil (errors/New "too many symbols; file may be corrupt")))
+
+      (let [syms (make (slice COFFSymbol) 0 c)
+          ^{:line 67} naux 0]
+        (for [k (conv uint32 0)] (< k (.-NumberOfSymbols fh)) (inc! k)
+          (let [^COFFSymbol sym (zero COFFSymbol)]
+            (if (== naux 0) (do
+                ;; Read a primary symbol.
+                (set! err (binary/Read r binary/LittleEndian (addr sym)))
+                (when (!= err nil)
+                  (return nil (fmt/Errorf "fail to read symbol table: %v" err)))
+
+                ;; Record how many auxiliary symbols it has.
+                (set! naux (conv int (.-NumberOfAuxSymbols sym))))
+              (do
+                ;; Read an aux symbol. At the moment we assume all
+                ;; aux symbols are format 5 (obviously this doesn't always
+                ;; hold; more cases will be needed below if more aux formats
+                ;; are supported in the future).
+                (dec! naux)
+                (let [aux (conv (* COFFSymbolAuxFormat5) (conv unsafe/Pointer (addr sym)))]
+                  (set! err (binary/Read r binary/LittleEndian aux))
+                  (when (!= err nil)
+                    (return nil (fmt/Errorf "fail to read symbol table: %v" err))))))
+
+
+            (set! syms (append syms sym))))
+
+        (when (!= naux 0)
+          (return nil (fmt/Errorf "fail to read symbol table: %d aux symbols unread" naux)))
+
+        (return syms nil)))))
+
+
+
+^{:go/end 109} (go/func isSymNameOffset "isSymNameOffset checks symbol name if it is encoded as offset into string table.\n" [^{:tag (array 8 byte)} name] :results [bool uint32]
+  (when (and (== (aget name 0) 0) (== (aget name 1) 0) (== (aget name 2) 0) (== (aget name 3) 0))
+    (let [offset (.Uint32 binary/LittleEndian (subslice name 4))]
+      (when (== offset 0)
+        ;; symbol has no name
+        (return false 0))
+
+      (return true offset)))
+
+  (return false 0))
+
+
+
+
+
+^{:go/end 119} (go/method FullName "FullName finds real name of symbol sym. Normally name is stored\nin sym.Name, but if it is longer then 8 characters, it is stored\nin COFF string table st instead.\n" [^{:tag (* COFFSymbol)} sym ^StringTable st] :results [string error]
+  (when [(values ok offset) (isSymNameOffset (.-Name sym))] ok
+    (return (.String st offset)))
+
+  (return (cstring (subslice (.-Name sym))) nil))
+
+
+^{:go/end 147} (go/func removeAuxSymbols [^{:tag (slice COFFSymbol)} allsyms ^StringTable st] :results [(slice (* Symbol)) error]
+  (when (== (len allsyms) 0)
+    (return nil nil))
+
+  (let [syms (make (slice (* Symbol)) 0)
+      ^{:line 126} aux (conv uint8 0)]
+    (range [_ sym allsyms]
+      (when (> aux 0)
+        (dec! aux)
+        (continue))
+
+      (let [(values name err) (.FullName sym st)]
+        (when (!= err nil)
+          (return nil err))
+
+        (set! aux (.-NumberOfAuxSymbols sym))
+        (let [s (addr ^{:go/breaks [2 4 6 8 10]} (lit Symbol
+                :Name name
+                :Value (.-Value sym)
+                :SectionNumber (.-SectionNumber sym)
+                :Type (.-Type sym)
+                :StorageClass (.-StorageClass sym)))]
+
+          (set! syms (append syms s)))))
+
+    (return syms nil)))
+
+
+
+
+(go/type Symbol "Symbol is similar to [COFFSymbol] with Name field replaced\nby Go string. Symbol also does not have NumberOfAuxSymbols.\n" (struct
+    ^{:line 152 :tag string} Name
+    ^{:line 153 :tag uint32} Value
+    ^{:line 154 :tag int16} SectionNumber
+    ^{:line 155 :tag uint16} Type
+    ^{:line 156 :tag uint8} StorageClass))
+
+
+
+
+
+
+
+
+
+
+(go/type COFFSymbolAuxFormat5 "COFFSymbolAuxFormat5 describes the expected form of an aux symbol\nattached to a section definition symbol. The PE format defines a\nnumber of different aux symbol formats: format 1 for function\ndefinitions, format 2 for .be and .ef symbols, and so on. Format 5\nholds extra info associated with a section definition, including\nnumber of relocations + line numbers, as well as COMDAT info. See\nhttps://docs.microsoft.com/en-us/windows/win32/debug/pe-format#auxiliary-format-5-section-definitions\nfor more on what's going on here.\n" (struct
+    ^{:line 168 :tag uint32} Size
+    ^{:line 169 :tag uint16} NumRelocs
+    ^{:line 170 :tag uint16} NumLineNumbers
+    ^{:line 171 :tag uint32} Checksum
+    ^{:line 172 :tag uint16} SecNum
+    ^{:line 173 :tag uint8} Selection
+    ^{:line 174 :tag (array 3 uint8)} _)) ; padding
+
+
+
+
+(go/const "These constants make up the possible values for the 'Selection'\nfield in an AuxFormat5.\n"
+  ^{:line 180} [^{:val 1} IMAGE_COMDAT_SELECT_NODUPLICATES 1]
+  ^{:line 181} [^{:val 2} IMAGE_COMDAT_SELECT_ANY 2]
+  ^{:line 182} [^{:val 3} IMAGE_COMDAT_SELECT_SAME_SIZE 3]
+  ^{:line 183} [^{:val 4} IMAGE_COMDAT_SELECT_EXACT_MATCH 4]
+  ^{:line 184} [^{:val 5} IMAGE_COMDAT_SELECT_ASSOCIATIVE 5]
+  ^{:line 185} [^{:val 6} IMAGE_COMDAT_SELECT_LARGEST 6])
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 214} (go/method COFFSymbolReadSectionDefAux "COFFSymbolReadSectionDefAux returns a blob of auxiliary information\n(including COMDAT info) for a section definition symbol. Here 'idx'\nis the index of a section symbol in the main [COFFSymbol] array for\nthe File. Return value is a pointer to the appropriate aux symbol\nstruct. For more info, see:\n\nauxiliary symbols: https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#auxiliary-symbol-records\nCOMDAT sections: https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#comdat-sections-object-only\nauxiliary info for section definitions: https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#auxiliary-format-5-section-definitions\n" [^{:tag (* File)} f ^int idx] :results [(* COFFSymbolAuxFormat5) error]
+  (let [^{:tag (* COFFSymbolAuxFormat5)} rv (zero (* COFFSymbolAuxFormat5))]
+    (when (or (< idx 0) (>= idx (len (.-COFFSymbols f))))
+      (return rv (fmt/Errorf "invalid symbol index")))
+
+    (let [pesym (addr (aget (.-COFFSymbols f) idx))
+        ^:const ^{:line 203 :val 3} IMAGE_SYM_CLASS_STATIC 3]
+      (when (!= (.-StorageClass pesym) (conv uint8 IMAGE_SYM_CLASS_STATIC))
+        (return rv (fmt/Errorf "incorrect symbol storage class")))
+
+      (when (or (== (.-NumberOfAuxSymbols pesym) 0) (>= (+ idx 1) (len (.-COFFSymbols f))))
+        (return rv (fmt/Errorf "aux symbol unavailable")))
+
+      ;; Locate and return a pointer to the successor aux symbol.
+      (let [pesymn (addr (aget (.-COFFSymbols f) (+ idx 1)))]
+        (set! rv (conv (* COFFSymbolAuxFormat5) (conv unsafe/Pointer pesymn)))
+        (return rv nil)))))

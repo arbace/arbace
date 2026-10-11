@@ -1,0 +1,243 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.math) (go/file "sin.go" :imports [])
+
+;; /*
+;; Floating-point sine and cosine.
+;; */
+
+;; The original C code, the long comment, and the constants
+;; below were from http://netlib.sandia.gov/cephes/cmath/sin.c,
+;; available from http://www.netlib.org/cephes/cmath.tgz.
+;; The go code is a simplified version of the original C.
+;;
+;;      sin.c
+;;
+;;      Circular sine
+;;
+;; SYNOPSIS:
+;;
+;; double x, y, sin();
+;; y = sin( x );
+;;
+;; DESCRIPTION:
+;;
+;; Range reduction is into intervals of pi/4.  The reduction error is nearly
+;; eliminated by contriving an extended precision modular arithmetic.
+;;
+;; Two polynomial approximating functions are employed.
+;; Between 0 and pi/4 the sine is approximated by
+;;      x  +  x**3 P(x**2).
+;; Between pi/4 and pi/2 the cosine is represented as
+;;      1  -  x**2 Q(x**2).
+;;
+;; ACCURACY:
+;;
+;;                      Relative error:
+;; arithmetic   domain      # trials      peak         rms
+;;    DEC       0, 10       150000       3.0e-17     7.8e-18
+;;    IEEE -1.07e9,+1.07e9  130000       2.1e-16     5.4e-17
+;;
+;; Partial loss of accuracy begins to occur at x = 2**30 = 1.074e9.  The loss
+;; is not gradual, but jumps suddenly to about 1 part in 10e7.  Results may
+;; be meaningless for x > 2**49 = 5.6e14.
+;;
+;;      cos.c
+;;
+;;      Circular cosine
+;;
+;; SYNOPSIS:
+;;
+;; double x, y, cos();
+;; y = cos( x );
+;;
+;; DESCRIPTION:
+;;
+;; Range reduction is into intervals of pi/4.  The reduction error is nearly
+;; eliminated by contriving an extended precision modular arithmetic.
+;;
+;; Two polynomial approximating functions are employed.
+;; Between 0 and pi/4 the cosine is approximated by
+;;      1  -  x**2 Q(x**2).
+;; Between pi/4 and pi/2 the sine is represented as
+;;      x  +  x**3 P(x**2).
+;;
+;; ACCURACY:
+;;
+;;                      Relative error:
+;; arithmetic   domain      # trials      peak         rms
+;;    IEEE -1.07e9,+1.07e9  130000       2.1e-16     5.4e-17
+;;    DEC        0,+1.07e9   17000       3.0e-17     7.2e-18
+;;
+;; Cephes Math Library Release 2.8:  June, 2000
+;; Copyright 1984, 1987, 1989, 1992, 2000 by Stephen L. Moshier
+;;
+;; The readme file at http://netlib.sandia.gov/cephes/ says:
+;;    Some software in this archive may be from the book _Methods and
+;; Programs for Mathematical Functions_ (Prentice-Hall or Simon & Schuster
+;; International, 1989) or from the Cephes Mathematical Library, a
+;; commercial product. In either event, it is copyrighted by the author.
+;; What you see here may be used freely but it comes with no support or
+;; guarantee.
+;;
+;;   The two known misprints in the book are repaired here in the
+;; source listings for the gamma function and the incomplete beta
+;; integral.
+;;
+;;   Stephen L. Moshier
+;;   moshier@na-net.ornl.gov
+
+
+(go/var ^{:doc "sin coefficients\n"} _sin ^{:go/breaks [2 3 4 5 6 7]} (lit (array ... float64)
+    1.5896230157654656806E-10M ; 0x3de5d8fd1fd19ccd
+    -2.50507477628578072866E-8M ; 0xbe5ae5e5a9291f5d
+    0.00000275573136213857245213M ; 0x3ec71de3567d48a1
+    -0.000198412698295895385996M ; 0xbf2a01a019bfdf03
+    0.00833333333332211858878M ; 0x3f8111111110f7d0
+    -0.166666666666666307295M)) ; 0xbfc5555555555548
+
+
+
+(go/var ^{:doc "cos coefficients\n"} _cos ^{:go/breaks [2 3 4 5 6 7]} (lit (array ... float64)
+    -1.135853652138768173E-11M ; 0xbda8fa49a0861a9b
+    2.08757008419747316778E-9M ; 0x3e21ee9d7b4e3f05
+    -2.75573141792967388112E-7M ; 0xbe927e4f7eac4bc6
+    0.0000248015872888517045348M ; 0x3efa01a019c844f5
+    -0.00138888888888730564116M ; 0xbf56c16c16c14f91
+    0.0416666666666665929218M)) ; 0x3fa555555555554b
+
+
+
+
+
+
+
+
+^{:go/end 123} (go/func Cos "Cos returns the cosine of the radian argument x.\n\nSpecial cases are:\n\n\tCos(±Inf) = NaN\n\tCos(NaN) = NaN\n" ^float64 [^float64 x]
+  (when haveArchCos
+    (return (archCos x)))
+
+  (cos x))
+
+
+^{:go/end 176} (go/func cos ^float64 [^float64 x]
+  (let [
+      ^:const ^{:line 127 :val 0.785398125648498535156M} PI4A 0.785398125648498535156M ; 0x3fe921fb40000000, Pi/4 split into three parts
+      ^:const ^:go/grouped ^{:line 128 :val 3.77489470793079817668E-8M} PI4B 3.77489470793079817668E-8M ; 0x3e64442d00000000,
+      ^:const ^:go/grouped ^{:line 129 :val 2.69515142907905952645E-15M} PI4C 2.69515142907905952645E-15M] ; 0x3ce8469898cc5170,
+
+    ;; special cases
+    (switch
+      (case [(or (IsNaN x) (IsInf x 0))]
+        (return (NaN))))
+
+
+    ;; make argument positive
+    (let [sign false]
+      (set! x (Abs x))
+
+      (let [^uint64 j (zero uint64)
+          (values ^float64 y ^float64 z) (zero float64)]
+        (if (>= x reduceThreshold)
+          (set! (values j z) (trigReduce x))
+          (do
+            (set! j (conv uint64 (* x (/ 4 Pi)))) ; integer part of x/(Pi/4), as integer for tests on the phase angle
+            (set! y (conv float64 j)) ; integer part of x/(Pi/4), as float
+
+            ;; map zeros to origin
+            (when (== (bit-and j 1) 1)
+              (inc! j)
+              (inc! y))
+
+            (set! j bit-and 7) ; octant modulo 2Pi radians (360 degrees)
+            (set! z (- x (* y PI4A) (* y PI4B) (* y PI4C))))) ; Extended precision modular arithmetic
+
+
+        (when (> j 3)
+          (set! j - 4)
+          (set! sign (not sign)))
+
+        (when (> j 1)
+          (set! sign (not sign)))
+
+
+        (let [zz (* z z)]
+          (if (or (== j 1) (== j 2))
+            (set! y (+ z (* z zz (+ (* (+ (* (+ (* (+ (* (+ (* (aget _sin 0) zz) (aget _sin 1)) zz) (aget _sin 2)) zz) (aget _sin 3)) zz) (aget _sin 4)) zz) (aget _sin 5)))))
+
+            (set! y (+ (- 1.0 (* 0.5 zz)) (* zz zz (+ (* (+ (* (+ (* (+ (* (+ (* (aget _cos 0) zz) (aget _cos 1)) zz) (aget _cos 2)) zz) (aget _cos 3)) zz) (aget _cos 4)) zz) (aget _cos 5))))))
+
+          (when sign
+            (set! y (- y)))
+
+          ^{:line 175} y)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 190} (go/func Sin "Sin returns the sine of the radian argument x.\n\nSpecial cases are:\n\n\tSin(±0) = ±0\n\tSin(±Inf) = NaN\n\tSin(NaN) = NaN\n" ^float64 [^float64 x]
+  (when haveArchSin
+    (return (archSin x)))
+
+  (sin x))
+
+
+^{:go/end 244} (go/func sin ^float64 [^float64 x]
+  (let [
+      ^:const ^{:line 194 :val 0.785398125648498535156M} PI4A 0.785398125648498535156M ; 0x3fe921fb40000000, Pi/4 split into three parts
+      ^:const ^:go/grouped ^{:line 195 :val 3.77489470793079817668E-8M} PI4B 3.77489470793079817668E-8M ; 0x3e64442d00000000,
+      ^:const ^:go/grouped ^{:line 196 :val 2.69515142907905952645E-15M} PI4C 2.69515142907905952645E-15M] ; 0x3ce8469898cc5170,
+
+    ;; special cases
+    (switch
+      (case [(or (== x 0) (IsNaN x))]
+        (return x)) ; return ±0 || NaN()
+      (case [(IsInf x 0)]
+        (return (NaN))))
+
+
+    ;; make argument positive but save the sign
+    (let [sign false]
+      (when (< x 0)
+        (set! x (- x))
+        (set! sign true))
+
+
+      (let [^uint64 j (zero uint64)
+          (values ^float64 y ^float64 z) (zero float64)]
+        (if (>= x reduceThreshold)
+          (set! (values j z) (trigReduce x))
+          (do
+            (set! j (conv uint64 (* x (/ 4 Pi)))) ; integer part of x/(Pi/4), as integer for tests on the phase angle
+            (set! y (conv float64 j)) ; integer part of x/(Pi/4), as float
+
+            ;; map zeros to origin
+            (when (== (bit-and j 1) 1)
+              (inc! j)
+              (inc! y))
+
+            (set! j bit-and 7) ; octant modulo 2Pi radians (360 degrees)
+            (set! z (- x (* y PI4A) (* y PI4B) (* y PI4C))))) ; Extended precision modular arithmetic
+
+        ;; reflect in x axis
+        (when (> j 3)
+          (set! sign (not sign))
+          (set! j - 4))
+
+        (let [zz (* z z)]
+          (if (or (== j 1) (== j 2))
+            (set! y (+ (- 1.0 (* 0.5 zz)) (* zz zz (+ (* (+ (* (+ (* (+ (* (+ (* (aget _cos 0) zz) (aget _cos 1)) zz) (aget _cos 2)) zz) (aget _cos 3)) zz) (aget _cos 4)) zz) (aget _cos 5)))))
+
+            (set! y (+ z (* z zz (+ (* (+ (* (+ (* (+ (* (+ (* (aget _sin 0) zz) (aget _sin 1)) zz) (aget _sin 2)) zz) (aget _sin 3)) zz) (aget _sin 4)) zz) (aget _sin 5))))))
+
+          (when sign
+            (set! y (- y)))
+
+          ^{:line 243} y)))))

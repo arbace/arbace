@@ -1,0 +1,253 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.cryptotest) (go/file "stream.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [cipher "crypto/cipher"]
+    ^{:line 10} [subtle "crypto/subtle"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [strings "strings"]
+    ^{:line 13} [testing "testing"]])
+
+
+
+(go/var "Each test is executed with each of the buffer lengths in bufLens.\n"
+  ^{:line 18} [bufLens (lit (slice int) 0 1 3 4 8 10 15 16 20 32 50 4096 5000)]
+  ^{:line 19} [bufCap 10000])
+
+
+
+
+
+
+(go/type MakeStream "MakeStream returns a cipher.Stream instance.\n\nMultiple calls to MakeStream must return equivalent instances,\nso for example the key and/or IV must be fixed.\n" (func [] [cipher/Stream]))
+
+
+
+^{:go/end 221} (go/func TestStream "TestStream performs a set of tests on cipher.Stream implementations,\nchecking the documented requirements of XORKeyStream.\n" [^{:tag (* testing/T)} t ^MakeStream ms]
+
+  (.Run t "XORSemantics" ^{:go/end 87} (fn [^{:tag (* testing/T)} t]
+      (when (strings/Contains ^{:go/via [common]} (.Name t) "TestCFBStream")
+        ;; This is ugly, but so is CFB's abuse of cipher.Stream.
+        ;; Don't want to make it easier for anyone else to do that.
+        ^{:go/via [common]} (.Skip t "CFB implements cipher.Stream but does not follow XOR semantics"))
+
+
+      ;; Test that XORKeyStream inverts itself for encryption/decryption.
+      (.Run t "Roundtrip" ^{:go/end 59} (fn [^{:tag (* testing/T)} t]
+
+          (range [_ length bufLens]
+            (.Run t (fmt/Sprintf "BuffLength=%d" length) ^{:go/end 57} (fn [^{:tag (* testing/T)} t]
+                (let [rng (newRandReader t)
+
+                    ^{:line 46} plaintext (make (slice byte) length)]
+                  (.Read rng plaintext)
+
+                  (let [ciphertext (make (slice byte) length)
+                      ^{:line 50} decrypted (make (slice byte) length)]
+
+                    (.XORKeyStream (ms) ciphertext plaintext) ; Encrypt plaintext
+                    (.XORKeyStream (ms) decrypted ciphertext) ; Decrypt ciphertext
+                    (when (not (bytes/Equal decrypted plaintext))
+                      ^{:go/via [common]} (.Errorf t "plaintext is different after an encrypt/decrypt cycle; got %s, want %s" (truncateHex decrypted) (truncateHex plaintext))))))))))
+
+
+
+
+
+      ;; Test that XORKeyStream behaves the same as directly XORing
+      ;; plaintext with the stream.
+      (.Run t "DirectXOR" ^{:go/end 86} (fn [^{:tag (* testing/T)} t]
+
+          (range [_ length bufLens]
+            (.Run t (fmt/Sprintf "BuffLength=%d" length) ^{:go/end 84} (fn [^{:tag (* testing/T)} t]
+                (let [rng (newRandReader t)
+
+                    ^{:line 69} plaintext (make (slice byte) length)]
+                  (.Read rng plaintext)
+
+                  ;; Encrypting all zeros should reveal the stream itself
+                  (let [(values stream directXOR) (values (make (slice byte) length) (make (slice byte) length))]
+                    (.XORKeyStream (ms) stream stream)
+                    ;; Encrypt plaintext by directly XORing the stream
+                    (subtle/XORBytes directXOR stream plaintext)
+
+                    ;; Encrypt plaintext with XORKeyStream
+                    (let [ciphertext (make (slice byte) length)]
+                      (.XORKeyStream (ms) ciphertext plaintext)
+                      (when (not (bytes/Equal ciphertext directXOR))
+                        ^{:go/via [common]} (.Errorf t "xor semantics were not preserved; got %s, want %s" (truncateHex ciphertext) (truncateHex directXOR)))))))))))))
+
+
+
+
+
+
+  (.Run t "EmptyInput" ^{:go/end 100} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          (values src dst) (values (make (slice byte) 100) (make (slice byte) 100))]
+        (.Read rng dst)
+        (let [before (bytes/Clone dst)]
+
+          (.XORKeyStream (ms) dst (subslice src _ 0))
+          (when (not (bytes/Equal dst before))
+            ^{:go/via [common]} (.Errorf t "XORKeyStream modified dst on empty input; got %s, want %s" (truncateHex dst) (truncateHex before)))))))
+
+
+
+  (.Run t "AlterInput" ^{:go/end 118} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+          (values src dst before) (values (make (slice byte) bufCap) (make (slice byte) bufCap) (make (slice byte) bufCap))]
+        (.Read rng src)
+
+        (range [_ length bufLens]
+
+          (.Run t (fmt/Sprintf "BuffLength=%d" length) ^{:go/end 116} (fn [^{:tag (* testing/T)} t]
+              (copy before src)
+
+              (.XORKeyStream (ms) (subslice dst _ length) (subslice src _ length))
+              (when (not (bytes/Equal src before))
+                ^{:go/via [common]} (.Errorf t "XORKeyStream modified src; got %s, want %s" (truncateHex src) (truncateHex before)))))))))
+
+
+
+
+
+  (.Run t "Aliasing" ^{:go/end 137} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          (values buff expectedOutput) (values (make (slice byte) bufCap) (make (slice byte) bufCap))]
+
+        (range [_ length bufLens]
+          ;; Record what output is when src and dst are different
+          (.Read rng buff)
+          (.XORKeyStream (ms) (subslice expectedOutput _ length) (subslice buff _ length))
+
+          ;; Check that the same output is generated when src=dst alias to the same
+          ;; memory
+          (.XORKeyStream (ms) (subslice buff _ length) (subslice buff _ length))
+          (when (not (bytes/Equal (subslice buff _ length) (subslice expectedOutput _ length)))
+            ^{:go/via [common]} (.Errorf t "block cipher produced different output when dst = src; got %x, want %x" (subslice buff _ length) (subslice expectedOutput _ length)))))))
+
+
+
+
+  (.Run t "OutOfBoundsWrite" ^{:go/end 157} (fn [^{:tag (* testing/T)} t] ; Issue 21104
+      (let [rng (newRandReader t)
+
+          ^{:line 142} plaintext (make (slice byte) bufCap)]
+        (.Read rng plaintext)
+        (let [ciphertext (make (slice byte) bufCap)]
+
+          (range [_ length bufLens]
+            (copy ciphertext plaintext) ; Reset ciphertext buffer
+
+            (.Run t (fmt/Sprintf "BuffLength=%d" length) ^{:go/end 155} (fn [^{:tag (* testing/T)} t]
+                (mustPanic t "output smaller than input" ^{:go/end 150} (fn [] (.XORKeyStream (ms) (subslice ciphertext _ length) plaintext)))
+
+                (when (not (bytes/Equal (subslice ciphertext length) (subslice plaintext length)))
+                  ^{:go/via [common]} (.Errorf t "XORKeyStream did out of bounds write; got %s, want %s" (truncateHex (subslice ciphertext length)) (truncateHex (subslice plaintext length)))))))))))
+
+
+
+
+
+  (.Run t "BufferOverlap" ^{:go/end 187} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          ^{:line 162} buff (make (slice byte) bufCap)]
+        (.Read rng buff)
+
+        (range [_ length bufLens]
+          (when (or (== length 0) (== length 1))
+            (continue))
+
+
+          (.Run t (fmt/Sprintf "BuffLength=%d" length) ^{:go/end 185} (fn [^{:tag (* testing/T)} t]
+              ;; Make src and dst slices point to same array with inexact overlap
+              (let [src (subslice buff _ length)
+                  ^{:line 173} dst (subslice buff 1 (+ length 1))]
+                (mustPanic t "invalid buffer overlap" ^{:go/end 174} (fn [] (.XORKeyStream (ms) dst src)))
+
+                ;; Only overlap on one byte
+                (set! src (subslice buff _ length))
+                (set! dst (subslice buff (- length 1) (- (* 2 length) 1)))
+                (mustPanic t "invalid buffer overlap" ^{:go/end 179} (fn [] (.XORKeyStream (ms) dst src)))
+
+                ;; src comes after dst with one byte overlap
+                (set! src (subslice buff (- length 1) (- (* 2 length) 1)))
+                (set! dst (subslice buff _ length))
+                (mustPanic t "invalid buffer overlap" ^{:go/end 184} (fn [] (.XORKeyStream (ms) dst src))))))))))
+
+
+
+
+  (.Run t "KeepState" ^{:go/end 220} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          ^{:line 192} plaintext (make (slice byte) bufCap)]
+        (.Read rng plaintext)
+        (let [ciphertext (make (slice byte) bufCap)]
+
+          ;; Make one long call to XORKeyStream
+          (.XORKeyStream (ms) ciphertext plaintext)
+
+          (range [_ step bufLens]
+            (when (== step 0)
+              (continue))
+
+            (let [stepMsg (fmt/Sprintf "step %d: " step)
+
+                ^{:line 205} dst (make (slice byte) bufCap)
+
+                ;; Make a bunch of small calls to (stateful) XORKeyStream
+                ^{:line 208} stream (ms)
+                ^{:line 209} i 0]
+              (while (< (+ i step) (len plaintext))
+                (.XORKeyStream stream (subslice dst i) (subslice plaintext i (+ i step)))
+                (set! i + step))
+
+              (.XORKeyStream stream (subslice dst i) (subslice plaintext i))
+
+              (when (not (bytes/Equal dst ciphertext))
+                ^{:go/via [common]} (.Errorf t (+ stepMsg "successive XORKeyStream calls returned a different result than a single one; got %s, want %s") (truncateHex dst) (truncateHex ciphertext))))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 245} (go/func TestStreamFromBlock "TestStreamFromBlock creates a Stream from a cipher.Block used in a\ncipher.BlockMode. It addresses Issue 68377 by checking for a panic when the\nBlockMode uses an IV with incorrect length.\nFor a valid IV, it also runs all TestStream tests on the resulting stream.\n" [^{:tag (* testing/T)} t ^cipher/Block block ^{:tag (func [^cipher/Block b ^{:tag (slice byte)} iv] [cipher/Stream])} blockMode]
+
+  (.Run t "WrongIVLen" ^{:go/end 236} (fn [^{:tag (* testing/T)} t]
+      ^{:go/via [common]} (.Skip t "see Issue 68377")
+
+      (let [rng (newRandReader t)
+          ^{:line 233} iv (make (slice byte) (+ (.BlockSize block) 1))]
+        (.Read rng iv)
+        (mustPanic t "IV length must equal block size" ^{:go/end 235} (fn [] (blockMode block iv))))))
+
+
+  (.Run t "BlockModeStream" ^{:go/end 244} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+          ^{:line 240} iv (make (slice byte) (.BlockSize block))]
+        (.Read rng iv)
+
+        (TestStream t ^{:go/end 243} (fn ^cipher/Stream [] (blockMode block iv)))))))
+
+
+
+^{:go/end 254} (go/func truncateHex ^string [^{:tag (slice byte)} b]
+  (let [numVals 50]
+
+    (when (<= (len b) numVals)
+      (return (fmt/Sprintf "%x" b)))
+
+    (fmt/Sprintf "%x..." (subslice b _ numVals))))

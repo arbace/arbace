@@ -1,0 +1,205 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.text.unicode.bidi) (go/file "prop.go" :imports [
+
+    ^{:line 7} [utf8 "unicode/utf8"]])
+
+
+(go/type Properties "Properties provides access to BiDi properties of runes.\n" (struct
+    ^{:line 11 :tag uint8} entry
+    ^{:line 12 :tag uint8} last))
+
+
+(go/var trie (newBidiTrie 0))
+
+;; TODO: using this for bidirule reduces the running time by about 5%. Consider
+;; if this is worth exposing or if we can find a way to speed up the Class
+;; method.
+;;
+;; // CompactClass is like Class, but maps all of the BiDi control classes
+;; // (LRO, RLO, LRE, RLE, PDF, LRI, RLI, FSI, PDI) to the class Control.
+;; func (p Properties) CompactClass() Class {
+;; 	return Class(p.entry & 0x0F)
+;; }
+
+
+^{:go/end 34} (go/method Class "Class returns the Bidi class for p.\n" ^Class [^Properties p]
+  (let [c (conv Class (bit-and (.-entry p) 0x0F))]
+    (when (== c Control)
+      (set! c (aget controlByteToClass (bit-and (.-last p) 0xF))))
+
+    ^{:line 33} c))
+
+
+
+^{:go/end 37} (go/method IsBracket "IsBracket reports whether the rune is a bracket.\n" ^bool [^Properties p] (!= (bit-and (.-entry p) 0xF0) 0))
+
+
+
+^{:go/end 41} (go/method IsOpeningBracket "IsOpeningBracket reports whether the rune is an opening bracket.\nIsBracket must return true.\n" ^bool [^Properties p] (!= (bit-and (.-entry p) openMask) 0))
+
+
+^{:go/end 46} (go/method reverseBracket "TODO: find a better API and expose.\n" ^rune [^Properties p ^rune r]
+  (bit-xor (aget xorMasks (>> (.-entry p) xorMaskShift)) r))
+
+
+(go/var controlByteToClass (lit (array 16 Class)
+    ^{:line 49} [0xD LRO] ; U+202D LeftToRightOverride,
+    ^{:line 50} [0xE RLO] ; U+202E RightToLeftOverride,
+    ^{:line 51} [0xA LRE] ; U+202A LeftToRightEmbedding,
+    ^{:line 52} [0xB RLE] ; U+202B RightToLeftEmbedding,
+    ^{:line 53} [0xC PDF] ; U+202C PopDirectionalFormat,
+    ^{:line 54} [0x6 LRI] ; U+2066 LeftToRightIsolate,
+    ^{:line 55} [0x7 RLI] ; U+2067 RightToLeftIsolate,
+    ^{:line 56} [0x8 FSI] ; U+2068 FirstStrongIsolate,
+    ^{:line 57} [0x9 PDI])) ; U+2069 PopDirectionalIsolate,
+
+
+
+^{:go/end 65} (go/func LookupRune "LookupRune returns properties for r.\n" [^rune r] :results [^Properties p ^int size]
+  (let [^{:tag (array 4 byte)} buf (zero (array 4 byte))
+      ^{:line 63} n (utf8/EncodeRune (subslice buf) r)]
+    (Lookup (subslice buf _ n))))
+
+
+;; TODO: these lookup methods are based on the generated trie code. The returned
+;; sizes have slightly different semantics from the generated code, in that it
+;; always returns size==1 for an illegal UTF-8 byte (instead of the length
+;; of the maximum invalid subsequence). Most Transformers, like unicode/norm,
+;; leave invalid UTF-8 untouched, in which case it has performance benefits to
+;; do so (without changing the semantics). Bidi requires the semantics used here
+;; for the bidirule implementation to be compatible with the Go semantics.
+;;  They ultimately should perhaps be adopted by all trie implementations, for
+;; convenience sake.
+;; This unrolled code also boosts performance of the secure/bidirule package by
+;; about 30%.
+;; So, to remove this code:
+;;   - add option to trie generator to define return type.
+;;   - always return 1 byte size for ill-formed UTF-8 runes.
+
+
+
+
+^{:go/end 143} (go/func Lookup "Lookup returns properties for the first rune in s and the width in bytes of\nits encoding. The size will be 0 if s does not hold enough bytes to complete\nthe encoding.\n" [^{:tag (slice byte)} s] :results [^Properties p ^int sz]
+  (let [c0 (aget s 0)]
+    (switch
+      (case [(< c0 0x80)] ; is ASCII
+        (return (lit Properties :entry (aget bidiValues c0)) 1))
+      (case [(< c0 0xC2)]
+        (return (lit Properties) 1))
+      (case [(< c0 0xE0)] ; 2-byte UTF-8
+        (when (< (len s) 2)
+          (return (lit Properties) 0))
+
+        (let [i (aget bidiIndex c0)
+            ^{:line 97} c1 (aget s 1)]
+          (when (or (< c1 0x80) (<= 0xC0 c1))
+            (return (lit Properties) 1))
+
+          (return (lit Properties :entry (.lookupValue trie (conv uint32 i) c1)) 2)))
+      (case [(< c0 0xF0)] ; 3-byte UTF-8
+        (when (< (len s) 3)
+          (return (lit Properties) 0))
+
+        (let [i (aget bidiIndex c0)
+            ^{:line 107} c1 (aget s 1)]
+          (when (or (< c1 0x80) (<= 0xC0 c1))
+            (return (lit Properties) 1))
+
+          (let [o (+ (<< (conv uint32 i) 6) (conv uint32 c1))]
+            (set! i (aget bidiIndex o))
+            (let [c2 (aget s 2)]
+              (when (or (< c2 0x80) (<= 0xC0 c2))
+                (return (lit Properties) 1))
+
+              (return (lit Properties :entry (.lookupValue trie (conv uint32 i) c2) :last c2) 3)))))
+      (case [(< c0 0xF8)] ; 4-byte UTF-8
+        (when (< (len s) 4)
+          (return (lit Properties) 0))
+
+        (let [i (aget bidiIndex c0)
+            ^{:line 123} c1 (aget s 1)]
+          (when (or (< c1 0x80) (<= 0xC0 c1))
+            (return (lit Properties) 1))
+
+          (let [o (+ (<< (conv uint32 i) 6) (conv uint32 c1))]
+            (set! i (aget bidiIndex o))
+            (let [c2 (aget s 2)]
+              (when (or (< c2 0x80) (<= 0xC0 c2))
+                (return (lit Properties) 1))
+
+              (set! o (+ (<< (conv uint32 i) 6) (conv uint32 c2)))
+              (set! i (aget bidiIndex o))
+              (let [c3 (aget s 3)]
+                (when (or (< c3 0x80) (<= 0xC0 c3))
+                  (return (lit Properties) 1))
+
+                (return (lit Properties :entry (.lookupValue trie (conv uint32 i) c3)) 4)))))))
+
+    ;; Illegal rune
+    (return (lit Properties) 1)))
+
+
+
+
+
+^{:go/end 206} (go/func LookupString "LookupString returns properties for the first rune in s and the width in\nbytes of its encoding. The size will be 0 if s does not hold enough bytes to\ncomplete the encoding.\n" [^string s] :results [^Properties p ^int sz]
+  (let [c0 (aget s 0)]
+    (switch
+      (case [(< c0 0x80)] ; is ASCII
+        (return (lit Properties :entry (aget bidiValues c0)) 1))
+      (case [(< c0 0xC2)]
+        (return (lit Properties) 1))
+      (case [(< c0 0xE0)] ; 2-byte UTF-8
+        (when (< (len s) 2)
+          (return (lit Properties) 0))
+
+        (let [i (aget bidiIndex c0)
+            ^{:line 160} c1 (aget s 1)]
+          (when (or (< c1 0x80) (<= 0xC0 c1))
+            (return (lit Properties) 1))
+
+          (return (lit Properties :entry (.lookupValue trie (conv uint32 i) c1)) 2)))
+      (case [(< c0 0xF0)] ; 3-byte UTF-8
+        (when (< (len s) 3)
+          (return (lit Properties) 0))
+
+        (let [i (aget bidiIndex c0)
+            ^{:line 170} c1 (aget s 1)]
+          (when (or (< c1 0x80) (<= 0xC0 c1))
+            (return (lit Properties) 1))
+
+          (let [o (+ (<< (conv uint32 i) 6) (conv uint32 c1))]
+            (set! i (aget bidiIndex o))
+            (let [c2 (aget s 2)]
+              (when (or (< c2 0x80) (<= 0xC0 c2))
+                (return (lit Properties) 1))
+
+              (return (lit Properties :entry (.lookupValue trie (conv uint32 i) c2) :last c2) 3)))))
+      (case [(< c0 0xF8)] ; 4-byte UTF-8
+        (when (< (len s) 4)
+          (return (lit Properties) 0))
+
+        (let [i (aget bidiIndex c0)
+            ^{:line 186} c1 (aget s 1)]
+          (when (or (< c1 0x80) (<= 0xC0 c1))
+            (return (lit Properties) 1))
+
+          (let [o (+ (<< (conv uint32 i) 6) (conv uint32 c1))]
+            (set! i (aget bidiIndex o))
+            (let [c2 (aget s 2)]
+              (when (or (< c2 0x80) (<= 0xC0 c2))
+                (return (lit Properties) 1))
+
+              (set! o (+ (<< (conv uint32 i) 6) (conv uint32 c2)))
+              (set! i (aget bidiIndex o))
+              (let [c3 (aget s 3)]
+                (when (or (< c3 0x80) (<= 0xC0 c3))
+                  (return (lit Properties) 1))
+
+                (return (lit Properties :entry (.lookupValue trie (conv uint32 i) c3)) 4)))))))
+
+    ;; Illegal rune
+    (return (lit Properties) 1)))

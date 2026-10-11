@@ -1,0 +1,437 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "mpallocbits.go" :imports [
+
+
+    ^{:line 8} [sys "internal/runtime/sys"]])
+
+
+
+(go/type pageBits "pageBits is a bitmap representing one bit per page in a palloc chunk.\n" (array (/ pallocChunkPages 64) uint64))
+
+
+^{:go/end 17} (go/method get "get returns the value of the i'th bit in the bitmap.\n" ^uint [^{:tag (* pageBits)} b ^uint i]
+  (conv uint (bit-and (>> (aget b (/ i 64)) (% i 64)) 1)))
+
+
+
+^{:go/end 22} (go/method block64 "block64 returns the 64-bit aligned block of bits containing the i'th bit.\n" ^uint64 [^{:tag (* pageBits)} b ^uint i]
+  (aget b (/ i 64)))
+
+
+
+^{:go/end 27} (go/method set "set sets bit i of pageBits.\n" [^{:tag (* pageBits)} b ^uint i]
+  (set! (aget b (/ i 64)) bit-or ^uint64 (<< 1 (% i 64))))
+
+
+
+^{:go/end 51} (go/method setRange "setRange sets bits in the range [i, i+n).\n" [^{:tag (* pageBits)} b ^uint i ^uint n]
+  (set! _ (aget b (/ i 64)))
+  (when (== n 1)
+    ;; Fast path for the n == 1 case.
+    (.set b i)
+    (return))
+
+  ;; Set bits [i, j].
+  (let [j (- (+ i n) 1)]
+    (when (== (/ i 64) (/ j 64))
+      (set! (aget b (/ i 64)) bit-or (<< (- (<< (conv uint64 1) n) 1) (% i 64)))
+      (return))
+
+    (set! _ (aget b (/ j 64)))
+    ;; Set leading bits.
+    (set! (aget b (/ i 64)) bit-or (<< (bit-not (conv uint64 0)) (% i 64)))
+    (for [k (+ (/ i 64) 1)] (< k (/ j 64)) (inc! k)
+      (aset b k (bit-not (conv uint64 0))))
+
+    ;; Set trailing bits.
+    (set! (aget b (/ j 64)) bit-or (- (<< (conv uint64 1) (+ (% j 64) 1)) 1))))
+
+
+
+^{:go/end 58} (go/method setAll "setAll sets all the bits of b.\n" [^{:tag (* pageBits)} b]
+  (range [i b]
+    (aset b i (bit-not (conv uint64 0)))))
+
+
+
+
+
+^{:go/end 64} (go/method setBlock64 "setBlock64 sets the 64-bit aligned block of bits containing the i'th bit that\nare set in v.\n" [^{:tag (* pageBits)} b ^uint i ^uint64 v]
+  (set! (aget b (/ i 64)) bit-or v))
+
+
+
+^{:go/end 69} (go/method clear "clear clears bit i of pageBits.\n" [^{:tag (* pageBits)} b ^uint i]
+  (set! (aget b (/ i 64)) bit-and-not ^uint64 (<< 1 (% i 64))))
+
+
+
+^{:go/end 91} (go/method clearRange "clearRange clears bits in the range [i, i+n).\n" [^{:tag (* pageBits)} b ^uint i ^uint n]
+  (set! _ (aget b (/ i 64)))
+  (when (== n 1)
+    ;; Fast path for the n == 1 case.
+    (.clear b i)
+    (return))
+
+  ;; Clear bits [i, j].
+  (let [j (- (+ i n) 1)]
+    (when (== (/ i 64) (/ j 64))
+      (set! (aget b (/ i 64)) bit-and-not (<< (- (<< (conv uint64 1) n) 1) (% i 64)))
+      (return))
+
+    (set! _ (aget b (/ j 64)))
+    ;; Clear leading bits.
+    (set! (aget b (/ i 64)) bit-and-not (<< (bit-not (conv uint64 0)) (% i 64)))
+    (clear (subslice b (+ (/ i 64) 1) (/ j 64)))
+    ;; Clear trailing bits.
+    (set! (aget b (/ j 64)) bit-and-not (- (<< (conv uint64 1) (+ (% j 64) 1)) 1))))
+
+
+
+^{:go/end 96} (go/method clearAll "clearAll frees all the bits of b.\n" [^{:tag (* pageBits)} b]
+  (clear (subslice b)))
+
+
+
+
+^{:go/end 102} (go/method clearBlock64 "clearBlock64 clears the 64-bit aligned block of bits containing the i'th bit that\nare set in v.\n" [^{:tag (* pageBits)} b ^uint i ^uint64 v]
+  (set! (aget b (/ i 64)) bit-and-not v))
+
+
+
+
+^{:go/end 122} (go/method popcntRange "popcntRange counts the number of set bits in the\nrange [i, i+n).\n" [^{:tag (* pageBits)} b ^uint i ^uint n] :results [^uint s]
+  (when (== n 1)
+    (return (conv uint (bit-and (>> (aget b (/ i 64)) (% i 64)) 1))))
+
+  (set! _ (aget b (/ i 64)))
+  (let [j (- (+ i n) 1)]
+    (when (== (/ i 64) (/ j 64))
+      (return (conv uint (sys/OnesCount64 (bit-and (>> (aget b (/ i 64)) (% i 64)) (- ^uint64 (<< 1 n) 1))))))
+
+    (set! _ (aget b (/ j 64)))
+    (set! s + (conv uint (sys/OnesCount64 (>> (aget b (/ i 64)) (% i 64)))))
+    (for [k (+ (/ i 64) 1)] (< k (/ j 64)) (inc! k)
+      (set! s + (conv uint (sys/OnesCount64 (aget b k)))))
+
+    (set! s + (conv uint (sys/OnesCount64 (bit-and (aget b (/ j 64)) (- ^uint64 (<< 1 (+ (% j 64) 1)) 1)))))
+    (return)))
+
+
+
+
+
+
+
+(go/type pallocBits "pallocBits is a bitmap that tracks page allocations for at most one\npalloc chunk.\n\nThe precise representation is an implementation detail, but for the\nsake of documentation, 0s are free pages and 1s are allocated pages.\n" pageBits)
+
+
+^{:go/end 221} (go/method summarize "summarize returns a packed summary of the bitmap in pallocBits.\n" ^pallocSum [^{:tag (* pallocBits)} b]
+  (let [(values ^uint start ^uint most ^uint cur) (zero uint)
+      ^:const ^{:line 134 :val 18446744073709551615N} notSetYet (bit-not (conv uint 0))] ; sentinel for start value
+    (set! start notSetYet)
+    (for [i 0] (< i (len b)) (inc! i)
+      (let [x (aget b i)]
+        (when (== x 0)
+          (set! cur + 64)
+          (continue))
+
+        (let [t (conv uint (sys/TrailingZeros64 x))
+            ^{:line 143} l (conv uint (sys/LeadingZeros64 x))]
+
+          ;; Finish any region spanning the uint64s
+          (set! cur + t)
+          (when (== start notSetYet)
+            (set! start cur))
+
+          (set! most (max most cur))
+          ;; Final region that might span to next uint64
+          (set! cur l))))
+
+    (when (== start notSetYet)
+      ;; Made it all the way through without finding a single 1 bit.
+      (let [^:const ^{:val 512} n (conv uint (* 64 (len b)))]
+        (return (packPallocSum n n n))))
+
+    (set! most (max most cur))
+
+    (when (>= most (- 64 2))
+      ;; There is no way an internal run of zeros could beat max.
+      (return (packPallocSum start most cur)))
+
+    ;; Now look inside each uint64 for runs of zeros.
+    ;; All uint64s must be nonzero, or we would have aborted above.
+    (label :outer
+      (for [i 0] (< i (len b)) (inc! i)
+        (let [x (aget b i)]
+
+          ;; Look inside this uint64. We have a pattern like
+          ;; 000000 1xxxxx1 000000
+          ;; We need to look inside the 1xxxxx1 for any contiguous
+          ;; region of zeros.
+
+          ;; We already know the trailing zeros are no larger than max. Remove them.
+          (set! x >> (bit-and (sys/TrailingZeros64 x) 63))
+          (when (== (bit-and x (+ x 1)) 0) ; no more zeros (except at the top).
+            (continue))
+
+
+          ;; Strategy: shrink all runs of zeros by max. If any runs of zero
+          ;; remain, then we've identified a larger maximum zero run.
+          (let [p most ; number of zeros we still need to shrink by.
+              ^{:line 185} k (conv uint 1)] ; current minimum length of runs of ones in x.
+            (while true
+              ;; Shrink all runs of zeros by p places (except the top zeros).
+              (while (> p 0)
+                (when (<= p k)
+                  ;; Shift p ones down into the top of each run of zeros.
+                  (set! x bit-or (>> x (bit-and p 63)))
+                  (when (== (bit-and x (+ x 1)) 0) ; no more zeros (except at the top).
+                    (continue :outer))
+
+                  (break))
+
+                ;; Shift k ones down into the top of each run of zeros.
+                (set! x bit-or (>> x (bit-and k 63)))
+                (when (== (bit-and x (+ x 1)) 0) ; no more zeros (except at the top).
+                  (continue :outer))
+
+                (set! p - k)
+                ;; We've just doubled the minimum length of 1-runs.
+                ;; This allows us to shift farther in the next iteration.
+                (set! k * 2))
+
+
+              ;; The length of the lowest-order zero run is an increment to our maximum.
+              (let [j (conv uint (sys/TrailingZeros64 (bit-not x)))] ; count contiguous trailing ones
+                (set! x >> (bit-and j 63)) ; remove trailing ones
+                (set! j (conv uint (sys/TrailingZeros64 x))) ; count contiguous trailing zeros
+                (set! x >> (bit-and j 63)) ; remove zeros
+                (set! most + j) ; we have a new maximum!
+                (when (== (bit-and x (+ x 1)) 0) ; no more zeros (except at the top).
+                  (continue :outer))
+
+                (set! p j))))))) ; remove j more zeros from each zero run.
+
+
+    (packPallocSum start most cur)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 240} (go/method find "find searches for npages contiguous free pages in pallocBits and returns\nthe index where that run starts, as well as the index of the first free page\nit found in the search. searchIdx represents the first known free page and\nwhere to begin the next search from.\n\nIf find fails to find any free space, it returns an index of ^uint(0) and\nthe new searchIdx should be ignored.\n\nNote that if npages == 1, the two returned values will always be identical.\n" [^{:tag (* pallocBits)} b ^uintptr npages ^uint searchIdx] :results [uint uint]
+  (cond (== npages 1)
+    (let [addr (.find1 b searchIdx)]
+      (return addr addr))
+    (<= npages 64)
+    (return (.findSmallN b npages searchIdx)))
+
+  (.findLargeN b npages searchIdx))
+
+
+
+
+
+
+^{:go/end 256} (go/method find1 "find1 is a helper for find which searches for a single free page\nin the pallocBits and returns the index.\n\nSee find for an explanation of the searchIdx parameter.\n" ^uint [^{:tag (* pallocBits)} b ^uint searchIdx]
+  (set! _ (aget b 0)) ; lift nil check out of loop
+  (for [i (/ searchIdx 64)] (< i (conv uint (len b))) (inc! i)
+    (let [x (aget b i)]
+      (when (== (bit-not x) 0)
+        (continue))
+
+      (return (+ (* i 64) (conv uint (sys/TrailingZeros64 (bit-not x)))))))
+
+  (bit-not (conv uint 0)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 295} (go/method findSmallN "findSmallN is a helper for find which searches for npages contiguous free pages\nin this pallocBits and returns the index where that run of contiguous pages\nstarts as well as the index of the first free page it finds in its search.\n\nSee find for an explanation of the searchIdx parameter.\n\nReturns a ^uint(0) index on failure and the new searchIdx should be ignored.\n\nfindSmallN assumes npages <= 64, where any such contiguous run of pages\ncrosses at most one aligned 64-bit boundary in the bits.\n" [^{:tag (* pallocBits)} b ^uintptr npages ^uint searchIdx] :results [uint uint]
+  (let [(values end newSearchIdx) (values (conv uint 0) (bit-not (conv uint 0)))]
+    (for [i (/ searchIdx 64)] (< i (conv uint (len b))) (inc! i)
+      (let [bi (aget b i)]
+        (when (== (bit-not bi) 0)
+          (set! end 0)
+          (continue))
+
+        ;; First see if we can pack our allocation in the trailing
+        ;; zeros plus the end of the last 64 bits.
+        (when (== newSearchIdx (bit-not (conv uint 0)))
+          ;; The new searchIdx is going to be at these 64 bits after any
+          ;; 1s we file, so count trailing 1s.
+          (set! newSearchIdx (+ (* i 64) (conv uint (sys/TrailingZeros64 (bit-not bi))))))
+
+        (let [start (conv uint (sys/TrailingZeros64 bi))]
+          (when (>= (+ end start) (conv uint npages))
+            (return (- (* i 64) end) newSearchIdx))
+
+          ;; Next, check the interior of the 64-bit chunk.
+          (let [j (findBitRange64 (bit-not bi) (conv uint npages))]
+            (when (< j 64)
+              (return (+ (* i 64) j) newSearchIdx))
+
+            (set! end (conv uint (sys/LeadingZeros64 bi)))))))
+
+    (return (bit-not (conv uint 0)) newSearchIdx)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 340} (go/method findLargeN "findLargeN is a helper for find which searches for npages contiguous free pages\nin this pallocBits and returns the index where that run starts, as well as the\nindex of the first free page it found it its search.\n\nSee alloc for an explanation of the searchIdx parameter.\n\nReturns a ^uint(0) index on failure and the new searchIdx should be ignored.\n\nfindLargeN assumes npages > 64, where any such run of free pages\ncrosses at least one aligned 64-bit boundary in the bits.\n" [^{:tag (* pallocBits)} b ^uintptr npages ^uint searchIdx] :results [uint uint]
+  (let [(values start size newSearchIdx) (values (bit-not (conv uint 0)) (conv uint 0) (bit-not (conv uint 0)))]
+    (for [i (/ searchIdx 64)] (< i (conv uint (len b))) (inc! i)
+      (let [x (aget b i)]
+        (when (== x (bit-not (conv uint64 0)))
+          (set! size 0)
+          (continue))
+
+        (when (== newSearchIdx (bit-not (conv uint 0)))
+          ;; The new searchIdx is going to be at these 64 bits after any
+          ;; 1s we file, so count trailing 1s.
+          (set! newSearchIdx (+ (* i 64) (conv uint (sys/TrailingZeros64 (bit-not x))))))
+
+        (when (== size 0)
+          (set! size (conv uint (sys/LeadingZeros64 x)))
+          (set! start (- (+ (* i 64) 64) size))
+          (continue))
+
+        (let [s (conv uint (sys/TrailingZeros64 x))]
+          (when (>= (+ s size) (conv uint npages))
+            (return start newSearchIdx))
+
+          (when (< s 64)
+            (set! size (conv uint (sys/LeadingZeros64 x)))
+            (set! start (- (+ (* i 64) 64) size))
+            (continue))
+
+          (set! size + 64))))
+
+    (when (< size (conv uint npages))
+      (return (bit-not (conv uint 0)) newSearchIdx))
+
+    (return start newSearchIdx)))
+
+
+
+^{:go/end 345} (go/method allocRange "allocRange allocates the range [i, i+n).\n" [^{:tag (* pallocBits)} b ^uint i ^uint n]
+  (.setRange (conv (* pageBits) b) i n))
+
+
+
+^{:go/end 350} (go/method allocAll "allocAll allocates all the bits of b.\n" [^{:tag (* pallocBits)} b]
+  (.setAll (conv (* pageBits) b)))
+
+
+
+^{:go/end 355} (go/method free1 "free1 frees a single page in the pallocBits at i.\n" [^{:tag (* pallocBits)} b ^uint i]
+  (.clear (conv (* pageBits) b) i))
+
+
+
+^{:go/end 360} (go/method free "free frees the range [i, i+n) of pages in the pallocBits.\n" [^{:tag (* pallocBits)} b ^uint i ^uint n]
+  (.clearRange (conv (* pageBits) b) i n))
+
+
+
+^{:go/end 365} (go/method freeAll "freeAll frees all the bits of b.\n" [^{:tag (* pallocBits)} b]
+  (.clearAll (conv (* pageBits) b)))
+
+
+
+
+
+^{:go/end 372} (go/method pages64 "pages64 returns a 64-bit bitmap representing a block of 64 pages aligned\nto 64 pages. The returned block of pages is the one containing the i'th\npage in this pallocBits. Each bit represents whether the page is in-use.\n" ^uint64 [^{:tag (* pallocBits)} b ^uint i]
+  (.block64 (conv (* pageBits) b) i))
+
+
+
+
+^{:go/end 378} (go/method allocPages64 "allocPages64 allocates a 64-bit block of 64 pages aligned to 64 pages according\nto the bits set in alloc. The block set is the one containing the i'th page.\n" [^{:tag (* pallocBits)} b ^uint i ^uint64 alloc]
+  (.setBlock64 (conv (* pageBits) b) i alloc))
+
+
+
+
+
+
+^{:go/end 410} (go/func findBitRange64 "findBitRange64 returns the bit index of the first set of\nn consecutive 1 bits. If no consecutive set of 1 bits of\nsize n may be found in c, then it returns an integer >= 64.\nn must be > 0.\n" ^uint [^uint64 c ^uint n]
+  ;; This implementation is based on shrinking the length of
+  ;; runs of contiguous 1 bits. We remove the top n-1 1 bits
+  ;; from each run of 1s, then look for the first remaining 1 bit.
+  (let [p (- n 1) ; number of 1s we want to remove.
+      ^{:line 389} k (conv uint 1)] ; current minimum width of runs of 0 in c.
+    (while (> p 0)
+      (when (<= p k)
+        ;; Shift p 0s down into the top of each run of 1s.
+        (set! c bit-and (>> c (bit-and p 63)))
+        (break))
+
+      ;; Shift k 0s down into the top of each run of 1s.
+      (set! c bit-and (>> c (bit-and k 63)))
+      (when (== c 0)
+        (return 64))
+
+      (set! p - k)
+      ;; We've just doubled the minimum length of 0-runs.
+      ;; This allows us to shift farther in the next iteration.
+      (set! k * 2))
+
+    ;; Find first remaining 1.
+    ;; Since we shrunk from the top down, the first 1 is in
+    ;; its correct original position.
+    (conv uint (sys/TrailingZeros64 c))))
+
+
+
+
+
+
+
+
+
+(go/type pallocData "pallocData encapsulates pallocBits and a bitmap for\nwhether or not a given page is scavenged in a single\nstructure. It's effectively a pallocBits with\nadditional functionality.\n\nUpdate the comment on (*pageAlloc).chunks should this\nstructure change.\n" (struct
+    ^{:line 420} pallocBits
+    ^{:line 421 :tag pageBits} scavenged))
+
+
+
+
+^{:go/end 430} (go/method allocRange "allocRange sets bits [i, i+n) in the bitmap to 1 and\nupdates the scavenged bits appropriately.\n" [^{:tag (* pallocData)} m ^uint i ^uint n]
+  ;; Clear the scavenged bits when we alloc the range.
+  (.allocRange (.-pallocBits m) i n)
+  (.clearRange (.-scavenged m) i n))
+
+
+
+
+^{:go/end 438} (go/method allocAll "allocAll sets every bit in the bitmap to 1 and updates\nthe scavenged bits appropriately.\n" [^{:tag (* pallocData)} m]
+  ;; Clear the scavenged bits when we alloc the range.
+  (.allocAll (.-pallocBits m))
+  (.clearAll (.-scavenged m)))

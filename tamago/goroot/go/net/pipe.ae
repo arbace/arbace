@@ -1,0 +1,237 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "pipe.go" :imports [
+
+
+    ^{:line 8} [io "io"]
+    ^{:line 9} [os "os"]
+    ^{:line 10} [sync "sync"]
+    ^{:line 11} [time "time"]])
+
+
+
+(go/type pipeDeadline "pipeDeadline is an abstraction for handling timeouts.\n" (struct
+    ^{:line 16 :tag sync/Mutex} mu ; Guards timer and cancel
+    ^{:line 17 :tag (* time/Timer)} timer
+    ^{:line 18 :tag (chan (struct))} cancel)) ; Must be non-nil
+
+
+^{:go/end 23} (go/func makePipeDeadline ^pipeDeadline []
+  (lit pipeDeadline :cancel (make (chan (struct)))))
+
+
+
+
+
+
+
+
+^{:go/end 64} (go/method set "set sets the point in time when the deadline will time out.\nA timeout event is signaled by closing the channel returned by waiter.\nOnce a timeout has occurred, the deadline can be refreshed by specifying a\nt value in the future.\n\nA zero value for t prevents timeout.\n" [^{:tag (* pipeDeadline)} d ^time/Time t]
+  (.Lock (.-mu d))
+  (defer (.Unlock (.-mu d)))
+
+  (when (and (!= (.-timer d) nil) (not (.Stop (.-timer d))))
+    (<! (.-cancel d))) ; Wait for the timer callback to finish and close cancel
+
+  (set! (.-timer d) nil)
+
+  ;; Time is zero, then there is no deadline.
+  (let [closed (isClosedChan (.-cancel d))]
+    (when (.IsZero t)
+      (when closed
+        (set! (.-cancel d) (make (chan (struct)))))
+
+      (return))
+
+
+    ;; Time in the future, setup a timer to cancel in the future.
+    (when [dur (time/Until t)] (> dur 0)
+      (when closed
+        (set! (.-cancel d) (make (chan (struct)))))
+
+      (set! (.-timer d) (time/AfterFunc dur ^{:go/end 56} (fn []
+            (close (.-cancel d)))))
+
+      (return))
+
+
+    ;; Time in the past, so close immediately.
+    (when (not closed)
+      (close (.-cancel d)))))
+
+
+
+
+^{:go/end 71} (go/method wait "wait returns a channel that is closed when the deadline is exceeded.\n" ^{:tag (chan (struct))} [^{:tag (* pipeDeadline)} d]
+  (.Lock (.-mu d))
+  (defer (.Unlock (.-mu d)))
+  (.-cancel d))
+
+
+^{:go/end 80} (go/func isClosedChan ^bool [^{:tag (chan :recv (struct))} c]
+  (select
+    (case (<! c)
+      (return true))
+    (default
+      (return false))))
+
+
+
+(go/type pipeAddr (struct))
+
+^{:go/end 84} (go/method Network ^string [pipeAddr] "pipe")
+^{:go/end 85} (go/method String ^string [pipeAddr] "pipe")
+
+(go/type pipe (struct
+    ^{:line 88 :tag sync/Mutex} wrMu ; Serialize Write operations
+
+
+
+    ^{:line 92 :tag (chan :recv (slice byte)) :doc "Used by local Read to interact with remote Write.\nSuccessful receive on rdRx is always followed by send on rdTx.\n"} rdRx
+    ^{:line 93 :tag (chan :send int)} rdTx
+
+
+
+    ^{:line 97 :tag (chan :send (slice byte)) :doc "Used by local Write to interact with remote Read.\nSuccessful send on wrTx is always followed by receive on wrRx.\n"} wrTx
+    ^{:line 98 :tag (chan :recv int)} wrRx
+
+    ^{:line 100 :tag sync/Once} once ; Protects closing localDone
+    ^{:line 101 :tag (chan (struct))} localDone
+    ^{:line 102 :tag (chan :recv (struct))} remoteDone
+
+    ^{:line 104 :tag pipeDeadline} readDeadline
+    ^{:line 105 :tag pipeDeadline} writeDeadline))
+
+
+
+
+
+
+
+^{:go/end 136} (go/func Pipe "Pipe creates a synchronous, in-memory, full duplex\nnetwork connection; both ends implement the [Conn] interface.\nReads on one end are matched with writes on the other,\ncopying data directly between the two; there is no internal\nbuffering.\n" [] :results [Conn Conn]
+  (let [cb1 (make (chan (slice byte)))
+      ^{:line 115} cb2 (make (chan (slice byte)))
+      ^{:line 116} cn1 (make (chan int))
+      ^{:line 117} cn2 (make (chan int))
+      ^{:line 118} done1 (make (chan (struct)))
+      ^{:line 119} done2 (make (chan (struct)))
+
+      ^{:line 121} p1 (addr ^{:go/breaks [2 6 10 14 16]} (lit pipe
+          :rdRx cb1 :rdTx cn1
+          :wrTx cb2 :wrRx cn2
+          :localDone done1 :remoteDone done2
+          :readDeadline (makePipeDeadline)
+          :writeDeadline (makePipeDeadline)))
+
+      ^{:line 128} p2 (addr ^{:go/breaks [2 6 10 14 16]} (lit pipe
+          :rdRx cb2 :rdTx cn2
+          :wrTx cb1 :wrRx cn1
+          :localDone done2 :remoteDone done1
+          :readDeadline (makePipeDeadline)
+          :writeDeadline (makePipeDeadline)))]
+
+    (return p1 p2)))
+
+
+^{:go/end 138} (go/method LocalAddr ^Addr [(* pipe)] (lit pipeAddr))
+^{:go/end 139} (go/method RemoteAddr ^Addr [(* pipe)] (lit pipeAddr))
+
+^{:go/end 147} (go/method Read [^{:tag (* pipe)} p ^{:tag (slice byte)} b] :results [int error]
+  (let [(values n err) (.read p b)]
+    (when (and (!= err nil) (!= err io/EOF) (!= err io/ErrClosedPipe))
+      (set! err (addr (lit OpError :Op "read" :Net "pipe" :Err err))))
+
+    (return n err)))
+
+
+^{:go/end 171} (go/method read [^{:tag (* pipe)} p ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (switch
+    (case [(isClosedChan (.-localDone p))]
+      (return 0 io/ErrClosedPipe))
+    (case [(isClosedChan (.-remoteDone p))]
+      (return 0 io/EOF))
+    (case [(isClosedChan (.wait (.-readDeadline p)))]
+      (return 0 os/ErrDeadlineExceeded)))
+
+
+  (select
+    (case [bw (<! (.-rdRx p))]
+      (let [nr (copy b bw)]
+        (>! (.-rdTx p) nr)
+        (return nr nil)))
+    (case (<! (.-localDone p))
+      (return 0 io/ErrClosedPipe))
+    (case (<! (.-remoteDone p))
+      (return 0 io/EOF))
+    (case (<! (.wait (.-readDeadline p)))
+      (return 0 os/ErrDeadlineExceeded))))
+
+
+
+^{:go/end 179} (go/method Write [^{:tag (* pipe)} p ^{:tag (slice byte)} b] :results [int error]
+  (let [(values n err) (.write p b)]
+    (when (and (!= err nil) (!= err io/ErrClosedPipe))
+      (set! err (addr (lit OpError :Op "write" :Net "pipe" :Err err))))
+
+    (return n err)))
+
+
+^{:go/end 208} (go/method write [^{:tag (* pipe)} p ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (switch
+    (case [(isClosedChan (.-localDone p))]
+      (return 0 io/ErrClosedPipe))
+    (case [(isClosedChan (.-remoteDone p))]
+      (return 0 io/ErrClosedPipe))
+    (case [(isClosedChan (.wait (.-writeDeadline p)))]
+      (return 0 os/ErrDeadlineExceeded)))
+
+
+  (.Lock (.-wrMu p)) ; Ensure entirety of b is written together
+  (defer (.Unlock (.-wrMu p)))
+  (for [once true] (or once (> (len b) 0)) (set! once false)
+    (select
+      (case (>! (.-wrTx p) b)
+        (let [nw (<! (.-wrRx p))]
+          (set! b (subslice b nw))
+          (set! n + nw)))
+      (case (<! (.-localDone p))
+        (return n io/ErrClosedPipe))
+      (case (<! (.-remoteDone p))
+        (return n io/ErrClosedPipe))
+      (case (<! (.wait (.-writeDeadline p)))
+        (return n os/ErrDeadlineExceeded))))
+
+
+  (return n nil))
+
+
+^{:go/breaks [6] :go/end 217} (go/method SetDeadline ^error [^{:tag (* pipe)} p ^time/Time t]
+  (when (or (isClosedChan (.-localDone p)) (isClosedChan (.-remoteDone p)))
+    (return io/ErrClosedPipe))
+
+  (.set (.-readDeadline p) t)
+  (.set (.-writeDeadline p) t)
+  nil)
+
+
+^{:go/breaks [5] :go/end 225} (go/method SetReadDeadline ^error [^{:tag (* pipe)} p ^time/Time t]
+  (when (or (isClosedChan (.-localDone p)) (isClosedChan (.-remoteDone p)))
+    (return io/ErrClosedPipe))
+
+  (.set (.-readDeadline p) t)
+  nil)
+
+
+^{:go/breaks [5] :go/end 233} (go/method SetWriteDeadline ^error [^{:tag (* pipe)} p ^time/Time t]
+  (when (or (isClosedChan (.-localDone p)) (isClosedChan (.-remoteDone p)))
+    (return io/ErrClosedPipe))
+
+  (.set (.-writeDeadline p) t)
+  nil)
+
+
+^{:go/breaks [4] :go/end 238} (go/method Close ^error [^{:tag (* pipe)} p]
+  (.Do (.-once p) ^{:go/end 236} (fn [] (close (.-localDone p))))
+  nil)

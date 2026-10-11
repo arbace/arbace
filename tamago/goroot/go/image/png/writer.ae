@@ -1,0 +1,667 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.image.png) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [zlib "compress/zlib"]
+    ^{:line 10} [binary "encoding/binary"]
+    ^{:line 11} [crc32 "hash/crc32"]
+    ^{:line 12} [image "image"]
+    ^{:line 13} [color "image/color"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [strconv "strconv"]])
+
+
+
+(go/type Encoder "Encoder configures encoding PNG images.\n" (struct
+    ^{:line 20 :tag CompressionLevel} CompressionLevel
+
+
+
+    ^{:line 24 :tag EncoderBufferPool :doc "BufferPool optionally specifies a buffer pool to get temporary\nEncoderBuffers when encoding an image.\n"} BufferPool))
+
+
+
+
+
+(go/type EncoderBufferPool "EncoderBufferPool is an interface for getting and returning temporary\ninstances of the [EncoderBuffer] struct. This can be used to reuse buffers\nwhen encoding multiple images.\n" (interface
+    (Get ^{:tag (* EncoderBuffer)} [])
+    (Put [(* EncoderBuffer)])))
+
+
+
+(go/type EncoderBuffer "EncoderBuffer holds the buffers used for encoding PNG images.\n" encoder)
+
+(go/type encoder (struct
+    ^{:line 39 :tag (* Encoder)} enc
+    ^{:line 40 :tag io/Writer} w
+    ^{:line 41 :tag image/Image} m
+    ^{:line 42 :tag int} cb
+    ^{:line 43 :tag error} err
+    ^{:line 44 :tag (array 8 byte)} header
+    ^{:line 45 :tag (array 4 byte)} footer
+    ^{:line 46 :tag (array (* 4 256) byte)} tmp
+    ^{:line 47 :tag (array nFilter (slice uint8))} cr
+    ^{:line 48 :tag (slice uint8)} pr
+    ^{:line 49 :tag (* zlib/Writer)} zw
+    ^{:line 50 :tag int} zwLevel
+    ^{:line 51 :tag (* bufio/Writer)} bw))
+
+
+
+(go/type CompressionLevel "CompressionLevel indicates the compression level.\n" int)
+
+(go/const
+  ^{:line 58} [^{:tag CompressionLevel :val 0} DefaultCompression 0]
+  ^{:line 59} [^{:tag CompressionLevel :val -1} NoCompression -1]
+  ^{:line 60} [^{:tag CompressionLevel :val -2} BestSpeed -2]
+  ^{:line 61} [^{:tag CompressionLevel :val -3} BestCompression -3])
+
+;; Positive CompressionLevel values are reserved to mean a numeric zlib
+;; compression level, although that is not implemented yet.
+
+
+(go/type opaquer (interface
+    (Opaque ^bool [])))
+
+
+
+^{:go/end 86} (go/func opaque "Returns whether or not the image is fully opaque.\n" ^bool [^image/Image m]
+  (when [(values o ok) (assert opaquer m)] ok
+    (return (.Opaque o)))
+
+  ^{:go/breaks [[3 85]]} (let [b (.Bounds m)]
+    (for [y (.-Y (.-Min b))] (< y (.-Y (.-Max b))) (inc! y)
+      (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+        (let [(values _ _ _ a) (.RGBA (.At m x y))]
+          (when (!= a 0xffff)
+            (return false)))))
+
+
+
+    true))
+
+
+
+^{:go/end 94} (go/func abs8 "The absolute value of a byte interpreted as a signed int8.\n" ^int [^uint8 d]
+  (when (< d 128)
+    (return (conv int d)))
+
+  (- 256 (conv int d)))
+
+
+^{:go/end 124} (go/method writeChunk [^{:tag (* encoder)} e ^{:tag (slice byte)} b ^string name]
+  (when (!= (.-err e) nil)
+    (return))
+
+  (let [n (conv uint32 (len b))]
+    (when (!= (conv int n) (len b))
+      (set! (.-err e) (conv UnsupportedError (+ name " chunk is too large: " (strconv/Itoa (len b)))))
+      (return))
+
+    (.PutUint32 binary/BigEndian (subslice (.-header e) _ 4) n)
+    (aset (.-header e) 4 (aget name 0))
+    (aset (.-header e) 5 (aget name 1))
+    (aset (.-header e) 6 (aget name 2))
+    (aset (.-header e) 7 (aget name 3))
+    (let [crc (crc32/NewIEEE)]
+      (.Write crc (subslice (.-header e) 4 8))
+      (.Write crc b)
+      (.PutUint32 binary/BigEndian (subslice (.-footer e) _ 4) (.Sum32 crc))
+
+      (set! (values _ (.-err e)) (.Write (.-w e) (subslice (.-header e) _ 8)))
+      (when (!= (.-err e) nil)
+        (return))
+
+      (set! (values _ (.-err e)) (.Write (.-w e) b))
+      (when (!= (.-err e) nil)
+        (return))
+
+      (set! (values _ (.-err e)) (.Write (.-w e) (subslice (.-footer e) _ 4))))))
+
+
+^{:go/end 167} (go/method writeIHDR [^{:tag (* encoder)} e]
+  (let [b (.Bounds (.-m e))]
+    (.PutUint32 binary/BigEndian (subslice (.-tmp e) 0 4) (conv uint32 (.Dx b)))
+    (.PutUint32 binary/BigEndian (subslice (.-tmp e) 4 8) (conv uint32 (.Dy b)))
+    ;; Set bit depth and color type.
+    (switch (.-cb e)
+      (case [cbG8]
+        (aset (.-tmp e) 8 8)
+        (aset (.-tmp e) 9 ctGrayscale))
+      (case [cbTC8]
+        (aset (.-tmp e) 8 8)
+        (aset (.-tmp e) 9 ctTrueColor))
+      (case [cbP8]
+        (aset (.-tmp e) 8 8)
+        (aset (.-tmp e) 9 ctPaletted))
+      (case [cbP4]
+        (aset (.-tmp e) 8 4)
+        (aset (.-tmp e) 9 ctPaletted))
+      (case [cbP2]
+        (aset (.-tmp e) 8 2)
+        (aset (.-tmp e) 9 ctPaletted))
+      (case [cbP1]
+        (aset (.-tmp e) 8 1)
+        (aset (.-tmp e) 9 ctPaletted))
+      (case [cbTCA8]
+        (aset (.-tmp e) 8 8)
+        (aset (.-tmp e) 9 ctTrueColorAlpha))
+      (case [cbG16]
+        (aset (.-tmp e) 8 16)
+        (aset (.-tmp e) 9 ctGrayscale))
+      (case [cbTC16]
+        (aset (.-tmp e) 8 16)
+        (aset (.-tmp e) 9 ctTrueColor))
+      (case [cbTCA16]
+        (aset (.-tmp e) 8 16)
+        (aset (.-tmp e) 9 ctTrueColorAlpha)))
+
+    (aset (.-tmp e) 10 0) ; default compression method
+    (aset (.-tmp e) 11 0) ; default filter method
+    (aset (.-tmp e) 12 0) ; non-interlaced
+    (.writeChunk e (subslice (.-tmp e) _ 13) "IHDR")))
+
+
+^{:go/end 189} (go/method writePLTEAndTRNS [^{:tag (* encoder)} e ^color/Palette p]
+  (when (or (< (len p) 1) (> (len p) 256))
+    (set! (.-err e) (conv FormatError (+ "bad palette length: " (strconv/Itoa (len p)))))
+    (return))
+
+  (let [last -1]
+    (range [i c p]
+      (let [c1 (assert color/NRGBA (.Convert color/NRGBAModel c))]
+        (aset (.-tmp e) (+ (* 3 i) 0) (.-R c1))
+        (aset (.-tmp e) (+ (* 3 i) 1) (.-G c1))
+        (aset (.-tmp e) (+ (* 3 i) 2) (.-B c1))
+        (when (!= (.-A c1) 0xff)
+          (set! last i))
+
+        (aset (.-tmp e) (+ (* 3 256) i) (.-A c1))))
+
+    (.writeChunk e (subslice (.-tmp e) _ (* 3 (len p))) "PLTE")
+    (when (!= last -1)
+      (.writeChunk e (subslice (.-tmp e) (* 3 256) (+ (* 3 256) 1 last)) "tRNS"))))
+
+
+
+
+
+
+
+
+
+^{:go/end 203} (go/method Write "An encoder is an io.Writer that satisfies writes by writing PNG IDAT chunks,\nincluding an 8-byte header and 4-byte CRC checksum per Write call. Such calls\nshould be relatively infrequent, since writeIDATs uses a [bufio.Writer].\n\nThis method should only be called from writeIDATs (via writeImage).\nNo other code should treat an encoder as an io.Writer.\n" [^{:tag (* encoder)} e ^{:tag (slice byte)} b] :results [int error]
+  (.writeChunk e b "IDAT")
+  (when (!= (.-err e) nil)
+    (return 0 (.-err e)))
+
+  (return (len b) nil))
+
+
+
+
+^{:go/end 296} (go/func filter "Chooses the filter to use for encoding the current row, and applies it.\nThe return value is the index of the filter and also of the row in cr that has had it applied.\n" ^int [^{:tag (* (array nFilter (slice byte)))} cr ^{:tag (slice byte)} pr ^int bpp]
+  ;; We try all five filter types, and pick the one that minimizes the sum of absolute differences.
+  ;; This is the same heuristic that libpng uses, although the filters are attempted in order of
+  ;; estimated most likely to be minimal (ftUp, ftPaeth, ftNone, ftSub, ftAverage), rather than
+  ;; in their enumeration order (ftNone, ftSub, ftUp, ftAverage, ftPaeth).
+  (let [cdat0 (subslice (aget cr 0) 1)
+      ^{:line 213} cdat1 (subslice (aget cr 1) 1)
+      ^{:line 214} cdat2 (subslice (aget cr 2) 1)
+      ^{:line 215} cdat3 (subslice (aget cr 3) 1)
+      ^{:line 216} cdat4 (subslice (aget cr 4) 1)
+      ^{:line 217} pdat (subslice pr 1)
+      ^{:line 218} n (len cdat0)
+
+      ;; The up filter.
+      ^{:line 221} sum 0]
+    (for [i 0] (< i n) (inc! i)
+      (aset cdat2 i (- (aget cdat0 i) (aget pdat i)))
+      (set! sum + (abs8 (aget cdat2 i))))
+
+    (let [best sum
+        ^{:line 227} filter ftUp]
+
+      ;; The Paeth filter.
+      (set! sum 0)
+      (for [i 0] (< i bpp) (inc! i)
+        (aset cdat4 i (- (aget cdat0 i) (aget pdat i)))
+        (set! sum + (abs8 (aget cdat4 i))))
+
+      (for [i bpp] (< i n) (inc! i)
+        (aset cdat4 i (- (aget cdat0 i) (paeth (aget cdat0 (- i bpp)) (aget pdat i) (aget pdat (- i bpp)))))
+        (set! sum + (abs8 (aget cdat4 i)))
+        (when (>= sum best)
+          (break)))
+
+
+      (when (< sum best)
+        (set! best sum)
+        (set! filter ftPaeth))
+
+
+      ;; The none filter.
+      (set! sum 0)
+      (for [i 0] (< i n) (inc! i)
+        (set! sum + (abs8 (aget cdat0 i)))
+        (when (>= sum best)
+          (break)))
+
+
+      (when (< sum best)
+        (set! best sum)
+        (set! filter ftNone))
+
+
+      ;; The sub filter.
+      (set! sum 0)
+      (for [i 0] (< i bpp) (inc! i)
+        (aset cdat1 i (aget cdat0 i))
+        (set! sum + (abs8 (aget cdat1 i))))
+
+      (for [i bpp] (< i n) (inc! i)
+        (aset cdat1 i (- (aget cdat0 i) (aget cdat0 (- i bpp))))
+        (set! sum + (abs8 (aget cdat1 i)))
+        (when (>= sum best)
+          (break)))
+
+
+      (when (< sum best)
+        (set! best sum)
+        (set! filter ftSub))
+
+
+      ;; The average filter.
+      (set! sum 0)
+      (for [i 0] (< i bpp) (inc! i)
+        (aset cdat3 i (- (aget cdat0 i) (/ (aget pdat i) 2)))
+        (set! sum + (abs8 (aget cdat3 i))))
+
+      (for [i bpp] (< i n) (inc! i)
+        (aset cdat3 i (- (aget cdat0 i) (conv uint8 (/ (+ (conv int (aget cdat0 (- i bpp))) (conv int (aget pdat i))) 2))))
+        (set! sum + (abs8 (aget cdat3 i)))
+        (when (>= sum best)
+          (break)))
+
+
+      (when (< sum best)
+        (set! filter ftAverage))
+
+
+      ^{:line 295} filter)))
+
+
+^{:go/end 544} (go/method writeImage ^error [^{:tag (* encoder)} e ^io/Writer w ^image/Image m ^int cb ^int level]
+  (if (or (== (.-zw e) nil) (!= (.-zwLevel e) level))
+    (let [(values zw err) (zlib/NewWriterLevel w level)]
+      (when (!= err nil)
+        (return err))
+
+      (set! (.-zw e) zw)
+      (set! (.-zwLevel e) level))
+
+    (.Reset (.-zw e) w))
+
+  (defer (.Close (.-zw e)))
+
+  (let [bitsPerPixel 0]
+
+    (switch cb
+      (case [cbG8]
+        (set! bitsPerPixel 8))
+      (case [cbTC8]
+        (set! bitsPerPixel 24))
+      (case [cbP8]
+        (set! bitsPerPixel 8))
+      (case [cbP4]
+        (set! bitsPerPixel 4))
+      (case [cbP2]
+        (set! bitsPerPixel 2))
+      (case [cbP1]
+        (set! bitsPerPixel 1))
+      (case [cbTCA8]
+        (set! bitsPerPixel 32))
+      (case [cbTC16]
+        (set! bitsPerPixel 48))
+      (case [cbTCA16]
+        (set! bitsPerPixel 64))
+      (case [cbG16]
+        (set! bitsPerPixel 16)))
+
+
+    ;; cr[*] and pr are the bytes for the current and previous row.
+    ;; cr[0] is unfiltered (or equivalently, filtered with the ftNone filter).
+    ;; cr[ft], for non-zero filter types ft, are buffers for transforming cr[0] under the
+    ;; other PNG filter types. These buffers are allocated once and re-used for each row.
+    ;; The +1 is for the per-row filter type, which is at cr[*][0].
+    (let [b (.Bounds m)
+        ^{:line 342} sz (+ 1 (/ (+ (* bitsPerPixel (.Dx b)) 7) 8))]
+      (range [i (.-cr e)]
+        (if (< (cap (aget (.-cr e) i)) sz)
+          (aset (.-cr e) i (make (slice uint8) sz))
+
+          (aset (.-cr e) i (subslice (aget (.-cr e) i) _ sz)))
+
+        (aset (aget (.-cr e) i) 0 (conv uint8 i)))
+
+      (let [cr (.-cr e)]
+        (if (< (cap (.-pr e)) sz)
+          (set! (.-pr e) (make (slice uint8) sz))
+          (do
+            (set! (.-pr e) (subslice (.-pr e) _ sz))
+            (clear (.-pr e))))
+
+        ^{:go/breaks [[3 543]]} (let [pr (.-pr e)
+
+            (values gray _) (assert (* image/Gray) m)
+            (values rgba _) (assert (* image/RGBA) m)
+            (values paletted _) (assert (* image/Paletted) m)
+            (values nrgba _) (assert (* image/NRGBA) m)]
+
+          (for [y (.-Y (.-Min b))] (< y (.-Y (.-Max b))) (inc! y)
+            ;; Convert from colors to bytes.
+            (let [i 1]
+              (switch cb
+                (case [cbG8]
+                  (if (!= gray nil)
+                    (let [offset (* (- y (.-Y (.-Min b))) (.-Stride gray))]
+                      (copy (subslice (aget cr 0) 1) (subslice (.-Pix gray) offset (+ offset (.Dx b)))))
+
+                    (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+                      (let [c (assert color/Gray (.Convert color/GrayModel (.At m x y)))]
+                        (aset (aget cr 0) i (.-Y c))
+                        (inc! i)))))
+
+
+                (case [cbTC8]
+                  ;; We have previously verified that the alpha value is fully opaque.
+                  (let [cr0 (aget cr 0)
+                      (values stride pix) (values 0 (conv (slice byte) nil))]
+                    (cond (!= rgba nil)
+                      (set! (values stride pix) (values (.-Stride rgba) (.-Pix rgba)))
+                      (!= nrgba nil)
+                      (set! (values stride pix) (values (.-Stride nrgba) (.-Pix nrgba))))
+
+                    (if (!= stride 0)
+                      (let [j0 (* (- y (.-Y (.-Min b))) stride)
+                          ^{:line 391} j1 (+ j0 (* (.Dx b) 4))]
+                        (for [j j0] (< j j1) (set! j + 4)
+                          (aset cr0 (+ i 0) (aget pix (+ j 0)))
+                          (aset cr0 (+ i 1) (aget pix (+ j 1)))
+                          (aset cr0 (+ i 2) (aget pix (+ j 2)))
+                          (set! i + 3)))
+
+
+                      (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+                        (let [(values r g b _) (.RGBA (.At m x y))]
+                          (aset cr0 (+ i 0) (conv uint8 (>> r 8)))
+                          (aset cr0 (+ i 1) (conv uint8 (>> g 8)))
+                          (aset cr0 (+ i 2) (conv uint8 (>> b 8)))
+                          (set! i + 3))))))
+
+
+                (case [cbP8]
+                  (if (!= paletted nil)
+                    (let [offset (* (- y (.-Y (.-Min b))) (.-Stride paletted))]
+                      (copy (subslice (aget cr 0) 1) (subslice (.-Pix paletted) offset (+ offset (.Dx b)))))
+
+                    (let [pi (assert image/PalettedImage m)]
+                      (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+                        (aset (aget cr 0) i (.ColorIndexAt pi x y))
+                        (set! i + 1)))))
+
+
+
+                (case [cbP4 cbP2 cbP1]
+                  (let [pi (assert image/PalettedImage m)
+
+                      ^{:line 422 :tag uint8} a (zero uint8)
+                      ^{:line 423 :tag int} c (zero int)
+                      ^{:line 424} pixelsPerByte (/ 8 bitsPerPixel)]
+                    (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+                      (set! a (bit-or (<< a (conv uint bitsPerPixel)) (.ColorIndexAt pi x y)))
+                      (inc! c)
+                      (when (== c pixelsPerByte)
+                        (aset (aget cr 0) i a)
+                        (set! i + 1)
+                        (set! a 0)
+                        (set! c 0)))
+
+
+                    (when (!= c 0)
+                      (while (!= c pixelsPerByte)
+                        (set! a (<< a (conv uint bitsPerPixel)))
+                        (inc! c))
+
+                      (aset (aget cr 0) i a))))
+
+
+                (case [cbTCA8]
+                  (cond (!= nrgba nil)
+                    (let [offset (* (- y (.-Y (.-Min b))) (.-Stride nrgba))]
+                      (copy (subslice (aget cr 0) 1) (subslice (.-Pix nrgba) offset (+ offset (* (.Dx b) 4)))))
+                    (!= rgba nil)
+                    (let [dst (subslice (aget cr 0) 1)
+                        ^{:line 449} src (subslice (.-Pix rgba) (.PixOffset rgba (.-X (.-Min b)) y) (.PixOffset rgba (.-X (.-Max b)) y))]
+                      (for [] (>= (len src) 4) (set! (values dst src) (values (subslice dst 4) (subslice src 4)))
+                        (let [d (conv (* (array 4 byte)) dst)
+                            ^{:line 452} s (conv (* (array 4 byte)) src)]
+                          (cond (== (aget s 3) 0x00) (do
+                              (aset d 0 0)
+                              (aset d 1 0)
+                              (aset d 2 0)
+                              (aset d 3 0))
+                            (== (aget s 3) 0xff)
+                            (copy (subslice d) (subslice s)) :else
+
+                            ;; This code does the same as color.NRGBAModel.Convert(
+                            ;; rgba.At(x, y)).(color.NRGBA) but with no extra memory
+                            ;; allocations or interface/function call overhead.
+                            ;;
+                            ;; The multiplier m combines 0x101 (which converts
+                            ;; 8-bit color to 16-bit color) and 0xffff (which, when
+                            ;; combined with the division-by-a, converts from
+                            ;; alpha-premultiplied to non-alpha-premultiplied).
+                            (let [^:const ^{:val 16842495} m (* 0x101 0xffff)
+                                ^{:line 470} a (* (conv uint32 (aget s 3)) 0x101)]
+                              (aset d 0 (conv uint8 (>> (/ (* (conv uint32 (aget s 0)) m) a) 8)))
+                              (aset d 1 (conv uint8 (>> (/ (* (conv uint32 (aget s 1)) m) a) 8)))
+                              (aset d 2 (conv uint8 (>> (/ (* (conv uint32 (aget s 2)) m) a) 8)))
+                              (aset d 3 (aget s 3))))))) :else
+
+
+
+                    ;; Convert from image.Image (which is alpha-premultiplied) to PNG's non-alpha-premultiplied.
+                    (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+                      (let [c (assert color/NRGBA (.Convert color/NRGBAModel (.At m x y)))]
+                        (aset (aget cr 0) (+ i 0) (.-R c))
+                        (aset (aget cr 0) (+ i 1) (.-G c))
+                        (aset (aget cr 0) (+ i 2) (.-B c))
+                        (aset (aget cr 0) (+ i 3) (.-A c))
+                        (set! i + 4)))))
+
+
+                (case [cbG16]
+                  (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+                    (let [c (assert color/Gray16 (.Convert color/Gray16Model (.At m x y)))]
+                      (aset (aget cr 0) (+ i 0) (conv uint8 (>> (.-Y c) 8)))
+                      (aset (aget cr 0) (+ i 1) (conv uint8 (.-Y c)))
+                      (set! i + 2))))
+
+                (case [cbTC16]
+                  ;; We have previously verified that the alpha value is fully opaque.
+                  (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+                    (let [(values r g b _) (.RGBA (.At m x y))]
+                      (aset (aget cr 0) (+ i 0) (conv uint8 (>> r 8)))
+                      (aset (aget cr 0) (+ i 1) (conv uint8 r))
+                      (aset (aget cr 0) (+ i 2) (conv uint8 (>> g 8)))
+                      (aset (aget cr 0) (+ i 3) (conv uint8 g))
+                      (aset (aget cr 0) (+ i 4) (conv uint8 (>> b 8)))
+                      (aset (aget cr 0) (+ i 5) (conv uint8 b))
+                      (set! i + 6))))
+
+                (case [cbTCA16]
+                  ;; Convert from image.Image (which is alpha-premultiplied) to PNG's non-alpha-premultiplied.
+                  (for [x (.-X (.-Min b))] (< x (.-X (.-Max b))) (inc! x)
+                    (let [c (assert color/NRGBA64 (.Convert color/NRGBA64Model (.At m x y)))]
+                      (aset (aget cr 0) (+ i 0) (conv uint8 (>> (.-R c) 8)))
+                      (aset (aget cr 0) (+ i 1) (conv uint8 (.-R c)))
+                      (aset (aget cr 0) (+ i 2) (conv uint8 (>> (.-G c) 8)))
+                      (aset (aget cr 0) (+ i 3) (conv uint8 (.-G c)))
+                      (aset (aget cr 0) (+ i 4) (conv uint8 (>> (.-B c) 8)))
+                      (aset (aget cr 0) (+ i 5) (conv uint8 (.-B c)))
+                      (aset (aget cr 0) (+ i 6) (conv uint8 (>> (.-A c) 8)))
+                      (aset (aget cr 0) (+ i 7) (conv uint8 (.-A c)))
+                      (set! i + 8)))))
+
+
+
+              ;; Apply the filter.
+              ;; Skip filter for NoCompression and paletted images (cbP8) as
+              ;; "filters are rarely useful on palette images" and will result
+              ;; in larger files (see http://www.libpng.org/pub/png/book/chapter09.html).
+              (let [f ftNone]
+                (when (and (!= level zlib/NoCompression) (!= cb cbP8) (!= cb cbP4) (!= cb cbP2) (!= cb cbP1))
+                  ;; Since we skip paletted images we don't have to worry about
+                  ;; bitsPerPixel not being a multiple of 8
+                  (let [bpp (/ bitsPerPixel 8)]
+                    (set! f (filter (addr cr) pr bpp))))
+
+
+                ;; Write the compressed bytes.
+                (when [(values _ err) (.Write (.-zw e) (aget cr f))] (!= err nil)
+                  (return err))
+
+
+                ;; The current row for y is the previous row for y+1.
+                (set! (values pr (aget cr 0)) (values (aget cr 0) pr)))))
+
+          nil)))))
+
+
+
+^{:go/end 561} (go/method writeIDATs "Write the actual image data to one or more IDAT chunks.\n" [^{:tag (* encoder)} e]
+  (when (!= (.-err e) nil)
+    (return))
+
+  (if (== (.-bw e) nil)
+    (set! (.-bw e) (bufio/NewWriterSize e (<< 1 15)))
+
+    (.Reset (.-bw e) e))
+
+  (set! (.-err e) (.writeImage e (.-bw e) (.-m e) (.-cb e) (levelToZlib (.-CompressionLevel (.-enc e)))))
+  (when (!= (.-err e) nil)
+    (return))
+
+  (set! (.-err e) (.Flush (.-bw e))))
+
+
+
+
+^{:go/end 578} (go/func levelToZlib "This function is required because we want the zero value of\nEncoder.CompressionLevel to map to zlib.DefaultCompression.\n" ^int [^CompressionLevel l]
+  (switch l
+    (case [DefaultCompression]
+      (return zlib/DefaultCompression))
+    (case [NoCompression]
+      (return zlib/NoCompression))
+    (case [BestSpeed]
+      (return zlib/BestSpeed))
+    (case [BestCompression]
+      (return zlib/BestCompression))
+    (default
+      (return zlib/DefaultCompression))))
+
+
+
+^{:go/end 580} (go/method writeIEND [^{:tag (* encoder)} e] (.writeChunk e nil "IEND"))
+
+
+
+
+
+
+
+^{:go/end 591} (go/func Encode "Encode writes the Image m to w in PNG format. Any Image may be\nencoded, but images that are not [image.NRGBA] might be encoded lossily.\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" ^error [^io/Writer w ^image/Image m]
+  (let [^Encoder e (zero Encoder)]
+    (.Encode e w m)))
+
+
+
+
+
+
+
+^{:go/end 668} (go/method Encode "Encode writes the Image m to w in PNG format.\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" ^error [^{:tag (* Encoder)} enc ^io/Writer w ^image/Image m]
+  ;; Obviously, negative widths and heights are invalid. Furthermore, the PNG
+  ;; spec section 11.2.2 says that zero is invalid. Excessively large images are
+  ;; also rejected.
+  (let [(values mw mh) (values (conv int64 (.Dx (.Bounds m))) (conv int64 (.Dy (.Bounds m))))]
+    (when (or (<= mw 0) (<= mh 0) (>= mw (<< 1 32)) (>= mh (<< 1 32)))
+      (return (conv FormatError (+ "invalid image size: " (strconv/FormatInt mw 10) "x" (strconv/FormatInt mh 10)))))
+
+
+    (let [^{:tag (* encoder)} e (zero (* encoder))]
+      (when (!= (.-BufferPool enc) nil)
+        (let [buffer (.Get (.-BufferPool enc))]
+          (set! e (conv (* encoder) buffer))))
+
+
+      (when (== e nil)
+        (set! e (addr (lit encoder))))
+
+      (when (!= (.-BufferPool enc) nil)
+        (defer (.Put (.-BufferPool enc) (conv (* EncoderBuffer) e))))
+
+
+      (set! (.-enc e) enc)
+      (set! (.-w e) w)
+      (set! (.-m e) m)
+
+      (let [^color/Palette pal (zero color/Palette)]
+        ;; cbP8 encoding needs PalettedImage's ColorIndexAt method.
+        (when [(values _ ok) (assert image/PalettedImage m)] ok
+          (set! (values pal _) (assert color/Palette (.ColorModel m))))
+
+        (if (!= pal nil)
+          (cond (<= (len pal) 2)
+            (set! (.-cb e) cbP1)
+            (<= (len pal) 4)
+            (set! (.-cb e) cbP2)
+            (<= (len pal) 16)
+            (set! (.-cb e) cbP4) :else
+
+            (set! (.-cb e) cbP8))
+
+
+          (switch (.ColorModel m)
+            (case [color/GrayModel]
+              (set! (.-cb e) cbG8))
+            (case [color/Gray16Model]
+              (set! (.-cb e) cbG16))
+            (case [color/RGBAModel color/NRGBAModel color/AlphaModel]
+              (if (opaque m)
+                (set! (.-cb e) cbTC8)
+
+                (set! (.-cb e) cbTCA8)))
+
+            (default
+              (if (opaque m)
+                (set! (.-cb e) cbTC16)
+
+                (set! (.-cb e) cbTCA16)))))
+
+
+
+
+        (set! (values _ (.-err e)) (io/WriteString w pngHeader))
+        (.writeIHDR e)
+        (when (!= pal nil)
+          (.writePLTEAndTRNS e pal))
+
+        (.writeIDATs e)
+        (.writeIEND e)
+        (.-err e)))))

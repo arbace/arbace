@@ -1,0 +1,2045 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.build) (go/file "build.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [ast "go/ast"]
+    ^{:line 12} [constraint "go/build/constraint"]
+    ^{:line 13} [doc "go/doc"]
+    ^{:line 14} [token "go/token"]
+    ^{:line 15} [buildcfg "internal/buildcfg"]
+    ^{:line 16} [godebug "internal/godebug"]
+    ^{:line 17} [goroot "internal/goroot"]
+    ^{:line 18} [goversion "internal/goversion"]
+    ^{:line 19} [platform "internal/platform"]
+    ^{:line 20} [syslist "internal/syslist"]
+    ^{:line 21} [io "io"]
+    ^{:line 22} [fs "io/fs"]
+    ^{:line 23} [os "os"]
+    ^{:line 24} [exec "os/exec"]
+    ^:alias ^{:line 25} [pathpkg "path"]
+    ^{:line 26} [filepath "path/filepath"]
+    ^{:line 27} [runtime "runtime"]
+    ^{:line 28} [slices "slices"]
+    ^{:line 29} [strconv "strconv"]
+    ^{:line 30} [strings "strings"]
+    ^{:line 31} [unicode "unicode"]
+    ^{:line 32} [utf8 "unicode/utf8"]
+    ^{:line 33} [_ "unsafe"]]) ; for linkname
+
+
+
+(go/type Context "A Context specifies the supporting context for a build.\n" (struct
+    ^{:line 38 :tag string} GOARCH ; target architecture
+    ^{:line 39 :tag string} GOOS ; target operating system
+    ^{:line 40 :tag string} GOROOT ; Go root
+    ^{:line 41 :tag string} GOPATH ; Go paths
+
+
+
+
+
+
+
+    ^{:line 49 :tag string :doc "Dir is the caller's working directory, or the empty string to use\nthe current directory of the running process. In module mode, this is used\nto locate the main module.\n\nIf Dir is non-empty, directories passed to Import and ImportDir must\nbe absolute.\n"} Dir
+
+    ^{:line 51 :tag bool} CgoEnabled ; whether cgo files are included
+    ^{:line 52 :tag bool} UseAllFiles ; use files regardless of go:build lines, file names
+    ^{:line 53 :tag string} Compiler ; compiler to assume when computing target paths
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 65 :tag (slice string) :doc "The build, tool, and release tags specify build constraints\nthat should be considered satisfied when processing go:build lines.\nClients creating a new context may customize BuildTags, which\ndefaults to empty, but it is usually an error to customize ToolTags or ReleaseTags.\nToolTags defaults to build tags appropriate to the current Go toolchain configuration.\nReleaseTags defaults to the list of Go releases the current release is compatible with.\nBuildTags is not set for the Default build Context.\nIn addition to the BuildTags, ToolTags, and ReleaseTags, build constraints\nconsider the values of GOARCH and GOOS as satisfied tags.\nThe last element in ReleaseTags is assumed to be the current release.\n"} BuildTags
+    ^{:line 66 :tag (slice string)} ToolTags
+    ^{:line 67 :tag (slice string)} ReleaseTags
+
+
+
+
+
+
+
+    ^{:line 75 :tag string :doc "The install suffix specifies a suffix to use in the name of the installation\ndirectory. By default it is empty, but custom builds that need to keep\ntheir outputs separate can set InstallSuffix to do so. For example, when\nusing the race detector, the go command uses InstallSuffix = \"race\", so\nthat on a Linux/386 system, packages are written to a directory named\n\"linux_386_race\" instead of the usual \"linux_386\".\n"} InstallSuffix
+
+    ;; By default, Import uses the operating system's file system calls
+    ;; to read directories and files. To read from other sources,
+    ;; callers can set the following functions. They all have default
+    ;; behaviors that use the local file system, so clients need only set
+    ;; the functions whose behaviors they wish to change.
+
+
+
+    ^{:line 85 :tag (func [& ^{:tag (slice string)} elem] [string]) :doc "JoinPath joins the sequence of path fragments into a single path.\nIf JoinPath is nil, Import uses filepath.Join.\n"} JoinPath
+
+
+
+    ^{:line 89 :tag (func [^string list] [(slice string)]) :doc "SplitPathList splits the path list into a slice of individual paths.\nIf SplitPathList is nil, Import uses filepath.SplitList.\n"} SplitPathList
+
+
+
+    ^{:line 93 :tag (func [^string path] [bool]) :doc "IsAbsPath reports whether path is an absolute path.\nIf IsAbsPath is nil, Import uses filepath.IsAbs.\n"} IsAbsPath
+
+
+
+    ^{:line 97 :tag (func [^string path] [bool]) :doc "IsDir reports whether the path names a directory.\nIf IsDir is nil, Import calls os.Stat and uses the result's IsDir method.\n"} IsDir
+
+
+
+
+
+
+
+
+    ^{:line 106 :tag (func [^string root ^string dir] [^string rel ^bool ok]) :doc "HasSubdir reports whether dir is lexically a subdirectory of\nroot, perhaps multiple levels below. It does not try to check\nwhether dir exists.\nIf so, HasSubdir sets rel to a slash-separated path that\ncan be joined to root to produce a path equivalent to dir.\nIf HasSubdir is nil, Import uses an implementation built on\nfilepath.EvalSymlinks.\n"} HasSubdir
+
+
+
+
+    ^{:line 111 :tag (func [^string dir] [(slice fs/FileInfo) error]) :doc "ReadDir returns a slice of fs.FileInfo, sorted by Name,\ndescribing the content of the named directory.\nIf ReadDir is nil, Import uses os.ReadDir.\n"} ReadDir
+
+
+
+    ^{:line 115 :tag (func [^string path] [io/ReadCloser error]) :doc "OpenFile opens a file (not a directory) for reading.\nIf OpenFile is nil, Import uses os.Open.\n"} OpenFile))
+
+
+
+^{:go/end 124} (go/method joinPath "joinPath calls ctxt.JoinPath (if not nil) or else filepath.Join.\n" ^string [^{:tag (* Context)} ctxt & ^{:tag (slice string)} elem]
+  (when [f (.-JoinPath ctxt)] (!= f nil)
+    (return (f (spread elem))))
+
+  (filepath/Join (spread elem)))
+
+
+
+^{:go/end 132} (go/method splitPathList "splitPathList calls ctxt.SplitPathList (if not nil) or else filepath.SplitList.\n" ^{:tag (slice string)} [^{:tag (* Context)} ctxt ^string s]
+  (when [f (.-SplitPathList ctxt)] (!= f nil)
+    (return (f s)))
+
+  (filepath/SplitList s))
+
+
+
+^{:go/end 140} (go/method isAbsPath "isAbsPath calls ctxt.IsAbsPath (if not nil) or else filepath.IsAbs.\n" ^bool [^{:tag (* Context)} ctxt ^string path]
+  (when [f (.-IsAbsPath ctxt)] (!= f nil)
+    (return (f path)))
+
+  (filepath/IsAbs path))
+
+
+
+^{:go/end 149} (go/method isDir "isDir calls ctxt.IsDir (if not nil) or else uses os.Stat.\n" ^bool [^{:tag (* Context)} ctxt ^string path]
+  (when [f (.-IsDir ctxt)] (!= f nil)
+    (return (f path)))
+
+  (let [(values fi err) (os/Stat path)]
+    (and (== err nil) (.IsDir fi))))
+
+
+
+
+^{:go/end 176} (go/method hasSubdir "hasSubdir calls ctxt.HasSubdir (if not nil) or else uses\nthe local file system to answer the question.\n" [^{:tag (* Context)} ctxt ^string root ^string dir] :results [^string rel ^bool ok]
+  (when [f (.-HasSubdir ctxt)] (!= f nil)
+    (return (f root dir)))
+
+
+  ;; Try using paths we received.
+  (when [(set! (values rel ok) (hasSubdir root dir))] ok
+    (return))
+
+
+  ;; Try expanding symlinks and comparing
+  ;; expanded against unexpanded and
+  ;; expanded against expanded.
+  (let [(values rootSym _) (filepath/EvalSymlinks root)
+      (values dirSym _) (filepath/EvalSymlinks dir)]
+
+    (when [(set! (values rel ok) (hasSubdir rootSym dir))] ok
+      (return))
+
+    (when [(set! (values rel ok) (hasSubdir root dirSym))] ok
+      (return))
+
+    (hasSubdir rootSym dirSym)))
+
+
+
+^{:go/end 191} (go/func hasSubdir "hasSubdir reports if dir is within root by performing lexical analysis only.\n" [^string root ^string dir] :results [^string rel ^bool ok]
+  (let [^:const ^{:val "/"} sep (conv string filepath/Separator)]
+    (set! root (filepath/Clean root))
+    (when (not (strings/HasSuffix root sep))
+      (set! root + sep))
+
+    (set! dir (filepath/Clean dir))
+    (let [(values after found) (strings/CutPrefix dir root)]
+      (when (not found)
+        (return "" false))
+
+      (return (filepath/ToSlash after) true))))
+
+
+
+^{:go/end 208} (go/method readDir "readDir calls ctxt.ReadDir (if not nil) or else os.ReadDir.\n" [^{:tag (* Context)} ctxt ^string path] :results [(slice fs/DirEntry) error]
+  ;; TODO: add a fs.DirEntry version of Context.ReadDir
+  (when [f (.-ReadDir ctxt)] (!= f nil)
+    (let [(values fis err) (f path)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [des (make (slice fs/DirEntry) (len fis))]
+        (range [i fi fis]
+          (aset des i (fs/FileInfoToDirEntry fi)))
+
+        (return des nil))))
+
+  (os/ReadDir path))
+
+
+
+^{:go/end 221} (go/method openFile "openFile calls ctxt.OpenFile (if not nil) or else os.Open.\n" [^{:tag (* Context)} ctxt ^string path] :results [io/ReadCloser error]
+  (when [fn (.-OpenFile ctxt)] (!= fn nil)
+    (return (go/call fn path)))
+
+
+  (let [(values f err) (os/Open path)]
+    (when (!= err nil)
+      (return nil err)) ; nil interface
+
+    (return f nil)))
+
+
+
+
+
+^{:go/end 233} (go/method isFile "isFile determines whether path is a file by trying to open it.\nIt reuses openFile instead of adding another function to the\nlist in Context.\n" ^bool [^{:tag (* Context)} ctxt ^string path]
+  ^{:go/breaks [4]} (let [(values f err) (.openFile ctxt path)]
+    (when (!= err nil)
+      (return false))
+
+    (.Close f)
+    true))
+
+
+
+^{:go/end 264} (go/method gopath "gopath returns the list of Go path directories.\n" ^{:tag (slice string)} [^{:tag (* Context)} ctxt]
+  (let [^{:tag (slice string)} all (zero (slice string))]
+    (range [_ p (.splitPathList ctxt (.-GOPATH ctxt))]
+      (when (or (== p "") (== p (.-GOROOT ctxt)))
+        ;; Empty paths are uninteresting.
+        ;; If the path is the GOROOT, ignore it.
+        ;; People sometimes set GOPATH=$GOROOT.
+        ;; Do not get confused by this common mistake.
+        (continue))
+
+      (when (strings/HasPrefix p "~")
+        ;; Path segments starting with ~ on Unix are almost always
+        ;; users who have incorrectly quoted ~ while setting GOPATH,
+        ;; preventing it from expanding to $HOME.
+        ;; The situation is made more confusing by the fact that
+        ;; bash allows quoted ~ in $PATH (most shells do not).
+        ;; Do not get confused by this, and do not try to use the path.
+        ;; It does not exist, and printing errors about it confuses
+        ;; those users even more, because they think "sure ~ exists!".
+        ;; The go command diagnoses this situation and prints a
+        ;; useful error.
+        ;; On Windows, ~ is used in short names, such as c:\progra~1
+        ;; for c:\program files.
+        (continue))
+
+      (set! all (append all p)))
+
+    ^{:line 263} all))
+
+
+
+
+
+^{:go/end 284} (go/method SrcDirs "SrcDirs returns a list of package source root directories.\nIt draws from the current Go root and Go path but omits directories\nthat do not exist.\n" ^{:tag (slice string)} [^{:tag (* Context)} ctxt]
+  (let [^{:tag (slice string)} all (zero (slice string))]
+    (when (and (!= (.-GOROOT ctxt) "") (!= (.-Compiler ctxt) "gccgo"))
+      (let [dir (.joinPath ctxt (.-GOROOT ctxt) "src")]
+        (when (.isDir ctxt dir)
+          (set! all (append all dir)))))
+
+
+    (range [_ p (.gopath ctxt)]
+      (let [dir (.joinPath ctxt p "src")]
+        (when (.isDir ctxt dir)
+          (set! all (append all dir)))))
+
+
+    ^{:line 283} all))
+
+
+
+
+
+(go/var ^{:tag Context :doc "Default is the default Context for builds.\nIt uses the GOARCH, GOOS, GOROOT, and GOPATH environment variables\nif set, or else the compiled code's GOARCH, GOOS, and GOROOT.\n"} Default (defaultContext))
+
+
+^{:go/end 309} (go/func defaultGOPATH "Keep consistent with cmd/go/internal/cfg.defaultGOPATH.\n" ^string []
+  ^{:go/breaks [[4 308]]} (let [env "HOME"]
+    (cond (== runtime/GOOS "windows")
+      (set! env "USERPROFILE")
+      (== runtime/GOOS "plan9")
+      (set! env "home"))
+
+    (when [home (os/Getenv env)] (!= home "")
+      (let [def (filepath/Join home "go")]
+        (when (== (filepath/Clean def) (filepath/Clean (runtime/GOROOT)))
+          ;; Don't set the default GOPATH to GOROOT,
+          ;; as that will trigger warnings from the go tool.
+          (return ""))
+
+        (return def)))
+
+    ""))
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag (slice string) :doc "defaultToolTags should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/gopherjs/gopherjs\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" :go/linkname "defaultToolTags"} defaultToolTags)
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag (slice string) :doc "defaultReleaseTags should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/gopherjs/gopherjs\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" :go/linkname "defaultReleaseTags"} defaultReleaseTags)
+
+^{:go/end 379} (go/func defaultContext ^Context []
+  (let [^Context c (zero Context)]
+
+    (set! (.-GOARCH c) buildcfg/GOARCH)
+    (set! (.-GOOS c) buildcfg/GOOS)
+    (when [goroot (runtime/GOROOT)] (!= goroot "")
+      (set! (.-GOROOT c) (filepath/Clean goroot)))
+
+    (set! (.-GOPATH c) (envOr "GOPATH" (defaultGOPATH)))
+    (set! (.-Compiler c) runtime/Compiler)
+    (set! (.-ToolTags c) (append (.-ToolTags c) (spread buildcfg/ToolTags)))
+
+    (set! defaultToolTags (append (lit (slice string)) (spread (.-ToolTags c)))) ; our own private copy
+
+    ;; Each major Go release in the Go 1.x series adds a new
+    ;; "go1.x" release tag. That is, the go1.x tag is present in
+    ;; all releases >= Go 1.x. Code that requires Go 1.x or later
+    ;; should say "go:build go1.x", and code that should only be
+    ;; built before Go 1.x (perhaps it is the stub to use in that
+    ;; case) should say "go:build !go1.x".
+    ;; The last element in ReleaseTags is the current release.
+    (for [i 1] (<= i goversion/Version) (inc! i)
+      (set! (.-ReleaseTags c) (append (.-ReleaseTags c) (+ "go1." (strconv/Itoa i)))))
+
+
+    (set! defaultReleaseTags (append (lit (slice string)) (spread (.-ReleaseTags c)))) ; our own private copy
+
+    (let [env (os/Getenv "CGO_ENABLED")]
+      (when (== env "")
+        (set! env buildcfg/DefaultCGO_ENABLED))
+
+      (switch env
+        (case ["1"]
+          (set! (.-CgoEnabled c) true))
+        (case ["0"]
+          (set! (.-CgoEnabled c) false))
+        (default
+          ;; cgo must be explicitly enabled for cross compilation builds
+          (when (and (== runtime/GOARCH (.-GOARCH c)) (== runtime/GOOS (.-GOOS c)))
+            (set! (.-CgoEnabled c) (platform/CgoSupported (.-GOOS c) (.-GOARCH c)))
+            (break))
+
+          (set! (.-CgoEnabled c) false)))
+
+
+      ^{:line 378} c)))
+
+
+^{:go/end 387} (go/func envOr ^string [^string name ^string def]
+  (let [s (os/Getenv name)]
+    (when (== s "")
+      (return def))
+
+    ^{:line 386} s))
+
+
+
+(go/type ImportMode "An ImportMode controls the behavior of the Import method.\n" uint)
+
+(go/const
+
+
+
+  ^{:line 396} [^{:tag ImportMode :val 1 :doc "If FindOnly is set, Import stops after locating the directory\nthat should contain the sources for a package. It does not\nread any files in the directory.\n"} FindOnly (<< 1 iota)]
+
+
+
+
+
+
+
+
+
+
+  ^{:line 407} [^{:val 2 :doc "If AllowBinary is set, Import can be satisfied by a compiled\npackage object without corresponding sources.\n\nDeprecated:\nThe supported way to create a compiled-only package is to\nwrite source code containing a //go:binary-only-package comment at\nthe top of the file. Such a package will be recognized\nregardless of this flag setting (because it has source code)\nand will have BinaryOnly set to true in the returned Package.\n"} AllowBinary]
+
+
+
+
+
+  ^{:line 413} [^{:val 4 :doc "If ImportComment is set, parse import comments on package statements.\nImport returns an error if it finds a comment it cannot understand\nor finds conflicting comments in multiple source files.\nSee golang.org/s/go14customimport for more information.\n"} ImportComment]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 433} [^{:val 8 :doc "By default, Import searches vendor directories\nthat apply in the given source directory before searching\nthe GOROOT and GOPATH roots.\nIf an Import finds and returns a package using a vendor\ndirectory, the resulting ImportPath is the complete path\nto the package, including the path elements leading up\nto and including \"vendor\".\nFor example, if Import(\"y\", \"x/subdir\", 0) finds\n\"x/vendor/y\", the returned package's ImportPath is \"x/vendor/y\",\nnot plain \"y\".\nSee golang.org/s/go15vendor for more information.\n\nSetting IgnoreVendor ignores vendor directories.\n\nIn contrast to the package's ImportPath,\nthe returned package's Imports, TestImports, and XTestImports\nare always the exact import paths from the source files:\nImport makes no attempt to resolve or check those paths.\n"} IgnoreVendor])
+
+
+
+(go/type Package "A Package describes the Go package found in a directory.\n" (struct
+    ^{:line 438 :tag string} Dir ; directory containing package sources
+    ^{:line 439 :tag string} Name ; package name
+    ^{:line 440 :tag string} ImportComment ; path in import comment on package statement
+    ^{:line 441 :tag string} Doc ; documentation synopsis
+    ^{:line 442 :tag string} ImportPath ; import path of package ("" if unknown)
+    ^{:line 443 :tag string} Root ; root of Go tree where this package lives
+    ^{:line 444 :tag string} SrcRoot ; package source root directory ("" if unknown)
+    ^{:line 445 :tag string} PkgRoot ; package install root directory ("" if unknown)
+    ^{:line 446 :tag string} PkgTargetRoot ; architecture dependent install root directory ("" if unknown)
+    ^{:line 447 :tag string} BinDir ; command install directory ("" if unknown)
+    ^{:line 448 :tag bool} Goroot ; package found in Go root
+    ^{:line 449 :tag string} PkgObj ; installed .a file
+    ^{:line 450 :tag (slice string)} AllTags ; tags that can influence file selection in this directory
+    ^{:line 451 :tag string} ConflictDir ; this directory shadows Dir in $GOPATH
+    ^{:line 452 :tag bool} BinaryOnly ; cannot be rebuilt from source (has //go:binary-only-package comment)
+
+
+    ^{:line 455 :tag (slice string) :doc "Source files\n"} GoFiles ; .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
+    ^{:line 456 :tag (slice string)} CgoFiles ; .go source files that import "C"
+    ^{:line 457 :tag (slice string)} IgnoredGoFiles ; .go source files ignored for this build (including ignored _test.go files)
+    ^{:line 458 :tag (slice string)} InvalidGoFiles ; .go source files with detected problems (parse error, wrong package name, and so on)
+    ^{:line 459 :tag (slice string)} IgnoredOtherFiles ; non-.go source files ignored for this build
+    ^{:line 460 :tag (slice string)} CFiles ; .c source files
+    ^{:line 461 :tag (slice string)} CXXFiles ; .cc, .cpp and .cxx source files
+    ^{:line 462 :tag (slice string)} MFiles ; .m (Objective-C) source files
+    ^{:line 463 :tag (slice string)} HFiles ; .h, .hh, .hpp and .hxx source files
+    ^{:line 464 :tag (slice string)} FFiles ; .f, .F, .for and .f90 Fortran source files
+    ^{:line 465 :tag (slice string)} SFiles ; .s source files
+    ^{:line 466 :tag (slice string)} SwigFiles ; .swig files
+    ^{:line 467 :tag (slice string)} SwigCXXFiles ; .swigcxx files
+    ^{:line 468 :tag (slice string)} SysoFiles ; .syso system object files to add to archive
+
+
+    ^{:line 471 :tag (slice string) :doc "Cgo directives\n"} CgoCFLAGS ; Cgo CFLAGS directives
+    ^{:line 472 :tag (slice string)} CgoCPPFLAGS ; Cgo CPPFLAGS directives
+    ^{:line 473 :tag (slice string)} CgoCXXFLAGS ; Cgo CXXFLAGS directives
+    ^{:line 474 :tag (slice string)} CgoFFLAGS ; Cgo FFLAGS directives
+    ^{:line 475 :tag (slice string)} CgoLDFLAGS ; Cgo LDFLAGS directives
+    ^{:line 476 :tag (slice string)} CgoPkgConfig ; Cgo pkg-config directives
+
+
+    ^{:line 479 :tag (slice string) :doc "Test information\n"} TestGoFiles ; _test.go files in package
+    ^{:line 480 :tag (slice string)} XTestGoFiles ; _test.go files outside package
+
+
+    ^{:line 483 :tag (slice Directive) :doc "Go directive comments (//go:zzz...) found in source files.\n"} Directives
+    ^{:line 484 :tag (slice Directive)} TestDirectives
+    ^{:line 485 :tag (slice Directive)} XTestDirectives
+
+
+    ^{:line 488 :tag (slice string) :doc "Dependency information\n"} Imports ; import paths from GoFiles, CgoFiles
+    ^{:line 489 :tag (map string (slice token/Position))} ImportPos ; line information for Imports
+    ^{:line 490 :tag (slice string)} TestImports ; import paths from TestGoFiles
+    ^{:line 491 :tag (map string (slice token/Position))} TestImportPos ; line information for TestImports
+    ^{:line 492 :tag (slice string)} XTestImports ; import paths from XTestGoFiles
+    ^{:line 493 :tag (map string (slice token/Position))} XTestImportPos ; line information for XTestImports
+
+
+
+
+
+
+    ^{:line 500 :tag (slice string) :doc "//go:embed patterns found in Go source files\nFor example, if a source file says\n\t//go:embed a* b.c\nthen the list will contain those two strings as separate entries.\n(See package embed for more details about //go:embed.)\n"} EmbedPatterns ; patterns from GoFiles, CgoFiles
+    ^{:line 501 :tag (map string (slice token/Position))} EmbedPatternPos ; line information for EmbedPatterns
+    ^{:line 502 :tag (slice string)} TestEmbedPatterns ; patterns from TestGoFiles
+    ^{:line 503 :tag (map string (slice token/Position))} TestEmbedPatternPos ; line information for TestEmbedPatterns
+    ^{:line 504 :tag (slice string)} XTestEmbedPatterns ; patterns from XTestGoFiles
+    ^{:line 505 :tag (map string (slice token/Position))} XTestEmbedPatternPos)) ; line information for XTestEmbedPatternPos
+
+
+
+(go/type Directive "A Directive is a Go directive comment (//go:zzz...) found in a source file.\n" (struct
+    ^{:line 510 :tag string} Text ; full line comment including leading slashes
+    ^{:line 511 :tag token/Position} Pos)) ; position of comment
+
+
+
+
+
+^{:go/end 519} (go/method IsCommand "IsCommand reports whether the package is considered a\ncommand to be installed (not just a library).\nPackages named \"main\" are treated as commands.\n" ^bool [^{:tag (* Package)} p]
+  (== (.-Name p) "main"))
+
+
+
+
+^{:go/end 525} (go/method ImportDir "ImportDir is like [Import] but processes the Go package found in\nthe named directory.\n" [^{:tag (* Context)} ctxt ^string dir ^ImportMode mode] :results [(* Package) error]
+  (.Import ctxt "." dir mode))
+
+
+
+
+
+(go/type NoGoError "NoGoError is the error used by [Import] to describe a directory\ncontaining no buildable Go source files. (It may still contain\ntest files, files hidden by build tags, and so on.)\n" (struct
+    ^{:line 531 :tag string} Dir))
+
+
+^{:go/end 536} (go/method Error ^string [^{:tag (* NoGoError)} e]
+  (+ "no buildable Go source files in " (.-Dir e)))
+
+
+
+
+(go/type MultiplePackageError "MultiplePackageError describes a directory containing\nmultiple buildable Go source files for multiple packages.\n" (struct
+    ^{:line 541 :tag string} Dir ; directory containing files
+    ^{:line 542 :tag (slice string)} Packages ; package names found
+    ^{:line 543 :tag (slice string)} Files)) ; corresponding files: Files[i] declares package Packages[i]
+
+
+^{:go/end 549} (go/method Error ^string [^{:tag (* MultiplePackageError)} e]
+  ;; Error string limited to two entries for compatibility.
+  (fmt/Sprintf "found packages %s (%s) and %s (%s) in %s" (aget (.-Packages e) 0) (aget (.-Files e) 0) (aget (.-Packages e) 1) (aget (.-Files e) 1) (.-Dir e)))
+
+
+^{:go/end 557} (go/func nameExt ^string [^string name]
+  (let [i (strings/LastIndex name ".")]
+    (when (< i 0)
+      (return ""))
+
+    (subslice name i)))
+
+
+(go/var installgoroot (godebug/New "installgoroot"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1083} (go/method Import "Import returns details about the Go package named by the import path,\ninterpreting local import paths relative to the srcDir directory.\nIf the path is a local import path naming a package that can be imported\nusing a standard import path, the returned package will set p.ImportPath\nto that path.\n\nIn the directory containing the package, .go, .c, .h, and .s files are\nconsidered part of the package except for:\n\n  - .go files in package documentation\n  - files starting with _ or . (likely editor temporary files)\n  - files with build constraints not satisfied by the context\n\nIf an error occurs, Import returns a non-nil error and a non-nil\n*[Package] containing partial information.\n" [^{:tag (* Context)} ctxt ^string path ^string srcDir ^ImportMode mode] :results [(* Package) error]
+  (let [p (addr ^{:go/breaks [2]} (lit Package
+          :ImportPath path))]
+
+    (when (== path "")
+      (return p (fmt/Errorf "import %q: invalid import path" path)))
+
+
+    (let [^string pkgtargetroot (zero string)
+        ^{:line 585 :tag string} pkga (zero string)
+        ^{:line 586 :tag error} pkgerr (zero error)
+        ^{:line 587} suffix ""]
+      (when (!= (.-InstallSuffix ctxt) "")
+        (set! suffix (+ "_" (.-InstallSuffix ctxt))))
+
+      (switch (.-Compiler ctxt)
+        (case ["gccgo"]
+          (set! pkgtargetroot (+ "pkg/gccgo_" (.-GOOS ctxt) "_" (.-GOARCH ctxt) suffix)))
+        (case ["gc"]
+          (set! pkgtargetroot (+ "pkg/" (.-GOOS ctxt) "_" (.-GOARCH ctxt) suffix)))
+        (default
+          ;; Save error for end of function.
+          (set! pkgerr (fmt/Errorf "import %q: unknown compiler %q" path (.-Compiler ctxt)))))
+
+      (let [setPkga ^{:go/end 608} (fn []
+            (switch (.-Compiler ctxt)
+              (case ["gccgo"]
+                (let [(values dir elem) (pathpkg/Split (.-ImportPath p))]
+                  (set! pkga (+ pkgtargetroot "/" dir "lib" elem ".a"))))
+              (case ["gc"]
+                (set! pkga (+ pkgtargetroot "/" (.-ImportPath p) ".a")))))]
+
+
+        (setPkga)
+
+        (let [binaryOnly false]
+          (if (IsLocalImport path) (do
+              (set! pkga "") ; local imports have no installed path
+              (when (== srcDir "")
+                (return p (fmt/Errorf "import %q: import relative to unknown directory" path)))
+
+              (when (not (.isAbsPath ctxt path))
+                (set! (.-Dir p) (.joinPath ctxt srcDir path)))
+
+              ;; p.Dir directory may or may not exist. Gather partial information first, check if it exists later.
+              ;; Determine canonical import path, if any.
+              ;; Exclude results where the import path would include /testdata/.
+              (let [inTestdata ^{:go/end 625} (fn ^bool [^string sub]
+                    (or (strings/Contains sub "/testdata/") (strings/HasSuffix sub "/testdata") (strings/HasPrefix sub "testdata/") (== sub "testdata")))]
+
+                (when (!= (.-GOROOT ctxt) "")
+                  (let [root (.joinPath ctxt (.-GOROOT ctxt) "src")]
+                    (when [(values sub ok) (.hasSubdir ctxt root (.-Dir p))] (and ok (not (inTestdata sub)))
+                      (set! (.-Goroot p) true)
+                      (set! (.-ImportPath p) sub)
+                      (set! (.-Root p) (.-GOROOT ctxt))
+                      (setPkga) ; p.ImportPath changed
+                      (goto :Found))))
+
+
+                (let [all (.gopath ctxt)]
+                  (range [i root all]
+                    (let [rootsrc (.joinPath ctxt root "src")]
+                      (when [(values sub ok) (.hasSubdir ctxt rootsrc (.-Dir p))] (and ok (not (inTestdata sub)))
+                        ;; We found a potential import path for dir,
+                        ;; but check that using it wouldn't find something
+                        ;; else first.
+                        (when (and (!= (.-GOROOT ctxt) "") (!= (.-Compiler ctxt) "gccgo"))
+                          (when [dir (.joinPath ctxt (.-GOROOT ctxt) "src" sub)] (.isDir ctxt dir)
+                            (set! (.-ConflictDir p) dir)
+                            (goto :Found)))
+
+
+                        (range [_ earlyRoot (subslice all _ i)]
+                          (when [dir (.joinPath ctxt earlyRoot "src" sub)] (.isDir ctxt dir)
+                            (set! (.-ConflictDir p) dir)
+                            (goto :Found)))
+
+
+
+                        ;; sub would not name some other directory instead of this one.
+                        ;; Record it.
+                        (set! (.-ImportPath p) sub)
+                        (set! (.-Root p) root)
+                        (setPkga) ; p.ImportPath changed
+                        (goto :Found)))))))
+
+
+            ;; It's okay that we didn't find a root containing dir.
+            ;; Keep going with the information we have.
+            (do
+              (when (strings/HasPrefix path "/")
+                (return p (fmt/Errorf "import %q: cannot import absolute path" path)))
+
+
+              (if [err (.importGo ctxt p path srcDir mode)] (== err nil)
+                (goto :Found)
+                (when (!= err errNoModules)
+                  (return p err)))
+
+
+              (let [gopath (.gopath ctxt) ; needed twice below; avoid computing many times
+
+                  ;; tried records the location of unsuccessful package lookups
+                  ^{:line 680 :tag (struct ^{:tag (slice string)} vendor ^string goroot ^{:tag (slice string)} gopath)} tried (zero (struct
+                      ^{:line 681 :tag (slice string)} vendor
+                      ^{:line 682 :tag string} goroot
+                      ^{:line 683 :tag (slice string)} gopath))]
+
+
+                ;; Vendor directories get first chance to satisfy import.
+                (when (and (== (bit-and mode IgnoreVendor) 0) (!= srcDir ""))
+                  (let [searchVendor ^{:go/end 714} (fn ^bool [^string root ^bool isGoroot]
+                        ^{:go/breaks [[4 713]]} (let [(values sub ok) (.hasSubdir ctxt root srcDir)]
+                          (when (or (not ok) (not (strings/HasPrefix sub "src/")) (strings/Contains sub "/testdata/"))
+                            (return false))
+
+                          (while true
+                            (let [vendor (.joinPath ctxt root sub "vendor")]
+                              (when (.isDir ctxt vendor)
+                                (let [dir (.joinPath ctxt vendor path)]
+                                  (when (and (.isDir ctxt dir) (hasGoFiles ctxt dir))
+                                    (set! (.-Dir p) dir)
+                                    (set! (.-ImportPath p) (strings/TrimPrefix (pathpkg/Join sub "vendor" path) "src/"))
+                                    (set! (.-Goroot p) isGoroot)
+                                    (set! (.-Root p) root)
+                                    (setPkga) ; p.ImportPath changed
+                                    (return true))
+
+                                  (set! (.-vendor tried) (append (.-vendor tried) dir))))
+
+                              (let [i (strings/LastIndex sub "/")]
+                                (when (< i 0)
+                                  (break))
+
+                                (set! sub (subslice sub _ i)))))
+
+                          false))]
+
+                    (when (and (!= (.-Compiler ctxt) "gccgo") (!= (.-GOROOT ctxt) "") (searchVendor (.-GOROOT ctxt) true))
+                      (goto :Found))
+
+                    (range [_ root gopath]
+                      (when (searchVendor root false)
+                        (goto :Found)))))
+
+
+
+
+                ;; Determine directory from import path.
+                (when (!= (.-GOROOT ctxt) "")
+                  ;; If the package path starts with "vendor/", only search GOROOT before
+                  ;; GOPATH if the importer is also within GOROOT. That way, if the user has
+                  ;; vendored in a package that is subsequently included in the standard
+                  ;; distribution, they'll continue to pick up their own vendored copy.
+                  (let [gorootFirst (or (== srcDir "") (not (strings/HasPrefix path "vendor/")))]
+                    (when (not gorootFirst)
+                      (set! (values _ gorootFirst) (.hasSubdir ctxt (.-GOROOT ctxt) srcDir)))
+
+                    (when gorootFirst
+                      (let [dir (.joinPath ctxt (.-GOROOT ctxt) "src" path)]
+                        (when (!= (.-Compiler ctxt) "gccgo")
+                          (let [isDir (.isDir ctxt dir)]
+                            (set! binaryOnly (and (not isDir) (!= (bit-and mode AllowBinary) 0) (!= pkga "") (.isFile ctxt (.joinPath ctxt (.-GOROOT ctxt) pkga))))
+                            (when (or isDir binaryOnly)
+                              (set! (.-Dir p) dir)
+                              (set! (.-Goroot p) true)
+                              (set! (.-Root p) (.-GOROOT ctxt))
+                              (goto :Found))))
+
+
+                        (set! (.-goroot tried) dir)))
+
+                    (when (and (== (.-Compiler ctxt) "gccgo") (goroot/IsStandardPackage os/ReadDir (.-GOROOT ctxt) (.-Compiler ctxt) path))
+                      ;; TODO(bcmills): Setting p.Dir here is misleading, because gccgo
+                      ;; doesn't actually load its standard-library packages from this
+                      ;; directory. See if we can leave it unset.
+                      (set! (.-Dir p) (.joinPath ctxt (.-GOROOT ctxt) "src" path))
+                      (set! (.-Goroot p) true)
+                      (set! (.-Root p) (.-GOROOT ctxt))
+                      (goto :Found))))
+
+
+                (range [_ root gopath]
+                  (let [dir (.joinPath ctxt root "src" path)
+                      ^{:line 761} isDir (.isDir ctxt dir)]
+                    (set! binaryOnly (and (not isDir) (!= (bit-and mode AllowBinary) 0) (!= pkga "") (.isFile ctxt (.joinPath ctxt root pkga))))
+                    (when (or isDir binaryOnly)
+                      (set! (.-Dir p) dir)
+                      (set! (.-Root p) root)
+                      (goto :Found))
+
+                    (set! (.-gopath tried) (append (.-gopath tried) dir))))
+
+
+                ;; If we tried GOPATH first due to a "vendor/" prefix, fall back to GOPATH.
+                ;; That way, the user can still get useful results from 'go list' for
+                ;; standard-vendored paths passed on the command line.
+                (when (and (!= (.-GOROOT ctxt) "") (== (.-goroot tried) ""))
+                  (let [dir (.joinPath ctxt (.-GOROOT ctxt) "src" path)]
+                    (when (!= (.-Compiler ctxt) "gccgo")
+                      (let [isDir (.isDir ctxt dir)]
+                        (set! binaryOnly (and (not isDir) (!= (bit-and mode AllowBinary) 0) (!= pkga "") (.isFile ctxt (.joinPath ctxt (.-GOROOT ctxt) pkga))))
+                        (when (or isDir binaryOnly)
+                          (set! (.-Dir p) dir)
+                          (set! (.-Goroot p) true)
+                          (set! (.-Root p) (.-GOROOT ctxt))
+                          (goto :Found))))
+
+
+                    (set! (.-goroot tried) dir)))
+
+
+                ;; package was not found
+                (let [^{:tag (slice string)} paths (zero (slice string))
+                    ^{:line 791} format "\t%s (vendor tree)"]
+                  (range [_ dir (.-vendor tried)]
+                    (set! paths (append paths (fmt/Sprintf format dir)))
+                    (set! format "\t%s"))
+
+                  (if (!= (.-goroot tried) "")
+                    (set! paths (append paths (fmt/Sprintf "\t%s (from $GOROOT)" (.-goroot tried))))
+
+                    (set! paths (append paths "\t($GOROOT not set)")))
+
+                  (set! format "\t%s (from $GOPATH)")
+                  (range [_ dir (.-gopath tried)]
+                    (set! paths (append paths (fmt/Sprintf format dir)))
+                    (set! format "\t%s"))
+
+                  (when (== (len (.-gopath tried)) 0)
+                    (set! paths (append paths "\t($GOPATH not set. For more details see: 'go help gopath')")))
+
+                  (return p (fmt/Errorf "cannot find package %q in any of:\n%s" path (strings/Join paths "\n")))))))
+
+
+          (label :Found
+            (when (!= (.-Root p) "")
+              (set! (.-SrcRoot p) (.joinPath ctxt (.-Root p) "src"))
+              (set! (.-PkgRoot p) (.joinPath ctxt (.-Root p) "pkg"))
+              (set! (.-BinDir p) (.joinPath ctxt (.-Root p) "bin"))
+              (when (!= pkga "")
+                ;; Always set PkgTargetRoot. It might be used when building in shared
+                ;; mode.
+                (set! (.-PkgTargetRoot p) (.joinPath ctxt (.-Root p) pkgtargetroot))
+
+                ;; Set the install target if applicable.
+                (when (or (not (.-Goroot p)) ^:go/paren (and (== (.Value installgoroot) "all") (!= (.-ImportPath p) "unsafe") (!= (.-ImportPath p) "builtin")))
+                  (when (.-Goroot p)
+                    (.IncNonDefault installgoroot))
+
+                  (set! (.-PkgObj p) (.joinPath ctxt (.-Root p) pkga))))))
+
+
+
+
+          ;; If it's a local import path, by the time we get here, we still haven't checked
+          ;; that p.Dir directory exists. This is the right time to do that check.
+          ;; We can't do it earlier, because we want to gather partial information for the
+          ;; non-nil *Package returned when an error occurs.
+          ;; We need to do this before we return early on FindOnly flag.
+          (when (and (IsLocalImport path) (not (.isDir ctxt (.-Dir p))))
+            (when (and (== (.-Compiler ctxt) "gccgo") (.-Goroot p))
+              ;; gccgo has no sources for GOROOT packages.
+              (return p nil))
+
+
+            ;; package was not found
+            (return p (fmt/Errorf "cannot find package %q in:\n\t%s" (.-ImportPath p) (.-Dir p))))
+
+
+          (when (!= (bit-and mode FindOnly) 0)
+            (return p pkgerr))
+
+          (when (and binaryOnly (!= (bit-and mode AllowBinary) 0))
+            (return p pkgerr))
+
+
+          (when (and (== (.-Compiler ctxt) "gccgo") (.-Goroot p))
+            ;; gccgo has no sources for GOROOT packages.
+            (return p nil))
+
+
+          (let [(values dirs err) (.readDir ctxt (.-Dir p))]
+            (when (!= err nil)
+              (return p err))
+
+
+            (let [^error badGoError (zero error)
+                ^{:line 865} badGoFiles (make (map string bool))
+                ^{:line 866} badGoFile ^{:go/end 874} (fn [^string name ^error err]
+                  (when (== badGoError nil)
+                    (set! badGoError err))
+
+                  (when (not (aget badGoFiles name))
+                    (set! (.-InvalidGoFiles p) (append (.-InvalidGoFiles p) name))
+                    (aset badGoFiles name true)))
+
+
+
+                ^{:line 876 :tag (slice string)} Sfiles (zero (slice string)) ; files with ".S"(capital S)/.sx(capital s equivalent for case insensitive filesystems)
+                (values ^string firstFile ^string firstCommentFile) (zero string)
+                ^{:line 878} embedPos (make (map string (slice token/Position)))
+                ^{:line 879} testEmbedPos (make (map string (slice token/Position)))
+                ^{:line 880} xTestEmbedPos (make (map string (slice token/Position)))
+                ^{:line 881} importPos (make (map string (slice token/Position)))
+                ^{:line 882} testImportPos (make (map string (slice token/Position)))
+                ^{:line 883} xTestImportPos (make (map string (slice token/Position)))
+                ^{:line 884} allTags (make (map string bool))
+                ^{:line 885} fset (token/NewFileSet)]
+              (range [_ d dirs]
+                (when (.IsDir d)
+                  (continue))
+
+                (when (== (.Type d) fs/ModeSymlink)
+                  (when (.isDir ctxt (.joinPath ctxt (.-Dir p) (.Name d)))
+                    ;; Symlinks to directories are not source files.
+                    (continue)))
+
+
+
+                (let [name (.Name d)
+                    ^{:line 898} ext (nameExt name)
+
+                    (values info err) (.matchFile ctxt (.-Dir p) name allTags (addr (.-BinaryOnly p)) fset)]
+                  (when (and (!= err nil) (strings/HasSuffix name ".go"))
+                    (badGoFile name err)
+                    (continue))
+
+                  (when (== info nil)
+                    (cond (or (strings/HasPrefix name "_") (strings/HasPrefix name ".")) (do)
+                      ;; not due to build constraints - don't report
+                      (== ext ".go")
+                      (set! (.-IgnoredGoFiles p) (append (.-IgnoredGoFiles p) name))
+                      (!= (fileListForExt p ext) nil)
+                      (set! (.-IgnoredOtherFiles p) (append (.-IgnoredOtherFiles p) name)))
+
+                    (continue))
+
+
+                  ;; Going to save the file. For non-Go files, can stop here.
+                  (switch ext
+                    (case [".go"])
+                    ;; keep going
+                    (case [".S" ".sx"]
+                      ;; special case for cgo, handled at end
+                      (set! Sfiles (append Sfiles name))
+                      (continue))
+                    (default
+                      (when [list (fileListForExt p ext)] (!= list nil)
+                        (set! @list (append @list name)))
+
+                      (continue)))
+
+
+                  (let [(values data filename) (values (.-header info) (.-name info))]
+
+                    (when (!= (.-parseErr info) nil)
+                      (badGoFile name (.-parseErr info)))
+                    ;; Fall through: we might still have a partial AST in info.parsed,
+                    ;; and we want to list files with parse errors anyway.
+
+
+                    (let [^string pkg (zero string)]
+                      (when (!= (.-parsed info) nil)
+                        (set! pkg (.-Name (.-Name (.-parsed info))))
+                        (when (== pkg "documentation")
+                          (set! (.-IgnoredGoFiles p) (append (.-IgnoredGoFiles p) name))
+                          (continue)))
+
+
+
+                      (let [isTest (strings/HasSuffix name "_test.go")
+                          ^{:line 949} isXTest false]
+                        (when (and isTest (strings/HasSuffix pkg "_test") (!= (.-Name p) pkg))
+                          (set! isXTest true)
+                          (set! pkg (subslice pkg _ (- (len pkg) (len "_test")))))
+
+
+                        (cond (== (.-Name p) "") (do
+                            (set! (.-Name p) pkg)
+                            (set! firstFile name))
+                          (!= pkg (.-Name p))
+                          ;; TODO(#45999): The choice of p.Name is arbitrary based on file iteration
+                          ;; order. Instead of resolving p.Name arbitrarily, we should clear out the
+                          ;; existing name and mark the existing files as also invalid.
+                          (badGoFile name (addr ^{:go/breaks [2 4 6]} (lit MultiplePackageError
+                                :Dir (.-Dir p)
+                                :Packages (lit (slice string) (.-Name p) pkg)
+                                :Files (lit (slice string) firstFile name)))))
+
+
+                        ;; Grab the first package comment as docs, provided it is not from a test file.
+                        (when (and (!= (.-parsed info) nil) (!= (.-Doc (.-parsed info)) nil) (== (.-Doc p) "") (not isTest) (not isXTest))
+                          (set! (.-Doc p) (doc/Synopsis (.Text (.-Doc (.-parsed info))))))
+
+
+                        (when (!= (bit-and mode ImportComment) 0)
+                          (let [(values qcom line) (findImportComment data)]
+                            (when (!= line 0)
+                              (let [(values com err) (strconv/Unquote qcom)]
+                                (cond (!= err nil)
+                                  (badGoFile name (fmt/Errorf "%s:%d: cannot parse import comment" filename line))
+                                  (== (.-ImportComment p) "") (do
+                                    (set! (.-ImportComment p) com)
+                                    (set! firstCommentFile name))
+                                  (!= (.-ImportComment p) com)
+                                  (badGoFile name (fmt/Errorf "found import comments %q (%s) and %q (%s) in %s" (.-ImportComment p) firstCommentFile com name (.-Dir p))))))))
+
+
+
+
+                        ;; Record imports and information about cgo.
+                        (let [isCgo false]
+                          (range [_ imp (.-imports info)]
+                            (when (== (.-path imp) "C")
+                              (when isTest
+                                (badGoFile name (fmt/Errorf "use of cgo in test %s not supported" filename))
+                                (continue))
+
+                              (set! isCgo true)
+                              (when (!= (.-doc imp) nil)
+                                (when [err (.saveCgo ctxt filename p (.-doc imp))] (!= err nil)
+                                  (badGoFile name err)))))
+
+
+
+
+
+                          (let [^{:tag (* (slice string))} fileList (zero (* (slice string)))
+                              (values ^{:tag (map string (slice token/Position))} importMap ^{:tag (map string (slice token/Position))} embedMap) (zero (map string (slice token/Position)))
+                              ^{:line 1007 :tag (* (slice Directive))} directives (zero (* (slice Directive)))]
+                            (switch
+                              (case [isCgo]
+                                (aset allTags "cgo" true)
+                                (if (.-CgoEnabled ctxt) (do
+                                    (set! fileList (addr (.-CgoFiles p)))
+                                    (set! importMap importPos)
+                                    (set! embedMap embedPos)
+                                    (set! directives (addr (.-Directives p))))
+
+                                  ;; Ignore imports and embeds from cgo files if cgo is disabled.
+                                  (set! fileList (addr (.-IgnoredGoFiles p)))))
+
+                              (case [isXTest]
+                                (set! fileList (addr (.-XTestGoFiles p)))
+                                (set! importMap xTestImportPos)
+                                (set! embedMap xTestEmbedPos)
+                                (set! directives (addr (.-XTestDirectives p))))
+                              (case [isTest]
+                                (set! fileList (addr (.-TestGoFiles p)))
+                                (set! importMap testImportPos)
+                                (set! embedMap testEmbedPos)
+                                (set! directives (addr (.-TestDirectives p))))
+                              (default
+                                (set! fileList (addr (.-GoFiles p)))
+                                (set! importMap importPos)
+                                (set! embedMap embedPos)
+                                (set! directives (addr (.-Directives p)))))
+
+                            (set! @fileList (append @fileList name))
+                            (when (!= importMap nil)
+                              (range [_ imp (.-imports info)]
+                                (aset importMap (.-path imp) (append (aget importMap (.-path imp)) (.Position fset (.-pos imp))))))
+
+
+                            (when (!= embedMap nil)
+                              (range [_ emb (.-embeds info)]
+                                (aset embedMap (.-pattern emb) (append (aget embedMap (.-pattern emb)) (.-pos emb)))))
+
+
+                            (when (!= directives nil)
+                              (set! @directives (append @directives (spread (.-directives info))))))))))))
+
+
+
+              (range [tag allTags]
+                (set! (.-AllTags p) (append (.-AllTags p) tag)))
+
+              (^{:inst [(slice string) string]} slices/Sort (.-AllTags p))
+
+              (set! (values (.-EmbedPatterns p) (.-EmbedPatternPos p)) (cleanDecls embedPos))
+              (set! (values (.-TestEmbedPatterns p) (.-TestEmbedPatternPos p)) (cleanDecls testEmbedPos))
+              (set! (values (.-XTestEmbedPatterns p) (.-XTestEmbedPatternPos p)) (cleanDecls xTestEmbedPos))
+
+              (set! (values (.-Imports p) (.-ImportPos p)) (cleanDecls importPos))
+              (set! (values (.-TestImports p) (.-TestImportPos p)) (cleanDecls testImportPos))
+              (set! (values (.-XTestImports p) (.-XTestImportPos p)) (cleanDecls xTestImportPos))
+
+              ;; add the .S/.sx files only if we are using cgo
+              ;; (which means gcc will compile them).
+              ;; The standard assemblers expect .s files.
+              (if (> (len (.-CgoFiles p)) 0) (do
+                  (set! (.-SFiles p) (append (.-SFiles p) (spread Sfiles)))
+                  (^{:inst [(slice string) string]} slices/Sort (.-SFiles p)))
+                (do
+                  (set! (.-IgnoredOtherFiles p) (append (.-IgnoredOtherFiles p) (spread Sfiles)))
+                  (^{:inst [(slice string) string]} slices/Sort (.-IgnoredOtherFiles p))))
+
+
+              (when (!= badGoError nil)
+                (return p badGoError))
+
+              (when (== (+ (len (.-GoFiles p)) (len (.-CgoFiles p)) (len (.-TestGoFiles p)) (len (.-XTestGoFiles p))) 0)
+                (return p (addr (lit NoGoError (.-Dir p)))))
+
+              (return p pkgerr))))))))
+
+
+^{:go/breaks [[4 1106]] :go/end 1107} (go/func fileListForExt ^{:tag (* (slice string))} [^{:tag (* Package)} p ^string ext]
+  (switch ext
+    (case [".c"]
+      (return (addr (.-CFiles p))))
+    (case [".cc" ".cpp" ".cxx"]
+      (return (addr (.-CXXFiles p))))
+    (case [".m"]
+      (return (addr (.-MFiles p))))
+    (case [".h" ".hh" ".hpp" ".hxx"]
+      (return (addr (.-HFiles p))))
+    (case [".f" ".F" ".for" ".f90"]
+      (return (addr (.-FFiles p))))
+    (case [".s" ".S" ".sx"]
+      (return (addr (.-SFiles p))))
+    (case [".swig"]
+      (return (addr (.-SwigFiles p))))
+    (case [".swigcxx"]
+      (return (addr (.-SwigCXXFiles p))))
+    (case [".syso"]
+      (return (addr (.-SysoFiles p)))))
+
+  nil)
+
+
+^{:go/end 1123} (go/func uniq ^{:tag (slice string)} [^{:tag (slice string)} list]
+  (when (== list nil)
+    (return nil))
+
+  (let [out (make (slice string) (len list))]
+    (copy out list)
+    (^{:inst [(slice string) string]} slices/Sort out)
+    (let [uniq (subslice out _ 0)]
+      (range [_ x out]
+        (when (or (== (len uniq) 0) (!= (aget uniq (- (len uniq) 1)) x))
+          (set! uniq (append uniq x))))
+
+
+      ^{:line 1122} uniq)))
+
+
+(go/var errNoModules (errors/New "not using modules"))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1280} (go/method importGo "importGo checks whether it can use the go command to find the directory for path.\nIf using the go command is not appropriate, importGo returns errNoModules.\nOtherwise, importGo tries using the go command and reports whether that succeeded.\nUsing the go command lets build.Import and build.Context.Import find code\nin Go modules. In the long term we want tools to use go/packages (currently golang.org/x/tools/go/packages),\nwhich will also use the go command.\nInvoking the go command here is not very efficient in that it computes information\nabout the requested package and all dependencies and then only reports about the requested package.\nThen we reinvoke it for every dependency. But this is still better than not working at all.\nSee golang.org/issue/26504.\n" ^error [^{:tag (* Context)} ctxt ^{:tag (* Package)} p ^string path ^string srcDir ^ImportMode mode]
+  ;; To invoke the go command,
+  ;; we must not being doing special things like AllowBinary or IgnoreVendor,
+  ;; and all the file system callbacks must be nil (we're meant to use the local file system).
+  (when (or (!= (bit-and mode AllowBinary) 0) (!= (bit-and mode IgnoreVendor) 0)
+      (!= (.-JoinPath ctxt) nil) (!= (.-SplitPathList ctxt) nil) (!= (.-IsAbsPath ctxt) nil) (!= (.-IsDir ctxt) nil) (!= (.-HasSubdir ctxt) nil) (!= (.-ReadDir ctxt) nil) (!= (.-OpenFile ctxt) nil) (not (^{:inst [(slice string) string]} slices/Equal (.-ToolTags ctxt) defaultToolTags)) (not (^{:inst [(slice string) string]} slices/Equal (.-ReleaseTags ctxt) defaultReleaseTags)) (.-UseAllFiles ctxt))
+    (return errNoModules))
+
+
+  ;; If ctxt.GOROOT is not set, we don't know which go command to invoke,
+  ;; and even if we did we might return packages in GOROOT that we wouldn't otherwise find
+  ;; (because we don't know to search in 'go env GOROOT' otherwise).
+  (when (== (.-GOROOT ctxt) "")
+    (return errNoModules))
+
+
+  ;; Predict whether module aware mode is enabled by checking the value of
+  ;; GO111MODULE and looking for a go.mod file in the source directory or
+  ;; one of its parents. Running 'go env GOMOD' in the source directory would
+  ;; give a canonical answer, but we'd prefer not to execute another command.
+  (let [go111Module (os/Getenv "GO111MODULE")]
+    (switch go111Module
+      (case ["off"]
+        (return errNoModules))
+      (default)) ; "", "on", "auto", anything else
+    ;; Maybe use modules.
+
+
+    (when (!= srcDir "")
+      (let [^string absSrcDir (zero string)]
+        (cond (filepath/IsAbs srcDir)
+          (set! absSrcDir srcDir)
+          (!= (.-Dir ctxt) "")
+          (return (fmt/Errorf "go/build: Dir is non-empty, so relative srcDir is not allowed: %v" srcDir)) :else
+
+          ;; Find the absolute source directory. hasSubdir does not handle
+          ;; relative paths (and can't because the callbacks don't support this).
+          (let [^error err (zero error)]
+            (set! (values absSrcDir err) (filepath/Abs srcDir))
+            (when (!= err nil)
+              (return errNoModules))))
+
+
+
+        ;; If the source directory is in GOROOT, then the in-process code works fine
+        ;; and we should keep using it. Moreover, the 'go list' approach below doesn't
+        ;; take standard-library vendoring into account and will fail.
+        (when [(values _ ok) (.hasSubdir ctxt (filepath/Join (.-GOROOT ctxt) "src") absSrcDir)] ok
+          (return errNoModules))))
+
+
+
+    ;; For efficiency, if path is a standard library package, let the usual lookup code handle it.
+    (when [dir (.joinPath ctxt (.-GOROOT ctxt) "src" path)] (.isDir ctxt dir)
+      (return errNoModules))
+
+
+    ;; If GO111MODULE=auto, look to see if there is a go.mod.
+    ;; Since go1.13, it doesn't matter if we're inside GOPATH.
+    (when (== go111Module "auto")
+      (let [
+          ^{:line 1198 :tag string} parent (zero string)
+          ^{:line 1199 :tag error} err (zero error)]
+
+        (if (== (.-Dir ctxt) "") (do
+            (set! (values parent err) (os/Getwd))
+            (when (!= err nil)
+              ;; A nonexistent working directory can't be in a module.
+              (return errNoModules)))
+
+          (do
+            (set! (values parent err) (filepath/Abs (.-Dir ctxt)))
+            (when (!= err nil)
+              ;; If the caller passed a bogus Dir explicitly, that's materially
+              ;; different from not having modules enabled.
+              (return err))))
+
+
+        (while true
+          (when [(values f err) (.openFile ctxt (.joinPath ctxt parent "go.mod"))] (== err nil)
+            (let [buf (make (slice byte) 100)
+                (values _ err) (.Read f buf)]
+              (.Close f)
+              (when (or (== err nil) (== err io/EOF))
+                ;; go.mod exists and is readable (is a file, not a directory).
+                (break))))
+
+
+          (let [d (filepath/Dir parent)]
+            (when (>= (len d) (len parent))
+              (return errNoModules)) ; reached top of file system, no go.mod
+
+            (set! parent d)))))
+
+
+
+    (let [goCmd (filepath/Join (.-GOROOT ctxt) "bin" "go")
+        ^{:line 1234} cmd (exec/Command goCmd "list" "-e" (+ "-compiler=" (.-Compiler ctxt)) (+ "-tags=" (strings/Join (.-BuildTags ctxt) ",")) (+ "-installsuffix=" (.-InstallSuffix ctxt)) "-f={{.Dir}}\n{{.ImportPath}}\n{{.Root}}\n{{.Goroot}}\n{{if .Error}}{{.Error}}{{end}}\n" "--" path)]
+
+      (when (!= (.-Dir ctxt) "")
+        (set! (.-Dir cmd) (.-Dir ctxt)))
+
+
+      (let [(values ^strings/Builder stdout ^strings/Builder stderr) (zero strings/Builder)]
+        (set! (.-Stdout cmd) (addr stdout))
+        (set! (.-Stderr cmd) (addr stderr))
+
+        (let [cgo "0"]
+          (when (.-CgoEnabled ctxt)
+            (set! cgo "1"))
+
+          (set! (.-Env cmd) (append (.Environ cmd)
+              (+ "GOOS=" (.-GOOS ctxt))
+              (+ "GOARCH=" (.-GOARCH ctxt))
+              (+ "GOROOT=" (.-GOROOT ctxt))
+              (+ "GOPATH=" (.-GOPATH ctxt))
+              (+ "CGO_ENABLED=" cgo)))
+
+
+          (when [err (.Run cmd)] (!= err nil)
+            (return (fmt/Errorf "go/build: go list %s: %v\n%s\n" path err (.String stderr))))
+
+
+          (let [f (strings/SplitN (.String stdout) "\n" 5)]
+            (when (!= (len f) 5)
+              (return (fmt/Errorf "go/build: importGo %s: unexpected output:\n%s\n" path (.String stdout))))
+
+            ^{:go/breaks [7]} (let [dir (aget f 0)
+                ^{:line 1265} errStr (strings/TrimSpace (aget f 4))]
+              (when (and (!= errStr "") (== dir ""))
+                ;; If 'go list' could not locate the package (dir is empty),
+                ;; return the same error that 'go list' reported.
+                (return (errors/New errStr)))
+
+
+              ;; If 'go list' did locate the package, ignore the error.
+              ;; It was probably related to loading source files, and we'll
+              ;; encounter it ourselves shortly if the FindOnly flag isn't set.
+              (set! (.-Dir p) dir)
+              (set! (.-ImportPath p) (aget f 1))
+              (set! (.-Root p) (aget f 2))
+              (set! (.-Goroot p) (== (aget f 3) "true"))
+              nil)))))))
+
+
+
+
+
+
+^{:go/end 1294} (go/func hasGoFiles "hasGoFiles reports whether dir contains any files with names ending in .go.\nFor a vendor check we must exclude directories that contain no .go files.\nOtherwise it is not possible to vendor just a/b/c and still import the\nnon-vendored a/b. See golang.org/issue/13832.\n" ^bool [^{:tag (* Context)} ctxt ^string dir]
+  ^{:go/breaks [[3 1293]]} (let [(values ents _) (.readDir ctxt dir)]
+    (range [_ ent ents]
+      (when (and (not (.IsDir ent)) (strings/HasSuffix (.Name ent) ".go"))
+        (return true)))
+
+
+    false))
+
+
+^{:go/end 1337} (go/func findImportComment [^{:tag (slice byte)} data] :results [^string s ^int line]
+  ;; expect keyword package
+  (let [(values word ^:assign data) (parseWord data)]
+    (when (!= (conv string word) "package")
+      (return "" 0))
+
+
+    ;; expect package name
+    (set! (values _ data) (parseWord data))
+
+    ;; now ready for import comment, a // or /* */ comment
+    ;; beginning and ending on the current line.
+    (while (and (> (len data) 0) ^:go/paren (or (== (aget data 0) \space) (== (aget data 0) \tab) (== (aget data 0) \return)))
+      (set! data (subslice data 1)))
+
+
+    (let [^{:tag (slice byte)} comment (zero (slice byte))]
+      (switch
+        (case [(bytes/HasPrefix data slashSlash)]
+          (set! (values comment _ _) (bytes/Cut (subslice data 2) newline)))
+        (case [(bytes/HasPrefix data slashStar)]
+          (let [^bool ok (zero bool)]
+            (set! (values comment _ ok) (bytes/Cut (subslice data 2) starSlash))
+            (when (not ok)
+              ;; malformed comment
+              (return "" 0))
+
+            (when (bytes/Contains comment newline)
+              (return "" 0)))))
+
+
+      (set! comment (bytes/TrimSpace comment))
+
+      ;; split comment into `import`, `"pkg"`
+      (let [(values ^:assign word arg) (parseWord comment)]
+        (when (!= (conv string word) "import")
+          (return "" 0))
+
+
+        (set! line (+ 1 (bytes/Count (subslice data _ (- (cap data) (cap arg))) newline)))
+        (return (strings/TrimSpace (conv string arg)) line)))))
+
+
+(go/var
+  ^{:line 1340} [slashSlash (conv (slice byte) "//")]
+  ^{:line 1341} [slashStar (conv (slice byte) "/*")]
+  ^{:line 1342} [starSlash (conv (slice byte) "*/")]
+  ^{:line 1343} [newline (conv (slice byte) "\n")])
+
+
+
+^{:go/end 1375} (go/func skipSpaceOrComment "skipSpaceOrComment returns data with any leading spaces or comments removed.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} data]
+  (while (> (len data) 0)
+    (switch (aget data 0)
+      (case [\space \tab \return \newline]
+        (set! data (subslice data 1))
+        (continue))
+      (case [\/]
+        (when (bytes/HasPrefix data slashSlash)
+          (let [i (bytes/Index data newline)]
+            (when (< i 0)
+              (return nil))
+
+            (set! data (subslice data (+ i 1)))
+            (continue)))
+
+        (when (bytes/HasPrefix data slashStar)
+          (set! data (subslice data 2))
+          (let [i (bytes/Index data starSlash)]
+            (when (< i 0)
+              (return nil))
+
+            (set! data (subslice data (+ i 2)))
+            (continue)))))
+
+
+    (break))
+
+  ^{:line 1374} data)
+
+
+
+
+
+^{:go/end 1400} (go/func parseWord "parseWord skips any leading spaces or comments in data\nand then parses the beginning of data as an identifier or keyword,\nreturning that word and what remains after the word.\n" [^{:tag (slice byte)} data] :results [^{:tag (slice byte)} word ^{:tag (slice byte)} rest]
+  (set! data (skipSpaceOrComment data))
+
+  ;; Parse past leading word characters.
+  (set! rest data)
+  (while true
+    (let [(values r size) (utf8/DecodeRune rest)]
+      (when (or (unicode/IsLetter r) (and (<= \0 r) (<= r \9)) (== r \_))
+        (set! rest (subslice rest size))
+        (continue))
+
+      (break)))
+
+
+  (set! word (subslice data _ (- (len data) (len rest))))
+  (when (== (len word) 0)
+    (return nil nil))
+
+
+  (return word rest))
+
+
+
+
+
+
+
+
+^{:go/end 1411} (go/method MatchFile "MatchFile reports whether the file with the given name in the given directory\nmatches the context and would be included in a [Package] created by [ImportDir]\nof that directory.\n\nMatchFile considers the name of the file and may use ctxt.OpenFile to\nread some or all of the file's content.\n" [^{:tag (* Context)} ctxt ^string dir ^string name] :results [^bool match ^error err]
+  (let [(values info ^:assign err) (.matchFile ctxt dir name nil nil nil)]
+    (return (!= info nil) err)))
+
+
+(go/var ^Package dummyPkg)
+
+
+(go/type fileInfo "fileInfo records information learned about a file included in a build.\n" (struct
+    ^{:line 1417 :tag string} name ; full name including dir
+    ^{:line 1418 :tag (slice byte)} header
+    ^{:line 1419 :tag (* token/FileSet)} fset
+    ^{:line 1420 :tag (* ast/File)} parsed
+    ^{:line 1421 :tag error} parseErr
+    ^{:line 1422 :tag (slice fileImport)} imports
+    ^{:line 1423 :tag (slice fileEmbed)} embeds
+    ^{:line 1424 :tag (slice Directive)} directives))
+
+
+(go/type fileImport (struct
+    ^{:line 1428 :tag string} path
+    ^{:line 1429 :tag token/Pos} pos
+    ^{:line 1430 :tag (* ast/CommentGroup)} doc))
+
+
+(go/type fileEmbed (struct
+    ^{:line 1434 :tag string} pattern
+    ^{:line 1435 :tag token/Position} pos))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1510} (go/method matchFile "matchFile determines whether the file with the given name in the given directory\nshould be included in the package being constructed.\nIf the file should be included, matchFile returns a non-nil *fileInfo (and a nil error).\nNon-nil errors are reserved for unexpected problems.\n\nIf name denotes a Go program, matchFile reads until the end of the\nimports and returns that section of the file in the fileInfo's header field,\neven though it only considers text until the first non-comment\nfor go:build lines.\n\nIf allTags is non-nil, matchFile records any encountered build tag\nby setting allTags[tag] = true.\n" [^{:tag (* Context)} ctxt ^string dir ^string name ^{:tag (map string bool)} allTags ^{:tag (* bool)} binaryOnly ^{:tag (* token/FileSet)} fset] :results [(* fileInfo) error]
+  (when (or (strings/HasPrefix name "_")
+      (strings/HasPrefix name "."))
+    (return nil nil))
+
+
+  (let [i (strings/LastIndex name ".")]
+    (when (< i 0)
+      (set! i (len name)))
+
+    (let [ext (subslice name i)]
+
+      (when (and (!= ext ".go") (== (fileListForExt (addr dummyPkg) ext) nil))
+        ;; skip
+        (return nil nil))
+
+
+      (when (and (not (.goodOSArchFile ctxt name allTags)) (not (.-UseAllFiles ctxt)))
+        (return nil nil))
+
+
+      (let [info (addr (lit fileInfo :name (.joinPath ctxt dir name) :fset fset))]
+        (when (== ext ".syso")
+          ;; binary, no reading
+          (return info nil))
+
+
+        (let [(values f err) (.openFile ctxt (.-name info))]
+          (when (!= err nil)
+            (return nil err))
+
+
+          (if (strings/HasSuffix name ".go") (do
+              (set! err (readGoInfo f info))
+              (when (strings/HasSuffix name "_test.go")
+                (set! binaryOnly nil))) ; ignore //go:binary-only-package comments in _test.go files
+
+            (do
+              (set! binaryOnly nil) ; ignore //go:binary-only-package comments in non-Go sources
+              (set! (values (.-header info) err) (readComments f))))
+
+          (.Close f)
+          (when (!= err nil)
+            (return info (fmt/Errorf "read %s: %v" (.-name info) err)))
+
+
+          ;; Look for go:build comments to accept or reject the file.
+          (let [(values ok sawBinaryOnly ^:assign err) (.shouldBuild ctxt (.-header info) allTags)]
+            (when (!= err nil)
+              (return nil (fmt/Errorf "%s: %v" name err)))
+
+            (when (and (not ok) (not (.-UseAllFiles ctxt)))
+              (return nil nil))
+
+
+            (when (and (!= binaryOnly nil) sawBinaryOnly)
+              (set! @binaryOnly true))
+
+
+            (return info nil)))))))
+
+
+^{:go/end 1519} (go/func cleanDecls [^{:tag (map string (slice token/Position))} m] :results [(slice string) (map string (slice token/Position))]
+  (let [all (make (slice string) 0 (len m))]
+    (range [path m]
+      (set! all (append all path)))
+
+    (^{:inst [(slice string) string]} slices/Sort all)
+    (return all m)))
+
+
+
+^{:go/end 1524} (go/func Import "Import is shorthand for Default.Import.\n" [^string path ^string srcDir ^ImportMode mode] :results [(* Package) error]
+  (.Import Default path srcDir mode))
+
+
+
+^{:go/end 1529} (go/func ImportDir "ImportDir is shorthand for Default.ImportDir.\n" [^string dir ^ImportMode mode] :results [(* Package) error]
+  (.ImportDir Default dir mode))
+
+
+(go/var
+  ^{:line 1532} [plusBuild (conv (slice byte) "+build")]
+
+  ^{:line 1534} [goBuildComment (conv (slice byte) "//go:build")]
+
+  ^{:line 1536} [errMultipleGoBuild (errors/New "multiple //go:build comments")])
+
+
+^{:go/end 1546} (go/func isGoBuildComment ^bool [^{:tag (slice byte)} line]
+  (when (not (bytes/HasPrefix line goBuildComment))
+    (return false))
+
+  (set! line (bytes/TrimSpace line))
+  (let [rest (subslice line (len goBuildComment))]
+    (or (== (len rest) 0) (< (len (bytes/TrimSpace rest)) (len rest)))))
+
+
+
+
+
+(go/var ^{:doc "Special comment denoting a binary-only package.\nSee https://golang.org/design/2775-binary-only-packages\nfor more about the design of binary-only packages.\n"} binaryOnlyComment (conv (slice byte) "//go:binary-only-package"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1616} (go/method shouldBuild "shouldBuild reports whether it is okay to use this file,\nThe rule is that in the file's leading run of // comments\nand blank lines, which must be followed by a blank line\n(to avoid including a Go package clause doc comment),\nlines beginning with '//go:build' are taken as build directives.\n\nThe file is accepted only if each such line lists something\nmatching the file. For example:\n\n\t//go:build windows linux\n\nmarks the file as applicable only on Windows and Linux.\n\nFor each build tag it consults, shouldBuild sets allTags[tag] = true.\n\nshouldBuild reports whether the file should be built\nand whether a //go:binary-only-package comment was found.\n" [^{:tag (* Context)} ctxt ^{:tag (slice byte)} content ^{:tag (map string bool)} allTags] :results [^bool shouldBuild ^bool binaryOnly ^error err]
+  ;; Identify leading run of // comments and blank lines,
+  ;; which must be followed by a blank line.
+  ;; Also identify any //go:build comments.
+  (let [(values ^:assign content goBuild sawBinaryOnly ^:assign err) (parseFileHeader content)]
+    (when (!= err nil)
+      (return false false err))
+
+
+    ;; If //go:build line is present, it controls.
+    ;; Otherwise fall back to +build processing.
+    (switch
+      (case [(!= goBuild nil)]
+        (let [(values x err) (constraint/Parse (conv string goBuild))]
+          (when (!= err nil)
+            (return false false (fmt/Errorf "parsing //go:build line: %v" err)))
+
+          (set! shouldBuild (.eval ctxt x allTags))))
+
+      (default
+        (set! shouldBuild true)
+        (let [p content]
+          (while (> (len p) 0)
+            (let [line p]
+              (if [i (bytes/IndexByte line \newline)] (>= i 0)
+                (set! (values line p) (values (subslice line _ i) (subslice p (+ i 1))))
+
+                (set! p (subslice p (len p))))
+
+              (set! line (bytes/TrimSpace line))
+              (when (or (not (bytes/HasPrefix line slashSlash)) (not (bytes/Contains line plusBuild)))
+                (continue))
+
+              (let [text (conv string line)]
+                (when (not (constraint/IsPlusBuild text))
+                  (continue))
+
+                (when [(values x err) (constraint/Parse text)] (== err nil)
+                  (when (not (.eval ctxt x allTags))
+                    (set! shouldBuild false)))))))))
+
+
+
+
+
+    (return shouldBuild sawBinaryOnly nil)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1692} (go/func ^{:go/linkname "parseFileHeader"} parseFileHeader "parseFileHeader should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bazelbuild/bazel-gazelle\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^{:tag (slice byte)} content] :results [^{:tag (slice byte)} trimmed ^{:tag (slice byte)} goBuild ^bool sawBinaryOnly ^error err]
+  (let [end 0
+      ^{:line 1629} p content
+      ^{:line 1630} ended false ; found non-blank, non-// line, so stopped accepting //go:build lines
+      ^{:line 1631} inSlashStar false] ; in /* */ comment
+
+    (label :Lines
+      (while (> (len p) 0)
+        (let [line p]
+          (if [i (bytes/IndexByte line \newline)] (>= i 0)
+            (set! (values line p) (values (subslice line _ i) (subslice p (+ i 1))))
+
+            (set! p (subslice p (len p))))
+
+          (set! line (bytes/TrimSpace line))
+          (when (and (== (len line) 0) (not ended)) ; Blank line
+            ;; Remember position of most recent blank line.
+            ;; When we find the first non-blank, non-// line,
+            ;; this "end" position marks the latest file position
+            ;; where a //go:build line can appear.
+            ;; (It must appear _before_ a blank line before the non-blank, non-// line.
+            ;; Yes, that's confusing, which is part of why we moved to //go:build lines.)
+            ;; Note that ended==false here means that inSlashStar==false,
+            ;; since seeing a /* would have set ended==true.
+            (set! end (- (len content) (len p)))
+            (continue :Lines))
+
+          (when (not (bytes/HasPrefix line slashSlash)) ; Not comment line
+            (set! ended true))
+
+
+          (when (and (not inSlashStar) (isGoBuildComment line))
+            (when (!= goBuild nil)
+              (return nil nil false errMultipleGoBuild))
+
+            (set! goBuild line))
+
+          (when (and (not inSlashStar) (bytes/Equal line binaryOnlyComment))
+            (set! sawBinaryOnly true))
+
+
+          (label :Comments
+            (while (> (len line) 0)
+              (when inSlashStar
+                (when [i (bytes/Index line starSlash)] (>= i 0)
+                  (set! inSlashStar false)
+                  (set! line (bytes/TrimSpace (subslice line (+ i (len starSlash)))))
+                  (continue :Comments))
+
+                (continue :Lines))
+
+              (when (bytes/HasPrefix line slashSlash)
+                (continue :Lines))
+
+              (when (bytes/HasPrefix line slashStar)
+                (set! inSlashStar true)
+                (set! line (bytes/TrimSpace (subslice line (len slashStar))))
+                (continue :Comments))
+
+              ;; Found non-comment text.
+              (break :Lines))))))
+
+
+
+    (return (subslice content _ end) goBuild sawBinaryOnly nil)))
+
+
+
+
+
+^{:go/end 1776} (go/method saveCgo "saveCgo saves the information from the #cgo lines in the import \"C\" comment.\nThese lines set CFLAGS, CPPFLAGS, CXXFLAGS and LDFLAGS and pkg-config directives\nthat affect the way cgo's C code is built.\n" ^error [^{:tag (* Context)} ctxt ^string filename ^{:tag (* Package)} di ^{:tag (* ast/CommentGroup)} cg]
+  ^{:go/breaks [[3 1775]]} (let [text (.Text cg)]
+    (range [line (strings/SplitSeq text "\n")]
+      (let [orig line]
+
+        ;; Line is
+        ;;	#cgo [GOOS/GOARCH...] LDFLAGS: stuff
+        ;;
+        (set! line (strings/TrimSpace line))
+        (when (or (< (len line) 5) (!= (subslice line _ 4) "#cgo") ^:go/paren (and (!= (aget line 4) \space) (!= (aget line 4) \tab)))
+          (continue))
+
+
+        ;; #cgo (nocallback|noescape) <function name>
+        (when [fields (strings/Fields line)] (and (== (len fields) 3) ^:go/paren (or (== (aget fields 1) "nocallback") (== (aget fields 1) "noescape")))
+          (continue))
+
+
+        ;; Split at colon.
+        (let [(values line argstr ok) (strings/Cut (strings/TrimSpace (subslice line 4)) ":")]
+          (when (not ok)
+            (return (fmt/Errorf "%s: invalid #cgo line: %s" filename orig)))
+
+
+          ;; Parse GOOS/GOARCH stuff.
+          (let [f (strings/Fields line)]
+            (when (< (len f) 1)
+              (return (fmt/Errorf "%s: invalid #cgo line: %s" filename orig)))
+
+
+            (let [(values cond verb) (values (subslice f _ (- (len f) 1)) (aget f (- (len f) 1)))]
+              (when (> (len cond) 0)
+                (let [ok false]
+                  (range [_ c cond]
+                    (when (.matchAuto ctxt c nil)
+                      (set! ok true)
+                      (break)))
+
+
+                  (when (not ok)
+                    (continue))))
+
+
+
+              (let [(values args err) (splitQuoted argstr)]
+                (when (!= err nil)
+                  (return (fmt/Errorf "%s: invalid #cgo line: %s" filename orig)))
+
+                (range [i arg args]
+                  (when [(set! (values arg ok) (expandSrcDir arg (.-Dir di)))] (not ok)
+                    (return (fmt/Errorf "%s: malformed #cgo argument: %s" filename arg)))
+
+                  (aset args i arg))
+
+
+                (switch verb
+                  (case ["CFLAGS" "CPPFLAGS" "CXXFLAGS" "FFLAGS" "LDFLAGS"]
+                    ;; Change relative paths to absolute.
+                    (.makePathsAbsolute ctxt args (.-Dir di))))
+
+
+                (switch verb
+                  (case ["CFLAGS"]
+                    (set! (.-CgoCFLAGS di) (append (.-CgoCFLAGS di) (spread args))))
+                  (case ["CPPFLAGS"]
+                    (set! (.-CgoCPPFLAGS di) (append (.-CgoCPPFLAGS di) (spread args))))
+                  (case ["CXXFLAGS"]
+                    (set! (.-CgoCXXFLAGS di) (append (.-CgoCXXFLAGS di) (spread args))))
+                  (case ["FFLAGS"]
+                    (set! (.-CgoFFLAGS di) (append (.-CgoFFLAGS di) (spread args))))
+                  (case ["LDFLAGS"]
+                    (set! (.-CgoLDFLAGS di) (append (.-CgoLDFLAGS di) (spread args))))
+                  (case ["pkg-config"]
+                    (set! (.-CgoPkgConfig di) (append (.-CgoPkgConfig di) (spread args))))
+                  (default
+                    (return (fmt/Errorf "%s: invalid #cgo verb: %s" filename orig))))))))))
+
+
+    nil))
+
+
+
+
+^{:go/end 1797} (go/func expandSrcDir "expandSrcDir expands any occurrence of ${SRCDIR}, making sure\nthe result is safe for the shell.\n" [^string str ^string srcdir] :results [string bool]
+  ;; "\" delimited paths cause safeCgoName to fail
+  ;; so convert native paths with a different delimiter
+  ;; to "/" before starting (eg: on windows).
+  (set! srcdir (filepath/ToSlash srcdir))
+
+  (let [chunks (strings/Split str "${SRCDIR}")]
+    (when (< (len chunks) 2)
+      (return str (safeCgoName str)))
+
+    (let [ok true]
+      (range [_ chunk chunks]
+        (set! ok (and ok ^:go/paren (or (== chunk "") (safeCgoName chunk)))))
+
+      (set! ok (and ok ^:go/paren (or (== srcdir "") (safeCgoName srcdir))))
+      (let [res (strings/Join chunks srcdir)]
+        (return res (and ok (!= res "")))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1828} (go/method makePathsAbsolute "makePathsAbsolute looks for compiler options that take paths and\nmakes them absolute. We do this because through the 1.8 release we\nran the compiler in the package directory, so any relative -I or -L\noptions would be relative to that directory. In 1.9 we changed to\nrunning the compiler in the build directory, to get consistent\nbuild results (issue #19964). To keep builds working, we change any\nrelative -I or -L options to be absolute.\n\nUsing filepath.IsAbs and filepath.Join here means the results will be\ndifferent on different systems, but that's OK: -I and -L options are\ninherently system-dependent.\n" [^{:tag (* Context)} ctxt ^{:tag (slice string)} args ^string srcDir]
+  (let [nextPath false]
+    (range [i arg args]
+      (cond nextPath (do
+          (when (not (filepath/IsAbs arg))
+            (aset args i (filepath/Join srcDir arg)))
+
+          (set! nextPath false))
+        (or (strings/HasPrefix arg "-I") (strings/HasPrefix arg "-L"))
+        (if (== (len arg) 2)
+          (set! nextPath true)
+          (do
+            (when (not (filepath/IsAbs (subslice arg 2)))
+              (aset args i (+ (subslice arg _ 2) (filepath/Join srcDir (subslice arg 2)))))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const ^{:val "+-.,/0123456789=ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz:$@%! ~^" :doc "NOTE: $ is not safe for the shell, but it is allowed here because of linker options like -Wl,$ORIGIN.\nWe never pass these arguments to a shell (just to programs we construct argv for), so this should be okay.\nSee golang.org/issue/6038.\nThe @ is for OS X. See golang.org/issue/13720.\nThe % is for Jenkins. See golang.org/issue/16959.\nThe ! is because module paths may use them. See golang.org/issue/26716.\nThe ~ and ^ are for sr.ht. See golang.org/issue/32260.\n"} safeString "+-.,/0123456789=ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz:$@%! ~^")
+
+^{:go/breaks [[5 1848]] :go/end 1849} (go/func safeCgoName ^bool [^string s]
+  (when (== s "")
+    (return false))
+
+  (for [i 0] (< i (len s)) (inc! i)
+    (when [c (aget s i)] (and (< c utf8/RuneSelf) (< (strings/IndexByte safeString c) 0))
+      (return false)))
+
+
+  true)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1909} (go/func splitQuoted "splitQuoted splits the string s around each instance of one or more consecutive\nwhite space characters while taking into account quotes and escaping, and\nreturns an array of substrings of s or an empty list if s contains only white space.\nSingle quotes and double quotes are recognized to prevent splitting within the\nquoted region, and are removed from the resulting substrings. If a quote in s\nisn't closed err will be set and r will have the unclosed argument as the\nlast element. The backslash is used for escaping.\n\nFor example, the following string:\n\n\ta b:\"c d\" 'e''f'  \"g\\\"\"\n\nWould be parsed as:\n\n\t[]string{\"a\", \"b:c d\", \"ef\", `g\"`}\n" [^string s] :results [^{:tag (slice string)} r ^error err]
+  (let [^{:tag (slice string)} args (zero (slice string))
+      ^{:line 1868} arg (make (slice rune) (len s))
+      ^{:line 1869} escaped false
+      ^{:line 1870} quoted false
+      ^{:line 1871} quote \u0000
+      ^{:line 1872} i 0]
+    (range [_ rune s]
+      (switch
+        (case [escaped]
+          (set! escaped false))
+        (case [(== rune \\)]
+          (set! escaped true)
+          (continue))
+        (case [(!= quote \u0000)]
+          (when (== rune quote)
+            (set! quote \u0000)
+            (continue)))
+
+        (case [(or (== rune \") (== rune \'))]
+          (set! quoted true)
+          (set! quote rune)
+          (continue))
+        (case [(unicode/IsSpace rune)]
+          (when (or quoted (> i 0))
+            (set! quoted false)
+            (set! args (append args (conv string (subslice arg _ i))))
+            (set! i 0))
+
+          (continue)))
+
+      (aset arg i rune)
+      (inc! i))
+
+    (when (or quoted (> i 0))
+      (set! args (append args (conv string (subslice arg _ i)))))
+
+    (cond (!= quote 0)
+      (set! err (errors/New "unclosed quote"))
+      ^{:line 1905} escaped
+      (set! err (errors/New "unfinished escaping")))
+
+    (return args err)))
+
+
+
+
+
+
+
+^{:go/end 1927} (go/method matchAuto "matchAuto interprets text as either a +build or //go:build expression (whichever works),\nreporting whether the expression matches the build context.\n\nmatchAuto is only used for testing of tag evaluation\nand in #cgo lines, which accept either syntax.\n" ^bool [^{:tag (* Context)} ctxt ^string text ^{:tag (map string bool)} allTags]
+  (if (strings/ContainsAny text "&|()")
+    (set! text (+ "//go:build " text))
+
+    (set! text (+ "// +build " text)))
+
+  (let [(values x err) (constraint/Parse text)]
+    (when (!= err nil)
+      (return false))
+
+    (.eval ctxt x allTags)))
+
+
+^{:go/end 1931} (go/method eval ^bool [^{:tag (* Context)} ctxt ^constraint/Expr x ^{:tag (map string bool)} allTags]
+  (.Eval x ^{:go/end 1930} (fn ^bool [^string tag] (.matchTag ctxt tag allTags))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1978} (go/method matchTag "matchTag reports whether the name is one of:\n\n\tcgo (if cgo is enabled)\n\t$GOOS\n\t$GOARCH\n\tctxt.Compiler\n\tlinux (if GOOS = android)\n\tsolaris (if GOOS = illumos)\n\tdarwin (if GOOS = ios)\n\tunix (if this is a Unix GOOS)\n\tboringcrypto (if GOEXPERIMENT=boringcrypto is enabled)\n\ttag (if tag is listed in ctxt.BuildTags, ctxt.ToolTags, or ctxt.ReleaseTags)\n\nIt records all consulted tags in allTags.\n" ^bool [^{:tag (* Context)} ctxt ^string name ^{:tag (map string bool)} allTags]
+  (when (!= allTags nil)
+    (aset allTags name true))
+
+
+  ;; special tags
+  (when (and (.-CgoEnabled ctxt) (== name "cgo"))
+    (return true))
+
+  (when (or (== name (.-GOOS ctxt)) (== name (.-GOARCH ctxt)) (== name (.-Compiler ctxt)))
+    (return true))
+
+  (when (and (== (.-GOOS ctxt) "android") (== name "linux"))
+    (return true))
+
+  (when (and (== (.-GOOS ctxt) "illumos") (== name "solaris"))
+    (return true))
+
+  (when (and (== (.-GOOS ctxt) "ios") (== name "darwin"))
+    (return true))
+
+  (when (and (== name "unix") (aget syslist/UnixOS (.-GOOS ctxt)))
+    (return true))
+
+  (when (== name "boringcrypto")
+    (set! name "goexperiment.boringcrypto")) ; boringcrypto is an old name for goexperiment.boringcrypto
+
+
+  ;; other tags
+  (or (^{:inst [(slice string) string]} slices/Contains (.-BuildTags ctxt) name) (^{:inst [(slice string) string]} slices/Contains (.-ToolTags ctxt) name)
+    (^{:inst [(slice string) string]} slices/Contains (.-ReleaseTags ctxt) name)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2027} (go/method goodOSArchFile "goodOSArchFile returns false if the name contains a $GOOS or $GOARCH\nsuffix which does not match the current system.\nThe recognized name formats are:\n\n\tname_$(GOOS).*\n\tname_$(GOARCH).*\n\tname_$(GOOS)_$(GOARCH).*\n\tname_$(GOOS)_test.*\n\tname_$(GOARCH)_test.*\n\tname_$(GOOS)_$(GOARCH)_test.*\n\nExceptions:\nif GOOS=android, then files with GOOS=linux are also matched.\nif GOOS=illumos, then files with GOOS=solaris are also matched.\nif GOOS=ios, then files with GOOS=darwin are also matched.\n" ^bool [^{:tag (* Context)} ctxt ^string name ^{:tag (map string bool)} allTags]
+  (set! (values name _ _) (strings/Cut name "."))
+
+  ;; Before Go 1.4, a file called "linux.go" would be equivalent to having a
+  ;; build tag "linux" in that file. For Go 1.4 and beyond, we require this
+  ;; auto-tagging to apply only to files with a non-empty prefix, so
+  ;; "foo_linux.go" is tagged but "linux.go" is not. This allows new operating
+  ;; systems, such as android, to arrive without breaking existing code with
+  ;; innocuous source code in "android.go". The easiest fix: cut everything
+  ;; in the name before the initial _.
+  (let [i (strings/Index name "_")]
+    (when (< i 0)
+      (return true))
+
+    (set! name (subslice name i)) ; ignore everything before first _
+
+    (let [l (strings/Split name "_")]
+      (when [n (len l)] (and (> n 0) (== (aget l (- n 1)) "test"))
+        (set! l (subslice l _ (- n 1))))
+
+      ^{:go/breaks [[4 2026]]} (let [n (len l)]
+        (when (and (>= n 2) (aget syslist/KnownOS (aget l (- n 2))) (aget syslist/KnownArch (aget l (- n 1))))
+          (when (!= allTags nil)
+            ;; In case we short-circuit on l[n-1].
+            (aset allTags (aget l (- n 2)) true))
+
+          (return (and (.matchTag ctxt (aget l (- n 1)) allTags) (.matchTag ctxt (aget l (- n 2)) allTags))))
+
+        (when (and (>= n 1) ^:go/paren (or (aget syslist/KnownOS (aget l (- n 1))) (aget syslist/KnownArch (aget l (- n 1)))))
+          (return (.matchTag ctxt (aget l (- n 1)) allTags)))
+
+        true))))
+
+
+
+(go/var ^{:doc "ToolDir is the directory containing build tools.\n"} ToolDir (getToolDir))
+
+
+
+^{:go/end 2037} (go/func IsLocalImport "IsLocalImport reports whether the import path is\na local import path, like \".\", \"..\", \"./foo\", or \"../foo\".\n" ^bool [^string path]
+  (or (== path ".") (== path "..")
+    (strings/HasPrefix path "./") (strings/HasPrefix path "../")))
+
+
+
+
+
+
+
+^{:go/end 2046} (go/func ArchChar "ArchChar returns \"?\" and an error.\nIn earlier versions of Go, the returned string was used to derive\nthe compiler and linker tool names, the default object file suffix,\nand the default linker output name. As of Go 1.5, those strings\nno longer vary by architecture; they are compile, link, .o, and a.out, respectively.\n" [^string goarch] :results [string error]
+  (return "?" (errors/New "architecture letter no longer used")))

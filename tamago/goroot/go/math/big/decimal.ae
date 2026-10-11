@@ -1,0 +1,268 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements multi-precision decimal numbers.
+;; The implementation is for float to decimal conversion only;
+;; not general purpose use.
+;; The only operations are precise conversion from binary to
+;; decimal and rounding.
+;;
+;; The key observation and some code (shr) is borrowed from
+;; strconv/decimal.go: conversion of binary fractional values can be done
+;; precisely in multi-precision decimal because 2 divides 10 (required for
+;; >> of mantissa); but conversion of decimal floating-point values cannot
+;; be done precisely in binary representation.
+;;
+;; In contrast to strconv/decimal.go, only right shift is implemented in
+;; decimal format - left shift can be done precisely in binary format.
+
+(in-ns 'go.math.big) (go/file "decimal.go" :imports [])
+
+
+
+
+
+
+(go/type decimal "A decimal represents an unsigned floating-point number in decimal representation.\nThe value of a non-zero decimal d is d.mant * 10**d.exp with 0.1 <= d.mant < 1,\nwith the most-significant mantissa digit at index 0. For the zero decimal, the\nmantissa length and exponent are 0.\nThe zero value for decimal represents a ready-to-use 0.0.\n" (struct
+    ^{:line 28 :tag (slice byte)} mant ; mantissa ASCII digits, big-endian
+    ^{:line 29 :tag int} exp)) ; exponent
+
+
+
+^{:go/breaks [[5 37]] :go/end 38} (go/method at "at returns the i'th mantissa digit, starting with the most significant digit at 0.\n" ^byte [^{:tag (* decimal)} d ^int i]
+  (when (and (<= 0 i) (< i (len (.-mant d))))
+    (return (aget (.-mant d) i)))
+
+  \0)
+
+
+
+
+(go/const ^{:val 60 :doc "Maximum shift amount that can be done in one pass without overflow.\nA Word has _W bits and (1<<maxShift - 1)*10 + 9 must fit into Word.\n"} maxShift (- _W 4))
+
+;; TODO(gri) Since we know the desired decimal precision when converting
+;; a floating-point number, we may be able to limit the number of decimal
+;; digits that need to be computed by init by providing an additional
+;; precision argument and keeping track of when a number was truncated early
+;; (equivalent of "sticky bit" in binary rounding).
+
+;; TODO(gri) Along the same lines, enforce some limit to shift magnitudes
+;; to avoid "infinitely" long running conversions (until we run out of space).
+
+
+
+^{:go/end 101} (go/method init "Init initializes x to the decimal representation of m << shift (for\nshift >= 0), or m >> -shift (for shift < 0).\n" [^{:tag (* decimal)} x ^nat m ^int shift]
+  ;; special case 0
+  (when (== (len m) 0)
+    (set! (.-mant x) (subslice (.-mant x) _ 0))
+    (set! (.-exp x) 0)
+    (return))
+
+
+  ;; Optimization: If we need to shift right, first remove any trailing
+  ;; zero bits from m to reduce shift amount that needs to be done in
+  ;; decimal format (since that is likely slower).
+  (when (< shift 0)
+    (let [ntz (.trailingZeroBits m)
+        ^{:line 68} s (conv uint (- shift))]
+      (when (>= s ntz)
+        (set! s ntz)) ; shift at most ntz bits
+
+      (set! m (.rsh (conv nat nil) m s))
+      (set! shift + (conv int s))))
+
+
+  ;; Do any shift left in binary representation.
+  (when (> shift 0)
+    (set! m (.lsh (conv nat nil) m (conv uint shift)))
+    (set! shift 0))
+
+
+  ;; Convert mantissa into decimal representation.
+  (let [s (.utoa m 10)
+      ^{:line 84} n (len s)]
+    (set! (.-exp x) n)
+    ;; Trim trailing zeros; instead the exponent is tracking
+    ;; the decimal point independent of the number of digits.
+    (while (and (> n 0) (== (aget s (- n 1)) \0))
+      (dec! n))
+
+    (set! (.-mant x) (append (subslice (.-mant x) _ 0) (spread (subslice s _ n))))
+
+    ;; Do any (remaining) shift right in decimal representation.
+    (when (< shift 0)
+      (while (< shift (- maxShift))
+        (rsh x maxShift)
+        (set! shift + maxShift))
+
+      (rsh x (conv uint (- shift))))))
+
+
+
+
+^{:go/end 158} (go/func rsh "rsh implements x >> s, for s <= maxShift.\n" [^{:tag (* decimal)} x ^uint s]
+  ;; Division by 1<<s using shift-and-subtract algorithm.
+
+  ;; pick up enough leading digits to cover first shift
+  (let [r 0 ; read index
+      ^{:line 109 :tag Word} n (zero Word)]
+    (while (and (== (>> n s) 0) (< r (len (.-mant x))))
+      (let [ch (conv Word (aget (.-mant x) r))]
+        (inc! r)
+        (set! n (- (+ (* n 10) ch) \0))))
+
+    (when (== n 0)
+      ;; x == 0; shouldn't get here, but handle anyway
+      (set! (.-mant x) (subslice (.-mant x) _ 0))
+      (return))
+
+    (while (== (>> n s) 0)
+      (inc! r)
+      (set! n * 10))
+
+    (set! (.-exp x) + (- 1 r))
+
+    ;; read a digit, write a digit
+    (let [w 0 ; write index
+        ^{:line 128} mask (- (<< (conv Word 1) s) 1)]
+      (while (< r (len (.-mant x)))
+        (let [ch (conv Word (aget (.-mant x) r))]
+          (inc! r)
+          (let [d (>> n s)]
+            (set! n bit-and mask) ; n -= d << s
+            (aset (.-mant x) w (conv byte (+ d \0)))
+            (inc! w)
+            (set! n (- (+ (* n 10) ch) \0)))))
+
+
+      ;; write extra digits that still fit
+      (while (and (> n 0) (< w (len (.-mant x))))
+        (let [d (>> n s)]
+          (set! n bit-and mask)
+          (aset (.-mant x) w (conv byte (+ d \0)))
+          (inc! w)
+          (set! n (* n 10))))
+
+      (set! (.-mant x) (subslice (.-mant x) _ w)) ; the number may be shorter (e.g. 1024 >> 10)
+
+      ;; append additional digits that didn't fit
+      (while (> n 0)
+        (let [d (>> n s)]
+          (set! n bit-and mask)
+          (set! (.-mant x) (append (.-mant x) (conv byte (+ d \0))))
+          (set! n (* n 10))))
+
+
+      (trim x))))
+
+
+^{:go/end 189} (go/method String ^string [^{:tag (* decimal)} x]
+  (when (== (len (.-mant x)) 0)
+    (return "0"))
+
+
+  (let [^{:tag (slice byte)} buf (zero (slice byte))]
+    (switch
+      (case [(<= (.-exp x) 0)]
+        ;; 0.00ddd
+        (set! buf (make (slice byte) 0 (+ 2 (- (.-exp x)) (len (.-mant x)))))
+        (set! buf (append buf (spread "0.")))
+        (set! buf (appendZeros buf (- (.-exp x))))
+        (set! buf (append buf (spread (.-mant x)))))
+
+      (case [(< (.-exp x) (len (.-mant x)))] ; /* 0 < */
+        ;; dd.ddd
+        (set! buf (make (slice byte) 0 (+ 1 (len (.-mant x)))))
+        (set! buf (append buf (spread (subslice (.-mant x) _ (.-exp x)))))
+        (set! buf (append buf \.))
+        (set! buf (append buf (spread (subslice (.-mant x) (.-exp x))))))
+
+      (default ; len(x.mant) <= x.exp
+        ;; ddd00
+        (set! buf (make (slice byte) 0 (.-exp x)))
+        (set! buf (append buf (spread (.-mant x))))
+        (set! buf (appendZeros buf (- (.-exp x) (len (.-mant x)))))))
+
+
+    (conv string buf)))
+
+
+
+^{:go/end 197} (go/func appendZeros "appendZeros appends n 0 digits to buf and returns buf.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^int n]
+  (for [] (> n 0) (dec! n)
+    (set! buf (append buf \0)))
+
+  ^{:line 196} buf)
+
+
+
+
+
+^{:go/end 209} (go/func shouldRoundUp "shouldRoundUp reports if x should be rounded up\nif shortened to n digits. n must be a valid index\nfor x.mant.\n" ^bool [^{:tag (* decimal)} x ^int n]
+  (when (and (== (aget (.-mant x) n) \5) (== (+ n 1) (len (.-mant x))))
+    ;; exactly halfway - round to even
+    (return (and (> n 0) (!= (bit-and (- (aget (.-mant x) (- n 1)) \0) 1) 0))))
+
+  ;; not halfway - digit tells all (x.mant has no trailing zeros)
+  (>= (aget (.-mant x) n) \5))
+
+
+
+
+
+^{:go/end 224} (go/method round "round sets x to (at most) n mantissa digits by rounding it\nto the nearest even value with n (or fever) mantissa digits.\nIf n < 0, x remains unchanged.\n" [^{:tag (* decimal)} x ^int n]
+  (when (or (< n 0) (>= n (len (.-mant x))))
+    (return)) ; nothing to do
+
+
+  (if (shouldRoundUp x n)
+    (.roundUp x n)
+
+    (.roundDown x n)))
+
+
+
+^{:go/end 249} (go/method roundUp [^{:tag (* decimal)} x ^int n]
+  (when (or (< n 0) (>= n (len (.-mant x))))
+    (return)) ; nothing to do
+
+  ;; 0 <= n < len(x.mant)
+
+  ;; find first digit < '9'
+  (while (and (> n 0) (>= (aget (.-mant x) (- n 1)) \9))
+    (dec! n))
+
+
+  (when (== n 0)
+    ;; all digits are '9's => round up to '1' and update exponent
+    (aset (.-mant x) 0 \1) ; ok since len(x.mant) > n
+    (set! (.-mant x) (subslice (.-mant x) _ 1))
+    (inc! (.-exp x))
+    (return))
+
+
+  ;; n > 0 && x.mant[n-1] < '9'
+  (inc! (aget (.-mant x) (- n 1)))
+  (set! (.-mant x) (subslice (.-mant x) _ n)))
+;; x already trimmed
+
+
+^{:go/end 257} (go/method roundDown [^{:tag (* decimal)} x ^int n]
+  (when (or (< n 0) (>= n (len (.-mant x))))
+    (return)) ; nothing to do
+
+  (set! (.-mant x) (subslice (.-mant x) _ n))
+  (trim x))
+
+
+
+
+^{:go/end 270} (go/func trim "trim cuts off any trailing zeros from x's mantissa;\nthey are meaningless for the value of x.\n" [^{:tag (* decimal)} x]
+  (let [i (len (.-mant x))]
+    (while (and (> i 0) (== (aget (.-mant x) (- i 1)) \0))
+      (dec! i))
+
+    (set! (.-mant x) (subslice (.-mant x) _ i))
+    (when (== i 0)
+      (set! (.-exp x) 0))))

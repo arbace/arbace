@@ -1,0 +1,414 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Multiprecision decimal numbers.
+;; For floating-point formatting only; not general purpose.
+;; Only operations are assign and (binary) left/right shift.
+;; Can do binary floating point in multiprecision decimal precisely
+;; because 2 divides 10; cannot do decimal floating point
+;; in multiprecision binary precisely.
+
+(in-ns 'go.internal.strconv) (go/file "decimal.go" :imports [])
+
+(go/type decimal (struct
+    ^{:line 15 :tag (array 800 byte)} d ; digits, big-endian representation
+    ^{:line 16 :tag int} nd ; number of digits used
+    ^{:line 17 :tag int} dp ; decimal point
+    ^{:line 18 :tag bool} neg ; negative flag
+    ^{:line 19 :tag bool} trunc)) ; discarded nonzero digits beyond d[:nd]
+
+
+^{:go/end 59} (go/method String ^string [^{:tag (* decimal)} a]
+  (let [n (+ 10 (.-nd a))]
+    (when (> (.-dp a) 0)
+      (set! n + (.-dp a)))
+
+    (when (< (.-dp a) 0)
+      (set! n + (- (.-dp a))))
+
+
+    (let [buf (make (slice byte) n)
+        ^{:line 32} w 0]
+      (switch
+        (case [(== (.-nd a) 0)]
+          (return "0"))
+
+        (case [(<= (.-dp a) 0)]
+          ;; zeros fill space between decimal point and digits
+          (aset buf w \0)
+          (inc! w)
+          (aset buf w \.)
+          (inc! w)
+          (set! w + (digitZero (subslice buf w (+ w (- (.-dp a))))))
+          (set! w + (copy (subslice buf w) (subslice (.-d a) 0 (.-nd a)))))
+
+        (case [(< (.-dp a) (.-nd a))]
+          ;; decimal point in middle of digits
+          (set! w + (copy (subslice buf w) (subslice (.-d a) 0 (.-dp a))))
+          (aset buf w \.)
+          (inc! w)
+          (set! w + (copy (subslice buf w) (subslice (.-d a) (.-dp a) (.-nd a)))))
+
+        (default
+          ;; zeros fill space between digits and decimal point
+          (set! w + (copy (subslice buf w) (subslice (.-d a) 0 (.-nd a))))
+          (set! w + (digitZero (subslice buf w (- (+ w (.-dp a)) (.-nd a)))))))
+
+      (conv string (subslice buf 0 w)))))
+
+
+^{:go/end 66} (go/func digitZero ^int [^{:tag (slice byte)} dst]
+  (range [i dst]
+    (aset dst i \0))
+
+  (len dst))
+
+
+
+
+
+^{:go/end 78} (go/func trim "trim trailing zeros from number.\n(They are meaningless; the decimal point is tracked\nindependent of the number of digits.)\n" [^{:tag (* decimal)} a]
+  (while (and (> (.-nd a) 0) (== (aget (.-d a) (- (.-nd a) 1)) \0))
+    (dec! (.-nd a)))
+
+  (when (== (.-nd a) 0)
+    (set! (.-dp a) 0)))
+
+
+
+
+^{:go/end 102} (go/method Assign "Assign v to a.\n" [^{:tag (* decimal)} a ^uint64 v]
+  (let [^{:tag (array 24 byte)} buf (zero (array 24 byte))
+
+      ;; Write reversed decimal in buf.
+      ^{:line 85} n 0]
+    (while (> v 0)
+      (let [v1 (/ v 10)]
+        (set! v - (* 10 v1))
+        (aset buf n (conv byte (+ v \0)))
+        (inc! n)
+        (set! v v1)))
+
+
+    ;; Reverse again to produce forward decimal in a.d.
+    (set! (.-nd a) 0)
+    (for [(dec! n)] (>= n 0) (dec! n)
+      (aset (.-d a) (.-nd a) (aget buf n))
+      (inc! (.-nd a)))
+
+    (set! (.-dp a) (.-nd a))
+    (trim a)))
+
+
+
+
+(go/const ^{:val 64 :doc "Maximum shift that we can do in one pass without overflow.\nA uint has 32 or 64 bits, and we have to be able to accommodate 9<<k.\n"} uintSize (<< 32 (>> (bit-not (conv uint 0)) 63)))
+(go/const ^{:val 60} maxShift (- uintSize 4))
+
+
+^{:go/end 161} (go/func rightShift "Binary shift right (/ 2) by k bits.  k <= maxShift to avoid overflow.\n" [^{:tag (* decimal)} a ^uint k]
+  (let [r 0 ; read pointer
+      ^{:line 112} w 0 ; write pointer
+
+      ;; Pick up enough leading digits to cover first shift.
+      ^{:line 115 :tag uint} n (zero uint)]
+    (for [] (== (>> n k) 0) (inc! r)
+      (when (>= r (.-nd a))
+        (when (== n 0)
+          ;; a == 0; shouldn't get here, but handle anyway.
+          (set! (.-nd a) 0)
+          (return))
+
+        (while (== (>> n k) 0)
+          (set! n (* n 10))
+          (inc! r))
+
+        (break))
+
+      (let [c (conv uint (aget (.-d a) r))]
+        (set! n (- (+ (* n 10) c) \0))))
+
+    (set! (.-dp a) - (- r 1))
+
+    (let [^uint mask (- ^uint (<< 1 k) 1)]
+
+      ;; Pick up a digit, put down a digit.
+      (for [] (< r (.-nd a)) (inc! r)
+        (let [c (conv uint (aget (.-d a) r))
+            ^{:line 139} dig (>> n k)]
+          (set! n bit-and mask)
+          (aset (.-d a) w (conv byte (+ dig \0)))
+          (inc! w)
+          (set! n (- (+ (* n 10) c) \0))))
+
+
+      ;; Put down extra digits.
+      (while (> n 0)
+        (let [dig (>> n k)]
+          (set! n bit-and mask)
+          (cond (< w (len (.-d a))) (do
+              (aset (.-d a) w (conv byte (+ dig \0)))
+              (inc! w))
+            (> dig 0)
+            (set! (.-trunc a) true))
+
+          (set! n (* n 10))))
+
+
+      (set! (.-nd a) w)
+      (trim a))))
+
+
+;; Cheat sheet for left shift: table indexed by shift count giving
+;; number of new digits that will be introduced by that shift.
+;;
+;; For example, leftcheats[4] = {2, "625"}.  That means that
+;; if we are shifting by 4 (multiplying by 16), it will add 2 digits
+;; when the string prefix is "625" through "999", and one fewer digit
+;; if the string prefix is "000" through "624".
+;;
+;; Credit for this trick goes to Ken.
+
+(go/type leftCheat (struct
+    ^{:line 174 :tag int} delta ; number of new digits
+    ^{:line 175 :tag string} cutoff)) ; minus one digit if original < a.
+
+
+(go/var leftcheats (lit (slice leftCheat)
+    ;; Leading digits of 1/2^i = 5^i.
+    ;; 5^23 is not an exact 64-bit floating point number,
+    ;; so have to use bc for the math.
+    ;; Go up to 60 to be large enough for 32bit and 64bit platforms.
+    ;; /*
+    ;; seq 60 | sed 's/^/5^/' | bc |
+    ;; awk 'BEGIN{ print "\t{ 0, \"\" }," }
+    ;; {
+    ;; log2 = log(2)/log(10)
+    ;; printf("\t{ %d, \"%s\" },\t// * %d\n",
+    ;; int(log2*NR+1), $0, 2**NR)
+    ;; }'
+    ;; */
+    (lit _ 0 "")
+    (lit _ 1 "5") ; * 2
+    (lit _ 1 "25") ; * 4
+    (lit _ 1 "125") ; * 8
+    (lit _ 2 "625") ; * 16
+    (lit _ 2 "3125") ; * 32
+    (lit _ 2 "15625") ; * 64
+    (lit _ 3 "78125") ; * 128
+    (lit _ 3 "390625") ; * 256
+    (lit _ 3 "1953125") ; * 512
+    (lit _ 4 "9765625") ; * 1024
+    (lit _ 4 "48828125") ; * 2048
+    (lit _ 4 "244140625") ; * 4096
+    (lit _ 4 "1220703125") ; * 8192
+    (lit _ 5 "6103515625") ; * 16384
+    (lit _ 5 "30517578125") ; * 32768
+    (lit _ 5 "152587890625") ; * 65536
+    (lit _ 6 "762939453125") ; * 131072
+    (lit _ 6 "3814697265625") ; * 262144
+    (lit _ 6 "19073486328125") ; * 524288
+    (lit _ 7 "95367431640625") ; * 1048576
+    (lit _ 7 "476837158203125") ; * 2097152
+    (lit _ 7 "2384185791015625") ; * 4194304
+    (lit _ 7 "11920928955078125") ; * 8388608
+    (lit _ 8 "59604644775390625") ; * 16777216
+    (lit _ 8 "298023223876953125") ; * 33554432
+    (lit _ 8 "1490116119384765625") ; * 67108864
+    (lit _ 9 "7450580596923828125") ; * 134217728
+    (lit _ 9 "37252902984619140625") ; * 268435456
+    (lit _ 9 "186264514923095703125") ; * 536870912
+    (lit _ 10 "931322574615478515625") ; * 1073741824
+    (lit _ 10 "4656612873077392578125") ; * 2147483648
+    (lit _ 10 "23283064365386962890625") ; * 4294967296
+    (lit _ 10 "116415321826934814453125") ; * 8589934592
+    (lit _ 11 "582076609134674072265625") ; * 17179869184
+    (lit _ 11 "2910383045673370361328125") ; * 34359738368
+    (lit _ 11 "14551915228366851806640625") ; * 68719476736
+    (lit _ 12 "72759576141834259033203125") ; * 137438953472
+    (lit _ 12 "363797880709171295166015625") ; * 274877906944
+    (lit _ 12 "1818989403545856475830078125") ; * 549755813888
+    (lit _ 13 "9094947017729282379150390625") ; * 1099511627776
+    (lit _ 13 "45474735088646411895751953125") ; * 2199023255552
+    (lit _ 13 "227373675443232059478759765625") ; * 4398046511104
+    (lit _ 13 "1136868377216160297393798828125") ; * 8796093022208
+    (lit _ 14 "5684341886080801486968994140625") ; * 17592186044416
+    (lit _ 14 "28421709430404007434844970703125") ; * 35184372088832
+    (lit _ 14 "142108547152020037174224853515625") ; * 70368744177664
+    (lit _ 15 "710542735760100185871124267578125") ; * 140737488355328
+    (lit _ 15 "3552713678800500929355621337890625") ; * 281474976710656
+    (lit _ 15 "17763568394002504646778106689453125") ; * 562949953421312
+    (lit _ 16 "88817841970012523233890533447265625") ; * 1125899906842624
+    (lit _ 16 "444089209850062616169452667236328125") ; * 2251799813685248
+    (lit _ 16 "2220446049250313080847263336181640625") ; * 4503599627370496
+    (lit _ 16 "11102230246251565404236316680908203125") ; * 9007199254740992
+    (lit _ 17 "55511151231257827021181583404541015625") ; * 18014398509481984
+    (lit _ 17 "277555756156289135105907917022705078125") ; * 36028797018963968
+    (lit _ 17 "1387778780781445675529539585113525390625") ; * 72057594037927936
+    (lit _ 18 "6938893903907228377647697925567626953125") ; * 144115188075855872
+    (lit _ 18 "34694469519536141888238489627838134765625") ; * 288230376151711744
+    (lit _ 18 "173472347597680709441192448139190673828125") ; * 576460752303423488
+    (lit _ 19 "867361737988403547205962240695953369140625"))) ; * 1152921504606846976
+
+
+
+^{:go/breaks [[5 265]] :go/end 266} (go/func prefixIsLessThan "Is the leading prefix of b lexicographically less than s?\n" ^bool [^{:tag (slice byte)} b ^string s]
+  (for [i 0] (< i (len s)) (inc! i)
+    (when (>= i (len b))
+      (return true))
+
+    (when (!= (aget b i) (aget s i))
+      (return (< (aget b i) (aget s i)))))
+
+
+  false)
+
+
+
+^{:go/end 312} (go/func leftShift "Binary shift left (* 2) by k bits.  k <= maxShift to avoid overflow.\n" [^{:tag (* decimal)} a ^uint k]
+  (let [delta (.-delta (aget leftcheats k))]
+    (when (prefixIsLessThan (subslice (.-d a) 0 (.-nd a)) (.-cutoff (aget leftcheats k)))
+      (dec! delta))
+
+
+    (let [r (.-nd a) ; read index
+        ^{:line 276} w (+ (.-nd a) delta) ; write index
+
+        ;; Pick up a digit, put down a digit.
+        ^{:line 279 :tag uint} n (zero uint)]
+      (for [(dec! r)] (>= r 0) (dec! r)
+        (set! n + (<< (- (conv uint (aget (.-d a) r)) \0) k))
+        (let [quo (/ n 10)
+            ^{:line 283} rem (- n (* 10 quo))]
+          (dec! w)
+          (cond (< w (len (.-d a)))
+            (aset (.-d a) w (conv byte (+ rem \0)))
+            (!= rem 0)
+            (set! (.-trunc a) true))
+
+          (set! n quo)))
+
+
+      ;; Put down extra digits.
+      (while (> n 0)
+        (let [quo (/ n 10)
+            ^{:line 296} rem (- n (* 10 quo))]
+          (dec! w)
+          (cond (< w (len (.-d a)))
+            (aset (.-d a) w (conv byte (+ rem \0)))
+            (!= rem 0)
+            (set! (.-trunc a) true))
+
+          (set! n quo)))
+
+
+      (set! (.-nd a) + delta)
+      (when (>= (.-nd a) (len (.-d a)))
+        (set! (.-nd a) (len (.-d a))))
+
+      (set! (.-dp a) + delta)
+      (trim a))))
+
+
+
+^{:go/end 332} (go/method Shift "Binary shift left (k > 0) or right (k < 0).\n" [^{:tag (* decimal)} a ^int k]
+  (switch
+    (case [(== (.-nd a) 0)])
+    ;; nothing to do: a == 0
+    (case [(> k 0)]
+      (while (> k maxShift)
+        (leftShift a maxShift)
+        (set! k - maxShift))
+
+      (leftShift a (conv uint k)))
+    (case [(< k 0)]
+      (while (< k (- maxShift))
+        (rightShift a maxShift)
+        (set! k + maxShift))
+
+      (rightShift a (conv uint (- k))))))
+
+
+
+
+^{:go/end 348} (go/func shouldRoundUp "If we chop a at nd digits, should we round up?\n" ^bool [^{:tag (* decimal)} a ^int nd]
+  (when (or (< nd 0) (>= nd (.-nd a)))
+    (return false))
+
+  (when (and (== (aget (.-d a) nd) \5) (== (+ nd 1) (.-nd a))) ; exactly halfway - round to even
+    ;; if we truncated, a little higher than what's recorded - always round up
+    (when (.-trunc a)
+      (return true))
+
+    (return (and (> nd 0) (!= (% (- (aget (.-d a) (- nd 1)) \0) 2) 0))))
+
+  ;; not halfway - digit tells all
+  (>= (aget (.-d a) nd) \5))
+
+
+
+
+
+
+^{:go/end 363} (go/method Round "Round a to nd digits (or fewer).\nIf nd is zero, it means we're rounding\njust to the left of the digits, as in\n0.09 -> 0.1.\n" [^{:tag (* decimal)} a ^int nd]
+  (when (or (< nd 0) (>= nd (.-nd a)))
+    (return))
+
+  (if (shouldRoundUp a nd)
+    (.RoundUp a nd)
+
+    (.RoundDown a nd)))
+
+
+
+
+^{:go/end 372} (go/method RoundDown "Round a down to nd digits (or fewer).\n" [^{:tag (* decimal)} a ^int nd]
+  (when (or (< nd 0) (>= nd (.-nd a)))
+    (return))
+
+  (set! (.-nd a) nd)
+  (trim a))
+
+
+
+^{:go/end 395} (go/method RoundUp "Round a up to nd digits (or fewer).\n" [^{:tag (* decimal)} a ^int nd]
+  (when (or (< nd 0) (>= nd (.-nd a)))
+    (return))
+
+
+  ;; round up
+  (for [i (- nd 1)] (>= i 0) (dec! i)
+    (let [c (aget (.-d a) i)]
+      (when (< c \9) ; can stop after this digit
+        (inc! (aget (.-d a) i))
+        (set! (.-nd a) (+ i 1))
+        (return))))
+
+
+
+  ;; Number is all 9s.
+  ;; Change to single 1 with adjusted decimal point.
+  (aset (.-d a) 0 \1)
+  (set! (.-nd a) 1)
+  (inc! (.-dp a)))
+
+
+
+
+^{:go/end 415} (go/method RoundedInteger "Extract integer part, rounded appropriately.\nNo guarantees about overflow.\n" ^uint64 [^{:tag (* decimal)} a]
+  (when (> (.-dp a) 20)
+    (return 0xFFFFFFFFFFFFFFFF))
+
+  (let [^int i (zero int)
+      ^{:line 404} n (conv uint64 0)]
+    (for [(set! i 0)] (and (< i (.-dp a)) (< i (.-nd a))) (inc! i)
+      (set! n (+ (* n 10) (conv uint64 (- (aget (.-d a) i) \0)))))
+
+    (for [] (< i (.-dp a)) (inc! i)
+      (set! n * 10))
+
+    (when (shouldRoundUp a (.-dp a))
+      (inc! n))
+
+    ^{:line 414} n))

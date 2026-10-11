@@ -1,0 +1,1434 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package bytes implements functions for the manipulation of byte slices.
+;; It is analogous to the facilities of the [strings] package.
+(in-ns 'go.bytes) (go/file "bytes.go" :doc "Package bytes implements functions for the manipulation of byte slices.\nIt is analogous to the facilities of the [strings] package.\n" :imports [
+
+
+    ^{:line 10} [bytealg "internal/bytealg"]
+    ^{:line 11} [bits "math/bits"]
+    ^{:line 12} [unicode "unicode"]
+    ^{:line 13} [utf8 "unicode/utf8"]
+    ^{:line 14} [_ "unsafe"]]) ; for linkname
+
+
+
+
+
+^{:go/end 23} (go/func Equal "Equal reports whether a and b\nare the same length and contain the same bytes.\nA nil argument is equivalent to an empty slice.\n" ^bool [^{:tag (slice byte)} a ^{:tag (slice byte)} b]
+  ;; Neither cmd/compile nor gccgo allocates for these string conversions.
+  (== (conv string a) (conv string b)))
+
+
+
+
+
+^{:go/end 30} (go/func Compare "Compare returns an integer comparing two byte slices lexicographically.\nThe result will be 0 if a == b, -1 if a < b, and +1 if a > b.\nA nil argument is equivalent to an empty slice.\n" ^int [^{:tag (slice byte)} a ^{:tag (slice byte)} b]
+  (bytealg/Compare a b))
+
+
+
+
+^{:go/end 53} (go/func explode "explode splits s into a slice of UTF-8 sequences, one per Unicode code point (still slices of bytes),\nup to a maximum of n byte slices. Invalid UTF-8 sequences are chopped into individual bytes.\n" ^{:tag (slice (slice byte))} [^{:tag (slice byte)} s ^int n]
+  (when (or (<= n 0) (> n (len s)))
+    (set! n (len s)))
+
+  (let [a (make (slice (slice byte)) n)
+      ^{:line 39 :tag int} size (zero int)
+      ^{:line 40} na 0]
+    (while (> (len s) 0)
+      (when (>= (+ na 1) n)
+        (aset a na s)
+        (inc! na)
+        (break))
+
+      (set! (values _ size) (utf8/DecodeRune s))
+      (aset a na (subslice s 0 size size))
+      (set! s (subslice s size))
+      (inc! na))
+
+    (subslice a 0 na)))
+
+
+
+
+^{:go/end 74} (go/func Count "Count counts the number of non-overlapping instances of sep in s.\nIf sep is an empty slice, Count returns 1 + the number of UTF-8-encoded code points in s.\n" ^int [^{:tag (slice byte)} s ^{:tag (slice byte)} sep]
+  ;; special case
+  (when (== (len sep) 0)
+    (return (+ (utf8/RuneCount s) 1)))
+
+  (when (== (len sep) 1)
+    (return (bytealg/Count s (aget sep 0))))
+
+  (let [n 0]
+    (while true
+      (let [i (Index s sep)]
+        (when (== i -1)
+          (return n))
+
+        (inc! n)
+        (set! s (subslice s (+ i (len sep))))))))
+
+
+
+
+^{:go/end 79} (go/func Contains "Contains reports whether subslice is within b.\n" ^bool [^{:tag (slice byte)} b ^{:tag (slice byte)} subslice]
+  (!= (Index b subslice) -1))
+
+
+
+^{:go/end 84} (go/func ContainsAny "ContainsAny reports whether any of the UTF-8-encoded code points in chars are within b.\n" ^bool [^{:tag (slice byte)} b ^string chars]
+  (>= (IndexAny b chars) 0))
+
+
+
+^{:go/end 89} (go/func ContainsRune "ContainsRune reports whether the rune is contained in the UTF-8-encoded byte slice b.\n" ^bool [^{:tag (slice byte)} b ^rune r]
+  (>= (IndexRune b r) 0))
+
+
+
+
+^{:go/end 95} (go/func ContainsFunc "ContainsFunc reports whether any of the UTF-8-encoded code points r within b satisfy f(r).\nIt stops as soon as a call to f returns true.\n" ^bool [^{:tag (slice byte)} b ^{:tag (func [rune] [bool])} f]
+  (>= (IndexFunc b f) 0))
+
+
+
+^{:go/end 100} (go/func IndexByte "IndexByte returns the index of the first instance of c in b, or -1 if c is not present in b.\n" ^int [^{:tag (slice byte)} b ^byte c]
+  (bytealg/IndexByte b c))
+
+
+
+^{:go/end 119} (go/func LastIndex "LastIndex returns the index of the last instance of sep in s, or -1 if sep is not present in s.\n" ^int [^{:tag (slice byte)} s ^{:tag (slice byte)} sep]
+  (let [n (len sep)]
+    (switch
+      (case [(== n 0)]
+        (return (len s)))
+      (case [(== n 1)]
+        (return (bytealg/LastIndexByte s (aget sep 0))))
+      (case [(== n (len s))]
+        (when (Equal s sep)
+          (return 0))
+
+        (return -1))
+      (case [(> n (len s))]
+        (return -1)))
+
+    (^{:inst [(slice byte)]} bytealg/LastIndexRabinKarp s sep)))
+
+
+
+^{:go/end 124} (go/func LastIndexByte "LastIndexByte returns the index of the last instance of c in s, or -1 if c is not present in s.\n" ^int [^{:tag (slice byte)} s ^byte c]
+  (bytealg/LastIndexByte s c))
+
+
+
+
+
+
+
+^{:go/end 207} (go/func IndexRune "IndexRune interprets s as a sequence of UTF-8-encoded code points.\nIt returns the byte index of the first occurrence in s of the given rune.\nIt returns -1 if rune is not present in s.\nIf r is [utf8.RuneError], it returns the first instance of any\ninvalid UTF-8 byte sequence.\n" ^int [^{:tag (slice byte)} s ^rune r]
+  (let [^:const ^{:val true} haveFastIndex (> bytealg/MaxBruteForce 0)]
+    (switch
+      (case [(and (<= 0 r) (< r utf8/RuneSelf))]
+        (return (IndexByte s (conv byte r))))
+      (case [(== r utf8/RuneError)]
+        (for [i 0] (< i (len s)) _
+          (let [(values r1 n) (utf8/DecodeRune (subslice s i))]
+            (when (== r1 utf8/RuneError)
+              (return i))
+
+            (set! i + n)))
+
+        (return -1))
+      (case [(not (utf8/ValidRune r))]
+        (return -1))
+      (default
+        ;; Search for rune r using the last byte of its UTF-8 encoded form.
+        ;; The distribution of the last byte is more uniform compared to the
+        ;; first byte which has a 78% chance of being [240, 243, 244].
+        (let [^{:tag (array utf8/UTFMax byte)} b (zero (array utf8/UTFMax byte))
+            ^{:line 152} n (utf8/EncodeRune (subslice b) r)
+            ^{:line 153} last (- n 1)
+            ^{:line 154} i last
+            ^{:line 155} fails 0]
+          (while (< i (len s))
+            (when (!= (aget s i) (aget b last))
+              (let [o (IndexByte (subslice s (+ i 1)) (aget b last))]
+                (when (< o 0)
+                  (return -1))
+
+                (set! i + (+ o 1))))
+
+            ;; Step backwards comparing bytes.
+            (for [j 1] (< j n) (inc! j)
+              (when (!= (aget s (- i j)) (aget b (- last j)))
+                (goto :next)))
+
+
+            (return (- i last))
+            (label :next
+              (inc! fails))
+            (inc! i)
+            (when (or (and ^:go/paren (and haveFastIndex (> fails (bytealg/Cutover i))) (< i (len s)))
+                ^:go/paren (and (not haveFastIndex) (>= fails (+ 4 (>> i 4))) (< i (len s))))
+              (goto :fallback)))
+
+
+          (return -1)
+
+          (label :fallback
+            ;; Switch to bytealg.Index, if available, or a brute force search when
+            ;; IndexByte returns too many false positives.
+            (if haveFastIndex
+              (when [j (bytealg/Index (subslice s (- i last)) (subslice b _ n))] (>= j 0)
+                (return (- (+ i j) last)))
+
+
+              ;; If bytealg.Index is not available a brute force search is
+              ;; ~1.5-3x faster than Rabin-Karp since n is small.
+              (let [c0 (aget b last)
+                  ^{:line 192} c1 (aget b (- last 1))] ; There are at least 2 chars to match
+                (label :loop
+                  (for [] (< i (len s)) (inc! i)
+                    (when (and (== (aget s i) c0) (== (aget s (- i 1)) c1))
+                      (for [k 2] (< k n) (inc! k)
+                        (when (!= (aget s (- i k)) (aget b (- last k)))
+                          (continue :loop)))
+
+
+                      (return (- i last))))))))
+
+
+
+          (return -1))))))
+
+
+
+
+
+
+
+^{:go/end 285} (go/func IndexAny "IndexAny interprets s as a sequence of UTF-8-encoded Unicode code points.\nIt returns the byte index of the first occurrence in s of any of the Unicode\ncode points in chars. It returns -1 if chars is empty or if there is no code\npoint in common.\n" ^int [^{:tag (slice byte)} s ^string chars]
+  (when (== chars "")
+    ;; Avoid scanning all of s.
+    (return -1))
+
+  (when (== (len s) 1)
+    (let [r (conv rune (aget s 0))]
+      (when (>= r utf8/RuneSelf)
+        ;; search utf8.RuneError.
+        ^:assign (range [_ r chars]
+          (when (== r utf8/RuneError)
+            (return 0)))
+
+
+        (return -1))
+
+      (when (>= (bytealg/IndexByteString chars (aget s 0)) 0)
+        (return 0))
+
+      (return -1)))
+
+  (when (== (len chars) 1)
+    (let [r (conv rune (aget chars 0))]
+      (when (>= r utf8/RuneSelf)
+        (set! r utf8/RuneError))
+
+      (return (IndexRune s r))))
+
+  (when (shouldUseASCIISet (len s))
+    (when [(values as isASCII) (makeASCIISet chars)] isASCII
+      (range [i c s]
+        (when (.contains as c)
+          (return i)))
+
+
+      (return -1)))
+
+
+  ^{:go/breaks [[3 284]]} (let [^int width (zero int)]
+    (for [i 0] (< i (len s)) (set! i + width)
+      (let [r (conv rune (aget s i))]
+        (when (< r utf8/RuneSelf)
+          (when (>= (bytealg/IndexByteString chars (aget s i)) 0)
+            (return i))
+
+          (set! width 1)
+          (continue))
+
+        (set! (values r width) (utf8/DecodeRune (subslice s i)))
+        (when (!= r utf8/RuneError)
+          ;; r is 2 to 4 bytes
+          (when (== (len chars) width)
+            (when (== chars (conv string r))
+              (return i))
+
+            (continue))
+
+          ;; Use bytealg.IndexString for performance if available.
+          (when (>= bytealg/MaxLen width)
+            (when (>= (bytealg/IndexString chars (conv string r)) 0)
+              (return i))
+
+            (continue)))
+
+
+        (range [_ ch chars]
+          (when (== r ch)
+            (return i)))))
+
+
+
+    -1))
+
+
+
+
+
+
+^{:go/breaks [[9 368]] :go/end 369} (go/func LastIndexAny "LastIndexAny interprets s as a sequence of UTF-8-encoded Unicode code\npoints. It returns the byte index of the last occurrence in s of any of\nthe Unicode code points in chars. It returns -1 if chars is empty or if\nthere is no code point in common.\n" ^int [^{:tag (slice byte)} s ^string chars]
+  (when (== chars "")
+    ;; Avoid scanning all of s.
+    (return -1))
+
+  (when (shouldUseASCIISet (len s))
+    (when [(values as isASCII) (makeASCIISet chars)] isASCII
+      (for [i (- (len s) 1)] (>= i 0) (dec! i)
+        (when (.contains as (aget s i))
+          (return i)))
+
+
+      (return -1)))
+
+
+  (when (== (len s) 1)
+    (let [r (conv rune (aget s 0))]
+      (when (>= r utf8/RuneSelf)
+        ^:assign (range [_ r chars]
+          (when (== r utf8/RuneError)
+            (return 0)))
+
+
+        (return -1))
+
+      (when (>= (bytealg/IndexByteString chars (aget s 0)) 0)
+        (return 0))
+
+      (return -1)))
+
+  (when (== (len chars) 1)
+    (let [cr (conv rune (aget chars 0))]
+      (when (>= cr utf8/RuneSelf)
+        (set! cr utf8/RuneError))
+
+      (for [i (len s)] (> i 0) _
+        (let [(values r size) (utf8/DecodeLastRune (subslice s _ i))]
+          (set! i - size)
+          (when (== r cr)
+            (return i))))
+
+
+      (return -1)))
+
+  (for [i (len s)] (> i 0) _
+    (let [r (conv rune (aget s (- i 1)))]
+      (when (< r utf8/RuneSelf)
+        (when (>= (bytealg/IndexByteString chars (aget s (- i 1))) 0)
+          (return (- i 1)))
+
+        (dec! i)
+        (continue))
+
+      (let [(values ^:assign r size) (utf8/DecodeLastRune (subslice s _ i))]
+        (set! i - size)
+        (when (!= r utf8/RuneError)
+          ;; r is 2 to 4 bytes
+          (when (== (len chars) size)
+            (when (== chars (conv string r))
+              (return i))
+
+            (continue))
+
+          ;; Use bytealg.IndexString for performance if available.
+          (when (>= bytealg/MaxLen size)
+            (when (>= (bytealg/IndexString chars (conv string r)) 0)
+              (return i))
+
+            (continue)))
+
+
+        (range [_ ch chars]
+          (when (== r ch)
+            (return i))))))
+
+
+
+  -1)
+
+
+
+
+^{:go/end 399} (go/func genSplit "Generic split: splits after each instance of sep,\nincluding sepSave bytes of sep in the subslices.\n" ^{:tag (slice (slice byte))} [^{:tag (slice byte)} s ^{:tag (slice byte)} sep ^int sepSave ^int n]
+  (when (== n 0)
+    (return nil))
+
+  (when (== (len sep) 0)
+    (return (explode s n)))
+
+  (when (< n 0)
+    (set! n (+ (Count s sep) 1)))
+
+  (set! n (min n (+ (len s) 1)))
+
+  (let [a (make (slice (slice byte)) n)]
+    (dec! n)
+    (let [i 0]
+      (while (< i n)
+        (let [m (Index s sep)]
+          (when (< m 0)
+            (break))
+
+          (aset a i (subslice s _ (+ m sepSave) (+ m sepSave)))
+          (set! s (subslice s (+ m (len sep))))
+          (inc! i)))
+
+      (aset a i s)
+      (subslice a _ (+ i 1)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 410} (go/func SplitN "SplitN slices s into subslices separated by sep and returns a slice of\nthe subslices between those separators.\nIf sep is empty, SplitN splits after each UTF-8 sequence.\nThe count determines the number of subslices to return:\n  - n > 0: at most n subslices; the last subslice will be the unsplit remainder;\n  - n == 0: the result is nil (zero subslices);\n  - n < 0: all subslices.\n\nTo split around the first instance of a separator, see [Cut].\n" ^{:tag (slice (slice byte))} [^{:tag (slice byte)} s ^{:tag (slice byte)} sep ^int n] (genSplit s sep 0 n))
+
+
+
+
+
+
+
+
+^{:go/end 421} (go/func SplitAfterN "SplitAfterN slices s into subslices after each instance of sep and\nreturns a slice of those subslices.\nIf sep is empty, SplitAfterN splits after each UTF-8 sequence.\nThe count determines the number of subslices to return:\n  - n > 0: at most n subslices; the last subslice will be the unsplit remainder;\n  - n == 0: the result is nil (zero subslices);\n  - n < 0: all subslices.\n" ^{:tag (slice (slice byte))} [^{:tag (slice byte)} s ^{:tag (slice byte)} sep ^int n]
+  (genSplit s sep (len sep) n))
+
+
+
+
+
+
+
+
+^{:go/end 429} (go/func Split "Split slices s into all subslices separated by sep and returns a slice of\nthe subslices between those separators.\nIf sep is empty, Split splits after each UTF-8 sequence.\nIt is equivalent to SplitN with a count of -1.\n\nTo split around the first instance of a separator, see [Cut].\n" ^{:tag (slice (slice byte))} [^{:tag (slice byte)} s ^{:tag (slice byte)} sep] (genSplit s sep 0 -1))
+
+
+
+
+
+^{:go/end 437} (go/func SplitAfter "SplitAfter slices s into all subslices after each instance of sep and\nreturns a slice of those subslices.\nIf sep is empty, SplitAfter splits after each UTF-8 sequence.\nIt is equivalent to SplitAfterN with a count of -1.\n" ^{:tag (slice (slice byte))} [^{:tag (slice byte)} s ^{:tag (slice byte)} sep]
+  (genSplit s sep (len sep) -1))
+
+
+(go/var asciiSpace (lit (array 256 uint8) [\tab 1] [\newline 1] [\u000b 1] [\formfeed 1] [\return 1] [\space 1]))
+
+
+
+
+
+
+
+^{:go/end 495} (go/func Fields "Fields interprets s as a sequence of UTF-8-encoded code points.\nIt splits the slice s around each instance of one or more consecutive white space\ncharacters, as defined by [unicode.IsSpace], returning a slice of subslices of s or an\nempty slice if s contains only white space. Every element of the returned slice is\nnon-empty. Unlike [Split], leading and trailing runs of white space characters\nare discarded.\n" ^{:tag (slice (slice byte))} [^{:tag (slice byte)} s]
+  ;; First count the fields.
+  ;; This is an exact count if s is ASCII, otherwise it is an approximation.
+  (let [n 0
+      ^{:line 451} wasSpace 1
+      ;; setBits is used to track which bits are set in the bytes of s.
+      ^{:line 453} setBits (conv uint8 0)]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [r (aget s i)]
+        (set! setBits bit-or r)
+        (let [isSpace (conv int (aget asciiSpace r))]
+          (set! n + (bit-and wasSpace (bit-not isSpace)))
+          (set! wasSpace isSpace))))
+
+
+    (when (>= setBits utf8/RuneSelf)
+      ;; Some runes in the input slice are not ASCII.
+      (return (FieldsFunc s unicode/IsSpace)))
+
+
+    ;; ASCII fast path
+    (let [a (make (slice (slice byte)) n)
+        ^{:line 469} na 0
+        ^{:line 470} fieldStart 0
+        ^{:line 471} i 0]
+      ;; Skip spaces in the front of the input.
+      (while (and (< i (len s)) (!= (aget asciiSpace (aget s i)) 0))
+        (inc! i))
+
+      (set! fieldStart i)
+      (while (< i (len s))
+        (when (== (aget asciiSpace (aget s i)) 0)
+          (inc! i)
+          (continue))
+
+        (aset a na (subslice s fieldStart i i))
+        (inc! na)
+        (inc! i)
+        ;; Skip spaces in between fields.
+        (while (and (< i (len s)) (!= (aget asciiSpace (aget s i)) 0))
+          (inc! i))
+
+        (set! fieldStart i))
+
+      (when (< fieldStart (len s)) ; Last field might end at EOF.
+        (aset a na (subslice s fieldStart (len s) (len s))))
+
+      ^{:line 494} a)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 547} (go/func FieldsFunc "FieldsFunc interprets s as a sequence of UTF-8-encoded code points.\nIt splits the slice s at each run of code points c satisfying f(c) and\nreturns a slice of subslices of s. If all code points in s satisfy f(c), or\nlen(s) == 0, an empty slice is returned. Every element of the returned slice is\nnon-empty. Unlike [Split], leading and trailing runs of code points\nsatisfying f(c) are discarded.\n\nFieldsFunc makes no guarantees about the order in which it calls f(c)\nand assumes that f always returns the same value for a given c.\n" ^{:tag (slice (slice byte))} [^{:tag (slice byte)} s ^{:tag (func [rune] [bool])} f]
+  ;; A span is used to record a slice of s of the form s[start:end].
+  ;; The start index is inclusive and the end index is exclusive.
+  (let-type [span (struct
+        ^{:line 510 :tag int} start
+        ^{:line 511 :tag int} end)]
+
+    (let [spans (make (slice span) 0 32)
+
+        ;; Find the field start and end indices.
+        ;; Doing this in a separate pass (rather than slicing the string s
+        ;; and collecting the result substrings right away) is significantly
+        ;; more efficient, possibly due to cache effects.
+        ^{:line 519} start -1] ; valid span start if >= 0
+      (for [i 0] (< i (len s)) _
+        (let [(values r size) (utf8/DecodeRune (subslice s i))]
+          (if (f r)
+            (when (>= start 0)
+              (set! spans (append spans (lit span start i)))
+              (set! start -1))
+
+            (do
+              (when (< start 0)
+                (set! start i))))
+
+
+          (set! i + size)))
+
+
+      ;; Last field might end at EOF.
+      (when (>= start 0)
+        (set! spans (append spans (lit span start (len s)))))
+
+
+      ;; Create subslices from recorded field indices.
+      (let [a (make (slice (slice byte)) (len spans))]
+        (range [i span spans]
+          (aset a i (subslice s (.-start span) (.-end span) (.-end span))))
+
+
+        ^{:line 546} a))))
+
+
+
+
+^{:go/end 581} (go/func Join "Join concatenates the elements of s to create a new byte slice. The separator\nsep is placed between elements in the resulting slice.\n" ^{:tag (slice byte)} [^{:tag (slice (slice byte))} s ^{:tag (slice byte)} sep]
+  (when (== (len s) 0)
+    (return (lit (slice byte))))
+
+  (when (== (len s) 1)
+    ;; Just return a copy.
+    (return (append (conv (slice byte) nil) (spread (aget s 0)))))
+
+
+  (let [^int n (zero int)]
+    (when (> (len sep) 0)
+      (when (>= (len sep) (/ maxInt (- (len s) 1)))
+        (panic "bytes: Join output length overflow"))
+
+      (set! n + (* (len sep) (- (len s) 1))))
+
+    (range [_ v s]
+      (when (> (len v) (- maxInt n))
+        (panic "bytes: Join output length overflow"))
+
+      (set! n + (len v)))
+
+
+    (let [b (subslice (bytealg/MakeNoZero n) _ n n)
+        ^{:line 575} bp (copy b (aget s 0))]
+      (range [_ v (subslice s 1)]
+        (set! bp + (copy (subslice b bp) sep))
+        (set! bp + (copy (subslice b bp) v)))
+
+      ^{:line 580} b)))
+
+
+
+^{:go/end 586} (go/func HasPrefix "HasPrefix reports whether the byte slice s begins with prefix.\n" ^bool [^{:tag (slice byte)} s ^{:tag (slice byte)} prefix]
+  (and (>= (len s) (len prefix)) (Equal (subslice s _ (len prefix)) prefix)))
+
+
+
+^{:go/end 591} (go/func HasSuffix "HasSuffix reports whether the byte slice s ends with suffix.\n" ^bool [^{:tag (slice byte)} s ^{:tag (slice byte)} suffix]
+  (and (>= (len s) (len suffix)) (Equal (subslice s (- (len s) (len suffix))) suffix)))
+
+
+
+
+
+
+^{:go/end 611} (go/func Map "Map returns a copy of the byte slice s with all its characters modified\naccording to the mapping function. If mapping returns a negative value, the character is\ndropped from the byte slice with no replacement. The characters in s and the\noutput are interpreted as UTF-8-encoded code points.\n" ^{:tag (slice byte)} [^{:tag (func [^rune r] [rune])} mapping ^{:tag (slice byte)} s]
+  ;; In the worst case, the slice can grow when mapped, making
+  ;; things unpleasant. But it's so rare we barge in assuming it's
+  ;; fine. It could also shrink but that falls out naturally.
+  (let [b (make (slice byte) 0 (len s))]
+    (for [i 0] (< i (len s)) _
+      (let [(values r wid) (utf8/DecodeRune (subslice s i))]
+        (set! r (mapping r))
+        (when (>= r 0)
+          (set! b (utf8/AppendRune b r)))
+
+        (set! i + wid)))
+
+    ^{:line 610} b))
+
+
+;; Despite being an exported symbol,
+;; Repeat is linknamed by widely used packages.
+;; Notable members of the hall of shame include:
+;;   - gitee.com/quant1x/num
+;;
+;; Do not remove or change the type signature.
+;; See go.dev/issue/67401.
+;;
+;; Note that this comment is not part of the doc comment.
+;;
+
+
+
+
+
+
+^{:go/end 675} (go/func ^{:go/linkname "Repeat"} Repeat "Repeat returns a new byte slice consisting of count copies of b.\n\nIt panics if count is negative or if the result of (len(b) * count)\noverflows.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^int count]
+  (when (== count 0)
+    (return (lit (slice byte))))
+
+
+  ;; Since we cannot return an error on overflow,
+  ;; we should panic if the repeat will generate an overflow.
+  ;; See golang.org/issue/16237.
+  (when (< count 0)
+    (panic "bytes: negative Repeat count"))
+
+  (let [(values hi lo) (bits/Mul (conv uint (len b)) (conv uint count))]
+    (when (or (> hi 0) (> lo (conv uint maxInt)))
+      (panic "bytes: Repeat output length overflow"))
+
+    (let [n (conv int lo)] ; lo = len(b) * count
+
+      (when (== (len b) 0)
+        (return (lit (slice byte))))
+
+
+      ;; Past a certain chunk size it is counterproductive to use
+      ;; larger chunks as the source of the write, as when the source
+      ;; is too large we are basically just thrashing the CPU D-cache.
+      ;; So if the result length is larger than an empirically-found
+      ;; limit (8KB), we stop growing the source string once the limit
+      ;; is reached and keep reusing the same source string - that
+      ;; should therefore be always resident in the L1 cache - until we
+      ;; have completed the construction of the result.
+      ;; This yields significant speedups (up to +100%) in cases where
+      ;; the result length is large (roughly, over L2 cache size).
+      (let [^:const ^{:val 8192} chunkLimit (* 8 1024)
+          ^{:line 661} chunkMax n]
+        (when (> chunkMax chunkLimit)
+          (set! chunkMax (* (/ chunkLimit (len b)) (len b)))
+          (when (== chunkMax 0)
+            (set! chunkMax (len b))))
+
+
+        (let [nb (subslice (bytealg/MakeNoZero n) _ n n)
+            ^{:line 669} bp (copy nb b)]
+          (while (< bp n)
+            (let [chunk (min bp chunkMax)]
+              (set! bp + (copy (subslice nb bp) (subslice nb _ chunk)))))
+
+          ^{:line 674} nb)))))
+
+
+
+
+^{:go/end 706} (go/func ToUpper "ToUpper returns a copy of the byte slice s with all Unicode letters mapped to\ntheir upper case.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s]
+  (let [(values isASCII hasLower) (values true false)]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [c (aget s i)]
+        (when (>= c utf8/RuneSelf)
+          (set! isASCII false)
+          (break))
+
+        (set! hasLower (or hasLower ^:go/paren (and (<= \a c) (<= c \z))))))
+
+
+    (when isASCII ; optimize for ASCII-only byte slices.
+      (when (not hasLower)
+        ;; Just return a copy.
+        (return (append (conv (slice byte) "") (spread s))))
+
+      (let [b (subslice (bytealg/MakeNoZero (len s)) _ (len s) (len s))]
+        (for [i 0] (< i (len s)) (inc! i)
+          (let [c (aget s i)]
+            (when (and (<= \a c) (<= c \z))
+              (set! c - (- \a \A)))
+
+            (aset b i c)))
+
+        (return b)))
+
+    (Map unicode/ToUpper s)))
+
+
+
+
+^{:go/end 736} (go/func ToLower "ToLower returns a copy of the byte slice s with all Unicode letters mapped to\ntheir lower case.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s]
+  (let [(values isASCII hasUpper) (values true false)]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [c (aget s i)]
+        (when (>= c utf8/RuneSelf)
+          (set! isASCII false)
+          (break))
+
+        (set! hasUpper (or hasUpper ^:go/paren (and (<= \A c) (<= c \Z))))))
+
+
+    (when isASCII ; optimize for ASCII-only byte slices.
+      (when (not hasUpper)
+        (return (append (conv (slice byte) "") (spread s))))
+
+      (let [b (subslice (bytealg/MakeNoZero (len s)) _ (len s) (len s))]
+        (for [i 0] (< i (len s)) (inc! i)
+          (let [c (aget s i)]
+            (when (and (<= \A c) (<= c \Z))
+              (set! c + (- \a \A)))
+
+            (aset b i c)))
+
+        (return b)))
+
+    (Map unicode/ToLower s)))
+
+
+
+^{:go/end 739} (go/func ToTitle "ToTitle treats s as UTF-8-encoded bytes and returns a copy with all the Unicode letters mapped to their title case.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s] (Map unicode/ToTitle s))
+
+
+
+^{:go/end 745} (go/func ToUpperSpecial "ToUpperSpecial treats s as UTF-8-encoded bytes and returns a copy with all the Unicode letters mapped to their\nupper case, giving priority to the special casing rules.\n" ^{:tag (slice byte)} [^unicode/SpecialCase c ^{:tag (slice byte)} s]
+  (Map (.-ToUpper c) s))
+
+
+
+
+^{:go/end 751} (go/func ToLowerSpecial "ToLowerSpecial treats s as UTF-8-encoded bytes and returns a copy with all the Unicode letters mapped to their\nlower case, giving priority to the special casing rules.\n" ^{:tag (slice byte)} [^unicode/SpecialCase c ^{:tag (slice byte)} s]
+  (Map (.-ToLower c) s))
+
+
+
+
+^{:go/end 757} (go/func ToTitleSpecial "ToTitleSpecial treats s as UTF-8-encoded bytes and returns a copy with all the Unicode letters mapped to their\ntitle case, giving priority to the special casing rules.\n" ^{:tag (slice byte)} [^unicode/SpecialCase c ^{:tag (slice byte)} s]
+  (Map (.-ToTitle c) s))
+
+
+
+
+^{:go/end 786} (go/func ToValidUTF8 "ToValidUTF8 treats s as UTF-8-encoded bytes and returns a copy with each run of bytes\nrepresenting invalid UTF-8 replaced with the bytes in replacement, which may be empty.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (slice byte)} replacement]
+  (let [b (make (slice byte) 0 (+ (len s) (len replacement)))
+      ^{:line 763} invalid false] ; previous byte was from an invalid UTF-8 sequence
+    (for [i 0] (< i (len s)) _
+      (let [c (aget s i)]
+        (when (< c utf8/RuneSelf)
+          (inc! i)
+          (set! invalid false)
+          (set! b (append b c))
+          (continue))
+
+        (let [(values _ wid) (utf8/DecodeRune (subslice s i))]
+          (when (== wid 1)
+            (inc! i)
+            (when (not invalid)
+              (set! invalid true)
+              (set! b (append b (spread replacement))))
+
+            (continue))
+
+          (set! invalid false)
+          (set! b (append b (spread (subslice s i (+ i wid)))))
+          (set! i + wid))))
+
+    ^{:line 785} b))
+
+
+
+
+^{:go/end 811} (go/func isSeparator "isSeparator reports whether the rune could mark a word boundary.\nTODO: update when package unicode captures more of the properties.\n" ^bool [^rune r]
+  ;; ASCII alphanumerics and underscore are not separators
+  (when (<= r 0x7F)
+    (switch
+      (case [(and (<= \0 r) (<= r \9))]
+        (return false))
+      (case [(and (<= \a r) (<= r \z))]
+        (return false))
+      (case [(and (<= \A r) (<= r \Z))]
+        (return false))
+      (case [(== r \_)]
+        (return false)))
+
+    (return true))
+
+  ;; Letters and digits are not separators
+  (when (or (unicode/IsLetter r) (unicode/IsDigit r))
+    (return false))
+
+  ;; Otherwise, all we can do for now is treat spaces as separators.
+  (unicode/IsSpace r))
+
+
+
+
+
+
+
+^{:go/end 833} (go/func Title "Title treats s as UTF-8-encoded bytes and returns a copy with all Unicode letters that begin\nwords mapped to their title case.\n\nDeprecated: The rule Title uses for word boundaries does not handle Unicode\npunctuation properly. Use golang.org/x/text/cases instead.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s]
+  ;; Use a closure here to remember state.
+  ;; Hackish but effective. Depends on Map scanning in order and calling
+  ;; the closure once per rune.
+  (let [prev \space]
+    (Map
+      ^{:go/end 831} (fn ^rune [^rune r]
+        (when (isSeparator prev)
+          (set! prev r)
+          (return (unicode/ToTitle r)))
+
+        (set! prev r)
+        ^{:line 830} r)
+
+      ^{:line 832} s)))
+
+
+
+
+^{:go/end 843} (go/func TrimLeftFunc "TrimLeftFunc treats s as UTF-8-encoded bytes and returns a subslice of s by slicing off\nall leading UTF-8-encoded code points c that satisfy f(c).\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (func [^rune r] [bool])} f]
+  (let [i (indexFunc s f false)]
+    (when (== i -1)
+      (return nil))
+
+    (subslice s i)))
+
+
+
+
+^{:go/end 856} (go/func TrimRightFunc "TrimRightFunc returns a subslice of s by slicing off all trailing\nUTF-8-encoded code points c that satisfy f(c).\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (func [^rune r] [bool])} f]
+  (let [i (lastIndexFunc s f false)]
+    (if (and (>= i 0) (>= (aget s i) utf8/RuneSelf))
+      (let [(values _ wid) (utf8/DecodeRune (subslice s i))]
+        (set! i + wid))
+
+      (inc! i))
+
+    (subslice s 0 i)))
+
+
+
+
+^{:go/end 862} (go/func TrimFunc "TrimFunc returns a subslice of s by slicing off all leading and trailing\nUTF-8-encoded code points c that satisfy f(c).\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (func [^rune r] [bool])} f]
+  (TrimRightFunc (TrimLeftFunc s f) f))
+
+
+
+
+^{:go/end 871} (go/func TrimPrefix "TrimPrefix returns s without the provided leading prefix string.\nIf s doesn't start with prefix, s is returned unchanged.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (slice byte)} prefix]
+  (when (HasPrefix s prefix)
+    (return (subslice s (len prefix))))
+
+  ^{:line 870} s)
+
+
+
+
+^{:go/end 880} (go/func TrimSuffix "TrimSuffix returns s without the provided trailing suffix string.\nIf s doesn't end with suffix, s is returned unchanged.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (slice byte)} suffix]
+  (when (HasSuffix s suffix)
+    (return (subslice s _ (- (len s) (len suffix)))))
+
+  ^{:line 879} s)
+
+
+
+
+
+^{:go/end 887} (go/func IndexFunc "IndexFunc interprets s as a sequence of UTF-8-encoded code points.\nIt returns the byte index in s of the first Unicode\ncode point satisfying f(c), or -1 if none do.\n" ^int [^{:tag (slice byte)} s ^{:tag (func [^rune r] [bool])} f]
+  (indexFunc s f true))
+
+
+
+
+
+^{:go/end 894} (go/func LastIndexFunc "LastIndexFunc interprets s as a sequence of UTF-8-encoded code points.\nIt returns the byte index in s of the last Unicode\ncode point satisfying f(c), or -1 if none do.\n" ^int [^{:tag (slice byte)} s ^{:tag (func [^rune r] [bool])} f]
+  (lastIndexFunc s f true))
+
+
+
+
+
+^{:go/end 909} (go/func indexFunc "indexFunc is the same as IndexFunc except that if\ntruth==false, the sense of the predicate function is\ninverted.\n" ^int [^{:tag (slice byte)} s ^{:tag (func [^rune r] [bool])} f ^bool truth]
+  ^{:go/breaks [[3 908]]} (let [start 0]
+    (while (< start (len s))
+      (let [(values r wid) (utf8/DecodeRune (subslice s start))]
+        (when (== (f r) truth)
+          (return start))
+
+        (set! start + wid)))
+
+    -1))
+
+
+
+
+
+^{:go/breaks [[5 925]] :go/end 926} (go/func lastIndexFunc "lastIndexFunc is the same as LastIndexFunc except that if\ntruth==false, the sense of the predicate function is\ninverted.\n" ^int [^{:tag (slice byte)} s ^{:tag (func [^rune r] [bool])} f ^bool truth]
+  (for [i (len s)] (> i 0) _
+    (let [(values r size) (values (conv rune (aget s (- i 1))) 1)]
+      (when (>= r utf8/RuneSelf)
+        (set! (values r size) (utf8/DecodeLastRune (subslice s 0 i))))
+
+      (set! i - size)
+      (when (== (f r) truth)
+        (return i))))
+
+
+  -1)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type asciiSet "asciiSet is a 256-byte lookup table for fast ASCII character membership testing.\nEach element corresponds to an ASCII character value, with true indicating the\ncharacter is in the set. Using bool instead of byte allows the compiler to\neliminate the comparison instruction, as bool values are guaranteed to be 0 or 1.\n\nThe full 256-element table is used rather than a 128-element table to avoid\nadditional operations in the lookup path. Alternative approaches were tested:\n  - [128]bool with explicit bounds check (if c >= 128): introduces branches\n    that cause pipeline stalls, resulting in ~70% slower performance\n  - [128]bool with masking (c&0x7f): eliminates bounds checks but the AND\n    operation still costs ~10% performance compared to direct indexing\n\nThe 256-element array allows direct indexing with no bounds checks, no branches,\nand no masking operations, providing optimal performance. The additional 128 bytes\nof memory is a worthwhile tradeoff for the simpler, faster code.\n" (array 256 bool))
+
+
+
+^{:go/end 956} (go/func makeASCIISet "makeASCIISet creates a set of ASCII characters and reports whether all\ncharacters in chars are ASCII.\n" [^string chars] :results [^asciiSet as ^bool ok]
+  (for [i 0] (< i (len chars)) (inc! i)
+    (let [c (aget chars i)]
+      (when (>= c utf8/RuneSelf)
+        (return as false))
+
+      (aset as c true)))
+
+  (return as true))
+
+
+
+^{:go/end 961} (go/method contains "contains reports whether c is inside the set.\n" ^bool [^{:tag (* asciiSet)} as ^byte c]
+  (aget as c))
+
+
+
+
+
+
+
+
+^{:go/end 971} (go/func shouldUseASCIISet "shouldUseASCIISet returns whether to use the lookup table optimization.\nThe threshold of 8 bytes balances initialization cost against per-byte\nsearch cost, performing well across all charset sizes.\n\nMore complex heuristics (e.g., different thresholds per charset size)\nadd branching overhead that eats away any theoretical improvements.\n" ^bool [^int bufLen]
+  (> bufLen 8))
+
+
+
+
+
+^{:go/breaks [[5 982]] :go/end 983} (go/func containsRune "containsRune is a simplified version of strings.ContainsRune\nto avoid importing the strings package.\nWe avoid bytes.ContainsRune to avoid allocating a temporary copy of s.\n" ^bool [^string s ^rune r]
+  (range [_ c s]
+    (when (== c r)
+      (return true)))
+
+
+  false)
+
+
+
+
+^{:go/end 1002} (go/func Trim "Trim returns a subslice of s by slicing off all leading and\ntrailing UTF-8-encoded code points contained in cutset.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^string cutset]
+  (when (== (len s) 0)
+    ;; This is what we've historically done.
+    (return nil))
+
+  (when (== cutset "")
+    (return s))
+
+  (when (and (== (len cutset) 1) (< (aget cutset 0) utf8/RuneSelf))
+    (return (trimLeftByte (trimRightByte s (aget cutset 0)) (aget cutset 0))))
+
+  (when [(values as ok) (makeASCIISet cutset)] ok
+    (return (trimLeftASCII (trimRightASCII s (addr as)) (addr as))))
+
+  (trimLeftUnicode (trimRightUnicode s cutset) cutset))
+
+
+
+
+^{:go/end 1021} (go/func TrimLeft "TrimLeft returns a subslice of s by slicing off all leading\nUTF-8-encoded code points contained in cutset.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^string cutset]
+  (when (== (len s) 0)
+    ;; This is what we've historically done.
+    (return nil))
+
+  (when (== cutset "")
+    (return s))
+
+  (when (and (== (len cutset) 1) (< (aget cutset 0) utf8/RuneSelf))
+    (return (trimLeftByte s (aget cutset 0))))
+
+  (when [(values as ok) (makeASCIISet cutset)] ok
+    (return (trimLeftASCII s (addr as))))
+
+  (trimLeftUnicode s cutset))
+
+
+^{:go/end 1032} (go/func trimLeftByte ^{:tag (slice byte)} [^{:tag (slice byte)} s ^byte c]
+  (while (and (> (len s) 0) (== (aget s 0) c))
+    (set! s (subslice s 1)))
+
+  (when (== (len s) 0)
+    ;; This is what we've historically done.
+    (return nil))
+
+  ^{:line 1031} s)
+
+
+^{:go/end 1046} (go/func trimLeftASCII ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (* asciiSet)} as]
+  (while (> (len s) 0)
+    (when (not (.contains as (aget s 0)))
+      (break))
+
+    (set! s (subslice s 1)))
+
+  (when (== (len s) 0)
+    ;; This is what we've historically done.
+    (return nil))
+
+  ^{:line 1045} s)
+
+
+^{:go/end 1061} (go/func trimLeftUnicode ^{:tag (slice byte)} [^{:tag (slice byte)} s ^string cutset]
+  (while (> (len s) 0)
+    (let [(values r n) (utf8/DecodeRune s)]
+      (when (not (containsRune cutset r))
+        (break))
+
+      (set! s (subslice s n))))
+
+  (when (== (len s) 0)
+    ;; This is what we've historically done.
+    (return nil))
+
+  ^{:line 1060} s)
+
+
+
+
+^{:go/end 1076} (go/func TrimRight "TrimRight returns a subslice of s by slicing off all trailing\nUTF-8-encoded code points that are contained in cutset.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^string cutset]
+  (when (or (== (len s) 0) (== cutset ""))
+    (return s))
+
+  (when (and (== (len cutset) 1) (< (aget cutset 0) utf8/RuneSelf))
+    (return (trimRightByte s (aget cutset 0))))
+
+  (when [(values as ok) (makeASCIISet cutset)] ok
+    (return (trimRightASCII s (addr as))))
+
+  (trimRightUnicode s cutset))
+
+
+^{:go/end 1083} (go/func trimRightByte ^{:tag (slice byte)} [^{:tag (slice byte)} s ^byte c]
+  (while (and (> (len s) 0) (== (aget s (- (len s) 1)) c))
+    (set! s (subslice s _ (- (len s) 1))))
+
+  ^{:line 1082} s)
+
+
+^{:go/end 1093} (go/func trimRightASCII ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (* asciiSet)} as]
+  (while (> (len s) 0)
+    (when (not (.contains as (aget s (- (len s) 1))))
+      (break))
+
+    (set! s (subslice s _ (- (len s) 1))))
+
+  ^{:line 1092} s)
+
+
+^{:go/end 1107} (go/func trimRightUnicode ^{:tag (slice byte)} [^{:tag (slice byte)} s ^string cutset]
+  (while (> (len s) 0)
+    (let [(values r n) (values (conv rune (aget s (- (len s) 1))) 1)]
+      (when (>= r utf8/RuneSelf)
+        (set! (values r n) (utf8/DecodeLastRune s)))
+
+      (when (not (containsRune cutset r))
+        (break))
+
+      (set! s (subslice s _ (- (len s) n)))))
+
+  ^{:line 1106} s)
+
+
+
+
+^{:go/breaks [[5 1139]] :go/end 1140} (go/func TrimSpace "TrimSpace returns a subslice of s by slicing off all leading and\ntrailing white space, as defined by Unicode.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s]
+  ;; Fast path for ASCII: look for the first ASCII non-space byte.
+  (range [lo c s]
+    (when (>= c utf8/RuneSelf)
+      ;; If we run into a non-ASCII byte, fall back to the
+      ;; slower unicode-aware method on the remaining bytes.
+      (return (TrimFunc (subslice s lo) unicode/IsSpace)))
+
+    (when (!= (aget asciiSpace c) 0)
+      (continue))
+
+    (set! s (subslice s lo))
+    ;; Now look for the first ASCII non-space byte from the end.
+    (for [hi (- (len s) 1)] (>= hi 0) (dec! hi)
+      (let [c (aget s hi)]
+        (when (>= c utf8/RuneSelf)
+          (return (TrimFunc (subslice s _ (+ hi 1)) unicode/IsSpace)))
+
+        (when (== (aget asciiSpace c) 0)
+          ;; At this point, s[:hi+1] starts and ends with ASCII
+          ;; non-space bytes, so we're done. Non-ASCII cases have
+          ;; already been handled above.
+          (return (subslice s _ (+ hi 1)))))))
+
+
+
+  ;; Special case to preserve previous TrimLeftFunc behavior,
+  ;; returning nil instead of empty slice if all spaces.
+  nil)
+
+
+
+
+^{:go/end 1154} (go/func Runes "Runes interprets s as a sequence of UTF-8-encoded code points.\nIt returns a slice of runes (Unicode code points) equivalent to s.\n" ^{:tag (slice rune)} [^{:tag (slice byte)} s]
+  (let [t (make (slice rune) (utf8/RuneCount s))
+      ^{:line 1146} i 0]
+    (while (> (len s) 0)
+      (let [(values r l) (utf8/DecodeRune s)]
+        (aset t i r)
+        (inc! i)
+        (set! s (subslice s l))))
+
+    ^{:line 1153} t))
+
+
+
+
+
+
+
+
+^{:go/end 1199} (go/func Replace "Replace returns a copy of the slice s with the first n\nnon-overlapping instances of old replaced by new.\nIf old is empty, it matches at the beginning of the slice\nand after each UTF-8 sequence, yielding up to k+1 replacements\nfor a k-rune slice.\nIf n < 0, there is no limit on the number of replacements.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (slice byte)} old ^{:tag (slice byte)} new ^int n]
+  (let [m 0]
+    (when (!= n 0)
+      ;; Compute number of replacements.
+      (set! m (Count s old)))
+
+    (when (== m 0)
+      ;; Just return a copy.
+      (return (append (conv (slice byte) nil) (spread s))))
+
+    (when (or (< n 0) (< m n))
+      (set! n m))
+
+
+    ;; Apply replacements to buffer.
+    (let [t (make (slice byte) (+ (len s) (* n (- (len new) (len old)))))
+        ^{:line 1178} w 0
+        ^{:line 1179} start 0]
+      (if (> (len old) 0)
+        (range [n]
+          (let [j (+ start (Index (subslice s start) old))]
+            (set! w + (copy (subslice t w) (subslice s start j)))
+            (set! w + (copy (subslice t w) new))
+            (set! start (+ j (len old)))))
+
+        (do ; len(old) == 0
+          (set! w + (copy (subslice t w) new))
+          (range [(- n 1)]
+            (let [(values _ wid) (utf8/DecodeRune (subslice s start))
+                ^{:line 1191} j (+ start wid)]
+              (set! w + (copy (subslice t w) (subslice s start j)))
+              (set! w + (copy (subslice t w) new))
+              (set! start j)))))
+
+
+      (set! w + (copy (subslice t w) (subslice s start)))
+      (subslice t 0 w))))
+
+
+
+
+
+
+
+^{:go/end 1208} (go/func ReplaceAll "ReplaceAll returns a copy of the slice s with all\nnon-overlapping instances of old replaced by new.\nIf old is empty, it matches at the beginning of the slice\nand after each UTF-8 sequence, yielding up to k+1 replacements\nfor a k-rune slice.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^{:tag (slice byte)} old ^{:tag (slice byte)} new]
+  (Replace s old new -1))
+
+
+
+
+
+^{:go/end 1285} (go/func EqualFold "EqualFold reports whether s and t, interpreted as UTF-8 strings,\nare equal under simple Unicode case-folding, which is a more general\nform of case-insensitivity.\n" ^bool [^{:tag (slice byte)} s ^{:tag (slice byte)} t]
+  ;; ASCII fast path
+  (let [i 0]
+    (for [n (min (len s) (len t))] (< i n) (inc! i)
+      (let [sr (aget s i)
+          ^{:line 1218} tr (aget t i)]
+        (when (>= (bit-or sr tr) utf8/RuneSelf)
+          (goto :hasUnicode))
+
+
+        ;; Easy case.
+        (when (== tr sr)
+          (continue))
+
+
+        ;; Make sr < tr to simplify what follows.
+        (when (< tr sr)
+          (set! (values tr sr) (values sr tr)))
+
+        ;; ASCII only, sr/tr must be upper/lower case
+        (when (and (<= \A sr) (<= sr \Z) (== tr (- (+ sr \a) \A)))
+          (continue))
+
+        (return false)))
+
+    ;; Check if we've exhausted both strings.
+    (return (== (len s) (len t)))
+
+    (label :hasUnicode
+      (set! s (subslice s i)))
+    (set! t (subslice t i))
+    (while (and (!= (len s) 0) (!= (len t) 0))
+      ;; Extract first rune from each.
+      (let [(values sr size) (utf8/DecodeRune s)]
+        (set! s (subslice s size))
+        (let [(values tr ^:assign size) (utf8/DecodeRune t)]
+          (set! t (subslice t size))
+
+          ;; If they match, keep going; if not, return false.
+
+          ;; Easy case.
+          (when (== tr sr)
+            (continue))
+
+
+          ;; Make sr < tr to simplify what follows.
+          (when (< tr sr)
+            (set! (values tr sr) (values sr tr)))
+
+          ;; Fast check for ASCII.
+          (when (< tr utf8/RuneSelf)
+            ;; ASCII only, sr/tr must be upper/lower case
+            (when (and (<= \A sr) (<= sr \Z) (== tr (- (+ sr \a) \A)))
+              (continue))
+
+            (return false))
+
+
+          ;; General case. SimpleFold(x) returns the next equivalent rune > x
+          ;; or wraps around to smaller values.
+          (let [r (unicode/SimpleFold sr)]
+            (while (and (!= r sr) (< r tr))
+              (set! r (unicode/SimpleFold r)))
+
+            (when (== r tr)
+              (continue))
+
+            (return false)))))
+
+
+    ;; One string is empty. Are both?
+    (== (len s) (len t))))
+
+
+
+^{:go/end 1373} (go/func Index "Index returns the index of the first instance of sep in s, or -1 if sep is not present in s.\n" ^int [^{:tag (slice byte)} s ^{:tag (slice byte)} sep]
+  (let [n (len sep)]
+    (switch
+      (case [(== n 0)]
+        (return 0))
+      (case [(== n 1)]
+        (return (IndexByte s (aget sep 0))))
+      (case [(== n (len s))]
+        (when (Equal sep s)
+          (return 0))
+
+        (return -1))
+      (case [(> n (len s))]
+        (return -1))
+      (case [(<= n bytealg/MaxLen)]
+        ;; Use brute force when s and sep both are small
+        (when (<= (len s) bytealg/MaxBruteForce)
+          (return (bytealg/Index s sep)))
+
+        (let [c0 (aget sep 0)
+            ^{:line 1308} c1 (aget sep 1)
+            ^{:line 1309} i 0
+            ^{:line 1310} t (+ (- (len s) n) 1)
+            ^{:line 1311} fails 0]
+          (while (< i t)
+            (when (!= (aget s i) c0)
+              ;; IndexByte is faster than bytealg.Index, so use it as long as
+              ;; we're not getting lots of false positives.
+              (let [o (IndexByte (subslice s (+ i 1) t) c0)]
+                (when (< o 0)
+                  (return -1))
+
+                (set! i + (+ o 1))))
+
+            (when (and (== (aget s (+ i 1)) c1) (Equal (subslice s i (+ i n)) sep))
+              (return i))
+
+            (inc! fails)
+            (inc! i)
+            ;; Switch to bytealg.Index when IndexByte produces too many false positives.
+            (when (> fails (bytealg/Cutover i))
+              (let [r (bytealg/Index (subslice s i) sep)]
+                (when (>= r 0)
+                  (return (+ r i)))
+
+                (return -1))))
+
+
+          (return -1))))
+
+    ^{:go/breaks [[3 1372]]} (let [c0 (aget sep 0)
+        ^{:line 1339} c1 (aget sep 1)
+        ^{:line 1340} i 0
+        ^{:line 1341} fails 0
+        ^{:line 1342} t (+ (- (len s) n) 1)]
+      (while (< i t)
+        (when (!= (aget s i) c0)
+          (let [o (IndexByte (subslice s (+ i 1) t) c0)]
+            (when (< o 0)
+              (break))
+
+            (set! i + (+ o 1))))
+
+        (when (and (== (aget s (+ i 1)) c1) (Equal (subslice s i (+ i n)) sep))
+          (return i))
+
+        (inc! i)
+        (inc! fails)
+        (when (and (>= fails (+ 4 (>> i 4))) (< i t))
+          ;; Give up on IndexByte, it isn't skipping ahead
+          ;; far enough to be better than Rabin-Karp.
+          ;; Experiments (using IndexPeriodic) suggest
+          ;; the cutover is about 16 byte skips.
+          ;; TODO: if large prefixes of sep are matching
+          ;; we should cutover at even larger average skips,
+          ;; because Equal becomes that much more expensive.
+          ;; This code does not take that effect into account.
+          (let [j (^{:inst [(slice byte)]} bytealg/IndexRabinKarp (subslice s i) sep)]
+            (when (< j 0)
+              (return -1))
+
+            (return (+ i j)))))
+
+
+      -1)))
+
+
+
+
+
+
+
+
+^{:go/end 1386} (go/func Cut "Cut slices s around the first instance of sep,\nreturning the text before and after sep.\nThe found result reports whether sep appears in s.\nIf sep does not appear in s, cut returns s, nil, false.\n\nCut returns slices of the original slice s, not copies.\n" [^{:tag (slice byte)} s ^{:tag (slice byte)} sep] :results [^{:tag (slice byte)} before ^{:tag (slice byte)} after ^bool found]
+  (when [i (Index s sep)] (>= i 0)
+    (return (subslice s _ i) (subslice s (+ i (len sep))) true))
+
+  (return s nil false))
+
+
+
+
+
+^{:go/end 1396} (go/func Clone "Clone returns a copy of b[:len(b)].\nThe result may have additional unused capacity.\nClone(nil) returns nil.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b]
+  (when (== b nil)
+    (return nil))
+
+  (append (lit (slice byte)) (spread b)))
+
+
+
+
+
+
+
+
+^{:go/end 1409} (go/func CutPrefix "CutPrefix returns s without the provided leading prefix byte slice\nand reports whether it found the prefix.\nIf s doesn't start with prefix, CutPrefix returns s, false.\nIf prefix is the empty byte slice, CutPrefix returns s, true.\n\nCutPrefix returns slices of the original slice s, not copies.\n" [^{:tag (slice byte)} s ^{:tag (slice byte)} prefix] :results [^{:tag (slice byte)} after ^bool found]
+  (when (not (HasPrefix s prefix))
+    (return s false))
+
+  (return (subslice s (len prefix)) true))
+
+
+
+
+
+
+
+
+^{:go/end 1422} (go/func CutSuffix "CutSuffix returns s without the provided ending suffix byte slice\nand reports whether it found the suffix.\nIf s doesn't end with suffix, CutSuffix returns s, false.\nIf suffix is the empty byte slice, CutSuffix returns s, true.\n\nCutSuffix returns slices of the original slice s, not copies.\n" [^{:tag (slice byte)} s ^{:tag (slice byte)} suffix] :results [^{:tag (slice byte)} before ^bool found]
+  (when (not (HasSuffix s suffix))
+    (return s false))
+
+  (return (subslice s _ (- (len s) (len suffix))) true))
+
+
+
+
+
+
+
+
+^{:go/end 1435} (go/func CutLast "CutLast slices s around the last instance of sep,\nreturning the text before and after sep.\nThe found result reports whether sep appears in s.\nIf sep does not appear in s, CutLast returns s, nil, false.\n\nCutLast returns slices of the original slice s, not copies.\n" [^{:tag (slice byte)} s ^{:tag (slice byte)} sep] :results [^{:tag (slice byte)} before ^{:tag (slice byte)} after ^bool found]
+  (when [i (LastIndex s sep)] (>= i 0)
+    (return (subslice s _ i) (subslice s (+ i (len sep))) true))
+
+  (return s nil false))

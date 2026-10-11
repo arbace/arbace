@@ -1,0 +1,657 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Type conversions for Scan.
+
+(in-ns 'go.database.sql) (go/file "convert.go" :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [driver "database/sql/driver"]
+    ^{:line 12} [internal "database/sql/internal"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [reflect "reflect"]
+    ^{:line 16} [strconv "strconv"]
+    ^{:line 17} [time "time"]
+    ^{:line 18} [unicode "unicode"]
+    ^{:line 19} [utf8 "unicode/utf8"]
+    ^{:line 20} [_ "unsafe"] ; for linkname
+    ^{:line 21} [uuid "uuid"]])
+
+
+(go/var errNilPtr (errors/New "destination pointer is nil")) ; embedded in descriptive error
+
+^{:go/end 31} (go/func describeNamedValue ^string [^{:tag (* driver/NamedValue)} nv]
+  (when (== (len (.-Name nv)) 0)
+    (return (fmt/Sprintf "$%d" (.-Ordinal nv))))
+
+  (fmt/Sprintf "with name %q" (.-Name nv)))
+
+
+^{:go/end 42} (go/func validateNamedValueName ^error [^string name]
+  (when (== (len name) 0)
+    (return nil))
+
+  (let [(values r _) (utf8/DecodeRuneInString name)]
+    (when (unicode/IsLetter r)
+      (return nil))
+
+    (fmt/Errorf "name %q does not begin with a letter" name)))
+
+
+
+
+
+(go/type ccChecker "ccChecker wraps the driver.ColumnConverter and allows it to be used\nas if it were a NamedValueChecker. If the driver ColumnConverter\nis not present then the NamedValueChecker will return driver.ErrSkip.\n" (struct
+    ^{:line 48 :tag driver/ColumnConverter} cci
+    ^{:line 49 :tag int} want))
+
+
+^{:go/end 95} (go/method CheckNamedValue ^error [^ccChecker c ^{:tag (* driver/NamedValue)} nv]
+  (when (== (.-cci c) nil)
+    (return driver/ErrSkip))
+
+  ;; The column converter shouldn't be called on any index
+  ;; it isn't expecting. The final error will be thrown
+  ;; in the argument converter loop.
+  (let [index (- (.-Ordinal nv) 1)]
+    (when (and (>= (.-want c) 0) (<= (.-want c) index))
+      (return nil))
+
+
+    ;; First, see if the value itself knows how to convert
+    ;; itself to a driver type. For example, a NullString
+    ;; struct changing into a string or nil.
+    (when [(values vr ok) (assert driver/Valuer (.-Value nv))] ok
+      (let [(values sv err) (callValuerValue vr)]
+        (when (!= err nil)
+          (return err))
+
+        (when (not (driver/IsValue sv))
+          (return (fmt/Errorf "non-subset type %T returned from Value" sv)))
+
+        (set! (.-Value nv) sv)))
+
+
+    ;; Second, ask the column to sanity check itself. For
+    ;; example, drivers might use this to make sure that
+    ;; an int64 values being inserted into a 16-bit
+    ;; integer field is in range (before getting
+    ;; truncated), or that a nil can't go into a NOT NULL
+    ;; column before going across the network to get the
+    ;; same error.
+    ^{:go/breaks [[5 94]]} (let [^error err (zero error)
+        ^{:line 86} arg (.-Value nv)]
+      (set! (values (.-Value nv) err) (.ConvertValue (.ColumnConverter (.-cci c) index) arg))
+      (when (!= err nil)
+        (return err))
+
+      (when (not (driver/IsValue (.-Value nv)))
+        (return (fmt/Errorf "driver ColumnConverter error converted %T to unsupported type %T" arg (.-Value nv))))
+
+      nil)))
+
+
+
+
+
+^{:go/end 103} (go/func defaultCheckNamedValue "defaultCheckNamedValue wraps the default ColumnConverter to have the same\nfunction signature as the CheckNamedValue in the driver.NamedValueChecker\ninterface.\n" [^{:tag (* driver/NamedValue)} nv] :results [^error err]
+  (set! (values (.-Value nv) err) (.ConvertValue driver/DefaultParameterConverter (.-Value nv)))
+  ^{:line 102} err)
+
+
+
+
+
+
+
+
+^{:go/end 209} (go/func driverArgsConnLocked "driverArgsConnLocked converts arguments from callers of Stmt.Exec and\nStmt.Query into driver Values.\n\nThe statement ds may be nil, if no statement is available.\n\nci must be locked.\n" [^driver/Conn ci ^{:tag (* driverStmt)} ds ^{:tag (slice any)} args] :results [(slice driver/NamedValue) error]
+  (let [nvargs (make (slice driver/NamedValue) (len args))
+
+      ;; -1 means the driver doesn't know how to count the number of
+      ;; placeholders, so we won't sanity check input here and instead let the
+      ;; driver deal with errors.
+      ^{:line 117} want -1
+
+      ^{:line 119 :tag driver/Stmt} si (zero driver/Stmt)
+      ^{:line 120 :tag ccChecker} cc (zero ccChecker)]
+    (when (!= ds nil)
+      (set! si (.-si ds))
+      (set! want (.NumInput (.-si ds)))
+      (set! (.-want cc) want))
+
+
+    ;; Check all types of interfaces from the start.
+    ;; Drivers may opt to use the NamedValueChecker for special
+    ;; argument types, then return driver.ErrSkip to pass it along
+    ;; to the column converter.
+    (let [(values nvc ok) (assert driver/NamedValueChecker si)]
+      (when (not ok)
+        (set! (values nvc _) (assert driver/NamedValueChecker ci)))
+
+      (let [(values cci ^:assign ok) (assert driver/ColumnConverter si)]
+        (when ok
+          (set! (.-cci cc) cci))
+
+
+        ;; Loop through all the arguments, checking each one.
+        ;; If no error is returned simply increment the index
+        ;; and continue. However, if driver.ErrRemoveArgument
+        ;; is returned the argument is not included in the query
+        ;; argument list.
+        (let [^error err (zero error)
+            ^{:line 146 :tag int} n (zero int)]
+          (range [_ arg args]
+            (let [nv (addr (aget nvargs n))]
+              (when [(values np ok) (assert NamedArg arg)] ok
+                (when [(set! err (validateNamedValueName (.-Name np)))] (!= err nil)
+                  (return nil err))
+
+                (set! arg (.-Value np))
+                (set! (.-Name nv) (.-Name np)))
+
+              (set! (.-Ordinal nv) (+ n 1))
+              (set! (.-Value nv) arg)
+
+              ;; Checking sequence has four routes:
+              ;; A: 1. Default
+              ;; B: 1. NamedValueChecker 2. Column Converter 3. Default
+              ;; C: 1. NamedValueChecker 3. Default
+              ;; D: 1. Column Converter 2. Default
+              ;;
+              ;; The only time a Column Converter is called is first
+              ;; or after NamedValueConverter. If first it is handled before
+              ;; the nextCheck label. Thus for repeats tries only when the
+              ;; NamedValueConverter is selected should the Column Converter
+              ;; be used in the retry.
+              (let [checker defaultCheckNamedValue
+                  ^{:line 171} nextCC false]
+                (switch
+                  (case [(!= nvc nil)]
+                    (set! nextCC (!= cci nil))
+                    (set! checker (.-CheckNamedValue nvc)))
+                  (case [(!= cci nil)]
+                    (set! checker (.-CheckNamedValue cc))))
+
+
+                (label :nextCheck
+                  (set! err (checker nv)))
+                (switch err
+                  (case [nil]
+                    (inc! n)
+                    (continue))
+                  (case [driver/ErrRemoveArgument]
+                    (set! nvargs (subslice nvargs _ (- (len nvargs) 1)))
+                    (continue))
+                  (case [driver/ErrSkip]
+                    (if nextCC (do
+                        (set! nextCC false)
+                        (set! checker (.-CheckNamedValue cc)))
+
+                      (set! checker defaultCheckNamedValue))
+
+                    (goto :nextCheck))
+                  (default
+                    (return nil (fmt/Errorf "sql: converting argument %s type: %w" (describeNamedValue nv) err)))))))
+
+
+
+          ;; Check the length of arguments after conversion to allow for omitted
+          ;; arguments.
+          (when (and (!= want -1) (!= (len nvargs) want))
+            (return nil (fmt/Errorf "sql: expected %d arguments, got %d" want (len nvargs))))
+
+
+          (return nvargs nil))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 225} (go/func ^{:go/linkname "convertAssign"} convertAssign "convertAssign is the same as convertAssignRows, but without the optional\nrows argument.\n\nconvertAssign should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - ariga.io/entcache\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^error [^any dest ^any src]
+  (convertAssignRows dest src nil))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 240} (go/func ConvertAssign "ConvertAssign copies the value in src to the value pointed at by dest.\nSee the documentation on [Rows.Scan] for details on conversions.\ndest must be a pointer or must implement [Scanner].\n\nImplementations of [driver.RowsColumnScanner] should pass through\ntheir [driver.ScanContext] parameter.\nIn other cases, pass driver.ScanContext{} as the context.\n\nConvertAssign is intended for use by driver implementations.\nMost users should not need to use it directly.\n" ^error [^driver/ScanContext scanCtx ^any dest ^driver/Value src]
+  (let [(values rows _) (assert (* Rows) (internal/ScanContextValue (conv internal/ScanContext scanCtx)))]
+    (convertAssignRows dest src rows)))
+
+
+
+
+
+
+
+^{:go/end 548} (go/func convertAssignRows "convertAssignRows copies to dest the value in src, converting it if possible.\nAn error is returned if the copy would result in loss of information.\ndest should be a pointer type. If rows is passed in, the rows will\nbe used as the parent for any cursor values converted from a\ndriver.Rows to a *Rows.\n" ^error [^any dest ^any src ^{:tag (* Rows)} rows]
+  ;; Common cases, without reflect.
+  (type-switch [s src]
+    (case [string]
+      (type-switch [d dest]
+        (case [(* string)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d s)
+          (return nil))
+        (case [(* (slice byte))]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d (conv (slice byte) s))
+          (return nil))
+        (case [(* RawBytes)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d (.setrawbuf rows (append (.rawbuf rows) (spread s))))
+          (return nil))
+        (case [(* uuid/UUID)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (let [(values u err) (uuid/Parse s)]
+            (when (!= err nil)
+              (return (fmt/Errorf "converting driver.Value type string (%q) to a UUID: %v" s err)))
+
+            (set! @d u)
+            (return nil)))))
+
+    (case [(slice byte)]
+      (type-switch [d dest]
+        (case [(* string)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d (conv string s))
+          (return nil))
+        (case [(* any)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d (bytes/Clone s))
+          (return nil))
+        (case [(* (slice byte))]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d (bytes/Clone s))
+          (return nil))
+        (case [(* RawBytes)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d s)
+          (return nil))
+        (case [(* uuid/UUID)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (when (== (len s) (len @d))
+            (copy (subslice @d) s)
+            (return nil))
+
+          (let [^uuid/UUID u (zero uuid/UUID)
+              ^{:line 316} err (.UnmarshalText u s)]
+            (when (!= err nil)
+              (return (fmt/Errorf "converting driver.Value type []byte (%q) to a UUID: %v" s err)))
+
+            (set! @d u)
+            (return nil)))))
+
+    (case [time/Time]
+      (type-switch [d dest]
+        (case [(* time/Time)]
+          (set! @d s)
+          (return nil))
+        (case [(* string)]
+          (set! @d (.Format s time/RFC3339Nano))
+          (return nil))
+        (case [(* (slice byte))]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d (.AppendFormat s (make (slice byte) 0 (len time/RFC3339Nano)) time/RFC3339Nano))
+          (return nil))
+        (case [(* RawBytes)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d (.setrawbuf rows (.AppendFormat s (.rawbuf rows) time/RFC3339Nano)))
+          (return nil))))
+
+    (case [decimalDecompose]
+      (type-switch [d dest]
+        (case [decimalCompose]
+          (return (.Compose d (.Decompose s nil))))))
+
+    (case [nil]
+      (type-switch [d dest]
+        (case [(* any)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d nil)
+          (return nil))
+        (case [(* (slice byte))]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d nil)
+          (return nil))
+        (case [(* RawBytes)]
+          (when (== d nil)
+            (return errNilPtr))
+
+          (set! @d nil)
+          (return nil))))
+
+    ;; The driver is returning a cursor the client may iterate over.
+    (case [driver/Rows]
+      (let [(values d ok) (assert (* Rows) dest)]
+        (when ok
+          (when (== d nil)
+            (return errNilPtr))
+
+          (when (== rows nil)
+            (return (errors/New "invalid context to convert cursor rows, missing parent *Rows")))
+
+          ;; This is hazardous and not really correct: If the user provides us
+          ;; with the same *Rows for each Scan (which they very likely will),
+          ;; then this overwrites the previously-used Rows, including its mutexes.
+          ;; The chained row cancel function below will also repeatedly reference
+          ;; the same *Rows.
+          (set! @d ^{:go/breaks [2 4 6]} (lit Rows
+              :dc (.-dc rows)
+              :releaseConn ^{:go/end 387} (fn [error])
+              :rowsi s))
+
+          ;; Chain the cancel function.
+          ;;
+          ;; This has problems:
+          ;;   - Repeatedly wrapping the cancel func is inefficient compared to
+          ;;     just storing a []*Rows of children.
+          ;;   - The cancel func is wrapped for each cursor read. If we scan N
+          ;;     rows, each with a child cursor, we end up with N chained cancel
+          ;;     funcs. (Also, if the user is reusing a Rows--see above--the cancel
+          ;;     funcs might all be referencing the same underlying Rows cursor.)
+          ;;   - It seems like it would be reasonable to invalidate a cursor
+          ;;     after advancing to the next parent row (the row which contains
+          ;;     the cursor). We don't do that now, and it isn't clear that we can
+          ;;     change this.
+          (let [parentCancel (.-cancel rows)]
+            (set! (.-cancel rows) ^{:go/end 411} (fn []
+                ;; When Rows.cancel is called, the closemu will be locked as well.
+                ;; So we can access rows.lasterr.
+                (.close d (.-lasterr rows))
+                (when (!= parentCancel nil)
+                  (parentCancel))))
+
+
+            (return nil))))))
+
+
+
+  (let [^reflect/Value sv (zero reflect/Value)]
+
+    (type-switch [d dest]
+      (case [(* string)]
+        (set! sv (reflect/ValueOf src))
+        (switch (.Kind sv)
+          (case [reflect/Bool
+              ^{:line 423} reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64
+              ^{:line 424} reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64
+              ^{:line 425} reflect/Float32 reflect/Float64]
+            (set! @d (asString src))
+            (return nil))))
+
+      (case [(* (slice byte))]
+        (set! sv (reflect/ValueOf src))
+        (when [(values b ok) (asBytes nil sv)] ok
+          (set! @d b)
+          (return nil)))
+
+      (case [(* RawBytes)]
+        (set! sv (reflect/ValueOf src))
+        (when [(values b ok) (asBytes (.rawbuf rows) sv)] ok
+          (set! @d (.setrawbuf rows b))
+          (return nil)))
+
+      (case [(* bool)]
+        (let [(values bv err) (.ConvertValue driver/Bool src)]
+          (when (== err nil)
+            (set! @d (assert bool bv)))
+
+          (return err)))
+      (case [(* any)]
+        (set! @d src)
+        (return nil)))
+
+
+    (when [(values scanner ok) (assert Scanner dest)] ok
+      (return (.Scan scanner src)))
+
+
+    (let [dpv (reflect/ValueOf dest)]
+      (when (!= (.Kind dpv) reflect/Pointer)
+        (return (errors/New "destination not a pointer")))
+
+      (when (.IsNil dpv)
+        (return errNilPtr))
+
+
+      (when (not (.IsValid sv))
+        (set! sv (reflect/ValueOf src)))
+
+
+      (let [dv (reflect/Indirect dpv)]
+        (when (and (.IsValid sv) (.AssignableTo (.Type sv) (.Type dv)))
+          (type-switch [b src]
+            (case [(slice byte)]
+              (.Set dv (reflect/ValueOf (bytes/Clone b))))
+            (default
+              (.Set dv sv)))
+
+          (return nil))
+
+
+        (when (and (== (.Kind dv) (.Kind sv)) (.ConvertibleTo (.Type sv) (.Type dv)))
+          (.Set dv (.Convert sv (.Type dv)))
+          (return nil))
+
+
+        ;; The following conversions use a string value as an intermediate representation
+        ;; to convert between various numeric types.
+        ;;
+        ;; This also allows scanning into user defined types such as "type Int int64".
+        ;; For symmetry, also check for string destination types.
+        (switch (.Kind dv)
+          (case [reflect/Pointer]
+            (when (== src nil)
+              (.SetZero dv)
+              (return nil))
+
+            (.Set dv (reflect/New (.Elem (.Type dv))))
+            (return (convertAssignRows (.Interface dv) src rows)))
+          (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+            (when (== src nil)
+              (return (fmt/Errorf "converting NULL to %s is unsupported" (.Kind dv))))
+
+            (let [s (asString src)
+                (values i64 err) (strconv/ParseInt s 10 (.Bits (.Type dv)))]
+              (when (!= err nil)
+                (set! err (strconvErr err))
+                (return (fmt/Errorf "converting driver.Value type %T (%q) to a %s: %v" src s (.Kind dv) err)))
+
+              (.SetInt dv i64)
+              (return nil)))
+          (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64]
+            (when (== src nil)
+              (return (fmt/Errorf "converting NULL to %s is unsupported" (.Kind dv))))
+
+            (let [s (asString src)
+                (values u64 err) (strconv/ParseUint s 10 (.Bits (.Type dv)))]
+              (when (!= err nil)
+                (set! err (strconvErr err))
+                (return (fmt/Errorf "converting driver.Value type %T (%q) to a %s: %v" src s (.Kind dv) err)))
+
+              (.SetUint dv u64)
+              (return nil)))
+          (case [reflect/Float32 reflect/Float64]
+            (when (== src nil)
+              (return (fmt/Errorf "converting NULL to %s is unsupported" (.Kind dv))))
+
+            (let [s (asString src)
+                (values f64 err) (strconv/ParseFloat s (.Bits (.Type dv)))]
+              (when (!= err nil)
+                (set! err (strconvErr err))
+                (return (fmt/Errorf "converting driver.Value type %T (%q) to a %s: %v" src s (.Kind dv) err)))
+
+              (.SetFloat dv f64)
+              (return nil)))
+          (case [reflect/String]
+            (when (== src nil)
+              (return (fmt/Errorf "converting NULL to %s is unsupported" (.Kind dv))))
+
+            (type-switch [v src]
+              (case [string]
+                (.SetString dv v)
+                (return nil))
+              (case [(slice byte)]
+                (.SetString dv (conv string v))
+                (return nil)))))
+
+
+
+        (fmt/Errorf "unsupported Scan, storing driver.Value type %T into type %T" src dest)))))
+
+
+^{:go/end 555} (go/func strconvErr ^error [^error err]
+  (when [(values ne ok) (assert (* strconv/NumError) err)] ok
+    (return (.-Err ne)))
+
+  ^{:line 554} err)
+
+
+^{:go/end 578} (go/func asString ^string [^any src]
+  (type-switch [v src]
+    (case [string]
+      (return v))
+    (case [(slice byte)]
+      (return (conv string v))))
+
+  (let [rv (reflect/ValueOf src)]
+    (switch (.Kind rv)
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+        (return (strconv/FormatInt (.Int rv) 10)))
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64]
+        (return (strconv/FormatUint (.Uint rv) 10)))
+      (case [reflect/Float64]
+        (return (strconv/FormatFloat (.Float rv) \g -1 64)))
+      (case [reflect/Float32]
+        (return (strconv/FormatFloat (.Float rv) \g -1 32)))
+      (case [reflect/Bool]
+        (return (strconv/FormatBool (.Bool rv)))))
+
+    (fmt/Sprintf "%v" src)))
+
+
+^{:go/end 597} (go/func asBytes [^{:tag (slice byte)} buf ^reflect/Value rv] :results [^{:tag (slice byte)} b ^bool ok]
+  (switch (.Kind rv)
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (return (strconv/AppendInt buf (.Int rv) 10) true))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64]
+      (return (strconv/AppendUint buf (.Uint rv) 10) true))
+    (case [reflect/Float32]
+      (return (strconv/AppendFloat buf (.Float rv) \g -1 32) true))
+    (case [reflect/Float64]
+      (return (strconv/AppendFloat buf (.Float rv) \g -1 64) true))
+    (case [reflect/Bool]
+      (return (strconv/AppendBool buf (.Bool rv)) true))
+    (case [reflect/String]
+      (let [s (.String rv)]
+        (return (append buf (spread s)) true))))
+
+  (return))
+
+
+(go/var valuerReflectType ((inst reflect/TypeFor driver/Valuer)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 619} (go/func callValuerValue "callValuerValue returns vr.Value(), with one exception:\nIf vr.Value is an auto-generated method on a pointer type and the\npointer is nil, it would panic at runtime in the panicwrap\nmethod. Treat it like nil instead.\nIssue 8415.\n\nThis is so people can implement driver.Value on value types and\nstill use nil pointers to those types to mean nil/NULL, just like\nstring/*string.\n\nThis function is mirrored in the database/sql/driver package.\n" [^driver/Valuer vr] :results [^driver/Value v ^error err]
+  (when [rv (reflect/ValueOf vr)] (and (== (.Kind rv) reflect/Pointer)
+      (.IsNil rv)
+      (.Implements (.Elem (.Type rv)) valuerReflectType))
+    (return nil nil))
+
+  (.Value vr))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type decimal "decimal composes or decomposes a decimal value to and from individual parts.\nThere are four parts: a boolean negative flag, a form byte with three possible states\n(finite=0, infinite=1, NaN=2), a base-2 big-endian integer\ncoefficient (also known as a significand) as a []byte, and an int32 exponent.\nThese are composed into a final value as \"decimal = (neg) (form=finite) coefficient * 10 ^ exponent\".\nA zero length coefficient is a zero value.\nThe big-endian integer coefficient stores the most significant byte first (at coefficient[0]).\nIf the form is not finite the coefficient and exponent should be ignored.\nThe negative parameter may be set to true for any form, although implementations are not required\nto respect the negative parameter in the non-finite form.\n\nImplementations may choose to set the negative parameter to true on a zero or NaN value,\nbut implementations that do not differentiate between negative and positive\nzero or NaN values should ignore the negative parameter without error.\nIf an implementation does not support Infinity it may be converted into a NaN without error.\nIf a value is set that is larger than what is supported by an implementation,\nan error must be returned.\nImplementations must return an error if a NaN or Infinity is attempted to be set while neither\nare supported.\n\nNOTE(kardianos): This is an experimental interface. See https://golang.org/issue/30870\n" (interface
+    ^{:line 643} decimalDecompose
+    ^{:line 644} decimalCompose))
+
+
+(go/type decimalDecompose (interface
+
+
+
+    (^{:doc "Decompose returns the internal decimal state in parts.\nIf the provided buf has sufficient capacity, buf may be returned as the coefficient with\nthe value set and length set as appropriate.\n"} Decompose [^{:tag (slice byte)} buf] :results [^byte form ^bool negative ^{:tag (slice byte)} coefficient ^int32 exponent])))
+
+
+(go/type decimalCompose (interface
+
+
+    (^{:doc "Compose sets the internal decimal value from parts. If the value cannot be\nrepresented then an error should be returned.\n"} Compose ^error [^byte form ^bool negative ^{:tag (slice byte)} coefficient ^int32 exponent])))

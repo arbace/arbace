@@ -1,0 +1,184 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.encoding.asn1) (go/file "common.go" :imports [
+
+
+    ^{:line 8} [reflect "reflect"]
+    ^{:line 9} [strconv "strconv"]
+    ^{:line 10} [strings "strings"]])
+
+
+;; ASN.1 objects have metadata preceding them:
+;;   the tag: the type of the object
+;;   a flag denoting if this object is compound or not
+;;   the class type: the namespace of the tag
+;;   the length of the object, in bytes
+
+;; Here are some standard tags and classes
+
+
+(go/const "ASN.1 tags represent the type of the following object.\n"
+  ^{:line 23} [^{:val 1} TagBoolean 1]
+  ^{:line 24} [^{:val 2} TagInteger 2]
+  ^{:line 25} [^{:val 3} TagBitString 3]
+  ^{:line 26} [^{:val 4} TagOctetString 4]
+  ^{:line 27} [^{:val 5} TagNull 5]
+  ^{:line 28} [^{:val 6} TagOID 6]
+  ^{:line 29} [^{:val 10} TagEnum 10]
+  ^{:line 30} [^{:val 12} TagUTF8String 12]
+  ^{:line 31} [^{:val 16} TagSequence 16]
+  ^{:line 32} [^{:val 17} TagSet 17]
+  ^{:line 33} [^{:val 18} TagNumericString 18]
+  ^{:line 34} [^{:val 19} TagPrintableString 19]
+  ^{:line 35} [^{:val 20} TagT61String 20]
+  ^{:line 36} [^{:val 22} TagIA5String 22]
+  ^{:line 37} [^{:val 23} TagUTCTime 23]
+  ^{:line 38} [^{:val 24} TagGeneralizedTime 24]
+  ^{:line 39} [^{:val 27} TagGeneralString 27]
+  ^{:line 40} [^{:val 30} TagBMPString 30])
+
+
+
+(go/const "ASN.1 class types represent the namespace of the tag.\n"
+  ^{:line 45} [^{:val 0} ClassUniversal 0]
+  ^{:line 46} [^{:val 1} ClassApplication 1]
+  ^{:line 47} [^{:val 2} ClassContextSpecific 2]
+  ^{:line 48} [^{:val 3} ClassPrivate 3])
+
+
+(go/type tagAndLength (struct
+    ^{:line 52 :tag int} class ^int tag ^int length
+    ^{:line 53 :tag bool} isCompound))
+
+
+;; ASN.1 has IMPLICIT and EXPLICIT tags, which can be translated as "instead
+;; of" and "in addition to". When not specified, every primitive type has a
+;; default tag in the UNIVERSAL class.
+;;
+;; For example: a BIT STRING is tagged [UNIVERSAL 3] by default (although ASN.1
+;; doesn't actually have a UNIVERSAL keyword). However, by saying [IMPLICIT
+;; CONTEXT-SPECIFIC 42], that means that the tag is replaced by another.
+;;
+;; On the other hand, if it said [EXPLICIT CONTEXT-SPECIFIC 10], then an
+;; /additional/ tag would wrap the default tag. This explicit tag will have the
+;; compound flag set.
+;;
+;; (This is used in order to remove ambiguity with optional elements.)
+;;
+;; You can layer EXPLICIT and IMPLICIT tags to an arbitrary depth, however we
+;; don't support that here. We support a single layer of EXPLICIT or IMPLICIT
+;; tagging with tag strings on the fields of a structure.
+
+
+(go/type fieldParameters "fieldParameters is the parsed representation of tag string from a structure field.\n" (struct
+    ^{:line 76 :tag bool} optional ; true iff the field is OPTIONAL
+    ^{:line 77 :tag bool} explicit ; true iff an EXPLICIT tag is in use.
+    ^{:line 78 :tag bool} application ; true iff an APPLICATION tag is in use.
+    ^{:line 79 :tag bool} private ; true iff a PRIVATE tag is in use.
+    ^{:line 80 :tag (* int64)} defaultValue ; a default value for INTEGER typed fields (maybe nil).
+    ^{:line 81 :tag (* int)} tag ; the EXPLICIT or IMPLICIT tag (maybe nil).
+    ^{:line 82 :tag int} stringType ; the string tag to use when marshaling.
+    ^{:line 83 :tag int} timeType ; the time tag to use when marshaling.
+    ^{:line 84 :tag bool} set ; true iff this should be encoded as a SET
+    ^{:line 85 :tag bool} omitEmpty)) ; true iff this should be omitted if empty when marshaling.
+
+;; Invariants:
+;;   if explicit is set, tag is non-nil.
+
+
+
+
+
+^{:go/end 147} (go/func parseFieldParameters "Given a tag string with the format specified in the package comment,\nparseFieldParameters will parse it into a fieldParameters structure,\nignoring unknown parts of the string.\n" [^string str] :results [^fieldParameters ret]
+  (let [^string part (zero string)]
+    (while (> (len str) 0)
+      (set! (values part str _) (strings/Cut str ","))
+      (switch
+        (case [(== part "optional")]
+          (set! (.-optional ret) true))
+        (case [(== part "explicit")]
+          (set! (.-explicit ret) true)
+          (when (== (.-tag ret) nil)
+            (set! (.-tag ret) (new int))))
+
+        (case [(== part "generalized")]
+          (set! (.-timeType ret) TagGeneralizedTime))
+        (case [(== part "utc")]
+          (set! (.-timeType ret) TagUTCTime))
+        (case [(== part "ia5")]
+          (set! (.-stringType ret) TagIA5String))
+        (case [(== part "printable")]
+          (set! (.-stringType ret) TagPrintableString))
+        (case [(== part "numeric")]
+          (set! (.-stringType ret) TagNumericString))
+        (case [(== part "utf8")]
+          (set! (.-stringType ret) TagUTF8String))
+        (case [(strings/HasPrefix part "default:")]
+          (let [(values i err) (strconv/ParseInt (subslice part 8) 10 64)]
+            (when (== err nil)
+              (set! (.-defaultValue ret) (new int64))
+              (set! @(.-defaultValue ret) i))))
+
+        (case [(strings/HasPrefix part "tag:")]
+          (let [(values i err) (strconv/Atoi (subslice part 4))]
+            (when (== err nil)
+              (set! (.-tag ret) (new int))
+              (set! @(.-tag ret) i))))
+
+        (case [(== part "set")]
+          (set! (.-set ret) true))
+        (case [(== part "application")]
+          (set! (.-application ret) true)
+          (when (== (.-tag ret) nil)
+            (set! (.-tag ret) (new int))))
+
+        (case [(== part "private")]
+          (set! (.-private ret) true)
+          (when (== (.-tag ret) nil)
+            (set! (.-tag ret) (new int))))
+
+        (case [(== part "omitempty")]
+          (set! (.-omitEmpty ret) true))))
+
+
+    (return)))
+
+
+
+
+^{:go/end 185} (go/func getUniversalType "Given a reflected Go type, getUniversalType returns the default tag number\nand expected compound flag.\n" [^reflect/Type t] :results [^bool matchAny ^int tagNumber ^bool isCompound ^bool ok]
+  (switch t
+    (case [rawValueType]
+      (return true -1 false true))
+    (case [objectIdentifierType]
+      (return false TagOID false true))
+    (case [bitStringType]
+      (return false TagBitString false true))
+    (case [timeType]
+      (return false TagUTCTime false true))
+    (case [enumeratedType]
+      (return false TagEnum false true))
+    (case [bigIntType]
+      (return false TagInteger false true)))
+
+  (switch (.Kind t)
+    (case [reflect/Bool]
+      (return false TagBoolean false true))
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (return false TagInteger false true))
+    (case [reflect/Struct]
+      (return false TagSequence true true))
+    (case [reflect/Slice]
+      (when (== (.Kind (.Elem t)) reflect/Uint8)
+        (return false TagOctetString false true))
+
+      (when (strings/HasSuffix (.Name t) "SET")
+        (return false TagSet true true))
+
+      (return false TagSequence true true))
+    (case [reflect/String]
+      (return false TagPrintableString false true)))
+
+  (return false 0 false false))

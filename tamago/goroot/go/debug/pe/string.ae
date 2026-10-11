@@ -1,0 +1,68 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.debug.pe) (go/file "string.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [saferio "internal/saferio"]
+    ^{:line 12} [io "io"]])
+
+
+
+
+^{:go/end 23} (go/func cstring "cstring converts ASCII byte sequence b to string.\nIt stops once it finds 0 or reaches end of b.\n" ^string [^{:tag (slice byte)} b]
+  (let [i (bytes/IndexByte b 0)]
+    (when (== i -1)
+      (set! i (len b)))
+
+    (conv string (subslice b _ i))))
+
+
+
+(go/type StringTable "StringTable is a COFF string table.\n" (slice byte))
+
+^{:go/end 54} (go/func readStringTable [^{:tag (* FileHeader)} fh ^io/ReadSeeker r] :results [StringTable error]
+  ;; COFF string table is located right after COFF symbol table.
+  (when (<= (.-PointerToSymbolTable fh) 0)
+    (return nil nil))
+
+  (let [offset (+ (.-PointerToSymbolTable fh) (* COFFSymbolSize (.-NumberOfSymbols fh)))
+      (values _ err) (.Seek r (conv int64 offset) io/SeekStart)]
+    (when (!= err nil)
+      (return nil (fmt/Errorf "fail to seek to string table: %v" err)))
+
+    (let [^uint32 l (zero uint32)]
+      (set! err (binary/Read r binary/LittleEndian (addr l)))
+      (when (!= err nil)
+        (return nil (fmt/Errorf "fail to read string table length: %v" err)))
+
+      ;; string table length includes itself
+      (when (<= l 4)
+        (return nil nil))
+
+      (set! l - 4)
+
+      (let [(values buf ^:assign err) (saferio/ReadData r (conv uint64 l))]
+        (when (!= err nil)
+          (return nil (fmt/Errorf "fail to read string table: %v" err)))
+
+        (return (conv StringTable buf) nil)))))
+
+
+;; TODO(brainman): decide if start parameter should be int instead of uint32
+
+
+^{:go/end 69} (go/method String "String extracts string from COFF string table st at offset start.\n" [^StringTable st ^uint32 start] :results [string error]
+  ;; start includes 4 bytes of string table length
+  (when (< start 4)
+    (return "" (fmt/Errorf "offset %d is before the start of string table" start)))
+
+  (set! start - 4)
+  (when (> (conv int start) (len st))
+    (return "" (fmt/Errorf "offset %d is beyond the end of string table" start)))
+
+  (return (cstring (subslice st start)) nil))

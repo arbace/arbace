@@ -1,0 +1,1081 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package draw provides image composition functions.
+;;
+;; See "The Go image/draw package" for an introduction to this package:
+;; https://golang.org/doc/articles/image_draw.html
+(in-ns 'go.image.draw) (go/file "draw.go" :doc "Package draw provides image composition functions.\n\nSee \"The Go image/draw package\" for an introduction to this package:\nhttps://golang.org/doc/articles/image_draw.html\n" :imports [
+
+
+    ^{:line 12} [image "image"]
+    ^{:line 13} [color "image/color"]
+    ^{:line 14} [imageutil "image/internal/imageutil"]])
+
+
+
+(go/const ^{:val 65535 :doc "m is the maximum color value returned by image.Color.RGBA.\n"} m (- (<< 1 16) 1))
+
+
+(go/type Image "Image is an image.Image with a Set method to change a single pixel.\n" (interface
+    ^{:line 22} image/Image
+    (Set [^int x ^int y ^color/Color c])))
+
+
+
+
+
+
+(go/type RGBA64Image "RGBA64Image extends both the [Image] and [image.RGBA64Image] interfaces with a\nSetRGBA64 method to change a single pixel. SetRGBA64 is equivalent to\ncalling Set, but it can avoid allocations from converting concrete color\ntypes to the [color.Color] interface type.\n" (interface
+    ^{:line 31} image/RGBA64Image
+    (Set [^int x ^int y ^color/Color c])
+    (SetRGBA64 [^int x ^int y ^color/RGBA64 c])))
+
+
+
+(go/type Quantizer "Quantizer produces a palette for an image.\n" (interface
+
+
+    (^{:doc "Quantize appends up to cap(p) - len(p) colors to p and returns the\nupdated palette suitable for converting m to a paletted image.\n"} Quantize ^color/Palette [^color/Palette p ^image/Image m])))
+
+
+
+(go/type Op "Op is a Porter-Duff compositing operator.\n" int)
+
+(go/const
+
+  ^{:line 48} [^{:tag Op :val 0 :doc "Over specifies ``(src in mask) over dst''.\n"} Over iota]
+
+  ^{:line 50} [^{:val 1 :doc "Src specifies ``src in mask''.\n"} Src])
+
+
+
+
+^{:go/end 57} (go/method Draw "Draw implements the [Drawer] interface by calling the Draw function with this\n[Op].\n" [^Op op ^Image dst ^image/Rectangle r ^image/Image src ^image/Point sp]
+  (DrawMask dst r src sp nil (lit image/Point) op))
+
+
+
+(go/type Drawer "Drawer contains the [Draw] method.\n" (interface
+
+
+    (^{:doc "Draw aligns r.Min in dst with sp in src and then replaces the\nrectangle r in dst with the result of drawing src on dst.\n"} Draw [^Image dst ^image/Rectangle r ^image/Image src ^image/Point sp])))
+
+
+
+
+(go/var ^{:tag Drawer :doc "FloydSteinberg is a [Drawer] that is the [Src] [Op] with Floyd-Steinberg error\ndiffusion.\n"} FloydSteinberg (lit floydSteinberg))
+
+(go/type floydSteinberg (struct))
+
+^{:go/end 78} (go/method Draw [floydSteinberg ^Image dst ^image/Rectangle r ^image/Image src ^image/Point sp]
+  (clip dst (addr r) src (addr sp) nil nil)
+  (when (.Empty r)
+    (return))
+
+  (drawPaletted dst r src sp true))
+
+
+
+
+
+^{:go/end 101} (go/func clip "clip clips r against each image's bounds (after translating into the\ndestination image's coordinate space) and shifts the points sp and mp by\nthe same amount as the change in r.Min.\n" [^Image dst ^{:tag (* image/Rectangle)} r ^image/Image src ^{:tag (* image/Point)} sp ^image/Image mask ^{:tag (* image/Point)} mp]
+  (let [orig (.-Min r)]
+    (set! @r (.Intersect r (.Bounds dst)))
+    (set! @r (.Intersect r (.Add (.Bounds src) (.Sub orig @sp))))
+    (when (!= mask nil)
+      (set! @r (.Intersect r (.Add (.Bounds mask) (.Sub orig @mp)))))
+
+    (let [dx (- (.-X (.-Min r)) (.-X orig))
+        ^{:line 91} dy (- (.-Y (.-Min r)) (.-Y orig))]
+      (when (and (== dx 0) (== dy 0))
+        (return))
+
+      (set! (.-X sp) + dx)
+      (set! (.-Y sp) + dy)
+      (when (!= mp nil)
+        (set! (.-X mp) + dx)
+        (set! (.-Y mp) + dy)))))
+
+
+
+^{:go/end 107} (go/func processBackward ^bool [^image/Image dst ^image/Rectangle r ^image/Image src ^image/Point sp]
+  (and (== dst src)
+    (.Overlaps r (.Add r (.Sub sp (.-Min r))))
+    ^:go/paren (or (< (.-Y sp) (.-Y (.-Min r))) ^:go/paren (and (== (.-Y sp) (.-Y (.-Min r))) (< (.-X sp) (.-X (.-Min r)))))))
+
+
+
+^{:go/end 112} (go/func Draw "Draw calls [DrawMask] with a nil mask.\n" [^Image dst ^image/Rectangle r ^image/Image src ^image/Point sp ^Op op]
+  (DrawMask dst r src sp nil (lit image/Point) op))
+
+
+
+
+^{:go/end 387} (go/func DrawMask "DrawMask aligns r.Min in dst with sp in src and mp in mask and then replaces the rectangle r\nin dst with the result of a Porter-Duff composition. A nil mask is treated as opaque.\n" [^Image dst ^image/Rectangle r ^image/Image src ^image/Point sp ^image/Image mask ^image/Point mp ^Op op]
+  (clip dst (addr r) src (addr sp) mask (addr mp))
+  (when (.Empty r)
+    (return))
+
+
+  ;; Fast paths for special cases. If none of them apply, then we fall back
+  ;; to general but slower implementations.
+  ;;
+  ;; For NRGBA and NRGBA64 image types, the code paths aren't just faster.
+  ;; They also avoid the information loss that would otherwise occur from
+  ;; converting non-alpha-premultiplied color to and from alpha-premultiplied
+  ;; color. See TestDrawSrcNonpremultiplied.
+  (type-switch [dst0 dst]
+    (case [(* image/RGBA)]
+      (if (== op Over)
+        (if (== mask nil)
+          (type-switch [src0 src]
+            (case [(* image/Uniform)]
+              (let [(values sr sg sb sa) (.RGBA src0)]
+                (if (== sa 0xffff)
+                  (drawFillSrc dst0 r sr sg sb sa)
+
+                  (drawFillOver dst0 r sr sg sb sa))
+
+                (return)))
+            (case [(* image/RGBA)]
+              (drawCopyOver dst0 r src0 sp)
+              (return))
+            (case [(* image/NRGBA)]
+              (drawNRGBAOver dst0 r src0 sp)
+              (return))
+            (case [(* image/YCbCr)]
+              ;; An image.YCbCr is always fully opaque, and so if the
+              ;; mask is nil (i.e. fully opaque) then the op is
+              ;; effectively always Src. Similarly for image.Gray and
+              ;; image.CMYK.
+              (when (imageutil/DrawYCbCr dst0 r src0 sp)
+                (return)))
+
+            (case [(* image/Gray)]
+              (drawGray dst0 r src0 sp)
+              (return))
+            (case [(* image/CMYK)]
+              (drawCMYK dst0 r src0 sp)
+              (return)))
+
+          (when [(values mask0 ok) (assert (* image/Alpha) mask)] ok
+            (type-switch [src0 src]
+              (case [(* image/Uniform)]
+                (drawGlyphOver dst0 r src0 mask0 mp)
+                (return))
+              (case [(* image/RGBA)]
+                (drawRGBAMaskOver dst0 r src0 sp mask0 mp)
+                (return))
+              (case [(* image/Gray)]
+                (drawGrayMaskOver dst0 r src0 sp mask0 mp)
+                (return))
+              ;; Case order matters. The next case (image.RGBA64Image) is an
+              ;; interface type that the concrete types above also implement.
+              (case [image/RGBA64Image]
+                (drawRGBA64ImageMaskOver dst0 r src0 sp mask0 mp)
+                (return)))))
+
+
+        (do
+          (when (== mask nil)
+            (type-switch [src0 src]
+              (case [(* image/Uniform)]
+                (let [(values sr sg sb sa) (.RGBA src0)]
+                  (drawFillSrc dst0 r sr sg sb sa)
+                  (return)))
+              (case [(* image/RGBA)]
+                (let [d0 (.PixOffset dst0 (.-X (.-Min r)) (.-Y (.-Min r)))
+                    ^{:line 190} s0 (.PixOffset src0 (.-X sp) (.-Y sp))]
+                  (drawCopySrc
+                    (subslice (.-Pix dst0) d0) (.-Stride dst0) r (subslice (.-Pix src0) s0) (.-Stride src0) sp (* 4 (.Dx r)))
+                  (return)))
+              (case [(* image/NRGBA)]
+                (drawNRGBASrc dst0 r src0 sp)
+                (return))
+              (case [(* image/YCbCr)]
+                (when (imageutil/DrawYCbCr dst0 r src0 sp)
+                  (return)))
+
+              (case [(* image/Gray)]
+                (drawGray dst0 r src0 sp)
+                (return))
+              (case [(* image/CMYK)]
+                (drawCMYK dst0 r src0 sp)
+                (return))))))
+
+
+
+      (drawRGBA dst0 r src sp mask mp op)
+      (return))
+    (case [(* image/Paletted)]
+      (when (and (== op Src) (== mask nil))
+        (if [(values src0 ok) (assert (* image/Uniform) src)] ok
+          (let [colorIndex (conv uint8 (.Index (.-Palette dst0) (.-C src0)))
+              ^{:line 216} i0 (.PixOffset dst0 (.-X (.-Min r)) (.-Y (.-Min r)))
+              ^{:line 217} i1 (+ i0 (.Dx r))]
+            (for [i i0] (< i i1) (inc! i)
+              (aset (.-Pix dst0) i colorIndex))
+
+            (let [firstRow (subslice (.-Pix dst0) i0 i1)]
+              (for [y (+ (.-Y (.-Min r)) 1)] (< y (.-Y (.-Max r))) (inc! y)
+                (set! i0 + (.-Stride dst0))
+                (set! i1 + (.-Stride dst0))
+                (copy (subslice (.-Pix dst0) i0 i1) firstRow))
+
+              (return)))
+          (when (not (processBackward dst r src sp))
+            (drawPaletted dst0 r src sp false)
+            (return)))))
+
+
+    (case [(* image/NRGBA)]
+      (when (and (== op Src) (== mask nil))
+        (when [(values src0 ok) (assert (* image/NRGBA) src)] ok
+          (let [d0 (.PixOffset dst0 (.-X (.-Min r)) (.-Y (.-Min r)))
+              ^{:line 237} s0 (.PixOffset src0 (.-X sp) (.-Y sp))]
+            (drawCopySrc
+              (subslice (.-Pix dst0) d0) (.-Stride dst0) r (subslice (.-Pix src0) s0) (.-Stride src0) sp (* 4 (.Dx r)))
+            (return)))))
+
+
+    (case [(* image/NRGBA64)]
+      (when (and (== op Src) (== mask nil))
+        (when [(values src0 ok) (assert (* image/NRGBA64) src)] ok
+          (let [d0 (.PixOffset dst0 (.-X (.-Min r)) (.-Y (.-Min r)))
+              ^{:line 247} s0 (.PixOffset src0 (.-X sp) (.-Y sp))]
+            (drawCopySrc
+              (subslice (.-Pix dst0) d0) (.-Stride dst0) r (subslice (.-Pix src0) s0) (.-Stride src0) sp (* 8 (.Dx r)))
+            (return))))))
+
+
+
+
+  (let [(values x0 x1 dx) (values (.-X (.-Min r)) (.-X (.-Max r)) 1)
+      (values y0 y1 dy) (values (.-Y (.-Min r)) (.-Y (.-Max r)) 1)]
+    (when (processBackward dst r src sp)
+      (set! (values x0 x1 dx) (values (- x1 1) (- x0 1) -1))
+      (set! (values y0 y1 dy) (values (- y1 1) (- y0 1) -1)))
+
+
+    ;; FALLBACK1.17
+    ;;
+    ;; Try the draw.RGBA64Image and image.RGBA64Image interfaces, part of the
+    ;; standard library since Go 1.17. These are like the draw.Image and
+    ;; image.Image interfaces but they can avoid allocations from converting
+    ;; concrete color types to the color.Color interface type.
+
+    (when [(values dst0 _) (assert RGBA64Image dst)] (!= dst0 nil)
+      (when [(values src0 _) (assert image/RGBA64Image src)] (!= src0 nil)
+        (if (== mask nil)
+          (let [sy (- (+ (.-Y sp) y0) (.-Y (.-Min r)))
+              ^{:line 273} my (- (+ (.-Y mp) y0) (.-Y (.-Min r)))]
+            (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+              (let [sx (- (+ (.-X sp) x0) (.-X (.-Min r)))
+                  ^{:line 276} mx (- (+ (.-X mp) x0) (.-X (.-Min r)))]
+                (for [x x0] (!= x x1) (set! (values x sx mx) (values (+ x dx) (+ sx dx) (+ mx dx)))
+                  (if (== op Src)
+                    (.SetRGBA64 dst0 x y (.RGBA64At src0 sx sy))
+
+                    (let [srgba (.RGBA64At src0 sx sy)
+                        ^{:line 282} a (- m (conv uint32 (.-A srgba)))
+                        ^{:line 283} drgba (.RGBA64At dst0 x y)]
+                      (.SetRGBA64 dst0 x y ^{:go/breaks [2 4 6 8]} (lit color/RGBA64
+                          :R (+ (conv uint16 (/ (* (conv uint32 (.-R drgba)) a) m)) (.-R srgba))
+                          :G (+ (conv uint16 (/ (* (conv uint32 (.-G drgba)) a) m)) (.-G srgba))
+                          :B (+ (conv uint16 (/ (* (conv uint32 (.-B drgba)) a) m)) (.-B srgba))
+                          :A (+ (conv uint16 (/ (* (conv uint32 (.-A drgba)) a) m)) (.-A srgba)))))))))
+
+
+
+
+            (return))
+
+          (when [(values mask0 _) (assert image/RGBA64Image mask)] (!= mask0 nil)
+            (let [sy (- (+ (.-Y sp) y0) (.-Y (.-Min r)))
+                ^{:line 297} my (- (+ (.-Y mp) y0) (.-Y (.-Min r)))]
+              (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+                (let [sx (- (+ (.-X sp) x0) (.-X (.-Min r)))
+                    ^{:line 300} mx (- (+ (.-X mp) x0) (.-X (.-Min r)))]
+                  (for [x x0] (!= x x1) (set! (values x sx mx) (values (+ x dx) (+ sx dx) (+ mx dx)))
+                    (let [ma (conv uint32 (.-A (.RGBA64At mask0 mx my)))]
+                      (switch
+                        (case [(== ma 0)]
+                          (if (== op Over) (do)
+                            ;; No-op.
+
+                            (.SetRGBA64 dst0 x y (lit color/RGBA64))))
+
+                        (case [(and (== ma m) (== op Src))]
+                          (.SetRGBA64 dst0 x y (.RGBA64At src0 sx sy)))
+                        (default
+                          (let [srgba (.RGBA64At src0 sx sy)]
+                            (if (== op Over)
+                              (let [drgba (.RGBA64At dst0 x y)
+                                  ^{:line 316} a (- m (/ (* (conv uint32 (.-A srgba)) ma) m))]
+                                (.SetRGBA64 dst0 x y ^{:go/breaks [2 4 6 8]} (lit color/RGBA64
+                                    :R (conv uint16 (/ (+ (* (conv uint32 (.-R drgba)) a) (* (conv uint32 (.-R srgba)) ma)) m))
+                                    :G (conv uint16 (/ (+ (* (conv uint32 (.-G drgba)) a) (* (conv uint32 (.-G srgba)) ma)) m))
+                                    :B (conv uint16 (/ (+ (* (conv uint32 (.-B drgba)) a) (* (conv uint32 (.-B srgba)) ma)) m))
+                                    :A (conv uint16 (/ (+ (* (conv uint32 (.-A drgba)) a) (* (conv uint32 (.-A srgba)) ma)) m)))))
+
+
+                              (.SetRGBA64 dst0 x y ^{:go/breaks [2 4 6 8]} (lit color/RGBA64
+                                  :R (conv uint16 (/ (* (conv uint32 (.-R srgba)) ma) m))
+                                  :G (conv uint16 (/ (* (conv uint32 (.-G srgba)) ma) m))
+                                  :B (conv uint16 (/ (* (conv uint32 (.-B srgba)) ma) m))
+                                  :A (conv uint16 (/ (* (conv uint32 (.-A srgba)) ma) m))))))))))))
+
+
+
+
+
+              (return))))))
+
+
+
+
+    ;; FALLBACK1.0
+    ;;
+    ;; If none of the faster code paths above apply, use the draw.Image and
+    ;; image.Image interfaces, part of the standard library since Go 1.0.
+
+    (let [^color/RGBA64 out (zero color/RGBA64)
+        ^{:line 345} sy (- (+ (.-Y sp) y0) (.-Y (.-Min r)))
+        ^{:line 346} my (- (+ (.-Y mp) y0) (.-Y (.-Min r)))]
+      (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+        (let [sx (- (+ (.-X sp) x0) (.-X (.-Min r)))
+            ^{:line 349} mx (- (+ (.-X mp) x0) (.-X (.-Min r)))]
+          (for [x x0] (!= x x1) (set! (values x sx mx) (values (+ x dx) (+ sx dx) (+ mx dx)))
+            (let [ma (conv uint32 m)]
+              (when (!= mask nil)
+                (set! (values _ _ _ ma) (.RGBA (.At mask mx my))))
+
+              (switch
+                (case [(== ma 0)]
+                  (if (== op Over) (do)
+                    ;; No-op.
+
+                    (.Set dst x y color/Transparent)))
+
+                (case [(and (== ma m) (== op Src))]
+                  (.Set dst x y (.At src sx sy)))
+                (default
+                  (let [(values sr sg sb sa) (.RGBA (.At src sx sy))]
+                    (if (== op Over)
+                      (let [(values dr dg db da) (.RGBA (.At dst x y))
+                          ^{:line 368} a (- m (/ (* sa ma) m))]
+                        (set! (.-R out) (conv uint16 (/ (+ (* dr a) (* sr ma)) m)))
+                        (set! (.-G out) (conv uint16 (/ (+ (* dg a) (* sg ma)) m)))
+                        (set! (.-B out) (conv uint16 (/ (+ (* db a) (* sb ma)) m)))
+                        (set! (.-A out) (conv uint16 (/ (+ (* da a) (* sa ma)) m))))
+                      (do
+                        (set! (.-R out) (conv uint16 (/ (* sr ma) m)))
+                        (set! (.-G out) (conv uint16 (/ (* sg ma) m)))
+                        (set! (.-B out) (conv uint16 (/ (* sb ma) m)))
+                        (set! (.-A out) (conv uint16 (/ (* sa ma) m)))))
+
+                    ;; The third argument is &out instead of out (and out is
+                    ;; declared outside of the inner loop) to avoid the implicit
+                    ;; conversion to color.Color here allocating memory in the
+                    ;; inner loop if sizeof(color.RGBA64) > sizeof(uintptr).
+                    (.Set dst x y (addr out))))))))))))
+
+
+
+
+
+^{:go/end 409} (go/func drawFillOver [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^uint32 sr ^uint32 sg ^uint32 sb ^uint32 sa]
+  ;; The 0x101 is here for the same reason as in drawRGBA.
+  (let [a (* (- m sa) 0x101)
+      ^{:line 392} i0 (.PixOffset dst (.-X (.-Min r)) (.-Y (.-Min r)))
+      ^{:line 393} i1 (+ i0 (* (.Dx r) 4))]
+    (for [y (.-Y (.-Min r))] (!= y (.-Y (.-Max r))) (inc! y)
+      (for [i i0] (< i i1) (set! i + 4)
+        (let [dr (addr (aget (.-Pix dst) (+ i 0)))
+            ^{:line 397} dg (addr (aget (.-Pix dst) (+ i 1)))
+            ^{:line 398} db (addr (aget (.-Pix dst) (+ i 2)))
+            ^{:line 399} da (addr (aget (.-Pix dst) (+ i 3)))]
+
+          (set! @dr (conv uint8 (>> (+ (/ (* (conv uint32 @dr) a) m) sr) 8)))
+          (set! @dg (conv uint8 (>> (+ (/ (* (conv uint32 @dg) a) m) sg) 8)))
+          (set! @db (conv uint8 (>> (+ (/ (* (conv uint32 @db) a) m) sb) 8)))
+          (set! @da (conv uint8 (>> (+ (/ (* (conv uint32 @da) a) m) sa) 8)))))
+
+      (set! i0 + (.-Stride dst))
+      (set! i1 + (.-Stride dst)))))
+
+
+
+^{:go/end 433} (go/func drawFillSrc [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^uint32 sr ^uint32 sg ^uint32 sb ^uint32 sa]
+  (let [sr8 (conv uint8 (>> sr 8))
+      ^{:line 413} sg8 (conv uint8 (>> sg 8))
+      ^{:line 414} sb8 (conv uint8 (>> sb 8))
+      ^{:line 415} sa8 (conv uint8 (>> sa 8))
+      ;; The built-in copy function is faster than a straightforward for loop to fill the destination with
+      ;; the color, but copy requires a slice source. We therefore use a for loop to fill the first row, and
+      ;; then use the first row as the slice source for the remaining rows.
+      ^{:line 419} i0 (.PixOffset dst (.-X (.-Min r)) (.-Y (.-Min r)))
+      ^{:line 420} i1 (+ i0 (* (.Dx r) 4))]
+    (for [i i0] (< i i1) (set! i + 4)
+      (aset (.-Pix dst) (+ i 0) sr8)
+      (aset (.-Pix dst) (+ i 1) sg8)
+      (aset (.-Pix dst) (+ i 2) sb8)
+      (aset (.-Pix dst) (+ i 3) sa8))
+
+    (let [firstRow (subslice (.-Pix dst) i0 i1)]
+      (for [y (+ (.-Y (.-Min r)) 1)] (< y (.-Y (.-Max r))) (inc! y)
+        (set! i0 + (.-Stride dst))
+        (set! i1 + (.-Stride dst))
+        (copy (subslice (.-Pix dst) i0 i1) firstRow)))))
+
+
+
+^{:go/end 478} (go/func drawCopyOver [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^{:tag (* image/RGBA)} src ^image/Point sp]
+  (let [(values dx dy) (values (.Dx r) (.Dy r))
+      ^{:line 437} d0 (.PixOffset dst (.-X (.-Min r)) (.-Y (.-Min r)))
+      ^{:line 438} s0 (.PixOffset src (.-X sp) (.-Y sp))
+
+      (values ^int ddelta ^int sdelta) (zero int)
+      (values ^int i0 ^int i1 ^int idelta) (zero int)]
+
+    (if (or (< (.-Y (.-Min r)) (.-Y sp)) (and (== (.-Y (.-Min r)) (.-Y sp)) (<= (.-X (.-Min r)) (.-X sp)))) (do
+        (set! ddelta (.-Stride dst))
+        (set! sdelta (.-Stride src))
+        (set! (values i0 i1 idelta) (values 0 (* dx 4) (+ 4))))
+      (do
+        ;; If the source start point is higher than the destination start point, or equal height but to the left,
+        ;; then we compose the rows in right-to-left, bottom-up order instead of left-to-right, top-down.
+        (set! d0 + (* (- dy 1) (.-Stride dst)))
+        (set! s0 + (* (- dy 1) (.-Stride src)))
+        (set! ddelta (- (.-Stride dst)))
+        (set! sdelta (- (.-Stride src)))
+        (set! (values i0 i1 idelta) (values (* (- dx 1) 4) -4 -4))))
+
+    (for [] (> dy 0) (dec! dy)
+      (let [dpix (subslice (.-Pix dst) d0)
+          ^{:line 458} spix (subslice (.-Pix src) s0)]
+        (for [i i0] (!= i i1) (set! i + idelta)
+          (let [s (subslice spix i (+ i 4) (+ i 4)) ; Small cap improves performance, see https://golang.org/issue/27857
+              ^{:line 461} sr (* (conv uint32 (aget s 0)) 0x101)
+              ^{:line 462} sg (* (conv uint32 (aget s 1)) 0x101)
+              ^{:line 463} sb (* (conv uint32 (aget s 2)) 0x101)
+              ^{:line 464} sa (* (conv uint32 (aget s 3)) 0x101)
+
+              ;; The 0x101 is here for the same reason as in drawRGBA.
+              ^{:line 467} a (* (- m sa) 0x101)
+
+              ^{:line 469} d (subslice dpix i (+ i 4) (+ i 4))] ; Small cap improves performance, see https://golang.org/issue/27857
+            (aset d 0 (conv uint8 (>> (+ (/ (* (conv uint32 (aget d 0)) a) m) sr) 8)))
+            (aset d 1 (conv uint8 (>> (+ (/ (* (conv uint32 (aget d 1)) a) m) sg) 8)))
+            (aset d 2 (conv uint8 (>> (+ (/ (* (conv uint32 (aget d 2)) a) m) sb) 8)))
+            (aset d 3 (conv uint8 (>> (+ (/ (* (conv uint32 (aget d 3)) a) m) sa) 8)))))
+
+        (set! d0 + ddelta)
+        (set! s0 + sdelta)))))
+
+
+
+
+
+
+^{:go/end 505} (go/func drawCopySrc "drawCopySrc copies bytes to dstPix from srcPix. These arguments roughly\ncorrespond to the Pix fields of the image package's concrete image.Image\nimplementations, but are offset (dstPix is dst.Pix[dpOffset:] not dst.Pix).\n" [
+    ^{:line 484 :tag (slice byte)} dstPix ^int dstStride ^image/Rectangle r
+    ^{:line 485 :tag (slice byte)} srcPix ^int srcStride ^image/Point sp
+    ^{:line 486 :tag int} bytesPerRow]
+
+  (let [(values d0 s0 ddelta sdelta dy) (values 0 0 dstStride srcStride (.Dy r))]
+    (when (> (.-Y (.-Min r)) (.-Y sp))
+      ;; If the source start point is higher than the destination start
+      ;; point, then we compose the rows in bottom-up order instead of
+      ;; top-down. Unlike the drawCopyOver function, we don't have to check
+      ;; the x coordinates because the built-in copy function can handle
+      ;; overlapping slices.
+      (set! d0 (* (- dy 1) dstStride))
+      (set! s0 (* (- dy 1) srcStride))
+      (set! ddelta (- dstStride))
+      (set! sdelta (- srcStride)))
+
+    (for [] (> dy 0) (dec! dy)
+      (copy (subslice dstPix d0 (+ d0 bytesPerRow)) (subslice srcPix s0 (+ s0 bytesPerRow)))
+      (set! d0 + ddelta)
+      (set! s0 + sdelta))))
+
+
+
+^{:go/end 542} (go/func drawNRGBAOver [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^{:tag (* image/NRGBA)} src ^image/Point sp]
+  (let [i0 (* (- (.-X (.-Min r)) (.-X (.-Min (.-Rect dst)))) 4)
+      ^{:line 509} i1 (* (- (.-X (.-Max r)) (.-X (.-Min (.-Rect dst)))) 4)
+      ^{:line 510} si0 (* (- (.-X sp) (.-X (.-Min (.-Rect src)))) 4)
+      ^{:line 511} yMax (- (.-Y (.-Max r)) (.-Y (.-Min (.-Rect dst))))
+
+      ^{:line 513} y (- (.-Y (.-Min r)) (.-Y (.-Min (.-Rect dst))))
+      ^{:line 514} sy (- (.-Y sp) (.-Y (.-Min (.-Rect src))))]
+    (for [] (!= y yMax) (set! (values y sy) (values (+ y 1) (+ sy 1)))
+      (let [dpix (subslice (.-Pix dst) (* y (.-Stride dst)))
+          ^{:line 517} spix (subslice (.-Pix src) (* sy (.-Stride src)))]
+
+        (for [(values i si) (values i0 si0)] (< i i1) (set! (values i si) (values (+ i 4) (+ si 4)))
+          ;; Convert from non-premultiplied color to pre-multiplied color.
+          (let [s (subslice spix si (+ si 4) (+ si 4)) ; Small cap improves performance, see https://golang.org/issue/27857
+              ^{:line 522} sa (* (conv uint32 (aget s 3)) 0x101)
+              ^{:line 523} sr (/ (* (conv uint32 (aget s 0)) sa) 0xff)
+              ^{:line 524} sg (/ (* (conv uint32 (aget s 1)) sa) 0xff)
+              ^{:line 525} sb (/ (* (conv uint32 (aget s 2)) sa) 0xff)
+
+              ^{:line 527} d (subslice dpix i (+ i 4) (+ i 4)) ; Small cap improves performance, see https://golang.org/issue/27857
+              ^{:line 528} dr (conv uint32 (aget d 0))
+              ^{:line 529} dg (conv uint32 (aget d 1))
+              ^{:line 530} db (conv uint32 (aget d 2))
+              ^{:line 531} da (conv uint32 (aget d 3))
+
+              ;; The 0x101 is here for the same reason as in drawRGBA.
+              ^{:line 534} a (* (- m sa) 0x101)]
+
+            (aset d 0 (conv uint8 (>> (+ (/ (* dr a) m) sr) 8)))
+            (aset d 1 (conv uint8 (>> (+ (/ (* dg a) m) sg) 8)))
+            (aset d 2 (conv uint8 (>> (+ (/ (* db a) m) sb) 8)))
+            (aset d 3 (conv uint8 (>> (+ (/ (* da a) m) sa) 8)))))))))
+
+
+
+
+^{:go/end 571} (go/func drawNRGBASrc [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^{:tag (* image/NRGBA)} src ^image/Point sp]
+  (let [i0 (* (- (.-X (.-Min r)) (.-X (.-Min (.-Rect dst)))) 4)
+      ^{:line 546} i1 (* (- (.-X (.-Max r)) (.-X (.-Min (.-Rect dst)))) 4)
+      ^{:line 547} si0 (* (- (.-X sp) (.-X (.-Min (.-Rect src)))) 4)
+      ^{:line 548} yMax (- (.-Y (.-Max r)) (.-Y (.-Min (.-Rect dst))))
+
+      ^{:line 550} y (- (.-Y (.-Min r)) (.-Y (.-Min (.-Rect dst))))
+      ^{:line 551} sy (- (.-Y sp) (.-Y (.-Min (.-Rect src))))]
+    (for [] (!= y yMax) (set! (values y sy) (values (+ y 1) (+ sy 1)))
+      (let [dpix (subslice (.-Pix dst) (* y (.-Stride dst)))
+          ^{:line 554} spix (subslice (.-Pix src) (* sy (.-Stride src)))]
+
+        (for [(values i si) (values i0 si0)] (< i i1) (set! (values i si) (values (+ i 4) (+ si 4)))
+          ;; Convert from non-premultiplied color to pre-multiplied color.
+          (let [s (subslice spix si (+ si 4) (+ si 4)) ; Small cap improves performance, see https://golang.org/issue/27857
+              ^{:line 559} sa (* (conv uint32 (aget s 3)) 0x101)
+              ^{:line 560} sr (/ (* (conv uint32 (aget s 0)) sa) 0xff)
+              ^{:line 561} sg (/ (* (conv uint32 (aget s 1)) sa) 0xff)
+              ^{:line 562} sb (/ (* (conv uint32 (aget s 2)) sa) 0xff)
+
+              ^{:line 564} d (subslice dpix i (+ i 4) (+ i 4))] ; Small cap improves performance, see https://golang.org/issue/27857
+            (aset d 0 (conv uint8 (>> sr 8)))
+            (aset d 1 (conv uint8 (>> sg 8)))
+            (aset d 2 (conv uint8 (>> sb 8)))
+            (aset d 3 (conv uint8 (>> sa 8)))))))))
+
+
+
+
+^{:go/end 594} (go/func drawGray [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^{:tag (* image/Gray)} src ^image/Point sp]
+  (let [i0 (* (- (.-X (.-Min r)) (.-X (.-Min (.-Rect dst)))) 4)
+      ^{:line 575} i1 (* (- (.-X (.-Max r)) (.-X (.-Min (.-Rect dst)))) 4)
+      ^{:line 576} si0 (* (- (.-X sp) (.-X (.-Min (.-Rect src)))) 1)
+      ^{:line 577} yMax (- (.-Y (.-Max r)) (.-Y (.-Min (.-Rect dst))))
+
+      ^{:line 579} y (- (.-Y (.-Min r)) (.-Y (.-Min (.-Rect dst))))
+      ^{:line 580} sy (- (.-Y sp) (.-Y (.-Min (.-Rect src))))]
+    (for [] (!= y yMax) (set! (values y sy) (values (+ y 1) (+ sy 1)))
+      (let [dpix (subslice (.-Pix dst) (* y (.-Stride dst)))
+          ^{:line 583} spix (subslice (.-Pix src) (* sy (.-Stride src)))]
+
+        (for [(values i si) (values i0 si0)] (< i i1) (set! (values i si) (values (+ i 4) (+ si 1)))
+          (let [p (aget spix si)
+              ^{:line 587} d (subslice dpix i (+ i 4) (+ i 4))] ; Small cap improves performance, see https://golang.org/issue/27857
+            (aset d 0 p)
+            (aset d 1 p)
+            (aset d 2 p)
+            (aset d 3 255)))))))
+
+
+
+
+^{:go/end 615} (go/func drawCMYK [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^{:tag (* image/CMYK)} src ^image/Point sp]
+  (let [i0 (* (- (.-X (.-Min r)) (.-X (.-Min (.-Rect dst)))) 4)
+      ^{:line 598} i1 (* (- (.-X (.-Max r)) (.-X (.-Min (.-Rect dst)))) 4)
+      ^{:line 599} si0 (* (- (.-X sp) (.-X (.-Min (.-Rect src)))) 4)
+      ^{:line 600} yMax (- (.-Y (.-Max r)) (.-Y (.-Min (.-Rect dst))))
+
+      ^{:line 602} y (- (.-Y (.-Min r)) (.-Y (.-Min (.-Rect dst))))
+      ^{:line 603} sy (- (.-Y sp) (.-Y (.-Min (.-Rect src))))]
+    (for [] (!= y yMax) (set! (values y sy) (values (+ y 1) (+ sy 1)))
+      (let [dpix (subslice (.-Pix dst) (* y (.-Stride dst)))
+          ^{:line 606} spix (subslice (.-Pix src) (* sy (.-Stride src)))]
+
+        (for [(values i si) (values i0 si0)] (< i i1) (set! (values i si) (values (+ i 4) (+ si 4)))
+          (let [s (subslice spix si (+ si 4) (+ si 4)) ; Small cap improves performance, see https://golang.org/issue/27857
+              ^{:line 610} d (subslice dpix i (+ i 4) (+ i 4))]
+            (set! (values (aget d 0) (aget d 1) (aget d 2)) (color/CMYKToRGB (aget s 0) (aget s 1) (aget s 2) (aget s 3)))
+            (aset d 3 255)))))))
+
+
+
+
+^{:go/end 643} (go/func drawGlyphOver [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^{:tag (* image/Uniform)} src ^{:tag (* image/Alpha)} mask ^image/Point mp]
+  (let [i0 (.PixOffset dst (.-X (.-Min r)) (.-Y (.-Min r)))
+      ^{:line 619} i1 (+ i0 (* (.Dx r) 4))
+      ^{:line 620} mi0 (.PixOffset mask (.-X mp) (.-Y mp))
+      (values sr sg sb sa) (.RGBA src)]
+    (for [(values y my) (values (.-Y (.-Min r)) (.-Y mp))] (!= y (.-Y (.-Max r))) (set! (values y my) (values (+ y 1) (+ my 1)))
+      (for [(values i mi) (values i0 mi0)] (< i i1) (set! (values i mi) (values (+ i 4) (+ mi 1)))
+        (let [ma (conv uint32 (aget (.-Pix mask) mi))]
+          (when (== ma 0)
+            (continue))
+
+          (set! ma bit-or (<< ma 8))
+
+          ;; The 0x101 is here for the same reason as in drawRGBA.
+          (let [a (* (- m (/ (* sa ma) m)) 0x101)
+
+              ^{:line 633} d (subslice (.-Pix dst) i (+ i 4) (+ i 4))] ; Small cap improves performance, see https://golang.org/issue/27857
+            (aset d 0 (conv uint8 (>> (/ (+ (* (conv uint32 (aget d 0)) a) (* sr ma)) m) 8)))
+            (aset d 1 (conv uint8 (>> (/ (+ (* (conv uint32 (aget d 1)) a) (* sg ma)) m) 8)))
+            (aset d 2 (conv uint8 (>> (/ (+ (* (conv uint32 (aget d 2)) a) (* sb ma)) m) 8)))
+            (aset d 3 (conv uint8 (>> (/ (+ (* (conv uint32 (aget d 3)) a) (* sa ma)) m) 8))))))
+
+      (set! i0 + (.-Stride dst))
+      (set! i1 + (.-Stride dst))
+      (set! mi0 + (.-Stride mask)))))
+
+
+
+^{:go/end 693} (go/func drawGrayMaskOver [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^{:tag (* image/Gray)} src ^image/Point sp ^{:tag (* image/Alpha)} mask ^image/Point mp]
+  (let [(values x0 x1 dx) (values (.-X (.-Min r)) (.-X (.-Max r)) 1)
+      (values y0 y1 dy) (values (.-Y (.-Min r)) (.-Y (.-Max r)) 1)]
+    (when (.Overlaps r (.Add r (.Sub sp (.-Min r))))
+      (when (or (< (.-Y sp) (.-Y (.-Min r))) (and (== (.-Y sp) (.-Y (.-Min r))) (< (.-X sp) (.-X (.-Min r)))))
+        (set! (values x0 x1 dx) (values (- x1 1) (- x0 1) -1))
+        (set! (values y0 y1 dy) (values (- y1 1) (- y0 1) -1))))
+
+
+
+    (let [sy (- (+ (.-Y sp) y0) (.-Y (.-Min r)))
+        ^{:line 656} my (- (+ (.-Y mp) y0) (.-Y (.-Min r)))
+        ^{:line 657} sx0 (- (+ (.-X sp) x0) (.-X (.-Min r)))
+        ^{:line 658} mx0 (- (+ (.-X mp) x0) (.-X (.-Min r)))
+        ^{:line 659} sx1 (+ sx0 (- x1 x0))
+        ^{:line 660} i0 (.PixOffset dst x0 y0)
+        ^{:line 661} di (* dx 4)]
+      (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+        (for [(values i sx mx) (values i0 sx0 mx0)] (!= sx sx1) (set! (values i sx mx) (values (+ i di) (+ sx dx) (+ mx dx)))
+          (let [mi (.PixOffset mask mx my)
+              ^{:line 665} ma (conv uint32 (aget (.-Pix mask) mi))]
+            (set! ma bit-or (<< ma 8))
+            (let [si (.PixOffset src sx sy)
+                ^{:line 668} sy (conv uint32 (aget (.-Pix src) si))]
+              (set! sy bit-or (<< sy 8))
+              (let [sa (conv uint32 0xffff)
+
+                  ^{:line 672} d (subslice (.-Pix dst) i (+ i 4) (+ i 4)) ; Small cap improves performance, see https://golang.org/issue/27857
+                  ^{:line 673} dr (conv uint32 (aget d 0))
+                  ^{:line 674} dg (conv uint32 (aget d 1))
+                  ^{:line 675} db (conv uint32 (aget d 2))
+                  ^{:line 676} da (conv uint32 (aget d 3))
+
+                  ;; dr, dg, db and da are all 8-bit color at the moment, ranging in [0,255].
+                  ;; We work in 16-bit color, and so would normally do:
+                  ;; dr |= dr << 8
+                  ;; and similarly for dg, db and da, but instead we multiply a
+                  ;; (which is a 16-bit color, ranging in [0,65535]) by 0x101.
+                  ;; This yields the same result, but is fewer arithmetic operations.
+                  ^{:line 684} a (* (- m (/ (* sa ma) m)) 0x101)]
+
+                (aset d 0 (conv uint8 (>> (/ (+ (* dr a) (* sy ma)) m) 8)))
+                (aset d 1 (conv uint8 (>> (/ (+ (* dg a) (* sy ma)) m) 8)))
+                (aset d 2 (conv uint8 (>> (/ (+ (* db a) (* sy ma)) m) 8)))
+                (aset d 3 (conv uint8 (>> (/ (+ (* da a) (* sa ma)) m) 8)))))))
+
+        (set! i0 + (* dy (.-Stride dst)))))))
+
+
+
+^{:go/end 747} (go/func drawRGBAMaskOver [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^{:tag (* image/RGBA)} src ^image/Point sp ^{:tag (* image/Alpha)} mask ^image/Point mp]
+  (let [(values x0 x1 dx) (values (.-X (.-Min r)) (.-X (.-Max r)) 1)
+      (values y0 y1 dy) (values (.-Y (.-Min r)) (.-Y (.-Max r)) 1)]
+    (when (and (== dst src) (.Overlaps r (.Add r (.Sub sp (.-Min r)))))
+      (when (or (< (.-Y sp) (.-Y (.-Min r))) (and (== (.-Y sp) (.-Y (.-Min r))) (< (.-X sp) (.-X (.-Min r)))))
+        (set! (values x0 x1 dx) (values (- x1 1) (- x0 1) -1))
+        (set! (values y0 y1 dy) (values (- y1 1) (- y0 1) -1))))
+
+
+
+    (let [sy (- (+ (.-Y sp) y0) (.-Y (.-Min r)))
+        ^{:line 706} my (- (+ (.-Y mp) y0) (.-Y (.-Min r)))
+        ^{:line 707} sx0 (- (+ (.-X sp) x0) (.-X (.-Min r)))
+        ^{:line 708} mx0 (- (+ (.-X mp) x0) (.-X (.-Min r)))
+        ^{:line 709} sx1 (+ sx0 (- x1 x0))
+        ^{:line 710} i0 (.PixOffset dst x0 y0)
+        ^{:line 711} di (* dx 4)]
+      (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+        (for [(values i sx mx) (values i0 sx0 mx0)] (!= sx sx1) (set! (values i sx mx) (values (+ i di) (+ sx dx) (+ mx dx)))
+          (let [mi (.PixOffset mask mx my)
+              ^{:line 715} ma (conv uint32 (aget (.-Pix mask) mi))]
+            (set! ma bit-or (<< ma 8))
+            (let [si (.PixOffset src sx sy)
+                ^{:line 718} sr (conv uint32 (aget (.-Pix src) (+ si 0)))
+                ^{:line 719} sg (conv uint32 (aget (.-Pix src) (+ si 1)))
+                ^{:line 720} sb (conv uint32 (aget (.-Pix src) (+ si 2)))
+                ^{:line 721} sa (conv uint32 (aget (.-Pix src) (+ si 3)))]
+              (set! sr bit-or (<< sr 8))
+              (set! sg bit-or (<< sg 8))
+              (set! sb bit-or (<< sb 8))
+              (set! sa bit-or (<< sa 8))
+              (let [d (subslice (.-Pix dst) i (+ i 4) (+ i 4)) ; Small cap improves performance, see https://golang.org/issue/27857
+                  ^{:line 727} dr (conv uint32 (aget d 0))
+                  ^{:line 728} dg (conv uint32 (aget d 1))
+                  ^{:line 729} db (conv uint32 (aget d 2))
+                  ^{:line 730} da (conv uint32 (aget d 3))
+
+                  ;; dr, dg, db and da are all 8-bit color at the moment, ranging in [0,255].
+                  ;; We work in 16-bit color, and so would normally do:
+                  ;; dr |= dr << 8
+                  ;; and similarly for dg, db and da, but instead we multiply a
+                  ;; (which is a 16-bit color, ranging in [0,65535]) by 0x101.
+                  ;; This yields the same result, but is fewer arithmetic operations.
+                  ^{:line 738} a (* (- m (/ (* sa ma) m)) 0x101)]
+
+                (aset d 0 (conv uint8 (>> (/ (+ (* dr a) (* sr ma)) m) 8)))
+                (aset d 1 (conv uint8 (>> (/ (+ (* dg a) (* sg ma)) m) 8)))
+                (aset d 2 (conv uint8 (>> (/ (+ (* db a) (* sb ma)) m) 8)))
+                (aset d 3 (conv uint8 (>> (/ (+ (* da a) (* sa ma)) m) 8)))))))
+
+        (set! i0 + (* dy (.-Stride dst)))))))
+
+
+
+^{:go/end 793} (go/func drawRGBA64ImageMaskOver [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^image/RGBA64Image src ^image/Point sp ^{:tag (* image/Alpha)} mask ^image/Point mp]
+  (let [(values x0 x1 dx) (values (.-X (.-Min r)) (.-X (.-Max r)) 1)
+      (values y0 y1 dy) (values (.-Y (.-Min r)) (.-Y (.-Max r)) 1)]
+    (when (and (== (conv image/Image dst) src) (.Overlaps r (.Add r (.Sub sp (.-Min r)))))
+      (when (or (< (.-Y sp) (.-Y (.-Min r))) (and (== (.-Y sp) (.-Y (.-Min r))) (< (.-X sp) (.-X (.-Min r)))))
+        (set! (values x0 x1 dx) (values (- x1 1) (- x0 1) -1))
+        (set! (values y0 y1 dy) (values (- y1 1) (- y0 1) -1))))
+
+
+
+    (let [sy (- (+ (.-Y sp) y0) (.-Y (.-Min r)))
+        ^{:line 760} my (- (+ (.-Y mp) y0) (.-Y (.-Min r)))
+        ^{:line 761} sx0 (- (+ (.-X sp) x0) (.-X (.-Min r)))
+        ^{:line 762} mx0 (- (+ (.-X mp) x0) (.-X (.-Min r)))
+        ^{:line 763} sx1 (+ sx0 (- x1 x0))
+        ^{:line 764} i0 (.PixOffset dst x0 y0)
+        ^{:line 765} di (* dx 4)]
+      (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+        (for [(values i sx mx) (values i0 sx0 mx0)] (!= sx sx1) (set! (values i sx mx) (values (+ i di) (+ sx dx) (+ mx dx)))
+          (let [mi (.PixOffset mask mx my)
+              ^{:line 769} ma (conv uint32 (aget (.-Pix mask) mi))]
+            (set! ma bit-or (<< ma 8))
+            (let [srgba (.RGBA64At src sx sy)
+                ^{:line 772} d (subslice (.-Pix dst) i (+ i 4) (+ i 4)) ; Small cap improves performance, see https://golang.org/issue/27857
+                ^{:line 773} dr (conv uint32 (aget d 0))
+                ^{:line 774} dg (conv uint32 (aget d 1))
+                ^{:line 775} db (conv uint32 (aget d 2))
+                ^{:line 776} da (conv uint32 (aget d 3))
+
+                ;; dr, dg, db and da are all 8-bit color at the moment, ranging in [0,255].
+                ;; We work in 16-bit color, and so would normally do:
+                ;; dr |= dr << 8
+                ;; and similarly for dg, db and da, but instead we multiply a
+                ;; (which is a 16-bit color, ranging in [0,65535]) by 0x101.
+                ;; This yields the same result, but is fewer arithmetic operations.
+                ^{:line 784} a (* (- m (/ (* (conv uint32 (.-A srgba)) ma) m)) 0x101)]
+
+              (aset d 0 (conv uint8 (>> (/ (+ (* dr a) (* (conv uint32 (.-R srgba)) ma)) m) 8)))
+              (aset d 1 (conv uint8 (>> (/ (+ (* dg a) (* (conv uint32 (.-G srgba)) ma)) m) 8)))
+              (aset d 2 (conv uint8 (>> (/ (+ (* db a) (* (conv uint32 (.-B srgba)) ma)) m) 8)))
+              (aset d 3 (conv uint8 (>> (/ (+ (* da a) (* (conv uint32 (.-A srgba)) ma)) m) 8))))))
+
+        (set! i0 + (* dy (.-Stride dst)))))))
+
+
+
+^{:go/end 931} (go/func drawRGBA [^{:tag (* image/RGBA)} dst ^image/Rectangle r ^image/Image src ^image/Point sp ^image/Image mask ^image/Point mp ^Op op]
+  (let [(values x0 x1 dx) (values (.-X (.-Min r)) (.-X (.-Max r)) 1)
+      (values y0 y1 dy) (values (.-Y (.-Min r)) (.-Y (.-Max r)) 1)]
+    (when (and (== (conv image/Image dst) src) (.Overlaps r (.Add r (.Sub sp (.-Min r)))))
+      (when (or (< (.-Y sp) (.-Y (.-Min r))) (and (== (.-Y sp) (.-Y (.-Min r))) (< (.-X sp) (.-X (.-Min r)))))
+        (set! (values x0 x1 dx) (values (- x1 1) (- x0 1) -1))
+        (set! (values y0 y1 dy) (values (- y1 1) (- y0 1) -1))))
+
+
+
+    (let [sy (- (+ (.-Y sp) y0) (.-Y (.-Min r)))
+        ^{:line 806} my (- (+ (.-Y mp) y0) (.-Y (.-Min r)))
+        ^{:line 807} sx0 (- (+ (.-X sp) x0) (.-X (.-Min r)))
+        ^{:line 808} mx0 (- (+ (.-X mp) x0) (.-X (.-Min r)))
+        ^{:line 809} sx1 (+ sx0 (- x1 x0))
+        ^{:line 810} i0 (.PixOffset dst x0 y0)
+        ^{:line 811} di (* dx 4)]
+
+      ;; Try the image.RGBA64Image interface, part of the standard library since
+      ;; Go 1.17.
+      ;;
+      ;; This optimization is similar to how FALLBACK1.17 optimizes FALLBACK1.0
+      ;; in DrawMask, except here the concrete type of dst is known to be
+      ;; *image.RGBA.
+      (when [(values src0 _) (assert image/RGBA64Image src)] (!= src0 nil)
+        (if (== mask nil) (do
+            (if (== op Over)
+              (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+                (for [(values i sx mx) (values i0 sx0 mx0)] (!= sx sx1) (set! (values i sx mx) (values (+ i di) (+ sx dx) (+ mx dx)))
+                  (let [srgba (.RGBA64At src0 sx sy)
+                      ^{:line 825} d (subslice (.-Pix dst) i (+ i 4) (+ i 4))
+                      ^{:line 826} dr (conv uint32 (aget d 0))
+                      ^{:line 827} dg (conv uint32 (aget d 1))
+                      ^{:line 828} db (conv uint32 (aget d 2))
+                      ^{:line 829} da (conv uint32 (aget d 3))
+                      ^{:line 830} a (* (- m (conv uint32 (.-A srgba))) 0x101)]
+                    (aset d 0 (conv uint8 (>> (+ (/ (* dr a) m) (conv uint32 (.-R srgba))) 8)))
+                    (aset d 1 (conv uint8 (>> (+ (/ (* dg a) m) (conv uint32 (.-G srgba))) 8)))
+                    (aset d 2 (conv uint8 (>> (+ (/ (* db a) m) (conv uint32 (.-B srgba))) 8)))
+                    (aset d 3 (conv uint8 (>> (+ (/ (* da a) m) (conv uint32 (.-A srgba))) 8)))))
+
+                (set! i0 + (* dy (.-Stride dst))))
+
+
+              (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+                (for [(values i sx mx) (values i0 sx0 mx0)] (!= sx sx1) (set! (values i sx mx) (values (+ i di) (+ sx dx) (+ mx dx)))
+                  (let [srgba (.RGBA64At src0 sx sy)
+                      ^{:line 842} d (subslice (.-Pix dst) i (+ i 4) (+ i 4))]
+                    (aset d 0 (conv uint8 (>> (.-R srgba) 8)))
+                    (aset d 1 (conv uint8 (>> (.-G srgba) 8)))
+                    (aset d 2 (conv uint8 (>> (.-B srgba) 8)))
+                    (aset d 3 (conv uint8 (>> (.-A srgba) 8)))))
+
+                (set! i0 + (* dy (.-Stride dst)))))
+
+
+            (return))
+
+          (when [(values mask0 _) (assert image/RGBA64Image mask)] (!= mask0 nil)
+            (if (== op Over)
+              (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+                (for [(values i sx mx) (values i0 sx0 mx0)] (!= sx sx1) (set! (values i sx mx) (values (+ i di) (+ sx dx) (+ mx dx)))
+                  (let [ma (conv uint32 (.-A (.RGBA64At mask0 mx my)))
+                      ^{:line 858} srgba (.RGBA64At src0 sx sy)
+                      ^{:line 859} d (subslice (.-Pix dst) i (+ i 4) (+ i 4))
+                      ^{:line 860} dr (conv uint32 (aget d 0))
+                      ^{:line 861} dg (conv uint32 (aget d 1))
+                      ^{:line 862} db (conv uint32 (aget d 2))
+                      ^{:line 863} da (conv uint32 (aget d 3))
+                      ^{:line 864} a (* (- m (/ (* (conv uint32 (.-A srgba)) ma) m)) 0x101)]
+                    (aset d 0 (conv uint8 (>> (/ (+ (* dr a) (* (conv uint32 (.-R srgba)) ma)) m) 8)))
+                    (aset d 1 (conv uint8 (>> (/ (+ (* dg a) (* (conv uint32 (.-G srgba)) ma)) m) 8)))
+                    (aset d 2 (conv uint8 (>> (/ (+ (* db a) (* (conv uint32 (.-B srgba)) ma)) m) 8)))
+                    (aset d 3 (conv uint8 (>> (/ (+ (* da a) (* (conv uint32 (.-A srgba)) ma)) m) 8)))))
+
+                (set! i0 + (* dy (.-Stride dst))))
+
+
+              (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+                (for [(values i sx mx) (values i0 sx0 mx0)] (!= sx sx1) (set! (values i sx mx) (values (+ i di) (+ sx dx) (+ mx dx)))
+                  (let [ma (conv uint32 (.-A (.RGBA64At mask0 mx my)))
+                      ^{:line 876} srgba (.RGBA64At src0 sx sy)
+                      ^{:line 877} d (subslice (.-Pix dst) i (+ i 4) (+ i 4))]
+                    (aset d 0 (conv uint8 (>> (/ (* (conv uint32 (.-R srgba)) ma) m) 8)))
+                    (aset d 1 (conv uint8 (>> (/ (* (conv uint32 (.-G srgba)) ma) m) 8)))
+                    (aset d 2 (conv uint8 (>> (/ (* (conv uint32 (.-B srgba)) ma) m) 8)))
+                    (aset d 3 (conv uint8 (>> (/ (* (conv uint32 (.-A srgba)) ma) m) 8)))))
+
+                (set! i0 + (* dy (.-Stride dst)))))
+
+
+            (return))))
+
+
+
+      ;; Use the image.Image interface, part of the standard library since Go
+      ;; 1.0.
+      ;;
+      ;; This is similar to FALLBACK1.0 in DrawMask, except here the concrete
+      ;; type of dst is known to be *image.RGBA.
+      (for [y y0] (!= y y1) (set! (values y sy my) (values (+ y dy) (+ sy dy) (+ my dy)))
+        (for [(values i sx mx) (values i0 sx0 mx0)] (!= sx sx1) (set! (values i sx mx) (values (+ i di) (+ sx dx) (+ mx dx)))
+          (let [ma (conv uint32 m)]
+            (when (!= mask nil)
+              (set! (values _ _ _ ma) (.RGBA (.At mask mx my))))
+
+            (let [(values sr sg sb sa) (.RGBA (.At src sx sy))
+                ^{:line 902} d (subslice (.-Pix dst) i (+ i 4) (+ i 4))] ; Small cap improves performance, see https://golang.org/issue/27857
+              (if (== op Over)
+                (let [dr (conv uint32 (aget d 0))
+                    ^{:line 905} dg (conv uint32 (aget d 1))
+                    ^{:line 906} db (conv uint32 (aget d 2))
+                    ^{:line 907} da (conv uint32 (aget d 3))
+
+                    ;; dr, dg, db and da are all 8-bit color at the moment, ranging in [0,255].
+                    ;; We work in 16-bit color, and so would normally do:
+                    ;; dr |= dr << 8
+                    ;; and similarly for dg, db and da, but instead we multiply a
+                    ;; (which is a 16-bit color, ranging in [0,65535]) by 0x101.
+                    ;; This yields the same result, but is fewer arithmetic operations.
+                    ^{:line 915} a (* (- m (/ (* sa ma) m)) 0x101)]
+
+                  (aset d 0 (conv uint8 (>> (/ (+ (* dr a) (* sr ma)) m) 8)))
+                  (aset d 1 (conv uint8 (>> (/ (+ (* dg a) (* sg ma)) m) 8)))
+                  (aset d 2 (conv uint8 (>> (/ (+ (* db a) (* sb ma)) m) 8)))
+                  (aset d 3 (conv uint8 (>> (/ (+ (* da a) (* sa ma)) m) 8))))
+
+                (do
+                  (aset d 0 (conv uint8 (>> (/ (* sr ma) m) 8)))
+                  (aset d 1 (conv uint8 (>> (/ (* sg ma) m) 8)))
+                  (aset d 2 (conv uint8 (>> (/ (* sb ma) m) 8)))
+                  (aset d 3 (conv uint8 (>> (/ (* sa ma) m) 8))))))))
+
+
+        (set! i0 + (* dy (.-Stride dst)))))))
+
+
+
+
+^{:go/end 942} (go/func clamp "clamp clamps i to the interval [0, 0xffff].\n" ^int32 [^int32 i]
+  (when (< i 0)
+    (return 0))
+
+  (when (> i 0xffff)
+    (return 0xffff))
+
+  ^{:line 941} i)
+
+
+
+
+
+
+^{:go/end 954} (go/func sqDiff "sqDiff returns the squared-difference of x and y, shifted by 2 so that\nadding four of those won't overflow a uint32.\n\nx and y are both assumed to be in the range [0, 0xffff].\n" ^uint32 [^int32 x ^int32 y]
+  ;; This is an optimized code relying on the overflow/wrap around
+  ;; properties of unsigned integers operations guaranteed by the language
+  ;; spec. See sqDiff from the image/color package for more details.
+  (let [d (conv uint32 (- x y))]
+    (>> (* d d) 2)))
+
+
+^{:go/end 1084} (go/func drawPaletted [^Image dst ^image/Rectangle r ^image/Image src ^image/Point sp ^bool floydSteinberg]
+  ;; TODO(nigeltao): handle the case where the dst and src overlap.
+  ;; Does it even make sense to try and do Floyd-Steinberg whilst
+  ;; walking the image backward (right-to-left bottom-to-top)?
+
+  ;; If dst is an *image.Paletted, we have a fast path for dst.Set and
+  ;; dst.At. The dst.Set equivalent is a batch version of the algorithm
+  ;; used by color.Palette's Index method in image/color/color.go, plus
+  ;; optional Floyd-Steinberg error diffusion.
+  (let [(values palette pix stride) (values (conv (slice (array 4 int32)) nil) (conv (slice byte) nil) 0)]
+    (when [(values p ok) (assert (* image/Paletted) dst)] ok
+      (set! palette (make (slice (array 4 int32)) (len (.-Palette p))))
+      (range [i col (.-Palette p)]
+        (let [(values r g b a) (.RGBA col)]
+          (aset (aget palette i) 0 (conv int32 r))
+          (aset (aget palette i) 1 (conv int32 g))
+          (aset (aget palette i) 2 (conv int32 b))
+          (aset (aget palette i) 3 (conv int32 a))))
+
+      (set! (values pix stride) (values (subslice (.-Pix p) (.PixOffset p (.-X (.-Min r)) (.-Y (.-Min r)))) (.-Stride p))))
+
+
+    ;; quantErrorCurr and quantErrorNext are the Floyd-Steinberg quantization
+    ;; errors that have been propagated to the pixels in the current and next
+    ;; rows. The +2 simplifies calculation near the edges.
+    (let [(values ^{:tag (slice (array 4 int32))} quantErrorCurr ^{:tag (slice (array 4 int32))} quantErrorNext) (zero (slice (array 4 int32)))]
+      (when floydSteinberg
+        (set! quantErrorCurr (make (slice (array 4 int32)) (+ (.Dx r) 2)))
+        (set! quantErrorNext (make (slice (array 4 int32)) (+ (.Dx r) 2))))
+
+      (let [pxRGBA ^{:go/end 986} (fn [^int x ^int y] :results [^uint32 r ^uint32 g ^uint32 b ^uint32 a] (.RGBA (.At src x y)))]
+        ;; Fast paths for special cases to avoid excessive use of the color.Color
+        ;; interface which escapes to the heap but need to be discovered for
+        ;; each pixel on r. See also https://golang.org/issues/15759.
+        (type-switch [src0 src]
+          (case [(* image/RGBA)]
+            (set! pxRGBA ^{:go/end 992} (fn [^int x ^int y] :results [^uint32 r ^uint32 g ^uint32 b ^uint32 a] (.RGBA (.RGBAAt src0 x y)))))
+          (case [(* image/NRGBA)]
+            (set! pxRGBA ^{:go/end 994} (fn [^int x ^int y] :results [^uint32 r ^uint32 g ^uint32 b ^uint32 a] (.RGBA (.NRGBAAt src0 x y)))))
+          (case [(* image/YCbCr)]
+            (set! pxRGBA ^{:go/end 996} (fn [^int x ^int y] :results [^uint32 r ^uint32 g ^uint32 b ^uint32 a] (.RGBA (.YCbCrAt src0 x y))))))
+
+
+        ;; Loop over each source pixel.
+        (let [out (lit color/RGBA64 :A 0xffff)]
+          (for [y 0] (!= y (.Dy r)) (inc! y)
+            (for [x 0] (!= x (.Dx r)) (inc! x)
+              ;; er, eg and eb are the pixel's R,G,B values plus the
+              ;; optional Floyd-Steinberg error.
+              (let [(values sr sg sb sa) (pxRGBA (+ (.-X sp) x) (+ (.-Y sp) y))
+                  (values er eg eb ea) (values (conv int32 sr) (conv int32 sg) (conv int32 sb) (conv int32 sa))]
+                (when floydSteinberg
+                  (set! er (clamp (+ er (/ (aget (aget quantErrorCurr (+ x 1)) 0) 16))))
+                  (set! eg (clamp (+ eg (/ (aget (aget quantErrorCurr (+ x 1)) 1) 16))))
+                  (set! eb (clamp (+ eb (/ (aget (aget quantErrorCurr (+ x 1)) 2) 16))))
+                  (set! ea (clamp (+ ea (/ (aget (aget quantErrorCurr (+ x 1)) 3) 16)))))
+
+
+                (if (!= palette nil)
+                  ;; Find the closest palette color in Euclidean R,G,B,A space:
+                  ;; the one that minimizes sum-squared-difference.
+                  ;; TODO(nigeltao): consider smarter algorithms.
+                  (let [(values bestIndex bestSum) (values 0 (conv uint32 (- (<< 1 32) 1)))]
+                    (range [index p palette]
+                      (let [sum (+ (sqDiff er (aget p 0)) (sqDiff eg (aget p 1)) (sqDiff eb (aget p 2)) (sqDiff ea (aget p 3)))]
+                        (when (< sum bestSum)
+                          (set! (values bestIndex bestSum) (values index sum))
+                          (when (== sum 0)
+                            (break)))))
+
+
+
+                    (aset pix (+ (* y stride) x) (conv byte bestIndex))
+
+                    (when (not floydSteinberg)
+                      (continue))
+
+                    (set! er - (aget (aget palette bestIndex) 0))
+                    (set! eg - (aget (aget palette bestIndex) 1))
+                    (set! eb - (aget (aget palette bestIndex) 2))
+                    (set! ea - (aget (aget palette bestIndex) 3)))
+
+                  (do
+                    (set! (.-R out) (conv uint16 er))
+                    (set! (.-G out) (conv uint16 eg))
+                    (set! (.-B out) (conv uint16 eb))
+                    (set! (.-A out) (conv uint16 ea))
+                    ;; The third argument is &out instead of out (and out is
+                    ;; declared outside of the inner loop) to avoid the implicit
+                    ;; conversion to color.Color here allocating memory in the
+                    ;; inner loop if sizeof(color.RGBA64) > sizeof(uintptr).
+                    (.Set dst (+ (.-X (.-Min r)) x) (+ (.-Y (.-Min r)) y) (addr out))
+
+                    (when (not floydSteinberg)
+                      (continue))
+
+                    (set! (values sr sg sb sa) (.RGBA (.At dst (+ (.-X (.-Min r)) x) (+ (.-Y (.-Min r)) y))))
+                    (set! er - (conv int32 sr))
+                    (set! eg - (conv int32 sg))
+                    (set! eb - (conv int32 sb))
+                    (set! ea - (conv int32 sa))))
+
+
+                ;; Propagate the Floyd-Steinberg quantization error.
+                (set! (aget (aget quantErrorNext (+ x 0)) 0) + (* er 3))
+                (set! (aget (aget quantErrorNext (+ x 0)) 1) + (* eg 3))
+                (set! (aget (aget quantErrorNext (+ x 0)) 2) + (* eb 3))
+                (set! (aget (aget quantErrorNext (+ x 0)) 3) + (* ea 3))
+                (set! (aget (aget quantErrorNext (+ x 1)) 0) + (* er 5))
+                (set! (aget (aget quantErrorNext (+ x 1)) 1) + (* eg 5))
+                (set! (aget (aget quantErrorNext (+ x 1)) 2) + (* eb 5))
+                (set! (aget (aget quantErrorNext (+ x 1)) 3) + (* ea 5))
+                (set! (aget (aget quantErrorNext (+ x 2)) 0) + (* er 1))
+                (set! (aget (aget quantErrorNext (+ x 2)) 1) + (* eg 1))
+                (set! (aget (aget quantErrorNext (+ x 2)) 2) + (* eb 1))
+                (set! (aget (aget quantErrorNext (+ x 2)) 3) + (* ea 1))
+                (set! (aget (aget quantErrorCurr (+ x 2)) 0) + (* er 7))
+                (set! (aget (aget quantErrorCurr (+ x 2)) 1) + (* eg 7))
+                (set! (aget (aget quantErrorCurr (+ x 2)) 2) + (* eb 7))
+                (set! (aget (aget quantErrorCurr (+ x 2)) 3) + (* ea 7))))
+
+
+            ;; Recycle the quantization error buffers.
+            (when floydSteinberg
+              (set! (values quantErrorCurr quantErrorNext) (values quantErrorNext quantErrorCurr))
+              (clear quantErrorNext))))))))
