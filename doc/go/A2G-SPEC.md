@@ -2389,6 +2389,26 @@ Linux-tagged `hostrand_linux.ae` (`//go:build linux`). jrt's own Java
 `NativePRNG`'s and `SeedGenerator`'s variants read where the JDK reads `/dev/random` and
 `/dev/urandom`.
 
+**The program's host; the box's** (amendments BX1-BX3, proposed 2026-10-11 for the user;
+BOX-NOTES.md, S1). The host a program starts with is `jrt.ProgramHost(resources)`, which the
+main package's `main` sets (§10.6) and which is `theHost`'s default (with no resources): on an
+operating system (`programhost.ae`, `//go:build !tamago`) `OSHost`, as before; built with
+`GOOS=tamago` (B1b's box) `hostbox_tamago.ae`'s box host, over the monitor's calls through the
+board (`arbace/box/board`, `abi`): the standard streams over `WaitRead`, `Write` and `Message`
+(the input polled without a wait, the reading goroutine sleeping 1 to 10 ms between polls, so
+that a read never stops the guest: BOX-SURVEY R3), `RandomBytes` over `Random`, `Exit` over the
+board's (the console flushed), the files `OSHost`'s over Go's `os`, which TamaGo answers from its
+in-memory file system (D11), `Now` Go's clock, which the board offsets by the host's wall clock
+at the entry (D10), `NumCPU` the vCPUs (`GOMAXPROCS`), and the command line and the environment
+those the monitor wrote at the entry, which jrt's `init` makes `os.Args` and the process's
+environment (TamaGo's runtime gives neither) before jrt reads them, applying `GOGC` too. It has
+none of the optional interfaces below: no `HostFS`, `HostLinks`, `NetHost`, `HostProc` or
+`HostExecutable`, so those features fail as on a host without them (BX1). `OSHost`'s network
+(`NetHost`'s methods, with their `syscall` socket options and `TIOCINQ`) is Linux's,
+`net_linux.ae` (`//go:build linux`): jrt builds for `GOOS=tamago` (BX2). a2g's view of jrt (its
+names, the collisions it checks) leaves out the files named for another system than Linux
+(`_tamago.ae`), as a Linux build of Go does (BX3).
+
 **An optional `HostExecutable`** (amendment FX6, accepted 2026-10-10; JRT-NOTES.md, "Resources
 by URL"). The executable's path, which the URLs of embedded resources name (§10.3), comes from
 an optional interface `jrt.HostExecutable`, as `HostFS`; `OSHost` implements it on Linux
@@ -2798,6 +2818,16 @@ neither `off` (the user's switch) nor `wrapped` (the marker for the child), it r
 (`syscall.Exec`) with `rlwrap` with `clj`'s flags around the executable's own path and
 arguments, `ARBACE_RLWRAP=wrapped` added; otherwise, or when the exec fails, it runs on,
 silently. The JVM launcher `bin/arbace-j` follows the same convention. `Host` is unchanged.
+
+**The box's program** (amendment BX4, proposed 2026-10-11; BOX-NOTES.md, S1). `main` sets the
+host with `jrt.ProgramHost` (§9.4) rather than `OSHost`, so the same main package serves both
+systems: `bin/arbace-go --build --box` builds the program a2g wrote, unchanged, with
+`GOOS=tamago` (`bin/g2a build --goos tamago --root box`: the board's package and `abi` join the
+module, TamaGo's `goos` module is required for `GOOSPKG`), embedding the image of prepared
+namespaces the Linux build made from the same program (the image is valid for the program that
+made it: BOX-SURVEY R6), and links it at the box's addresses with its symbol table. `os.Args`,
+`os.Exit` and `rlwrap_other.go`'s empty `execRlwrap` work there as they are (jrt's box host sets
+the first, the board answers the second).
 
 **Arbace's version** (2026-10-11; doc/VENDOR-NOTES.md, hand change 20). The main package has a
 string variable `arbaceVersion`, empty in a2g's output: `bin/arbace-go`'s final links (with the
@@ -4228,6 +4258,14 @@ user's decision of 2026-10-11): §4.1. TL6 `BreakIteratorResourceBundle`'s varia
 jrt's locale properties, the Turkish and Azerbaijani i, `SoftReference`'s subclass
 constructors: §12 (R17), JRT-NOTES.md. TL8 the shape check's known difference in
 `Locale.ae`: JRT-SOURCES.md. TL5 revises TM4.
+
+**The box** (BOX-NOTES.md, S1; proposed 2026-10-11, for the user): BX1 the program's host
+`jrt.ProgramHost` and the box's host: §9.4. BX2 `OSHost`'s network Linux's (`net_linux.ae`):
+§9.4. BX3 a2g's view of jrt without other systems' files: §9.4. BX4 the main package's host by
+`ProgramHost`, the box's program built from a2g's with `GOOS=tamago`: §10.6. BX5 the
+evaluator's yield: `Compiler$CodeRun.tick`, a native counted at every method run and `recur`,
+`runtime.Gosched` every 65,536 on TamaGo, which does not preempt (BOX-SURVEY R2), an empty
+function on Linux (`boxYield`): SPEED-NOTES.md's closure compiler, jrt's `natives.ae`.
 
 The 23 questions, each with its recommendation, which the user accepted on 2026-10-08 and the
 text above follows:

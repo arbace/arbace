@@ -218,8 +218,38 @@ TEXT whim_vectors(SB),NOSPLIT|NOFRAME,$0
 
 // vector_common reports the exception by abi.Fault -- the vector, the
 // error code, RIP and CR2 -- from a block of its own, and never returns:
-// the monitor ends the guest as the C editor dies of a SIGSEGV.
+// the monitor ends the guest as the C editor dies of a SIGSEGV.  But for
+// a page fault below the first page once NilPanics has set sigpanicPC (a
+// nil dereference, Arbace's addition): that returns to sigpanic, as if the
+// faulting instruction had called it -- its address pushed on the
+// interrupted stack, every register else as it was -- as Linux's signal
+// handler makes a SIGSEGV a run-time panic.
 TEXT vector_common<>(SB),NOSPLIT|NOFRAME,$0
+	CMPQ	0(SP), $14
+	JNE	report
+	PUSHQ	AX
+	MOVQ	CR2, AX
+	CMPQ	AX, $0x1000
+	JCC	reportAX
+	MOVQ	·sigpanicPC(SB), AX
+	TESTQ	AX, AX
+	JZ	reportAX
+	// 0 BX, 8 AX, 16 the vector, 24 the error code, 32 RIP, 40 CS, 48 RFLAGS, 56 RSP, 64 SS
+	PUSHQ	BX
+	MOVQ	56(SP), BX
+	SUBQ	$8, BX
+	MOVQ	32(SP), AX
+	MOVQ	AX, (BX)
+	MOVQ	BX, 56(SP)
+	MOVQ	·sigpanicPC(SB), AX
+	MOVQ	AX, 32(SP)
+	POPQ	BX
+	POPQ	AX
+	ADDQ	$16, SP
+	IRETQ
+reportAX:
+	POPQ	AX
+report:
 	POPQ	DI
 	POPQ	SI
 	MOVQ	(SP), DX
