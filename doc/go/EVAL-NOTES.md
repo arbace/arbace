@@ -1456,7 +1456,7 @@ Java fixtures, resources by URL"); where each is folded is marked below.
   *Accepted 2026-10-10, folded into "Phase 2C", "The runner", above.*
 - **FX3 (EVAL-PLAN §2; C2G-SPEC §10.2) Functional interfaces of let and loop locals.** The
   evaluator adapts or casts the init of an object local tagged with a functional interface, as
-  `LetExpr.doEmit` compiles it. *Accepted 2026-10-10, folded into EVAL-PLAN §2; C2G-SPEC
+  `LetExpr.doEmit` compiles it. *Accepted 2026-10-10, folded into EVAL-PLAN §2.6; C2G-SPEC
   §10.2 pending.*
 - **FX4 (EVAL-PLAN §2.5, C2G-SPEC §10.2) The JVM's errors of `new` and of a stub's name.** The
   resolved `new` of an abstract class throws `InstantiationError` before its arguments; a
