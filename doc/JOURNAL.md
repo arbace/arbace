@@ -278,3 +278,23 @@ the first. The history before it is on the frozen branches and in git history:
   main's previous build (4 classes in jrt, about 17 in `lang`; that build was from a dirty tree,
   so not conclusive); 21 files of jrt-convert's output differ only in a header naming a numbered
   temporary directory (`.tmp/j2a-patch/java.base-N`).
+
+## 2026-10-11: B1b S2, R1: the box launcher maps the guest image
+
+- Agent, branch `box-mmap` (`01eca80`), merged into main; details in BOX-NOTES.md, S2, amendment
+  BX11 (proposed). `vmm.ImageFile` (a file, offset, size; `vmm.OpenImage`, `vmm.AppendedFile`):
+  the monitor reads the ELF from the file and maps each loadable segment privately into the slot
+  (`mapfixed_linux.ae`), or reads it straight into the slot when it cannot (unaligned, macOS,
+  `ARBACE_BOX_MAP=0`); never a copy in the launcher's heap. `vmm.Append` and `bin/arbace-go`'s
+  `box_append` pad the launcher to 64 KiB before the image. The symbol table is read once for the
+  three symbols the monitor needs (it was parsed three times, about 65 MB of heap). New tests in
+  `imagefile_test.ae`. `box/` edited as Go in a printed copy and converted back by g2a.
+- Numbers (`-e nil`, best of 9, nested KVM): resident 445-448 MB → 257-265 MB mapped, 291-295 MB
+  copied (native 161-164); start 0.36 s → 0.55 s mapped, 0.32 s copied (native 0.20). Mapped
+  starts slower here: about 8,400 small faults through two levels of nested paging against the
+  copy's 2 MiB pages; not measured without nesting. Evaluation speed unchanged.
+- Checks: the executable and guest unchanged in size; `--smoke --box` 64 of 64, mapped and copied
+  (and again on merged main); the box oracle 21,695 of 21,742 (the 47 recorded); `bin/box-vendor
+  roundtrip` 16 of 16 and `kvm-tests` pass. A guest image must not be rewritten in place while a
+  box runs from it (the build replaces the launcher by rename).
+- Open for the user: BX11, and the default (mapped, as R1 asked, or copied).
