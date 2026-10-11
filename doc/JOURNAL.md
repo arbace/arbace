@@ -69,3 +69,28 @@ the first. The history before it is on the frozen branches and in git history:
   upstream file-name comments untouched; `.ae` wins over `.clj`, a dialect divergence).
 - Started in parallel: c2a and the tool renames j2a, g2a, a2g (branch `c2a`); Arbace's own
   version (branch `version`).
+
+## 2026-10-11: c2a; the tools renamed j2a, g2a, a2g
+
+- Agent, branch `c2a` (7 commits), fast-forwarded into main. c2a, the Clojure → Arbace
+  translator (`arbace/c2a/`, `bin/c2a`, doc/C2A.md): text-level, guided by a lexical reader
+  (`text.ae`, as LispReader reads), so layout and comments are kept; `arbace.j2c.rename` moved
+  in as `arbace.c2a.rename`, its rules unchanged; a rule table (`rules.ae`): reader conditionals
+  resolved for `:clj` when `.cljc` becomes `.ae`, the renames, the proxy method mapping names
+  (the suite's former `sed`), `:core-names` (a new dialect divergence: arbace.core's
+  `{:added "arbace"}` vars such as `return` are excluded where a file defines them; test.check's
+  generators did), `SecurityManager` qualified; a table naming, for each VENDOR-NOTES divergence,
+  its rule or why none applies. `bin/clojure-tests` translates the suite and its libraries with
+  c2a: the suite's translation is byte-identical to before (`test/c2a/suite.sha256`); six
+  libraries translated to `.ae` load and pass 14 checks on both builds (`bin/c2a-check`).
+- The tools renamed after their target (`git mv`, then every caller): `arbace/j2c` → `j2a`,
+  `g2c` → `g2a`, `c2g` → `a2g`, with `bin/`, `test/`, environment variables (`J2A_*`, `G2A_*`,
+  `A2G_*`), properties, the overlay directives (`a2g/variant`...), the generated Go program's
+  names (`a2g_*.go`, `A2g_*`), and the documents (`C2G-SPEC.md` → `A2G-SPEC.md`, `C2G-NOTES.md`
+  → `A2G-NOTES.md`; `G2C-SURVEY.md` keeps its name as a historical survey). No shims for the old
+  command names. Living documents use the new names, dated passages included, each with a note
+  of the old names; the journal and the vendored files' provenance lines keep them.
+- Checks (the agent's; targeted): `bin/gate` passed (7m04s); `bin/j2a-check` 183 of 183; g2a's
+  print and convert tests and `bin/g2a roundtrip amd64` without regressions; jrt-convert; the
+  Go build, smoke, test build; the Go oracle as recorded (46); Clojure's suite on Go 20,506 of
+  20,520; `bin/oracle check jvm` (the two known cases); `bin/jrt test`.
