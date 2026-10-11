@@ -34,6 +34,10 @@ metadata such as type hints), so the same sources ran on the frozen Clojure and 
 Its other dependencies are ordinary core functions, `proxy` (for ASM's `ClassWriter` and
 visitors) and `arbace.lang.DynamicClassLoader`/`RT` for the REPL loaders.
 
+The front end (`types`, `env`, `parse`, `lower`, `analyze`) also serves the Go build: c2g
+translates its analysis into Go forms (doc/go/C2G-SPEC.md), and the Go executable's REPL
+evaluates it for class forms (doc/go/CLASSFORMS-REPL.md). Amendment 15 came from that use.
+
 ## Use
 
 ```
@@ -80,8 +84,8 @@ from the tree first, then the JDK, never from classes loaded in the verifying ru
 stage: `java -cp target/stageN:. arbace.lang.Main -m arbace.classes.verify DIR [CLASS-DIR...]`
 (exit status 1 on any error, with a report grouped by kind). `bin/build-arbace` runs it on
 stages 1 and 2 (stage 3 equals stage 2): 5,091 classes each when it was added, the class forms'
-and the Clojure compiler's, verified in about 0.9 s (1.7 s with the JVM launch); 5,756 each at
-the last check (2026-10-07).
+and the Clojure compiler's, verified in about 0.9 s (1.7 s with the JVM launch); 5,756 each
+on 2026-10-07, 5,740 on 2026-10-08 (the journal), 5,771 in `target/stage2` on 2026-10-11.
 
 ## How it works
 
@@ -97,9 +101,9 @@ the last check (2026-10-07).
 3. **Analyze**: the code of each class, in the textual order of its members, becomes typed nodes
    (`:type` is a descriptor, `:null` or `:none` for forms that do not complete). Field
    initializers and `initializer` bodies are analyzed once and emitted into each constructor that
-   calls `super.`. Clojure macros are expanded with the frozen Clojure's macros; `and`, `or`,
-   `locking`, comparisons, the operators and conversions are recognized by var (so shadowing
-   works) and compiled to instructions.
+   calls `super.`. Clojure macros are expanded with the running core's macros (`arbace.core`);
+   `and`, `or`, `locking`, comparisons, the operators and conversions are recognized by var (so
+   shadowing works) and compiled to instructions.
 4. **Emit** (`emit.clj`): ASM with `COMPUTE_FRAMES`, `getCommonSuperClass` answered from the
    class environment (classes being compiled are not loadable yet). `InnerClasses` is added by
    rereading the class's constant pool, as javac lists every nested class the file refers to.
@@ -186,28 +190,29 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
   compiles any fn in it twice. `monitor-enter` and `monitor-exit` are errors there (`locking`
   works).
 
-## Stage-0 limits
+## Stage-0 limits (until the freeze)
 
-- `anon`, `letclass`, `lambda`, `switch` and the other new code forms work inside class bodies
-  only (the frozen compiler does not know their special forms). From stage 1 on they work in
+Until 2026-10-08, when stage 0 was the frozen Clojure (now the seed, with native class forms):
+
+- `anon`, `letclass`, `lambda`, `switch` and the other new code forms worked inside class bodies
+  only (the frozen compiler did not know their special forms). From stage 1 on they worked in
   ordinary fns too (below).
-- `defclass` must be evaluated (it compiles at macroexpansion time); a top-level `do` of class
-  forms is seen form by form by the frozen compiler, hence `defclasses` (amendment 1). From
-  stage 1 on a top-level `do` works.
+- `defclass` had to be evaluated (it compiles at macroexpansion time); a top-level `do` of class
+  forms was seen form by form by the frozen compiler, hence `defclasses` (amendment 1). From
+  stage 1 on a top-level `do` worked.
 
-## Native class forms (stage 1 on)
+## Native class forms (every stage)
 
 SPEC §9.5: the class forms' names are vars of `arbace.core` and their special forms are known to
 `arbace.lang.Compiler`; there is still one implementation of the class forms, `arbace.classes`
 (§12 question 17), which the compiler loads on first use. Nothing needs `arbace.classes.boot`
-from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
+at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
 
 - **The names.** `arbace/core_classes.clj`, loaded at the end of `arbace/core.clj`, defines the
-  macros (`defclass` ... `when-instance`) and the operators of §5.4 in `arbace.core`. At stage 0
-  `arbace.classes.boot` loads the same file into `clojure.core` (reading `arbace.X` as
-  `clojure.X`); there `defclass` and `defclasses` compile at macroexpansion time, as before,
-  since the frozen compiler has no `class*` (the macros test `(contains? Compiler/specials
-  'class*)`).
+  macros (`defclass` ... `when-instance`) and the operators of §5.4 in `arbace.core`. Until the
+  freeze `arbace.classes.boot` also loaded the same file into the frozen `clojure.core` at stage
+  0, where `defclass` and `defclasses` compiled at macroexpansion time; that path was removed on
+  2026-10-08 (journal, "A faster gate").
 - **The operators.** The operators of §5.4 that Clojure lacks (`bit-and-int` ...
   `unsigned-bit-shift-right-int`, `unchecked-add-float` ... `unchecked-negate-float`,
   `unchecked-divide`, `unchecked-remainder`) are defined by `defop` with `:inline` expansions
@@ -225,9 +230,7 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
   context (an operand of another operator, a `^long`/`^double` fn's result, a primitive local)
   the compiler emits `iand`, `fadd`, `ldiv` ... and no call; where the result is boxed it
   calls the method, as for Clojure's own operators (`test/native/inline_test.clj` reads the
-  instructions of AOT-compiled fns). At stage 0 `clojure.lang.Numbers` lacks these methods:
-  there `defop` defines plain functions, the fallback of class bodies for operands that fit no
-  instruction.
+  instructions of AOT-compiled fns).
 - **Loading `arbace.classes`.** `bin/build-arbace` AOT-compiles the `arbace.classes`
   namespaces (`compile 'arbace.classes.boot`, not `arbace.j2c`) into each stage with that
   stage's runtime, after its class forms are built. Since 2026-10-07 this is one
@@ -335,7 +338,7 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
   inside a handed-over fn or a class body is compiled by the compiler while that code is
   analyzed ("Clojure in class bodies" above).
 - **Tests**: `bin/native-tests [STAGE]` (`test/native/*_test.clj`, run by `bin/build-arbace` on
-  stage 1): `defclass` with no boot step, a REPL session (`arbace.main/repl` on a string),
+  stage 2): `defclass` with no boot step, a REPL session (`arbace.main/repl` on a string),
   `defclasses`, a top-level `do`, the code forms in fns, Clojure in handed-over fns and in class
   bodies, extended special forms, primitive signatures, deftypes and records with the class
   forms in their methods (their shape against the compiler's), `reify` methods chosen by hints
@@ -343,7 +346,7 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
   `defrecord` inside handed-over fns and class bodies (`nested_deftype_test`), and AOT
   compilation (a handed-over deftype and a deftype inside a handed-over fn included) loaded by a
   fresh JVM from the class path. `test/classes/clojure_test.clj` covers Clojure in class bodies
-  at stage 0 (`deftype` and `defrecord` in them included).
+  (`deftype` and `defrecord` in them included).
 
 ## Checking converted code
 
@@ -355,12 +358,14 @@ of `.tmp/frozen/` there). It runs on Arbace (`bin/lib/tools.bash`). On 2026-10-0
 files (read from its work area, not committed) first gave 138 of 139 `clojure/lang` files and
 4 of 5 `clojure/asm/commons` ones shape-identical to javac (the others all), after patching two
 converter issues by hand (notes for the converter, below); with the converter's later output all
-files of `clojure/lang` (139), `clojure/asm` (36), `clojure/asm/commons` (5),
-`clojure/asm/signature` (3) and `clojure/java/api` (1) are shape-identical, without patches.
+files of `clojure/lang` (139), `clojure/asm` (34), `clojure/asm/commons` (5),
+`clojure/asm/signature` (3), `clojure/java/api` (1) and `clojure` (1, `main_class`) are
+shape-identical, without patches.
 
 ### The converted JDK
 
-The converter also converted all of jdk26u's modules (13,566 Java files; its work area, not
+The converter also converted all of jdk26u's modules (the 12,730 Java files of
+`src/*/share/classes`, CONVERTER-NOTES.md; its work area, not
 committed). The running JDK is built from the same sources, so its own classes are javac's
 reference: `JAVA_OPTS='--add-modules ALL-SYSTEM' bin/class-forms-check <dir> <module>` per module,
 with the javac options the JDK build uses for that module (`make/modules/*/Java.gmk`:
@@ -477,7 +482,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | §9.3 AOT | done (tested: a baseline JVM without the compiler loads the compiled namespace) |
 | §10 REPL: package loaders, generations | done (tested) |
 | §5.13 Clojure in class bodies | done: vars (read, call, `set!`, `def`, `var`), keywords, quoted data and other constants, vector/map/set literals (constants in private static synthetic `const__N` fields set in `<clinit>`, collections built with `RT.vector`/`map`/`set`), core operations as instructions or their `:inline` expansions, any value called, `fn`, `letfn`, `case`, `reify`, `deftype` (section "Clojure in class bodies") |
-| §5.6 reflection is an error | done: unresolved members are compile errors; with `^{:reflection :warn}` on the class (or an enclosing one) unresolved instance method calls go through `Reflector` (`clojure.lang` at stage 0, `arbace.lang` from stage 1) with a warning; `^{:reflection :clojure}` (handed-over fns and deftypes) reflects as Clojure does (section "Native class forms") |
+| §5.6 reflection is an error | done: unresolved members are compile errors; with `^{:reflection :warn}` on the class (or an enclosing one) unresolved instance method calls go through `arbace.lang.Reflector` with a warning; `^{:reflection :clojure}` (handed-over fns and deftypes) reflects as Clojure does (section "Native class forms") |
 | `access$NNN` accessors, `Outer/super` | done ≡ (protected members of a superclass in another package from nested classes and lambdas, `C/super` calls; javac's numbering) |
 
 ## Notes for the converter
