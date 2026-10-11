@@ -144,7 +144,7 @@ Left alone (with the reason):
    (`version-string "1.13.0-master-SNAPSHOT"`) and the parsing kept, so `*clojure-version*` and
    `(clojure-version)` are unchanged. Dropping the machinery was the alternative; the test suite
    and tools use `*clojure-version*`, so it stays. The REPL banner reads
-   `Clojure 1.13.0-master-SNAPSHOT`.
+   `Clojure 1.13.0-master-SNAPSHOT` (until hand change 20: `Arbace <describe> (<commit>)`).
 2. `arbace/core/server.clj`: `(= k1 "clojure")` → `(= k1 "arbace")`, the prefix of the
    `arbace.server.*` properties.
 
@@ -855,6 +855,34 @@ step 4 (2026-10-07); the others came with later work, as each says:
     sibling `.clj` or `.ae`. The bootstrap's stage 0, the seed, reads `.clj` only: it compiles
     from `target/seed-view` ("The binary seed", above).
 
+20. **Arbace's own version** (2026-10-11, the user's decision of 2026-10-10; doc/AGENDA.md,
+    "After the freeze", item 3). `arbace/core.ae` gains `*arbace-version*`, a map read when
+    `arbace.core` loads (never folded into a class, the Go build's image or an AOT cache):
+    `:describe` (`git describe --tags --always --dirty` of the build's checkout; in a
+    tarball, the describe `git archive` wrote into `VERSION`; `"unknown"` when neither),
+    `:commit` (the full hash, nil when unknown) and `:dirty` (true when tracked files differed
+    from the commit; false in a tarball; nil when unknown); and `(arbace-version)`, the
+    describe. Both `{:added "arbace"}`. Its source: the system property `arbace.version` (the
+    Go program sets it from its link-time `main.arbaceVersion`, C2G-SPEC §10.6), else the
+    resource `arbace/version.edn`, which `bin/build-arbace` writes into every stage (so into
+    `target/arbace.jar`); both hold the map's text, from `bin/lib/version.bash`. The REPL's
+    banner (`arbace/main.ae`, `repl-opt`) says `Arbace <describe> (<first 7 of the commit>)`
+    in place of `Clojure 1.13.0-master-SNAPSHOT`. `*clojure-version*` and `(clojure-version)`
+    are unchanged (hand edit 1), for the libraries that test them. The describe takes every
+    tag: main descends from the freezes, so it reads `arbace-for-go1.27.1-v1-N-gHASH` until
+    main has a tag of its own, which then wins as the nearest. `VERSION` holds `$Format:%H$`
+    and `$Format:%(describe:tags)$` lines and `.gitattributes` gives it `export-subst`. Stage
+    3 still equals stage 2 (one commit, one version file), the jar is reproducible per commit
+    and dirty flag; the seed (stage 0) neither reads nor needs it. The gate's cached Go
+    executable is keyed by its inputs, not the commit (bin/arbace-go, `gate_key`). Listed
+    under "Dialect divergences".
+21. **`data_readers.ae`** (2026-10-11, the user's decision): `arbace.core`'s
+    `data-reader-urls` takes `data_readers.ae` at the class path's roots before
+    `data_readers.clj` and `data_readers.cljc`, the order `RT.load` takes a namespace's
+    sources (hand change 19); it is read as a `.clj` is (no reader conditionals). On the Go
+    build the same code finds it on `ARBACE_PATH`. Tests: `test/native/version_test.ae`
+    (JVM), `bin/arbace-go --smoke` (Go). Listed under "Dialect divergences".
+
 ## Dialect divergences
 
 Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
@@ -880,6 +908,14 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
 - **Source files** (hand change 19): Arbace's own sources are `.ae`; a namespace loads from
   its `.ae` before its `.clj` (a library may ship both: Arbace takes the `.ae`), and the
   not-found message names four files.
+- **The REPL's banner and `*arbace-version*`** (hand change 20): the banner says `Arbace
+  <git describe> (<short commit>)`, not `Clojure <version>`; `arbace.core` has
+  `*arbace-version*` and `arbace-version` (a name upstream lacks: a library defining its own
+  `arbace-version` in a namespace referring all of core gets a warning), and the system
+  property `arbace.version`, when set, overrides the version on the JVM too.
+  `*clojure-version*` is upstream's.
+- **`data_readers.ae`** (hand change 21) at a class path root is read, before
+  `data_readers.clj` and `.cljc`; upstream ignores it.
 - **Runtime-visible names** (hand change 2, step 4's cleanups): agent, socket server and process
   thread names, the error report files' prefix and the proxy methods (`__initArbaceFnMappings`
   and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.

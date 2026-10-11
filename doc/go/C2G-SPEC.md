@@ -2793,6 +2793,20 @@ neither `off` (the user's switch) nor `wrapped` (the marker for the child), it r
 arguments, `ARBACE_RLWRAP=wrapped` added; otherwise, or when the exec fails, it runs on,
 silently. The JVM launcher `bin/arbace-j` follows the same convention. `Host` is unchanged.
 
+**Arbace's version** (2026-10-11; doc/VENDOR-NOTES.md, hand change 20). The main package has a
+string variable `arbaceVersion`, empty in c2g's output: `bin/arbace-go`'s final links (with the
+image, and the profile-guided ones) set it with `go build -ldflags "-X
+'main.arbaceVersion=...'"` to the version map of `bin/lib/version.bash` (`{:describe "..."
+:commit "..." :dirty false}`, from git in a checkout, from `VERSION` in a tarball), read at link
+time. `main`, after `execRlwrap`, sets the system property `arbace.version` to it when it is not
+empty, and `arbace.core` reads `*arbace-version*` from that property when it loads (on the JVM,
+from the resource `arbace/version.edn`). So c2g's output, the Go build's cache and the image of
+prepared namespaces hold no version (the executable that prepares the image, from the first
+link, has none: its `*arbace-version*` says `unknown`, and nothing of it is kept), and a new
+commit only links again. `-ldflags -X` rather than a constant c2g writes: c2g's output stays a
+function of the sources, and the version is the checkout's when linking, not when translating.
+Go's `-buildvcs` does not apply: the program builds from a generated module.
+
 ### 10.7 Stack traces
 
 The evaluated Clojure code's frames are not Go frames: the Go stack shows only the

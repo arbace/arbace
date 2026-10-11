@@ -67,6 +67,22 @@ bin/arbace-go --build --pgo    # target/arbace-go/{amd64,arm64}/arbace, profile-
 bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)', a script
 ```
 
+## Arbace's version
+
+Arbace names the commit it was built from: the REPL's banner says `Arbace <git describe>
+(<short commit>)`, and `*arbace-version*` holds `{:describe ... :commit ... :dirty ...}`
+(`(arbace-version)` the describe), on both builds; `*clojure-version*` stays 1.13 for the
+libraries that test it.
+
+```sh
+bin/arbace-j -e '(prn *arbace-version*)'   # or bin/arbace-go -e ...; java -cp target/stage2:. arbace.lang.Main -e ...
+unzip -p target/arbace.jar arbace/version.edn
+```
+
+In a checkout it is `git describe --tags --always --dirty` at build time (the jar's resource
+`arbace/version.edn`, the Go executable's link); in a tarball made by `git archive` (GitHub's
+archives) the file `VERSION`, which `git archive` fills with the commit and its describe.
+
 ## Documentation
 
 - [doc/AGENDA.md](doc/AGENDA.md): where the work stands and what comes next
