@@ -24,8 +24,8 @@ something outside the build), 1,051 hand-written in jrt; 35 more exist as stubs 
 The classes the Go build has are nearly complete (95.6% of their members); the rest is whole
 packages left out: `java.lang.classfile`, most of `java.security` (its basics are in:
 JRT-NOTES.md, "Security") and of `javax.*`,
-`java.nio`'s channels, `java.lang.invoke`, most of `java.lang.foreign`. Of the **896 members
-Arbace's runtime and REPL namespaces reference, 833 are provided (93.0%)**; the others are
+`java.nio`'s channels, `java.lang.invoke`, most of `java.lang.foreign`. Of the **901 members
+Arbace's runtime and REPL namespaces reference, 837 are provided (92.9%)**; the others are
 D6's cuts and reworks (method handles, class loading). The first measurement (main
 at `6a33be8`: 5,598 members, 31.9%) found primitive `Arrays.sort` and
 `Comparator.naturalOrder` throwing on Go; the branch `jbase` fixed them and added java.util's
@@ -96,7 +96,8 @@ exactly when the status says the member is in Go. 0 mismatches.
 catches protected members not reached and failed translations. What Arbace itself reaches is
 measured instead from its references: the members the runtime (`arbace.lang`) and the namespaces
 loaded at a REPL's start reference (java-surface.edn, groups `:runtime` and `:repl`; regenerated
-for this measurement, unchanged).
+for this measurement, unchanged; regenerated again on 2026-10-11 against main at `9f15aea`,
+which moved "Arbace's use" below from 896 members to 901, the rest unchanged).
 
 ## Numbers
 
@@ -193,16 +194,21 @@ exported API:
 
 | members used | translated | partial | hand-written | stub | outside type | cut | absent |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 896 | 585 | 0 | 248 | 0 | 2 | 23 | 38 |
+| 901 | 587 | 0 | 250 | 0 | 2 | 23 | 39 |
 
-833 of 896 (93.0%) are provided (827 at the measurement on `gosec`, 805 on `go-juc`, 793 at
-the first). The 63 others are cut or reworked by decision: method handles and call sites
+837 of 901 (92.9%) are provided (833 of 896 before the surface was regenerated on
+2026-10-11: the JVM's `bean` by reflection added to the REPL's references `Class.getMethod`,
+`getModifiers`, `getPackageName`, `Method.getParameterCount`, `isBridge`, `Character.isUpperCase`
+and `Module.isExported`, and `*arbace-version*` `InputStream.readAllBytes` and
+`String(byte[], String)`; 827 at the measurement on `gosec`, 805 on `go-juc`, 793 at the
+first). The 64 others are cut or reworked by decision: method handles and call sites
 (`java.lang.invoke`, 35: the evaluator replaces `invokedynamic`), class loading (`ClassLoader`'s
 `defineClass`, `findClass`, `findLoadedClass`, `resolveClass`, `getSystemResource` and
 `getSystemResourceAsStream`, 6; `URLClassLoader.findClass`; jars: `JarURLConnection.getJarFile`,
 `JarFile.getEntry`, `ZipEntry.getTime`), channels (`FileChannel`, `getChannel`,
 `Reader.read(CharBuffer)`, `AbstractInterruptibleChannel.close`, 6), annotations (`Retention`,
-`RetentionPolicy`, `getAnnotation` twice, 4), modules (`Class.getModule`, `Module.getName`),
+`RetentionPolicy`, `getAnnotation` twice, 4), modules (`Class.getModule`, `Module.getName`, `Module.isExported`: the Go build's `bean` has no
+modules, `arbace/lang/go/ns/core_bean.subst.ae`),
 `Runtime.version`/`Version.feature`, `System.loadLibrary`, `URLEncoder.encode`, serialization's
 `defaultWriteObject`, and `Executable.getName` (declared abstract there; `Method` and
 `Constructor` provide it). Processes (`Process`, `ProcessBuilder`, its `Redirect`, 21; amendments
