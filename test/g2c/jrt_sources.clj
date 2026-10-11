@@ -147,14 +147,16 @@
          ["java/util/regex/MatchResult.java"])))
 
 (def text-locales
-  "The locales of jdk.localedata's CLDR data in the Go build by default (JRT_LOCALES unset
-  or \"default\"; doc/go/JRT-NOTES.md, \"Text and locales\"), as language tags: the languages
+  "The locales of jdk.localedata's CLDR data in the Go build with JRT_LOCALES=common
+  (doc/go/JRT-NOTES.md, \"Text and locales\"), as language tags: the languages
   with the most speakers and users of the JDK's locale constants, and the regions the JDK's
   constants and the commonest English, French, German, Spanish, Portuguese and Chinese
   variants name. Each takes its CLDR bundles and those of its parent locales (en-GB takes
   en-001's, es-MX es-419's, zh-TW zh-Hant's). java.base's own root and English data are
-  always in. JRT_LOCALES=all takes every locale CLDRConverter writes for jdk.localedata;
-  JRT_LOCALES=none none; a comma-separated list of tags those."
+  always in. JRT_LOCALES unset or none (the default, the user's decision of 2026-10-11: the
+  shipped executables and the freeze carry java.base's root and English data alone) takes
+  none; all every locale CLDRConverter writes for jdk.localedata; a comma-separated list of
+  tags those."
   ["ar" "de" "es" "fr" "hi" "id" "it" "ja" "ko" "nl" "pl" "pt" "ru" "sv" "tr" "uk" "zh"
    "en-GB" "en-CA" "en-AU" "en-IN" "fr-CA" "de-CH" "es-MX" "pt-PT" "zh-TW" "ar-EG"])
 
@@ -243,10 +245,10 @@
         all (sort (for [dir (distinct (map second cldr-kinds)) :let [d (io/file ld dir)] :when (.isDirectory d)
                         f (.listFiles d) :when (str/ends-with? (.getName ^File f) ".java")]
                     (str dir "/" (.getName ^File f))))]
-    (case spec
+    (case (if (str/blank? spec) "none" spec)
       "all" (vec (distinct all))
       "none" []
-      (let [tags (if (or (nil? spec) (= spec "") (= spec "default")) text-locales (str/split spec #","))
+      (let [tags (if (= spec "common") text-locales (str/split spec #","))
             parents (parent-locales base-meta)]
         (vec (sort (distinct
                      (for [t tags
@@ -263,12 +265,12 @@
   [spec jdk]
   (let [dir "src/jdk.localedata/share/classes/sun/text/resources/ext"
         exists? (fn [rel] (.isFile (io/file jdk rel)))]
-    (case spec
+    (case (if (str/blank? spec) "none" spec)
       "none" []
       "all" (vec (sort (for [f (.listFiles (io/file jdk dir)) :let [n (.getName ^File f)]
                              :when (re-matches #"CollationData_.*\.java" n)]
                          (str dir "/" n))))
-      (let [tags (if (or (nil? spec) (= spec "") (= spec "default")) text-locales (str/split spec #","))]
+      (let [tags (if (= spec "common") text-locales (str/split spec #","))]
         (vec (sort (distinct (for [t tags c (default-list (parse-tag (str/trim t)))
                                    :let [n (loc-name c) rel (str dir "/CollationData_" n ".java")]
                                    :when (and (seq n) (exists? rel))]
@@ -360,7 +362,7 @@
                                       (map #(str "java.base share:jdk.localedata " %) coll-rel)
                                       ["java.base jrtgen jdk/internal/jrt/LocaleDataIndex.java"]))
                "\n"))
-    (println (count files) "jdk.localedata bundles," (count coll-rel) "collation data files for locales" (or spec "default"))))
+    (println (count files) "jdk.localedata bundles," (count coll-rel) "collation data files for locales" (or spec "none"))))
 
 (def added-sources
   "Files of src/java.base/share/classes added to the measured closure (B1a step 4, phase 2C,
@@ -760,7 +762,7 @@
   ;; bin/jrt-convert's generate step expands into the generated bundles (KIND
   ;; gensrc:jdk.localedata), the JRE collation data (share:jdk.localedata) and jrt's generated
   ;; index jdk.internal.jrt.LocaleDataIndex (KIND jrtgen)
-  (println "java.base locales" (let [e (System/getenv "JRT_LOCALES")] (if (str/blank? e) "default" e))))
+  (println "java.base locales" (let [e (System/getenv "JRT_LOCALES")] (if (str/blank? e) "none" e))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; the edge
