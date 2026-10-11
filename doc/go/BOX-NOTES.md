@@ -368,18 +368,49 @@ module cache, `GOPROXY=off`, checked against the pinned hashes) and `--root` (BU
   (the REPL under rlwrap, the up arrow, `ARBACE_RLWRAP=off`, `TERM=dumb`, no rlwrap on `PATH`,
   `-e`), which also gained two checks for both programs: Ctrl-C ends the REPL, with and without
   rlwrap. All pass.
-- **The oracle's box subset** (RESULT_ORACLE).
-- **Clojure's suite in the box** (RESULT_SUITE).
+- **The oracle's box subset**: every corpus but `forms/files.ae`, `forms/net.ae` and
+  `forms/processes.ae` (the host's files, sockets and processes): `bin/oracle check
+  'target/arbace-go/box-amd64/arbace-box -' --timeout 900 --exclude forms/files. --exclude
+  forms/net. --exclude forms/processes. --expected test/oracle/known-go-box-amd64.edn` (the
+  runner's new `--exclude`, and a reference's `:incomplete`, ORACLE.md): 21,695 of 21,742 cases
+  match; the 47 mismatches are the native build's 46 (`known-go-amd64.edn`, the same cases) and
+  `harvest/reducers.ae:9`, whose reduction peaks at 4.9 GB natively and runs the 3 GiB guest out
+  of memory (R1; that run recorded as incomplete). 47 s with `-j 12`. The full corpus in the box
+  (before the subset, with `board.NilPanics`): 22,107 of 22,278, the rest the excluded files'
+  (files 12 of 324 differ: permissions, times; net 26 of 83; processes 86 of 129). Before
+  `NilPanics`, 7 runs ended at their first nil dereference.
+- **Clojure's suite in the box**: `bin/box-suite` (new): each test namespace in its own box,
+  the renamed suite (from a `bin/clojure-tests` run on the Go build) and its test libraries
+  written into the guest's memory by its input (1 MB of `spit`s), then bin/clojure-tests's
+  runner, its result printed by a shutdown hook; against `test/arbace-box-results.edn`. 66
+  namespaces, 676 tests, 19,627 assertions: 19,625 pass, 2 errors, each namespace as on the
+  Linux test build (`arbace-go-results.edn`) but `java.io` (its socket test: no network) and
+  `sequences` (a test reads `readme.txt` from the suite's directory, a host file). Excluded (10,
+  with reasons in the file): the eight namespaces that need the suite's Java fixtures (the box is
+  the shipped program, not the test build), `java.process` (no processes) and `reducers` (the
+  same 4.9 GB reduction, R1). 258 s with `-j 12` (each box loads every test namespace first, as
+  upstream's runner does: required, since `fails-with-cause?` and the reducers' tests depend on
+  it, natively too).
 - **`bin/box-vendor roundtrip`** (in `bin/gate --full`): `box/` printed with its tests, the
   printed Go converted back for each configuration and merged as `convert` merges, printed
   again, and the two printings compared by gocmp (tree, export data, code; with tests) per
-  configuration: RESULT_RT.
+  configuration: 16 of 16 pass at all three levels (linux/amd64 and arm64: `abi`, `hv`,
+  `vmm`, `cmd/arbace-box`; darwin/arm64: `abi`, `hv`, `libsys`, `vmm`; tamago/amd64 and arm64:
+  `abi`, `board`), about 2 minutes.
 - **`bin/box-vendor kvm-tests`** (in `bin/gate --full`): go-whim at `80c49bf`, renamed, its box
   packages replaced by `box/` printed, its `editor.Exit` given the method `ExitCode` (the one
   adaptation: its tests' recording hosts serve `editor.Main` and `vmm.Run` alike), then `hv`'s,
   `vmm`'s and the guest tests S0 ran (`TestHello`, `TestFault`, `TestWatchdog`, `TestGoGuest`,
-  `TestGoGuestFault`, `TestReadAheadC`, `TestReadAheadGo`, `TestGoGuestSMP`): RESULT_KVM.
-- **The Linux executable is unaffected**: RESULT_LINUX.
+  `TestGoGuestFault`, `TestReadAheadC`, `TestReadAheadGo`, `TestGoGuestSMP`): all pass (about
+  45 s), the board's one-vCPU parking and the new vmm under go-whim's C and Go guests included.
+- **The Linux executable is unaffected**: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build` (66,523,296
+  bytes, as main's), `--smoke` (41 checks, the two new Ctrl-C ones included), the Go oracle
+  against `known-go-amd64.edn` (22,232 of 22,278, the 46 recorded), `bin/jrt test` (amd64), and
+  Clojure's suite on the test build (`--build-tests`; 76 namespaces, 777 tests, 20,506 of 20,520
+  assertions, no regression against `arbace-go-results.edn`): all as before. arm64 was not
+  rebuilt here (its executable's code changes only by the moved file and the empty tick). The
+  essential `bin/gate` was not run: no source the bootstrap compiles changed (`arbace/a2g`,
+  `arbace/g2a` and `arbace/lang/go` are read by the tools only).
 
 ### Measured (amd64, nested KVM on the shared 64-core machine; best of 7)
 
@@ -428,7 +459,8 @@ Numbered BX (a prefix not used in `doc/`); proposed 2026-10-11, for the user.
 - Accept BX1-BX10.
 - The box's smoke test, suite subset and oracle subset in `bin/gate --full` (as the survey's §8
   proposed for S1/S2)? Only the round trip and the KVM tests were added, as decided; the box's
-  build adds about 2 minutes and its checks about RESULT_TIME.
+  build adds about 2 minutes, its smoke test 2.5 minutes, the oracle subset 1 and the suite
+  4.5.
 - R1 / S2: the launcher's 445 MB resident (the image read whole, then copied into the slot);
   mapping the appended image instead of reading it would save most of the 77 MB twice.
 - arm64 (S4): `board.NilPanics` and the vectors' return to `sigpanic` need their arm64 form
