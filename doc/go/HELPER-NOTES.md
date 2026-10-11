@@ -31,7 +31,9 @@ bin/g2a dump -goos linux -goarch arm64 -o DIR std
   `-go $G2A_GOROOT/bin/go`, which the helper uses for `go env` and `go list`.
 - **Pinned Go.** The helper checks that it was built with go1.27 (its `go/types` is the
   language) and that the go command is go1.27.1. It type-checks at the package's language
-  version: `go1.27` for std and single files, the `go` line of a module otherwise. It refuses a
+  version: `go1.27` for std and single files, the language of a module's `go` line otherwise
+  (`go 1.27.1` is `go1.27`, as the go command gives gc `-lang`; since 2026-10-11, B1b S0,
+  BOX-NOTES.md: before, the line as written, so `go 1.27.1` was refused). It refuses a
   module or file whose language version is newer than go1.27. Files whose build constraint
   needs a newer release (`//go:build go1.28`) are excluded by the configuration, as the go
   command does. Moving the pin is a recorded decision (the journal on `arbace-for-java-26`,

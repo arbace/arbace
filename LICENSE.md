@@ -67,6 +67,25 @@ covers what.
 - `go/`: jrt's hand-written Go forms (`go/arbace/jrt.ae`, `go/arbace/jrt/`) and the Go
   build's main package (`go/arbace/cmd/arbace/`): Arbace's own, under the Eclipse Public License
   1.0, except the parts of `go/arbace/jrt/` listed below.
+- `box/` (`box/go/arbace/box.../`, the packages `arbace/box/hv`, `vmm`, `abi`, `board` and
+  `libsys`, with `board/boot_amd64.s` and `boot_arm64.s`; box/README.md, doc/go/BOX-NOTES.md):
+  the box of go-whim, https://github.com/arbace/go-whim at
+  `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, its `hv/`, `vmm/` (without `vmm/cmd/`),
+  `guest/abi/`, `guest/tamago/board/` and `internal/libsys/`, converted to Go forms by
+  `bin/g2a convert` (`bin/box-vendor`): under the Eclipse Public License 1.0, as Arbace.
+  go-whim's repository-wide `LICENSE` is Vim's licence, which covers the modified vim that
+  go-whim's README names as its product; these parts are not derived from vim. Their history
+  in go-whim (`git log --format=%an -- hv vmm guest/abi guest/tamago/board internal/libsys`)
+  has a single author, the user (`rhz`, robert.zawiasa@gmail.com), as has every commit of
+  go-whim, and the files carry no other copyright or licence notice. The user stated on
+  2026-10-11 that these parts are licensed to Arbace under the Eclipse Public License 1.0
+  (decision D8, doc/go/BOX-SURVEY.md §10). go-whim keeps its own copy under its own terms.
+  What these packages build with is not held here: on darwin, `hv` and `libsys` import purego
+  (https://github.com/ebitengine/purego v0.11.1, under the Apache License 2.0, text below), and
+  a guest built on `board` links TamaGo's `goos` module (https://github.com/usbarmory/tamago
+  v1.27.1, BSD 3-Clause License, Copyright (c) The TamaGo Authors) and TamaGo's Go tree (Go's
+  BSD 3-Clause License, below); their entries here are made when a build of Arbace's contains
+  them.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"), written for Arbace in place of jdk26u's files of the same names (from their
   documented APIs, without their code): Arbace's own, under the Eclipse Public License 1.0. The

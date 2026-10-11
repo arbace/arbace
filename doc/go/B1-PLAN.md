@@ -113,7 +113,10 @@ monitor. Then: the image's own Go (board, TamaGo's runtime, std) as round-trippe
 image byte-identical to one built from the originals; amd64 on /dev/kvm here; arm64 under QEMU
 here and on Hypervisor.framework on the user's Mac. How Arbace depends on go-whim (its checkout
 pinned by commit, or vendored) is decided then. The survey and its stages S0-S6:
-[BOX-SURVEY.md](BOX-SURVEY.md).
+[BOX-SURVEY.md](BOX-SURVEY.md). Decided 2026-10-11 (D3, D8-D14, all as recommended): vendored
+as Go forms. S0 done 2026-10-11: go-whim's box copied unchanged as Go forms under `box/`,
+proved by the round trip's oracle, byte-identical builds of go-whim's monitor and guests and
+go-whim's tests on /dev/kvm ([BOX-NOTES.md](BOX-NOTES.md)).
 
 ## Decisions (the user's, 2026-10-08)
 
