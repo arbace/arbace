@@ -309,3 +309,9 @@ the first. The history before it is on the frozen branches and in git history:
   milestone is the box on amd64: S2, S3 (the store), S5 (the network, D12: a stream proxy or
   packets with netstack in the guest, decided at S5) and S6 on amd64; its freeze runs
   `bin/gate --full`. AGENDA.md and BOX-SURVEY.md §6 follow.
+- The user, the same day: S6 before S3 and S5. S6 needs only S1's guest build, reproducible
+  builds (the determinism work in progress) and g2a's round trip of TamaGo's std, not the
+  store or the network; converting all of TamaGo's runtime and std, not only the image's closure,
+  covers S5's netstack if packets are chosen. With TamaGo's Go as forms first, S3's and S5's
+  runtime changes are made on forms, as `box/` is. The order: S2, S6 (amd64), S3, S5, each later
+  stage re-running S6's proof.

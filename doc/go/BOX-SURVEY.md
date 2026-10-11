@@ -363,8 +363,10 @@ Classes:
 
 ## 6. Staging
 
-Each stage a gate, as B1a's steps. The order (the user, 2026-10-11): amd64 first, S2, S3, S5
-and S6's amd64 half as this milestone; S4 (arm64, the Mac) and S6's arm64 half the next.
+Each stage a gate, as B1a's steps. The order (the user, 2026-10-11): amd64 first, as this milestone:
+S2, then S6's amd64 half (it needs reproducible builds, not S3 or S5; the whole of TamaGo's
+runtime and std as forms, so that S5's netstack, if chosen, needs no more), then S3 and S5,
+each re-running S6's byte-identity proof; S4 (arm64, the Mac) and S6's arm64 half the next.
 
 | stage | content | gate |
 |---|---|---|

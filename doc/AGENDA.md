@@ -68,9 +68,11 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host) and
   Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler,
   GC), with proper tail calls possible.
-- The milestone now (the user, 2026-10-11): the box on amd64, S2, S3 (the store), S5 (the
-  network, D12) and S6 (the image's Go as forms, byte-identical) on amd64; its freeze runs
-  `bin/gate --full`.
+- The milestone now (the user, 2026-10-11): the box on amd64, in this order: S2; S6 (the image's
+  Go as forms: TamaGo's runtime and std converted by g2a, the image built from the printed forms
+  byte-identical to one built from the originals), started once two builds of the same tree are
+  identical; then S3 (the store) and S5 (the network, D12), each re-running S6's proof. Its
+  freeze runs `bin/gate --full`.
 - The next milestone: S4, arm64 (KVM/arm64, then Hypervisor.framework on the Mac; purego,
   `board.NilPanics` for arm64, S6's arm64 identity).
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
