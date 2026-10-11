@@ -97,11 +97,14 @@ Prior art:
   a2g, the Go build, the image: the gate then takes about 7 minutes).
   `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2a-check --suite`, the
   g2a round trip on amd64 for tamago and linux (`bin/g2a roundtrip amd64`, `linux/amd64`), the
-  box's round trip and go-whim's KVM tests on it (`bin/box-vendor roundtrip`, `kvm-tests`) and
+  box's round trip and go-whim's KVM tests on it (`bin/box-vendor roundtrip`, `kvm-tests`),
+  `tamago/` converted afresh and compared (`bin/tamago-vendor verify`) and
   the Go build on amd64: `bin/jrt-convert`, `bin/arbace-go --build`, then its smoke test,
   Clojure's suite on its test build (`bin/arbace-go --build-tests`: the program with the
   suite's Java fixtures; `test/arbace-go-results.edn`) and the oracle on it, against its known
-  mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`); g2a and the
+  mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`) and the box's
+  guest built from `tamago/`'s forms, byte-identical to one from TamaGo's originals
+  (`bin/arbace-go --build --box`, `bin/tamago-vendor check`); g2a and the
   Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
   on Go the longest): run it when
   the class forms compiler, j2a, g2a, a2g or jrt change. Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build

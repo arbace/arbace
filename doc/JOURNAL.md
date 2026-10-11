@@ -375,3 +375,39 @@ the first. The history before it is on the frozen branches and in git history:
 - On merged main (with RP1): `--build`, `--build --box`, `--smoke`, `--smoke --box` pass; the
   native oracle and the box oracle as recorded (46 each, 0 new); `bin/box-suite` 19,645 of
   19,646.
+
+## 2026-10-11: B1b S6 done for amd64: the guest's own Go as forms
+
+- Agent, branch `box-s6` (`aa3dfda`, `cd4cfe8`, `fc808c8`, `0a95951`, `b148601`, with main merged
+  in as `0853f3e` so that the proof covered S2), merged into main. Details: BOX-NOTES.md, S6;
+  amendments BX20-BX24.
+- `tamago/`, a source root of its own (SPEC §4.1): `tamago/goroot/go/`, TamaGo's std for
+  tamago/amd64 (371 packages with their assembly, 2,105 files, 579,502 lines, 31.4 MB) and
+  `tamago/goroot/src/`'s module files; `tamago/goos/`, 69 of the goos module's 94 packages (those
+  that build for tamago/amd64); 32.2 MB, 6.4 MB gzipped. Left out: std's 6 test-only packages,
+  `internal/trace/traceviewer` (Catapult's viewer) and `encoding/json/internal/jsontest` (JSON
+  corpora): third-party data no guest can import. Origin pinned in `bin/tamago-vendor`: TamaGo's
+  go1.27.1 at /root/tamago-go (a digest of `src/` without `cmd/`), goos v1.27.1 by its go.sum
+  hash; recorded in `tamago/README.md` and LICENSE.md (Go's BSD-3).
+- `bin/tamago-vendor`: `convert`, `verify` (a fresh conversion byte for byte), `print` (a printed
+  GOROOT, the module, jrt's overlay for it), `check` (the proof). `bin/g2a build --print-only
+  --module std`, `--goos-dir` (BX21). `bin/arbace-go --build --box` builds the guest from the
+  printed forms by default, `ARBACE_BOX_GO=orig` from the originals (BX22).
+- The proof: std printed against GOROOT/src by `bin/g2a-check`, 371 of 371; the goos module's
+  packages by gocmp, 69 of 69; the guest image built with `-buildid=` from the forms and from the
+  originals identical as linked (76,766,368 bytes) and after `tools/elfsyms`' cut (65,909,034
+  bytes). The shipped images differ only in the build ID, which hashes the source text (the
+  printer keeps no comments); two builds from the forms are identical. Its first attempt failed:
+  a literal beginning a Go line (a final `return true` after a comment) was printed on the wrong
+  line, changing gc's line tables; the round trip's code level compares code, not line tables.
+  The converter records `[index line]` in `:go/breaks` for such literals (BX20);
+  `overlay/go/runtime/proc.ae` follows.
+- Also: `test/jrt/tables.ae` follows RP1, `reflect_tables.ae` regenerated (five tables reorder
+  overloads that differ in arity: the Reflector's choice unchanged). The Linux executable's bytes
+  change through it and `proc.go`'s line numbers.
+- On merged main: the essential `bin/gate` passed; `--build`, `--build --box` (from the forms),
+  `--smoke --box`; `tamago-vendor verify` and `check` (identical, as linked and cut); the native
+  oracle as recorded (46).
+- The user's decisions: BX20-BX24 accepted; `tamago/` kept as committed; `tamago-vendor verify`
+  joins `bin/gate --full`'s `box` step and the box's build from the forms with `check` its go
+  chain (`box-forms`; run at the milestone's freeze, not yet run in `--full`).

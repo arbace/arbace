@@ -1255,7 +1255,7 @@ Positions are lines, and they are carried by the layout of the forms text:
   after the last one it wrote; when its Go line is a later one (blank or comment lines, or a
   closing brace, between), the entry is `[index line]`, the line recorded: `^{:go/breaks [[8
   1462]]} (go/func ...)` for a function whose final `return true` (index 8) follows a comment
-  (amendment BX20, proposed 2026-10-11, B1b S6: without it gc's line tables differed from the
+  (amendment BX20, accepted 2026-10-11, B1b S6: without it gc's line tables differed from the
   original's for such returns, 8 functions of a small TamaGo program, which the round trip's
   code level does not see; BOX-NOTES.md, S6). The rows of `utf8`'s `first` table begin with
   the symbol `as` and need nothing; a table of numbers with 16 to a row, each row on a line of

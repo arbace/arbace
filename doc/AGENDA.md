@@ -57,8 +57,12 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   vCPUs (BX12-BX17, accepted). Box oracle 21,696 of 21,742 (the native's 46), `bin/box-suite`
   19,645 of 19,646. The box's checks in `bin/gate --full`: deferred.
 - Reproducible builds (RP1, accepted): two builds of a clean commit are byte-identical.
-- S6 in progress (amd64): TamaGo's runtime, std and `goos` module as Go forms, the guest built
-  from them byte-identical to one from the originals.
+- S6 done for amd64 (2026-10-11): TamaGo's runtime, std (371 packages) and `goos` module as Go
+  forms in `tamago/` (`bin/tamago-vendor`; 32 MB), the box's guest built from them by default,
+  byte-identical to one built from TamaGo's originals (BX20-BX24, accepted); `bin/gate --full`
+  runs `tamago-vendor verify` and the proof (`box-forms`).
+- Next: S3, the store; then S5, the network (D12 decided there); each re-runs S6's proof. Then
+  this milestone's freeze (`bin/gate --full`).
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 

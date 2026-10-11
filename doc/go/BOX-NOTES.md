@@ -909,7 +909,7 @@ so that the proof is about what ships.
   `Semaphore.tryAcquire`), each name's overloads of different arities, so `Reflector`'s choice
   is unchanged; two runs give the same file.
 
-### Amendments (proposed 2026-10-11)
+### Amendments (proposed 2026-10-11, accepted by the user the same day)
 
 - **BX20 (SPEC §10.1) A literal break's line**: `:go/breaks` entries `[index line]` when the
   literal's Go line is not the line after the last written; the converter writes them, the
@@ -926,15 +926,9 @@ so that the proof is about what ships.
   box build, about 1 min 40 s, which `--full` does not make today), or only when `tamago/`,
   `arbace/g2a`, `overlay/go` or the toolchain change.
 
-### For the user
+### The user's decisions (2026-10-11)
 
-- The size: 32 MB of tracked forms (6.4 MB compressed), the largest tree of the repository,
-  committed on the branch as a commit of its own (`tamago/: ...`) so that it can be replaced.
-  Alternatives, if it is too much: (a) only the image's closure (116 packages of std's
-  371 with the goos module's `goos`: S5's netstack and TLS would add what they import when they come), with `convert`
-  regenerating the rest on demand; (b) a compact encoding (the forms gzipped in the tree, the
-  printer reading them; git compresses them anyway, so it saves the checkout, not the history);
-  (c) the forms not tracked, `convert` run by the build (then the forms are not the source of
-  truth, against the direction). Recommended: as committed.
-- The two std packages left out (third-party data, unimportable by guests); the test files not
-  converted.
+- BX20-BX24 accepted: the guest's Go from `tamago/` by default.
+- `tamago/` kept as committed (all of std for tamago/amd64 and the goos module, 32 MB of forms).
+- `bin/tamago-vendor verify` joins `bin/gate --full`'s `box` step, and the box's build from the
+  forms with `bin/tamago-vendor check` the go chain, as `box-forms`.

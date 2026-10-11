@@ -145,7 +145,7 @@ collected by the package file's `load`, but not printed). `bin/jrt`
 JRT-NOTES.md and accepted 2026-10-08 with A2G-SPEC's amendments, §16; it adds options to
 `bin/g2a build` only and changes no form, so nothing of SPEC is amended.)
 
-## The box's guest and other roots (amendment BX6, proposed 2026-10-11)
+## The box's guest and other roots (amendment BX6, accepted 2026-10-11)
 
 `--goos tamago` builds the program for B1b's box (doc/go/BOX-NOTES.md, S1): `GOOS=tamago` with
 TamaGo's `goos` module as `GOOSPKG` (`github.com/usbarmory/tamago` v1.27.1: the printed `go.mod`
@@ -159,7 +159,7 @@ imports, and whose launcher is a program of its own: `bin/g2a build --module arb
 --build --box` then cuts the guest's symbol table to the three symbols the monitor reads
 (`tools/elfsyms`; amendment BX12, BOX-NOTES.md, S2): 11 MB less, the rest of the file as gc wrote it.
 
-## The standard library and the goos module from forms (amendment BX21, proposed 2026-10-11)
+## The standard library and the goos module from forms (amendment BX21, accepted 2026-10-11)
 
 B1b S6 (doc/go/BOX-NOTES.md, S6; `tamago/`): `--print-only --module std` prints a root whose
 packages are the standard library's: each at its import path, as GOROOT/src lays them out
