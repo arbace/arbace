@@ -1,7 +1,7 @@
-# The evaluator: closure compilation (B1a step 7b)
+# The evaluator: closure compilation (B1a step 7b; step 7a below)
 
-B1a step 7 ([B1-PLAN.md](B1-PLAN.md), D7: "closure compilation of `Expr`s, then AOT of
-namespaces to Go forms"), part b, branch `step7b`, 2026-10-10: the evaluator's speed. (Part a,
+B1a step 7 ([B1-PLAN.md](B1-PLAN.md)'s row: "closure compilation of `Expr`s, then AOT of
+namespaces to Go forms"; D7 the collector), part b, branch `step7b`, 2026-10-10: the evaluator's speed. (Part a,
 the runtime below the evaluator, c2g's code and jrt, is described under its own heading.)
 Before this step each node of an analyzed `Expr` tree interpreted itself at every call
 (`evalIn(Frame)`, [EVAL-NOTES.md](EVAL-NOTES.md)); hinted static calls such as
@@ -105,7 +105,7 @@ fields. Preparing the image takes 11 s (32 s before), the image is unchanged (3.
 
 ## Measurements
 
-Method: `test/bench/eval-bench.clj`, run unchanged by the JVM's `bin/arbace` (jar and AOT cache)
+Method: `test/bench/eval-bench.clj`, run unchanged by the JVM's `bin/arbace` (now `bin/arbace-j`; jar and AOT cache)
 and by the Go executable; each benchmark runs once, then repeatedly for at least a second and 3
 runs; the best run's time is reported (ms). Go: amd64, go1.27.1, `GOGC` default after the start
 (step 6); "before" is main's executable at `bc586b1`. The machine (64 cores) was shared with
@@ -171,12 +171,12 @@ settings are part a's (D7).
   assertions (646 tests, 0 errors), no regressions against `test/arbace-go-results.edn` (before
   that merge 19,255 of 19,280); `transducers` alone (not skipped) 108 of 108.
 - After merging step 7b (`bfedb18`, main at `48ba45c`): `bin/jrt test` amd64 and
-`bin/arbace-go --smoke` pass; Clojure's suite on Go has no regressions against
-`test/arbace-go-results.edn`; the oracle matches 20,780 of 21,027, with 242 new mismatches
-against `test/oracle/known-go-amd64.edn`, all in `defclass.clj` and `defclass_corpus.clj`
-(`Unable to resolve classname: Compiler$CF$Node`): main's own executable of that commit fails
-the same way (class forms at the REPL after the merges), so they are not this branch's.
-`bin/gate` was not run: no source the bootstrap compiles changed (the variants and c2g are
+  `bin/arbace-go --smoke` pass; Clojure's suite on Go has no regressions against
+  `test/arbace-go-results.edn`; the oracle matches 20,780 of 21,027, with 242 new mismatches
+  against `test/oracle/known-go-amd64.edn`, all in `defclass.clj` and `defclass_corpus.clj`
+  (`Unable to resolve classname: Compiler$CF$Node`): main's own executable of that commit fails
+  the same way (class forms at the REPL after the merges), so they are not this branch's.
+  `bin/gate` was not run: no source the bootstrap compiles changed (the variants and c2g are
   read by c2g only).
 
 ## Tried and dropped
@@ -201,12 +201,12 @@ the same way (class forms at the REPL after the merges), so they are not this br
 
 ## Next
 
-- AOT of namespaces to Go forms built into the executable (B1-PLAN step 7's second half): the
-  `Code` tree is a direct guide (each node kind a Go statement form); it would remove the
+- AOT of namespaces to Go forms built into the executable (B1-PLAN step 7's second half; not
+  scheduled, the user, 2026-10-10): the `Code` tree is a direct guide (each node kind a Go statement form); it would remove the
   remaining dispatch per node and the frames' boxing at calls.
 - Protocol call sites (`InvokeExpr.isProtocol`: the JVM's inline cache of the target's class),
   `Keyword` call sites, `case` on ints with a primitive `long` key without boxing.
-- The collector's settings for the running program (part a, D7).
+- The collector's settings for the running program (part a, D7): done, amendment O1 (below).
 
 ## Amendments
 
@@ -479,8 +479,8 @@ workloads): hashing -37%, numbers -15%, vecEquiv -20%, hashMapAssoc -10%, the ot
 -5%. The executable (an earlier build, its profile from `-e nil`, `ev.clj` and `w.clj`): the
 `w.clj` total 46.3 → 43.2 s (-7%), `hashmap` -18%, `fib` -9%. Opt-in because the second build
 is a full one (about 11 minutes of CPU for the c2g step, both builds and the training run, against
-about 8 without) and the training run needs the amd64 executable; proposed for the
-freeze's builds (amendment O5).
+about 8 without) and the training run needs the amd64 executable; the freeze's builds use it
+(amendment O5, accepted).
 
 ### Tried and dropped
 
@@ -700,6 +700,10 @@ without `Method.invoke`) and frames sized at analysis would remove most of it.
   pool's 60 s keep-alive, with Go's `fatal error: all goroutines are asleep - deadlock!` (the
   JVM exits once its pool threads time out): `jrt.WaitNonDaemon` waits for the pool's
   non-daemon workers, which block on their queue forever (step 6's executable).
+  *Resolved by amendment JC9 (accepted 2026-10-10; C2G-SPEC §8.4, JRT-NOTES.md "Concurrency"):
+  `RunMain` keeps a ticker pending, so the program ends as on the JVM: a `send` without
+  `shutdown-agents` keeps it running, as the JVM's agent pool does; a `future`-only one exits
+  after 60 s.*
 - gc for linux/arm64 reports a constant negative index into a slice of unknown length as index
   0 (above).
 
