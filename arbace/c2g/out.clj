@@ -492,6 +492,12 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                     (when (!= v nil)
                       (.SetProperty_String_String__O p (Str k) v))))
                 p)))
+     (when (m/translated? "java/util/Properties")
+       (list 'go/func 'System_GetProperties__Properties
+             "System_GetProperties__Properties is System.getProperties() as translated code calls it
+(m/c2g-static?).\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Properties;")})
+             '(C2g_SystemGetProperties)))
      ;; jrt's statics whose values are translated objects (C2G-NOTES.md, phase 2C)
      (when (m/translated? "jdk/internal/jrt/StandardStreams")
        (let [is (m/go-type :jrt "Ljava/io/InputStream;")
@@ -540,6 +546,9 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
      '(go/func C2g_DoubleBits "C2g_DoubleBits is Double.doubleToLongBits (one NaN).\n" ^int64 [^float64 d]
         (when (math/IsNaN d) (return 0x7ff8000000000000))
         (conv int64 (math/Float64bits d)))
+     '(go/func C2g_BoolHash "C2g_BoolHash is Boolean.hashCode(boolean).\n" ^int32 [^bool b]
+        (when b (return 1231))
+        (return 1237))
      '(go/func C2g_FloatBits "C2g_FloatBits is Float.floatToIntBits (one NaN).\n" ^int32 [^float32 f]
         (when (!= f f) (return 0x7fc00000))
         (conv int32 (math/Float32bits f)))

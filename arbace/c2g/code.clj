@@ -407,7 +407,8 @@
 (defn- mdesc-missing [d] (some class-missing (m/method-desc-classes d)))
 
 (defn- hw-static-exists? [cls base]
-  (contains? (:funcs (:jrt m/*w*)) (str (m/go-name cls) "_" base)))
+  (or (contains? (:funcs (:jrt m/*w*)) (str (m/go-name cls) "_" base))
+      (m/c2g-static? cls base)))
 
 (defn- lookup-call?
   "MethodHandles.lookup(): the lookup VarHandle constants are found with (C2G-SPEC §8.5); in Go
@@ -1060,6 +1061,12 @@
           :else
           (rv (apply list (symbol (str ".Impl_" base)) (super-struct) thisx (map :x args)))))
 
+      ;; an interface's private instance method (called from its default methods): its
+      ;; function, as a default method's, with the receiver first (MatchResult.groupNumber)
+      (and mm (m/private? mm) (m/translated? mowner) (m/interface? mowner))
+      (let [[tv & args] (operands (cons (:target node) (:args node)) (cons nil ps))]
+        (rv (apply list (m/class-sym (pkg) mowner (str "_" base)) (:x tv) (map :x args))))
+
       ;; private methods are not virtual
       (and mm (m/private? mm) (m/translated? mowner))
       (let [[tv & args] (if (or (m/leaf? mowner) (#{:local :this-path} (:op (:target node))))
@@ -1126,6 +1133,79 @@
 ;; ---------------------------------------------------------------------------------------
 ;; arrays (§5.9)
 
+;; constant array initializers as data (jrt's ConstRefArray; proposed amendment TL1)
+
+(def ^:private const-array-min
+  "The least number of string leaves for which an initializer is written as data."
+  4)
+
+(defn- utf8-safe?
+  "Can the Java string travel as Go UTF-8 text (no unpaired surrogates)?"
+  [^String s]
+  (loop [i 0]
+    (if (>= i (count s))
+      true
+      (let [c (.charAt s i)]
+        (cond
+          (Character/isHighSurrogate c)
+          (if (and (< (inc i) (count s)) (Character/isLowSurrogate (.charAt s (inc i))))
+            (recur (+ i 2))
+            false)
+          (Character/isLowSurrogate c) false
+          :else (recur (inc i)))))))
+
+(defn- const-tree
+  "node as a constant array tree ([:arr elem-desc trees], [:str s], [:null], [:hole i]), holes
+  collecting the immutable locals, or nil when it is none."
+  [node holes]
+  (let [node (acc/unaccess node)]
+    (case (:op node)
+      :const (cond (nil? (:val node)) [:null]
+                   (and (string? (:val node)) (utf8-safe? (:val node))) [:str (:val node)]
+                   :else nil)
+      :local (when (and (stable? node) (not (t/prim? (:type node))))
+               (let [i (count @holes)] (swap! holes conj node) [:hole i]))
+      :array-init (let [et (t/elem-type (:type node))]
+                    (when-not (t/prim? et)
+                      (let [cs (mapv #(const-tree % holes) (:elems node))]
+                        (when (every? some? cs) [:arr et cs]))))
+      nil)))
+
+(defn- const-strings [tree]
+  (case (first tree)
+    :str 1
+    :arr (reduce + 0 (map const-strings (nth tree 2)))
+    0))
+
+(defn- const-encode
+  "The encoding of a tree (jrt's constarray.clj), classes an atom of the element descriptors."
+  [tree classes ^StringBuilder sb]
+  (case (first tree)
+    :null (.append sb "n")
+    :hole (.append sb (str "h" (second tree) ","))
+    :str (let [^String s (second tree)]
+           (.append sb (str "s" (alength (.getBytes s "UTF-8")) ":" s)))
+    :arr (let [[_ et cs] tree
+               ci (or (first (keep-indexed #(when (= %2 et) %1) @classes))
+                      (do (swap! classes conj et) (dec (count @classes))))]
+           (.append sb (str "[" ci "," (count cs) ","))
+           (doseq [c cs] (const-encode c classes sb)))))
+
+(defn- const-array
+  "The ConstRefArray call of a reference array initializer that is a constant tree with enough
+  strings, or nil."
+  [node]
+  (let [holes (atom [])
+        tree (const-tree node holes)]
+    (when (and tree (>= (const-strings tree) const-array-min))
+      (let [classes (atom [])
+            sb (StringBuilder.)
+            _ (const-encode tree classes sb)
+            hs (operands @holes (repeat "Ljava/lang/Object;"))]
+        (apply list (jsym "ConstRefArray") (str sb)
+               (apply list 'lit (list 'slice (list '* (jsym "Class"))) (map class-val @classes))
+               (map :x hs))))))
+
 (defn array-val [node]
   (let [d (:type node)
         et (t/elem-type d)]
@@ -1139,11 +1219,13 @@
                (list (jsym "NewRefArray") (class-val et) (:x (first dims))))
              d :nn true)))
       :array-init
+      (if-let [x (and (not (t/prim? et)) (const-array node))]
+        (v x d :nn true)
       (let [elems (operands (:elems node) (repeat (if (t/prim? et) et "Ljava/lang/Object;")))]
         (v (if (t/prim? et)
              (apply list (jsym (str (subs (m/prim-array-go et) 0 (- (count (m/prim-array-go et)) 5)) "ArrayOf")) (map :x elems))
              (apply list (jsym "RefArrayOf") (class-val et) (map :x elems)))
-           d :nn true)))))
+           d :nn true))))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; string concatenation (§7.5)

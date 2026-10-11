@@ -1,0 +1,47 @@
+;; jrt: constant array initializers as data (C2G-SPEC §7, proposed amendment TL1;
+;; doc/go/JRT-NOTES.md, "Text and locales"). c2g writes an initializer of a reference array whose
+;; elements are, to any depth, string literals, null, nested such initializers and immutable
+;; locals (the CLDR bundles' getContents: thousands of rows of names) as one call of
+;; ConstRefArray with the tree encoded in a string, instead of code building it: the strings
+;; are interned as literals are, so they are the literals' objects; the locals are passed in
+;; order. Encoding, read left to right: an array is "[" class-index "," count "," then its
+;; elements; a string "s" byte-length ":" its UTF-8 bytes; null "n"; a local "h" index ",".
+(in-ns 'go.arbace.jrt)
+
+(go/file "constarray.go")
+
+(go/type constDecoder (struct ^string enc ^int pos ^{:tag (slice (* Class))} classes ^{:tag (slice any)} holes))
+
+(go/method num ^int [^{:tag (* constDecoder)} d]
+  (let [n 0]
+    (for [] (and (< (.-pos d) (len (.-enc d))) (>= (aget (.-enc d) (.-pos d)) \0) (<= (aget (.-enc d) (.-pos d)) \9)) _
+      (set! n (+ (* n 10) (conv int (- (aget (.-enc d) (.-pos d)) \0))))
+      (set! (.-pos d) (+ (.-pos d) 1)))
+    ;; the separator
+    (set! (.-pos d) (+ (.-pos d) 1))
+    n))
+
+(go/method value ^any [^{:tag (* constDecoder)} d]
+  (let [c (aget (.-enc d) (.-pos d))]
+    (set! (.-pos d) (+ (.-pos d) 1))
+    (switch c
+      (case [\n] (return nil))
+      (case [\h] (return (aget (.-holes d) (.num d))))
+      (case [\s] (let [n (.num d)
+                       s (subslice (.-enc d) (.-pos d) (+ (.-pos d) n))]
+                   (set! (.-pos d) (+ (.-pos d) n))
+                   (return (Intern s))))
+      (case [\[] (let [cls (aget (.-classes d) (.num d))
+                       n (.num d)
+                       a (make (slice any) n)]
+                   (for [i 0] (< i n) (inc! i)
+                     (aset a i (.value d)))
+                   (return (addr (lit RefArray :Comp cls :A a))))))
+    (panic "ConstRefArray: bad encoding")))
+
+(go/func ConstRefArray
+  "ConstRefArray is a constant reference array initializer, encoded (above): classes are the
+component classes its arrays name by index, holes the locals it holds.\n"
+  ^{:tag (* RefArray)} [^string enc ^{:tag (slice (* Class))} classes & ^{:tag (slice any)} holes]
+  (let [d (addr (lit constDecoder :enc enc :classes classes :holes holes))]
+    (assert (* RefArray) (.value d))))

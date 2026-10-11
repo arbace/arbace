@@ -81,6 +81,289 @@
                "CalendarSystem" "CalendarUtils" "Era" "Gregorian" "JulianCalendar"
                "ImmutableGregorianDate"]))))
 
+(def text-sources
+  "java.text and the locales in the Go build (the user's decision of 2026-10-10;
+  doc/go/JRT-NOTES.md, \"Text and locales\"): paths below src/java.base/share/classes.
+  java.text's formats, symbols, field positions, MessageFormat, ChoiceFormat, ListFormat,
+  Collator (RuleBasedCollator and its tables), BreakIterator and Bidi, with their service
+  provider interfaces and jdk26u's provider implementations, which jrt's own
+  LocaleProviderAdapter hands out (overlay/jdk); java.util.Currency (its currency.data is
+  resource data); and jdk26u's java.util.Locale in place of jrt's hand-written one, with
+  sun.util.locale (language tags, extensions, the locale builder and matcher),
+  LocaleISOData, StaticProperty (the default locale's properties), the referenced-key caches
+  and LazyConstant, which Locale, BaseLocale and the bundles compute their constants with."
+  (vec (concat
+         (map #(str "java/text/" % ".java")
+              ["Annotation" "AttributedCharacterIterator" "AttributedString" "Bidi" "BreakIterator"
+               "CalendarBuilder" "CharacterIteratorFieldDelegate" "ChoiceFormat"
+               "CollationElementIterator" "CollationKey" "Collator" "CompactNumberFormat" "DateFormat"
+               "DateFormatSymbols" "DecimalFormat" "DecimalFormatSymbols" "DigitList"
+               "DontCareFieldPosition" "EntryPair" "FieldPosition" "Format" "ListFormat"
+               "MergeCollation" "MessageFormat" "NumberFormat" "ParseException" "PatternEntry"
+               "RBCollationTables" "RBTableBuilder" "RuleBasedCollationKey" "RuleBasedCollator"
+               "SimpleDateFormat" "StringBufFactory" "StringCharacterIterator"])
+         (map #(str "java/text/spi/" % ".java")
+              ["BreakIteratorProvider" "CollatorProvider" "DateFormatProvider"
+               "DateFormatSymbolsProvider" "DecimalFormatSymbolsProvider" "NumberFormatProvider"])
+         ;; the collator's and the break iterators' machinery, their JRE data (the root
+         ;; collation rules; the break iterators' rule data, which bin/jrt-convert generates as
+         ;; the JDK build does)
+         (map #(str "sun/text/" % ".java")
+              ["CollatorUtilities" "ComposedCharIter" "IntHashtable" "UCompactIntArray"
+               "RuleBasedBreakIterator" "SupplementaryCharacterData" "CompactByteArray"
+               "resources/BreakIteratorInfo" "resources/BreakIteratorResources"
+               "resources/CollationData"])
+         ["sun/util/resources/BreakIteratorResourceBundle.java"]
+         ;; Bidi: ICU's bidirectional algorithm and its properties (ubidi.icu, resource data)
+         (map #(str "jdk/internal/icu/" % ".java")
+              ["text/BidiBase" "text/BidiLine" "text/BidiRun" "impl/UBiDiProps"])
+         ;; jdk26u's provider implementations, over jrt's LocaleProviderAdapter and
+         ;; LocaleResources
+         (map #(str "sun/util/locale/provider/" % ".java")
+              ["AvailableLanguageTags" "BreakIteratorProviderImpl" "CollationRules"
+               "CollatorProviderImpl" "CurrencyNameProviderImpl" "DateFormatProviderImpl"
+               "DateFormatSymbolsProviderImpl" "DecimalFormatSymbolsProviderImpl"
+               "LocaleNameProviderImpl" "NumberFormatProviderImpl" "JRELocaleConstants"
+               ;; the pool of a provider class (jdk26u's, over jrt's one adapter)
+               "LocaleServiceProviderPool"])
+         ["java/util/Currency.java"]
+         ;; the service provider interfaces the pool names
+         (map #(str "java/util/spi/" % ".java")
+              ["CurrencyNameProvider" "LocaleNameProvider" "TimeZoneNameProvider"
+               "CalendarDataProvider" "CalendarNameProvider"])
+         ;; java.util.Locale (jrt's hand-written Locale becomes a stand-in for jrt's own build)
+         ["java/util/Locale.java" "java/util/LocaleISOData.java"]
+         (map #(str "sun/util/locale/" % ".java")
+              ["BaseLocale" "Extension" "InternalLocaleBuilder" "LanguageTag" "LocaleExtensions"
+               "LocaleMatcher" "LocaleSyntaxException" "LocaleUtils" "StringTokenIterator"
+               "UnicodeLocaleExtension"])
+         (map #(str "jdk/internal/util/" % ".java")
+              ["StaticProperty" "ReferencedKeyMap" "ReferencedKeySet" "ReferenceKey"
+               "StrongReferenceKey" "WeakReferenceKey" "SoftReferenceKey"])
+         ["java/lang/LazyConstant.java" "jdk/internal/lang/LazyConstantImpl.java"]
+         ;; the class data sharing queries BaseLocale and the caches make (natives jrt's: no archive)
+         ["jdk/internal/misc/CDS.java"]
+         ;; CompactNumberFormat's pattern parsing
+         ["java/util/regex/MatchResult.java"])))
+
+(def text-locales
+  "The locales of jdk.localedata's CLDR data in the Go build with JRT_LOCALES=common
+  (doc/go/JRT-NOTES.md, \"Text and locales\"), as language tags: the languages
+  with the most speakers and users of the JDK's locale constants, and the regions the JDK's
+  constants and the commonest English, French, German, Spanish, Portuguese and Chinese
+  variants name. Each takes its CLDR bundles and those of its parent locales (en-GB takes
+  en-001's, es-MX es-419's, zh-TW zh-Hant's). java.base's own root and English data are
+  always in. JRT_LOCALES unset or none (the default, the user's decision of 2026-10-11: the
+  shipped executables and the freeze carry java.base's root and English data alone) takes
+  none; all every locale CLDRConverter writes for jdk.localedata; a comma-separated list of
+  tags those."
+  ["ar" "de" "es" "fr" "hi" "id" "it" "ja" "ko" "nl" "pl" "pt" "ru" "sv" "tr" "uk" "zh"
+   "en-GB" "en-CA" "en-AU" "en-IN" "fr-CA" "de-CH" "es-MX" "pt-PT" "zh-TW" "ar-EG"])
+
+(def ^:private cldr-kinds
+  "jdk.localedata's CLDR bundle kinds, with the directory of their generated files."
+  [["FormatData" "sun/text/resources/cldr/ext"] ["TimeZoneNames" "sun/util/resources/cldr/ext"]
+   ["CurrencyNames" "sun/util/resources/cldr/ext"] ["LocaleNames" "sun/util/resources/cldr/ext"]])
+
+(defn- parse-tag
+  "[language script region variant] of a BCP 47 language tag (the part these tags use)."
+  [^String tag]
+  (let [ps (str/split tag #"[-_]")
+        lang (str/lower-case (first ps))
+        more (rest ps)
+        [script more] (if (and (seq more) (re-matches #"[A-Za-z]{4}" (first more)))
+                        [(str (str/upper-case (subs (first more) 0 1)) (str/lower-case (subs (first more) 1))) (rest more)]
+                        ["" more])
+        [region more] (if (and (seq more) (re-matches #"[A-Za-z]{2}|[0-9]{3}" (first more)))
+                        [(str/upper-case (first more)) (rest more)]
+                        ["" more])]
+    [(if (= lang "und") "" lang) script region (str/join "_" more)]))
+
+(defn- loc-name
+  "The bundle suffix of [language script region variant]: \"zh_Hant_TW\", \"\" for the root locale."
+  [[l s r v]]
+  (str/join "_" (remove empty? [l s r v])))
+
+(defn- loc-tag [[l s r v]]
+  (if (every? empty? [l s r v]) "und" (str/join "-" (remove empty? [l s r v]))))
+
+(defn- default-list
+  "ResourceBundle.Control's default candidate list (jdk26u's getDefaultList, with its Chinese
+  script and region supplied), as [l s r v] vectors, the root locale last."
+  [[l s r v]]
+  (let [s (if (and (= l "zh") (empty? s) (seq r))
+            (case r ("TW" "HK" "MO") "Hant" ("CN" "SG") "Hans" s)
+            s)
+        variants (when (seq v)
+                   (loop [acc [] idx (count v)]
+                     (if (= idx -1) acc
+                       (recur (conj acc (subs v 0 idx)) (.lastIndexOf ^String v "_" (int (dec idx)))))))
+        r2 (if (and (= l "zh") (seq s) (empty? r)) (case s "Hans" "CN" "Hant" "TW" r) r)]
+    (vec (concat (for [vv variants] [l s r vv])
+                 (when (seq r) [[l s r ""]])
+                 (when (seq s)
+                   (concat [[l s "" ""]]
+                           (for [vv variants] [l "" r2 vv])
+                           (when (seq r2) [[l "" r2 ""]])))
+                 (when (seq l) [[l "" "" ""]])
+                 [["" "" "" ""]]))))
+
+(defn- cldr-candidates
+  "The CLDR adapter's candidate locales of a locale (CLDRLocaleProviderAdapter.getCandidateLocales:
+  the default list with CLDR's parent locales applied), given parents, a map from a language
+  tag to its parent's [l s r v]."
+  [parents loc]
+  (let [cands (default-list loc)]
+    (loop [i 0]
+      (if (>= i (dec (count cands)))
+        cands
+        (let [c (nth cands i)
+              p (get parents (loc-tag c))]
+          (if (and p (not= (nth cands (inc i)) p))
+            (vec (concat (subvec cands 0 (inc i))
+                         (if (= p ["" "" "" ""]) [p] (cldr-candidates parents p))))
+            (recur (inc i))))))))
+
+(defn- parent-locales
+  "CLDR's parent locales from the generated CLDRBaseLocaleDataMetaInfo.java: child tag ->
+  parent [l s r v]."
+  [meta-file]
+  (let [text (slurp meta-file)]
+    (into {}
+          (for [[_ _ ptag children] (re-seq #"parentLocalesMap\.put\((Locale\.ROOT|Locale\.forLanguageTag\(\"([^\"]*)\"\)),\s*new String\[\] \{([^}]*)\}" text)
+                :let [p (if ptag (parse-tag ptag) ["" "" "" ""])]
+                child (re-seq #"\"([^\"]+)\"" children)]
+            [(second child) p]))))
+
+(defn locale-data-files
+  "The generated bundle files of jdk.localedata's CLDR data to translate, relative to the
+  converter's output directory ld, for the locale selection spec (\"default\", \"all\",
+  \"none\", or comma-separated tags): each locale's candidate locales' existing bundles,
+  sorted."
+  [spec ld base-meta]
+  (let [exists? (fn [rel] (.isFile (io/file ld rel)))
+        all (sort (for [dir (distinct (map second cldr-kinds)) :let [d (io/file ld dir)] :when (.isDirectory d)
+                        f (.listFiles d) :when (str/ends-with? (.getName ^File f) ".java")]
+                    (str dir "/" (.getName ^File f))))]
+    (case (if (str/blank? spec) "none" spec)
+      "all" (vec (distinct all))
+      "none" []
+      (let [tags (if (= spec "common") text-locales (str/split spec #","))
+            parents (parent-locales base-meta)]
+        (vec (sort (distinct
+                     (for [t tags
+                           c (cldr-candidates parents (parse-tag (str/trim t)))
+                           :let [n (loc-name c)] :when (seq n)
+                           [kind dir] cldr-kinds
+                           :let [rel (str dir "/" kind "_" n ".java")] :when (exists? rel)]
+                       rel))))))))
+
+(defn collation-files
+  "The JRE collation data of jdk.localedata (src/jdk.localedata/share/classes/sun/text/resources/
+  ext/CollationData_X.java, hand-written) for the selected locales: those of each locale's
+  default candidate list (the JRE adapter's), paths relative to jdk26u."
+  [spec jdk]
+  (let [dir "src/jdk.localedata/share/classes/sun/text/resources/ext"
+        exists? (fn [rel] (.isFile (io/file jdk rel)))]
+    (case (if (str/blank? spec) "none" spec)
+      "none" []
+      "all" (vec (sort (for [f (.listFiles (io/file jdk dir)) :let [n (.getName ^File f)]
+                             :when (re-matches #"CollationData_.*\.java" n)]
+                         (str dir "/" n))))
+      (let [tags (if (= spec "common") text-locales (str/split spec #","))]
+        (vec (sort (distinct (for [t tags c (default-list (parse-tag (str/trim t)))
+                                   :let [n (loc-name c) rel (str dir "/CollationData_" n ".java")]
+                                   :when (and (seq n) (exists? rel))]
+                               rel))))))))
+
+(defn- bundle-key
+  "The index key of a generated bundle file (\"FormatData_fr\") and its class."
+  [rel]
+  (let [cls (str/replace (subs rel 0 (- (count rel) 5)) "/" ".")]
+    [(subs cls (inc (.lastIndexOf ^String cls "."))) cls]))
+
+(defn- tag-available?
+  "Whether every bundle of a language tag's candidate locales that the converter wrote is in."
+  [parents ld included tag]
+  (every? (fn [rel] (or (not (.isFile (io/file ld rel))) (included rel)))
+          (for [c (cldr-candidates parents (parse-tag tag))
+                :let [n (loc-name c)] :when (seq n)
+                [kind dir] cldr-kinds]
+            (str dir "/" kind "_" n ".java"))))
+
+(defn write-locale-data
+  "Writes jrt's generated jdk.internal.jrt.LocaleDataIndex (doc/go/JRT-NOTES.md, \"Text and
+  locales\") to out: the language tags of jdk.localedata's CLDR locales whose bundles are all
+  in the Go build (of the JDK's CLDRLocaleDataMetaInfo, ld's), and a factory of the bundles by
+  name (files: the generated bundles' paths below ld; collation: the JRE collation data's
+  paths). Deterministic."
+  [ld base-meta files collation out]
+  (let [included (set files)
+        parents (parent-locales base-meta)
+        meta (slurp (io/file ld "sun/util/resources/cldr/provider/CLDRLocaleDataMetaInfo.java"))
+        all-tags (str/split (str/trim (second (re-find #"return \"([^\"]*)\";" meta))) #" ")
+        tags (filter #(tag-available? parents ld included %) all-tags)
+        entries (sort (concat (map bundle-key files)
+                              (for [rel collation :let [n (.getName (io/file rel))
+                                                        s (subs n 0 (- (count n) 5))]]
+                                [(str "jre:" s) (str "sun.text.resources.ext." s)])))
+        chunks (partition-all 250 entries)]
+    (spit out
+          (str "/*\n * Generated by bin/jrt-convert (test/g2c/jrt_sources.clj, write-locale-data); do not edit.\n"
+               " * jrt's index of the locale data in the Go build (doc/go/JRT-NOTES.md, \"Text and locales\").\n"
+               " */\n"
+               "package jdk.internal.jrt;\n\n"
+               "import java.util.ResourceBundle;\n\n"
+               "/**\n * The locale data of jdk.localedata in the Go build: the CLDR bundles bin/jrt-convert\n"
+               " * generated for the selected locales, and the JRE collation data of those locales.\n */\n"
+               "public final class LocaleDataIndex {\n"
+               "    /** The language tags whose CLDR bundles are all in (CLDRLocaleDataMetaInfo's, filtered). */\n"
+               "    public static final String TAGS = \" " (str/join " " tags) "\";\n\n"
+               "    private LocaleDataIndex() {\n    }\n\n"
+               "    /** A new bundle of the name (\"FormatData_fr\", \"jre:CollationData_fr\"), or null. */\n"
+               "    public static ResourceBundle bundle(String name) {\n"
+               "        ResourceBundle b;\n"
+               (apply str (for [i (range (count chunks))]
+                            (str "        if ((b = bundle" i "(name)) != null) {\n            return b;\n        }\n")))
+               "        return null;\n"
+               "    }\n"
+               ;; in chunks of 250 cases: a class file method's code is at most 64 KB
+               (apply str (for [[i chunk] (map-indexed vector chunks)]
+                            (str "\n    private static ResourceBundle bundle" i "(String name) {\n"
+                                 "        switch (name) {\n"
+                                 (apply str (for [[k cls] chunk]
+                                              (str "            case \"" k "\": return new " cls "();\n")))
+                                 "            default: return null;\n"
+                                 "        }\n"
+                                 "    }\n")))
+               "}\n"))))
+
+(defn expand-locales
+  "bin/jrt-convert's generate step: rewrites sources-txt with its KIND locales line expanded
+  (kept, then followed by the selection's lines): the generated bundles of jdk.localedata
+  (gensrc:jdk.localedata, files of the converter's output ld), the JRE collation data
+  (share:jdk.localedata, of jdk's src/jdk.localedata) and jrt's index (jrtgen
+  jdk/internal/jrt/LocaleDataIndex.java, written to index-out). base-meta is the java.base
+  converter's CLDRBaseLocaleDataMetaInfo.java (CLDR's parent locales)."
+  [sources-txt ld base-meta jdk index-out]
+  (let [lines (str/split-lines (slurp sources-txt))
+        expanded? #(re-find #" (gensrc:jdk\.localedata|share:jdk\.localedata|jrtgen) " (str % " "))
+        lines (remove expanded? lines)
+        spec (some #(second (re-find #"^java\.base locales (.*)$" %)) lines)
+        files (locale-data-files spec ld base-meta)
+        coll (collation-files spec jdk)
+        prefix "src/jdk.localedata/share/classes/"
+        coll-rel (map #(subs % (count prefix)) coll)]
+    (io/make-parents index-out)
+    (write-locale-data ld base-meta files coll-rel index-out)
+    (spit sources-txt
+          (str (str/join "\n" (concat lines
+                                      (map #(str "java.base gensrc:jdk.localedata " %) files)
+                                      (map #(str "java.base share:jdk.localedata " %) coll-rel)
+                                      ["java.base jrtgen jdk/internal/jrt/LocaleDataIndex.java"]))
+               "\n"))
+    (println (count files) "jdk.localedata bundles," (count coll-rel) "collation data files for locales" (or spec "none"))))
+
 (def added-sources
   "Files of src/java.base/share/classes added to the measured closure (B1a step 4, phase 2C,
   doc/go/JRT-NOTES.md \"Phase 2C\"): plain Java that jrt had as stand-ins (C2G-SPEC §4.3) or
@@ -202,7 +485,8 @@
            ;; \N{name} (CharacterName's uniName.dat is zlib-compressed: the overlay's
            ;; InflaterInputStream throws ZipException)
            ["java/util/zip/ZipException.java"]
-           time-sources))))
+           time-sources
+           text-sources))))
 
 (def added-gensrc
   "Files the JDK build generates (make/modules/java.base/gensrc/GensrcBuffer.gmk,
@@ -221,7 +505,13 @@
                ["sun/text/resources/cldr/FormatData.java" "sun/text/resources/cldr/FormatData_en.java"
                 "sun/util/resources/cldr/TimeZoneNames.java" "sun/util/resources/cldr/TimeZoneNames_en.java"
                 "sun/util/resources/cldr/CalendarData.java" "sun/util/cldr/CLDRBaseLocaleDataMetaInfo.java"
-                "java/time/format/ZoneName.java"])))
+                "java/time/format/ZoneName.java"]
+               ;; java.text's (JRT-NOTES.md, \"Text and locales\"): java.base's CLDR currency and
+               ;; locale names of the root and English locales
+               ["sun/util/resources/cldr/CurrencyNames.java" "sun/util/resources/cldr/CurrencyNames_en.java"
+                "sun/util/resources/cldr/LocaleNames.java" "sun/util/resources/cldr/LocaleNames_en.java"
+                ;; Locale's language equivalences (filter, lookup), from the language subtag registry
+                "sun/util/locale/LocaleEquivalentMaps.java"])))
 
 (def util-sources
   "Files of src/java.base/share/classes added for java.util's plain Java (doc/go/JAVA-BASE.md,
@@ -467,7 +757,12 @@
   ;; KIND overlay: overlay/jdk/MODULE/REL, jrt's own (replacing jdk26u's file of that path)
   (doseq [s (overlay-sources)
           :let [[_ m rel] (re-find #"^([^/]+)/(.*)$" s)]]
-    (println m "overlay" rel)))
+    (println m "overlay" rel))
+  ;; KIND locales: the selection of jdk.localedata's locales (JRT_LOCALES, text-locales), which
+  ;; bin/jrt-convert's generate step expands into the generated bundles (KIND
+  ;; gensrc:jdk.localedata), the JRE collation data (share:jdk.localedata) and jrt's generated
+  ;; index jdk.internal.jrt.LocaleDataIndex (KIND jrtgen)
+  (println "java.base locales" (let [e (System/getenv "JRT_LOCALES")] (if (str/blank? e) "none" e))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; the edge
@@ -647,7 +942,11 @@
    "java/util/stream/Gatherers.clj" [:local-class-capture-order 9]
    "java/util/stream/MatchOps.clj" [:local-class-capture-order 12]
    ;; InnerClasses: a nested class javac's stack map frames name (Spliterator$OfPrimitive)
-   "java/util/stream/Nodes.clj" [:inner-classes-of-frames 2]})
+   "java/util/stream/Nodes.clj" [:inner-classes-of-frames 2]
+   ;; a switch expression of String arms as an argument of a varargs call (Locale's
+   ;; getDisplayKeyTypeExtensionString): javac checkcasts the switch's value to String, the
+   ;; class forms do not (its arms are Strings already; JRT-NOTES.md, "Text and locales")
+   "java/util/Locale.clj" [:switch-expression-checkcast 1]})
 
 (defn known-difference? [r]
   (when-let [[_ n] (known-differences (:file r))]

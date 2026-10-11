@@ -136,9 +136,8 @@
    ["sun.nio.cs.UTF_16BE" [] false]
    ["sun.nio.cs.UTF_16LE" [] false]
    ["java.nio.charset.StandardCharsets" [] false]
-   ["java.util.Locale" ["java.lang.Cloneable" "java.io.Serializable"] false]
-   ["java.util.Locale$Category" [] false]
-   ["java.text.DecimalFormatSymbols" ["java.lang.Cloneable" "java.io.Serializable"] false]
+   ;; java.util.Locale, Locale.Category and java.text.DecimalFormatSymbols are translated
+   ;; (JRT-NOTES.md, "Text and locales"; standin_locale.clj for jrt's own build)
    ["java.util.Date" ["java.io.Serializable" "java.lang.Cloneable" "java.lang.Comparable"] true]
    ["jdk.internal.foreign.Utils" [] false]
    ;; phase 2a: threads, concurrency, Unsafe, the VM's services

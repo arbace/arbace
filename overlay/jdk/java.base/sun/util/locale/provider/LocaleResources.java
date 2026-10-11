@@ -1,21 +1,24 @@
 /*
  * jrt's own sun.util.locale.provider.LocaleResources for the Go build (doc/go/JRT-NOTES.md,
- * "Time"). Its lookups (getCalendarData, getNumberPatterns and getNumberStrings,
- * getTimeZoneNames, getZoneIDs, getZoneStrings, getCalendarNames, getJavaTimeNames,
- * getJavaTimeDateTimePattern and getDateTimePattern, getLocalizedPattern with its skeleton
- * matching, getRules) are transcribed from openjdk/jdk26u at baf63fb,
+ * "Time" and "Text and locales"). Its lookups (getBreakIteratorInfo, getBreakIteratorResources,
+ * getCalendarData, getCollationData, getDecimalFormatSymbolsData, getNumberPatterns and
+ * getNumberStrings, getCNPatterns, getCurrencyName, getLocaleName, getTimeZoneNames,
+ * getZoneIDs, getZoneStrings, getCalendarNames, getJavaTimeNames, getDateTimePattern and
+ * getJavaTimeDateTimePattern, getLocalizedPattern with its skeleton matching, getRules,
+ * getListPatterns) are transcribed from openjdk/jdk26u at baf63fb,
  * src/java.base/share/classes/sun/util/locale/provider/LocaleResources.java, Copyright (c) Oracle
  * and/or its affiliates, under the GNU General Public License version 2 with the Classpath
- * Exception (LICENSE.md); the bundles' chaining and the MessageFormat subset are Arbace's own.
+ * Exception (LICENSE.md); the caching (strong, where the JDK's are soft references) and the
+ * MessageFormat subset are Arbace's own.
  */
 package sun.util.locale.provider;
 
-import java.util.ArrayList;
+import java.text.ListFormat;
+import java.text.NumberFormat;
 import java.util.Arrays;
-import java.util.Enumeration;
+import java.util.Calendar;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -29,37 +32,36 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import sun.util.resources.LocaleData;
 
 /**
- * A locale's resources, as the JDK's CLDR adapter has them, over java.base's CLDR bundles:
- * FormatData and TimeZoneNames of the English language (FormatData_en, TimeZoneNames_en) then
- * of the root locale for a locale whose language is English, of the root locale alone for any
- * other (the bundle chain the JDK's candidate locales give, en_US to en to root, there being no
- * en_US bundle in java.base), and the root locale's CalendarData. Values are cached; they are
- * not to be changed by callers (as the JDK's).
+ * A locale's resources, as the JDK's CLDR adapter has them, over the locale data of the Go
+ * build (jrt's LocaleData: java.base's CLDR bundles, the JRE's root data, and the bundles of
+ * jdk.localedata's locales bin/jrt-convert selected), each the chain of the locale's candidate
+ * locales' bundles. Values are cached; they are not to be changed by callers (as the JDK's).
  */
 public class LocaleResources {
 
-    private static final ResourceBundle ROOT_FORMAT = new sun.text.resources.cldr.FormatData();
-    private static final ResourceBundle EN_FORMAT = new sun.text.resources.cldr.FormatData_en();
-    private static final ResourceBundle ROOT_TZNAMES = new sun.util.resources.cldr.TimeZoneNames();
-    private static final ResourceBundle EN_TZNAMES = new sun.util.resources.cldr.TimeZoneNames_en();
-    private static final ResourceBundle CALENDAR_DATA = new sun.util.resources.cldr.CalendarData();
-
     private final Locale locale;
-    private final ResourceBundle formatData;
-    private final ResourceBundle timeZoneNames;
+    private final LocaleData localeData;
     private final ConcurrentMap<String, Object> cache = new ConcurrentHashMap<>();
 
     // cache key prefixes
+    private static final String BREAK_ITERATOR_INFO = "BII.";
     private static final String CALENDAR_DATA_KEY = "CALD.";
+    private static final String COLLATION_DATA = "COLD";
+    private static final String DECIMAL_FORMAT_SYMBOLS_DATA_CACHEKEY = "DFSD";
+    private static final String CURRENCY_NAMES = "CN.";
+    private static final String LOCALE_NAMES = "LN.";
     private static final String TIME_ZONE_NAMES = "TZN.";
     private static final String ZONE_IDS_CACHEKEY = "ZID";
     private static final String CALENDAR_NAMES = "CALN.";
     private static final String NUMBER_PATTERNS_CACHEKEY = "NP";
+    private static final String COMPACT_NUMBER_PATTERNS_CACHEKEY = "CNP";
     private static final String DATE_TIME_PATTERN = "DTP.";
     private static final String RULES_CACHEKEY = "RULE";
     private static final String SKELETON_PATTERN = "SP.";
+    private static final String LIST_PATTERN = "LP.";
 
     // ResourceBundle key names for skeletons
     private static final String SKELETON_INPUT_REGIONS_KEY = "DateFormatItemInputRegions";
@@ -97,13 +99,7 @@ public class LocaleResources {
 
     LocaleResources(Locale locale) {
         this.locale = locale;
-        if ("en".equals(locale.getLanguage())) {
-            formatData = new Bundles(EN_FORMAT, ROOT_FORMAT);
-            timeZoneNames = new Bundles(EN_TZNAMES, ROOT_TZNAMES);
-        } else {
-            formatData = new Bundles(ROOT_FORMAT);
-            timeZoneNames = new Bundles(ROOT_TZNAMES);
-        }
+        this.localeData = LocaleProviderAdapter.getResourceBundleBased().getLocaleData();
     }
 
     /** The locale whose resources these are. */
@@ -116,8 +112,9 @@ public class LocaleResources {
         Object data = cache.get(cacheKey);
         if (data == null) {
             String caldata = "";
-            if (CALENDAR_DATA.containsKey(key)) {
-                caldata = CALENDAR_DATA.getString(key);
+            ResourceBundle rb = localeData.getCalendarData(locale);
+            if (rb.containsKey(key)) {
+                caldata = rb.getString(key);
             }
             cache.putIfAbsent(cacheKey, caldata);
             data = caldata;
@@ -128,7 +125,7 @@ public class LocaleResources {
     public String[] getNumberPatterns() {
         Object data = cache.get(NUMBER_PATTERNS_CACHEKEY);
         if (data == null) {
-            data = getNumberStrings(formatData, "NumberPatterns");
+            data = getNumberStrings(localeData.getNumberFormatData(locale), "NumberPatterns");
             cache.putIfAbsent(NUMBER_PATTERNS_CACHEKEY, data);
         }
         return (String[]) data;
@@ -169,7 +166,7 @@ public class LocaleResources {
         String cacheKey = TIME_ZONE_NAMES + key;
         Object val = cache.get(cacheKey);
         if (val == null) {
-            ResourceBundle tznb = timeZoneNames;
+            ResourceBundle tznb = localeData.getTimeZoneNames(locale);
             if (key.startsWith(TZNB_EXCITY_PREFIX)) {
                 if (tznb.containsKey(key)) {
                     val = tznb.getString(key);
@@ -202,7 +199,7 @@ public class LocaleResources {
     Set<String> getZoneIDs() {
         Object data = cache.get(ZONE_IDS_CACHEKEY);
         if (data == null) {
-            data = timeZoneNames.keySet();
+            data = localeData.getTimeZoneNames(locale).keySet();
             cache.putIfAbsent(ZONE_IDS_CACHEKEY, data);
         }
         return (Set<String>) data;
@@ -210,7 +207,7 @@ public class LocaleResources {
 
     // zoneStrings are cached separately in TimeZoneNameUtility.
     String[][] getZoneStrings() {
-        ResourceBundle rb = timeZoneNames;
+        ResourceBundle rb = localeData.getTimeZoneNames(locale);
         Set<String> keyset = getZoneIDs();
         // Use a LinkedHashSet to preserve the order
         Set<String[]> value = new LinkedHashSet<>();
@@ -257,6 +254,7 @@ public class LocaleResources {
         String cacheKey = CALENDAR_NAMES + key;
         Object data = cache.get(cacheKey);
         if (data == null) {
+            ResourceBundle formatData = localeData.getDateFormatData(locale);
             if (!formatData.containsKey(key)) {
                 return null;
             }
@@ -338,7 +336,7 @@ public class LocaleResources {
         Object value = cache.get(cacheKey);
         if (value == null) {
             value = NULLOBJECT;
-            ResourceBundle r = formatData;
+            ResourceBundle r = localeData.getDateFormatData(locale);
             if (r.containsKey(resourceKey)) {
                 value = r.getStringArray(resourceKey);
             } else {
@@ -358,51 +356,33 @@ public class LocaleResources {
     }
 
     /**
-     * The candidate locales of a locale without script or extensions, as ResourceBundle.Control
-     * and the CLDR adapter give them for java.base's locales: language_COUNTRY_variant,
-     * language_COUNTRY, language, the root locale.
+     * The lookup locales of LocaleServiceProviderPool (ResourceBundle.Control's default
+     * candidate list), whose first supported one with an answer wins.
      */
     static List<Locale> candidateLocales(Locale locale) {
-        List<Locale> list = new ArrayList<>(4);
-        String language = locale.getLanguage();
-        String country = locale.getCountry();
-        String variant = locale.getVariant();
-        if (!variant.isEmpty()) {
-            list.add(locale);
-        }
-        if (!country.isEmpty()) {
-            list.add(variant.isEmpty() ? locale : Locale.of(language, country));
-        }
-        if (!language.isEmpty()) {
-            list.add(country.isEmpty() && variant.isEmpty() ? locale : Locale.of(language));
-        }
-        list.add(Locale.ROOT);
-        return list;
+        return ResourceBundle.Control.getNoFallbackControl(ResourceBundle.Control.FORMAT_DEFAULT)
+            .getCandidateLocales("", locale);
     }
 
-    /** The candidate locales java.base's CLDR adapter supports (supportedLocale). */
+    /** The CLDR adapter's candidate locales (with CLDR's parent locales). */
+    static List<Locale> cldrCandidateLocales(Locale locale) {
+        return LocaleProviderAdapter.getResourceBundleBased().getCandidateLocales("", locale);
+    }
+
+    /** The lookup locales the adapter supports (LocaleServiceProviderPool's findProviders). */
     static List<Locale> supportedCandidateLocales(Locale locale) {
         List<Locale> list = candidateLocales(locale);
         list.removeIf(l -> !isSupportedLocale(l));
         return list;
     }
 
-    /** java.base's CLDR adapter's locales: " en en-Latn-US en-US en-US-POSIX" and the root locale. */
+    /** Whether the adapter supports the locale. */
     static boolean isSupportedLocale(Locale locale) {
-        if (Locale.ROOT.equals(locale)) {
-            return true;
-        }
-        if (!"en".equals(locale.getLanguage())) {
-            return false;
-        }
-        String country = locale.getCountry();
-        String variant = locale.getVariant();
-        return (country.isEmpty() && variant.isEmpty())
-            || ("US".equals(country) && (variant.isEmpty() || "POSIX".equals(variant)));
+        return LocaleProviderAdapter.isSupportedLocale(locale);
     }
 
     public ResourceBundle getJavaTimeFormatData() {
-        return formatData;
+        return localeData.getDateFormatData(locale);
     }
 
     public String getLocalizedPattern(String requestedTemplate, String calType) {
@@ -461,7 +441,7 @@ public class LocaleResources {
         var inferred = possibleInferred(skeleton);
 
         // Search the closest format pattern string from the resource bundle
-        ResourceBundle r = formatData;
+        ResourceBundle r = localeData.getDateFormatData(locale);
         return inferred
             .map(s -> ("gregory".equals(calType) ? "" : calType + ".") + "DateFormatItem." + s)
             .map(key -> r.containsKey(key) ? r.getString(key) : null)
@@ -475,7 +455,7 @@ public class LocaleResources {
         if (inputSkeletons == null) {
             Map<String, Map<String, String>> skeletons = new HashMap<>();
             Pattern p = Pattern.compile("([^:]+):([^;]+);");
-            ResourceBundle r = ROOT_FORMAT;
+            ResourceBundle r = localeData.getDateFormatData(Locale.ROOT);
             for (String type : new String[] {"preferred", "allowed"}) {
                 var inputRegionsKey = SKELETON_INPUT_REGIONS_KEY + "." + type;
                 Map<String, String> typeMap = new HashMap<>();
@@ -564,7 +544,7 @@ public class LocaleResources {
     public String[] getRules() {
         Object data = cache.get(RULES_CACHEKEY);
         if (data == null) {
-            ResourceBundle rb = formatData;
+            ResourceBundle rb = localeData.getDateFormatData(locale);
             String[] rules = new String[2];
             rules[0] = rules[1] = "";
             if (rb.containsKey("PluralRules")) {
@@ -609,55 +589,164 @@ public class LocaleResources {
         return sb.toString();
     }
 
-    /**
-     * The chain of a locale's bundles as one bundle: a key's value is the first bundle's that
-     * has the key (as a bundle's parent chain); the keys are the bundles', in their order.
-     */
-    private static final class Bundles extends ResourceBundle {
-        private final ResourceBundle[] chain;
-        private volatile Set<String> keys;
+    // ---------------------------------------------------------------------------------------
+    // java.text's lookups (jdk26u's)
 
-        Bundles(ResourceBundle... chain) {
-            this.chain = chain;
+    Object getBreakIteratorInfo(String key) {
+        String cacheKey = BREAK_ITERATOR_INFO + key;
+        Object biInfo = cache.get(cacheKey);
+        if (biInfo == null) {
+            biInfo = localeData.getBreakIteratorInfo(locale).getObject(key);
+            cache.putIfAbsent(cacheKey, biInfo);
         }
+        return biInfo;
+    }
 
-        @Override
-        protected Object handleGetObject(String key) {
-            for (ResourceBundle b : chain) {
-                if (b.containsKey(key)) {
-                    return b.getObject(key);
-                }
+    byte[] getBreakIteratorResources(String key) {
+        return (byte[]) localeData.getBreakIteratorResources(locale).getObject(key);
+    }
+
+    public String getCollationData() {
+        String key = "Rule";
+        String cacheKey = COLLATION_DATA;
+        String coldata = "";
+
+        try {
+            var type = locale.getUnicodeLocaleType("co");
+            if (type != null && !type.isEmpty() && !type.equalsIgnoreCase("standard")) {
+                key += "." + type;
+                cacheKey += type;
             }
-            return null;
-        }
+        } catch (IllegalArgumentException ignore) {}
 
-        @Override
-        protected Set<String> handleKeySet() {
-            Set<String> ks = keys;
-            if (ks == null) {
-                ks = new LinkedHashSet<>();
-                for (ResourceBundle b : chain) {
-                    for (Enumeration<String> e = b.getKeys(); e.hasMoreElements(); ) {
-                        ks.add(e.nextElement());
-                    }
-                }
-                keys = ks;
+        Object data = cache.get(cacheKey);
+        if (data == null) {
+            ResourceBundle rb = localeData.getCollationData(locale);
+            if (rb.containsKey(key)) {
+                coldata = rb.getString(key);
             }
-            return ks;
+            cache.putIfAbsent(cacheKey, coldata);
+        } else {
+            coldata = (String) data;
         }
 
-        @Override
-        public Enumeration<String> getKeys() {
-            Iterator<String> it = handleKeySet().iterator();
-            return new Enumeration<String>() {
-                public boolean hasMoreElements() {
-                    return it.hasNext();
-                }
+        return coldata;
+    }
 
-                public String nextElement() {
-                    return it.next();
-                }
+    public Object[] getDecimalFormatSymbolsData() {
+        Object data = cache.get(DECIMAL_FORMAT_SYMBOLS_DATA_CACHEKEY);
+        if (data == null) {
+            // Note that only dfsdata[0] is prepared here in this method. Other
+            // elements are provided by the caller, yet they are cached here.
+            ResourceBundle rb = localeData.getNumberFormatData(locale);
+            Object[] dfsdata = new Object[3];
+            dfsdata[0] = getNumberStrings(rb, "NumberElements");
+            Object prev = cache.putIfAbsent(DECIMAL_FORMAT_SYMBOLS_DATA_CACHEKEY, dfsdata);
+            data = prev != null ? prev : dfsdata;
+        }
+        return (Object[]) data;
+    }
+
+    public String getCurrencyName(String key) {
+        String cacheKey = CURRENCY_NAMES + key;
+        Object currencyName = cache.get(cacheKey);
+        if (currencyName != null) {
+            return currencyName == NULLOBJECT ? null : (String) currencyName;
+        }
+
+        ResourceBundle olrb = localeData.getCurrencyNames(locale);
+        if (olrb.containsKey(key)) {
+            currencyName = olrb.getObject(key);
+            cache.putIfAbsent(cacheKey, currencyName);
+        }
+
+        return (String) currencyName;
+    }
+
+    public String getLocaleName(String key) {
+        // Get names for old ISO codes with new ISO code resources
+        if (jdk.internal.util.StaticProperty.javaLocaleUseOldISOCodes().equalsIgnoreCase("true")) {
+            key = switch (key) {
+                case "iw" -> "he";
+                case "in" -> "id";
+                case "ji" -> "yi";
+                default -> key;
             };
         }
+
+        String cacheKey = LOCALE_NAMES + key;
+        Object localeName = cache.get(cacheKey);
+        if (localeName != null) {
+            return localeName == NULLOBJECT ? null : (String) localeName;
+        }
+
+        ResourceBundle olrb = localeData.getLocaleNames(locale);
+        if (olrb.containsKey(key)) {
+            localeName = olrb.getObject(key);
+            cache.putIfAbsent(cacheKey, localeName);
+        }
+
+        return (String) localeName;
+    }
+
+    public String getDateTimePattern(int timeStyle, int dateStyle, Calendar cal) {
+        if (cal == null) {
+            cal = Calendar.getInstance(locale);
+        }
+        return getDateTimePattern(null, timeStyle, dateStyle, cal.getCalendarType());
+    }
+
+    /**
+     * Returns the compact number format patterns.
+     * @param formatStyle the style for formatting a number
+     * @return an array of compact number patterns
+     */
+    public String[] getCNPatterns(NumberFormat.Style formatStyle) {
+        Objects.requireNonNull(formatStyle);
+        String width = (formatStyle == NumberFormat.Style.LONG) ? "long" : "short";
+        String cacheKey = width + "." + COMPACT_NUMBER_PATTERNS_CACHEKEY;
+        Object data = cache.get(cacheKey);
+        if (data == null) {
+            ResourceBundle resource = localeData.getNumberFormatData(locale);
+            data = (String[]) resource.getObject(width + ".CompactNumberPatterns");
+            cache.putIfAbsent(cacheKey, data);
+        }
+        return (String[]) data;
+    }
+
+    /**
+     * {@return the list patterns for the locale}
+     *
+     * @param type a {@link ListFormat.Type}
+     * @param style a {@link ListFormat.Style}
+     */
+    public String[] getListPatterns(ListFormat.Type type, ListFormat.Style style) {
+        String typeStr = type.toString().toLowerCase(Locale.ROOT);
+        String styleStr = style.toString().toLowerCase(Locale.ROOT);
+        String cacheKey = LIST_PATTERN + typeStr + styleStr;
+        Object data = cache.get(cacheKey);
+
+        if (data == null) {
+            var rbKey = "ListPatterns_" + typeStr + (style == ListFormat.Style.FULL ? "" : "-" + styleStr);
+            String[] lpArray = localeData.getDateFormatData(locale).getStringArray(rbKey);
+
+            if (lpArray[0].isEmpty() || lpArray[1].isEmpty() || lpArray[2].isEmpty()) {
+                var candList = cldrCandidateLocales(locale);
+                if (!candList.isEmpty()) {
+                    for (var p : candList.subList(1, candList.size())) {
+                        var parentPatterns = localeData.getDateFormatData(p).getStringArray(rbKey);
+                        for (int i = 0; i < 3; i++) { // exclude optional ones, ie, "two"/"three"
+                            if (lpArray[i].isEmpty()) {
+                                lpArray[i] = parentPatterns[i];
+                            }
+                        }
+                    }
+                }
+            }
+            cache.putIfAbsent(cacheKey, lpArray);
+            data = lpArray;
+        }
+
+        return (String[]) data;
     }
 }

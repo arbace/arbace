@@ -83,7 +83,8 @@
   (let [g (m/go-name cls)
         base (nm/method-base name desc)
         scan (:jrt m/*w*)]
-    (contains? (:funcs scan) (str g "_" base))))
+    (or (contains? (:funcs scan) (str g "_" base))
+        (m/c2g-static? cls base))))
 
 (defn- hw-has-field? [cls fname static?]
   (let [g (m/go-name cls)

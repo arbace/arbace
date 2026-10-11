@@ -95,9 +95,9 @@
 
 (def method-classes
   ["java.lang.Object" "java.lang.String" "java.lang.Math" "java.lang.StringBuilder" "java.lang.Class"
-   "java.lang.Throwable" "java.util.Locale" "java.util.Locale$Category" "java.util.Date"
+   "java.lang.Throwable" "java.util.Date"
    "java.nio.charset.Charset" "sun.nio.cs.UTF_8" "java.lang.reflect.Method" "java.lang.reflect.Field"
-   "java.lang.reflect.Member" "java.lang.ClassLoader" "java.text.DecimalFormatSymbols" "java.lang.Enum"])
+   "java.lang.reflect.Member" "java.lang.ClassLoader" "java.lang.Enum"])
 
 (def translated-classes
   "The top-level classes c2g translates from the JDK closure (g2c.jrt-sources: the measured
@@ -168,8 +168,8 @@
    ["java.lang.Class" "getMethods" ""] ["java.lang.StringBuilder" "append" "java.lang.String"]
    ["java.lang.StringBuilder" "append" "char"] ["java.lang.StringBuilder" "length" ""]
    ["java.lang.Throwable" "getMessage" ""] ["java.lang.Throwable" "printStackTrace" ""]
-   ["java.util.Locale" "getDefault" ""] ["java.util.Locale$Category" "values" ""]
-   ["java.util.Locale$Category" "name" ""] ["java.util.Locale$Category" "compareTo" "java.lang.Enum"]
+   ["java.lang.Thread$State" "values" ""]
+   ["java.lang.Thread$State" "name" ""] ["java.lang.Thread$State" "compareTo" "java.lang.Enum"]
    ["java.util.Date" "getTime" ""] ["java.util.Date" "compareTo" "java.util.Date"]
    ["java.util.Date" "UTC" "int,int,int,int,int,int"]
    ["java.nio.charset.Charset" "forName" "java.lang.String"] ["java.nio.charset.Charset" "name" ""]
@@ -185,9 +185,9 @@
                   ["java.lang.Object" ""] ["java.lang.Math" ""] ["java.lang.Throwable" "java.lang.String"]]]
       (line "getConstructor" c ps (outcome #(str (.getConstructor (class-of c) (params-of ps))))))
     (for [[c f] [["java.lang.Math" "PI"] ["java.lang.Math" "E"] ["java.lang.Math" "nope"]
-                 ["java.util.Locale" "US"] ["java.util.Locale$Category" "FORMAT"] ["sun.nio.cs.UTF_8" "INSTANCE"]]]
+                 ["java.lang.Thread$State" "NEW"] ["sun.nio.cs.UTF_8" "INSTANCE"]]]
       (line "getField" c f (outcome #(str (.getField (class-of c) f)))))
-    (for [c ["java.lang.Math" "java.util.Locale" "java.lang.String" "java.nio.charset.StandardCharsets" "java.lang.Object"]]
+    (for [c ["java.lang.Math" "java.lang.String" "java.nio.charset.StandardCharsets" "java.lang.Object"]]
       (line "fields" c (str/join "|" (sort (for [^Field f (.getFields (class-of c))
                                                  :when (contains? (set (for [[k n] (get-in manifest [(symbol (.getName (.getDeclaringClass f))) :members])
                                                                              :when (= k :field)] n))
@@ -244,17 +244,13 @@
    ["java.lang.Math" "sqrt" "double" "n" "d:2.0"]
    ["java.lang.Class" "getName" "" "C:java.lang.String" ""]
    ["java.lang.Class" "getName" "" "C:[I" ""]
-   ["java.lang.Class" "getSimpleName" "" "C:java.util.Locale$Category" ""]
+   ["java.lang.Class" "getSimpleName" "" "C:java.lang.Thread$State" ""]
    ["java.lang.Class" "isInstance" "java.lang.Object" "C:java.lang.CharSequence" "s:x"]
    ["java.lang.Class" "forName" "java.lang.String" "n" "s:java.util.Date"]
    ["java.lang.Class" "forName" "java.lang.String" "n" "s:no.Such"]
    ["java.lang.Class" "getSuperclass" "" "C:sun.nio.cs.UTF_8" ""]
    ["java.lang.StringBuilder" "append" "java.lang.String" "n" "s:x"]
    ["java.lang.Throwable" "getMessage" "" "s:abc" ""]
-   ["java.util.Locale" "getDefault" "" "n" ""]
-   ["java.util.Locale" "toString" "" "L:US" ""]
-   ["java.util.Locale" "getLanguage" "" "L:ENGLISH" ""]
-   ["java.util.Locale" "toLanguageTag" "" "L:ROOT" ""]
    ["java.util.Date" "getTime" "" "n" ""]
    ["java.util.Date" "UTC" "int,int,int,int,int,int" "n" "i:70 i:0 i:1 i:0 i:0 i:0"]
    ["java.nio.charset.Charset" "forName" "java.lang.String" "n" "s:latin1"]
@@ -285,15 +281,15 @@
 
 (defn field-lines []
   (concat
-    (for [[c f recv] [["java.lang.Math" "PI" "n"] ["java.lang.Math" "E" "s:ignored"] ["java.util.Locale" "ROOT" "n"]
-                      ["java.nio.charset.StandardCharsets" "UTF_8" "n"] ["java.util.Locale$Category" "DISPLAY" "n"]]]
+    (for [[c f recv] [["java.lang.Math" "PI" "n"] ["java.lang.Math" "E" "s:ignored"]
+                      ["java.nio.charset.StandardCharsets" "UTF_8" "n"] ["java.lang.Thread$State" "RUNNABLE" "n"]]]
       (line "fieldGet" c f recv (outcome #(.get (.getField (class-of c) f) (value recv)))))
-    (for [[c f v] [["java.lang.Math" "PI" "d:3.0"] ["java.lang.Math" "PI" "n"] ["java.util.Locale" "US" "L:ROOT"]]]
+    (for [[c f v] [["java.lang.Math" "PI" "d:3.0"] ["java.lang.Math" "PI" "n"] ["java.nio.charset.StandardCharsets" "UTF_8" "cs:UTF-8"]]]
       (line "fieldSet" c f v (outcome #(.set (.getField (class-of c) f) nil (value v)))))))
 
 (defn class-lines []
-  (for [n ["java.lang.String" "[I" "[[Ljava.lang.String;" "int" "java.util.Locale$Category" "sun.nio.cs.UTF_8"
-           "java.lang.reflect.Method" "[Ljava.util.Locale$Category;" "java.lang.Object"]
+  (for [n ["java.lang.String" "[I" "[[Ljava.lang.String;" "int" "java.lang.Thread$State" "sun.nio.cs.UTF_8"
+           "java.lang.reflect.Method" "[Ljava.lang.Thread$State;" "java.lang.Object"]
         :let [c (class-of n)]
         [op f] [["typeName" #(.getTypeName c)] ["canonicalName" #(.getCanonicalName c)]
                 ["packageName" #(.getPackageName c)] ["simpleName" #(.getSimpleName c)]
@@ -412,15 +408,6 @@
     [(line "default" (outcome #(str (Locale/getDefault))))
      (line "defaultFormat" (outcome #(str (Locale/getDefault java.util.Locale$Category/FORMAT))))
      (line "categories" (outcome #(str/join "," (map str (java.util.Locale$Category/values)))))]
-    (for [[n l] [["ROOT" Locale/ROOT] ["US" Locale/US]]
-          :let [d (java.text.DecimalFormatSymbols/getInstance l)]
-          [op f] [["zero" #(int (.getZeroDigit d))] ["grouping" #(int (.getGroupingSeparator d))]
-                  ["decimal" #(int (.getDecimalSeparator d))] ["minus" #(int (.getMinusSign d))]
-                  ["percent" #(int (.getPercent d))] ["perMill" #(int (.getPerMill d))]
-                  ["infinity" #(.getInfinity d)] ["nan" #(.getNaN d)] ["exponent" #(.getExponentSeparator d)]
-                  ["currency" #(.getCurrencySymbol d)] ["intlCurrency" #(.getInternationalCurrencySymbol d)]
-                  ["locale" #(str (.getLocale d))]]]
-      (line (str "dfs." op) n (outcome f)))
     (for [s ["TITLE" "title" "İstanbul" "ıi"]
           [n l] [["ROOT" Locale/ROOT] ["US" Locale/US]]
           [op f] [["lower" #(.toLowerCase ^String s ^Locale l)] ["upper" #(.toUpperCase ^String s ^Locale l)]]]

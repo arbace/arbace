@@ -32,8 +32,8 @@ import sun.util.cldr.CLDRBaseLocaleDataMetaInfo;
  * TimeZoneNames and FormatData (LocaleResources): the names of the bundles, then the names the
  * JDK derives where CLDR has none (from the parent locales, the canonical zone, the generic or
  * standard name of a zone without daylight saving time, the region format "{0} Time" over the
- * exemplar city, the GMT format). A locale's names come from the first of its candidate locales
- * (en_US, en, the root locale) java.base's CLDR adapter supports: the root locale, en and en_US.
+ * exemplar city, the GMT format). A locale's names come from the first of its lookup locales
+ * (LocaleServiceProviderPool's) the adapter supports.
  */
 public final class TimeZoneNameUtility {
 
@@ -338,7 +338,7 @@ public final class TimeZoneNameUtility {
 
         // Check parent locales first
         if (!exists(names, index)) {
-            var cands = LocaleResources.candidateLocales(locale);
+            var cands = LocaleResources.cldrCandidateLocales(locale);
             for (int i = 1; i < cands.size() ; i++) {
                 var loc = cands.get(i);
                 String[] parentNames = bundleDisplayNameArray(id, loc);

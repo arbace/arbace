@@ -20,6 +20,15 @@
 
 (defn translated? [n] (contains? (T) n))
 
+(defn c2g-static?
+  "A static method of jrt's hand-written class cls (Go base name base) that c2g writes itself,
+  in the program's support code, because its type is a translated class jrt cannot name:
+  System.getProperties(), a Properties (out.clj; JRT-NOTES.md, \"Text and locales\":
+  StaticProperty reads it)."
+  [cls base]
+  (and (= cls "java/lang/System") (= base "GetProperties__Properties")
+       (translated? "java/util/Properties")))
+
 (defn jrt-class
   "jrt's hand-written (or stand-in) class n, when jrt defines it: {:go :var :standin :file}."
   [n]
@@ -243,6 +252,8 @@
   [n]
   (vec (filter in-world? (env/all-supertypes n))))
 
+(declare c2g-method?)
+
 (defn hw-method-exists?
   "Does jrt's hand-written class or interface n have method m (name desc) in Go?"
   [n m]
@@ -255,7 +266,18 @@
                          ;; a default method is a package function J_m
                          (contains? (:funcs scan) (str g "_" base)))
       :else (let [ms (jrt/struct-methods scan g)]
-              (or (contains? ms base) (contains? ms (nm/impl-name base)))))))
+              (or (contains? ms base) (contains? ms (nm/impl-name base))
+                  (c2g-method? n base))))))
+
+(defn c2g-method?
+  "An instance method of jrt's hand-written class n (Go base name base) that the program's
+  support code has, though jrt does not: String's chars() and codePoints(), the default methods
+  of CharSequence (translated), which c2g forwards to on the classes jrt writes that implement
+  it (JRT-NOTES.md, \"Text and locales\": CompactNumberFormat and java.time's text call them on
+  a String)."
+  [n base]
+  (and (= n "java/lang/String") (#{"Chars__IntStream" "CodePoints__IntStream"} base)
+       (translated? "java/lang/CharSequence") (translated? "java/util/stream/IntStream")))
 
 (defn member-in-world?
   "Does method m of class n exist in Go: its descriptor's classes exist, and for a jrt class

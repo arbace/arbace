@@ -99,23 +99,6 @@
                                (when (== op "lower")
                                  (return (.ToLowerCase_Locale__String s l)))
                                (.ToUpperCase_Locale__String s l)))))
-        (strings/HasPrefix op "dfs.")
-        (let [d (DecimalFormatSymbols_GetInstance_Locale__DecimalFormatSymbols (localeOf (aget c 1)))]
-          (set! got (outcome (fn ^any []
-                               (switch (strings/TrimPrefix op "dfs.")
-                                 (case ["zero"] (return (Box (conv int32 (.GetZeroDigit__C d)))))
-                                 (case ["grouping"] (return (Box (conv int32 (.GetGroupingSeparator__C d)))))
-                                 (case ["decimal"] (return (Box (conv int32 (.GetDecimalSeparator__C d)))))
-                                 (case ["minus"] (return (Box (conv int32 (.GetMinusSign__C d)))))
-                                 (case ["percent"] (return (Box (conv int32 (.GetPercent__C d)))))
-                                 (case ["perMill"] (return (Box (conv int32 (.GetPerMill__C d)))))
-                                 (case ["infinity"] (return (.GetInfinity__String d)))
-                                 (case ["nan"] (return (.GetNaN__String d)))
-                                 (case ["exponent"] (return (.GetExponentSeparator__String d)))
-                                 (case ["currency"] (return (.GetCurrencySymbol__String d)))
-                                 (case ["intlCurrency"] (return (.GetInternationalCurrencySymbol__String d)))
-                                 (case ["locale"] (return (.ToString__String (.GetLocale__Locale d)))))
-                               nil))))
         :else
         (let [l (localeOf (aget c 1))]
           (set! got (outcome (fn ^any []

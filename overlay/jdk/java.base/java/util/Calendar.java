@@ -1,6 +1,8 @@
 /*
- * jrt's own java.util.Calendar for the Go build (doc/go/JRT-NOTES.md, phase 2B "Dates"). Parts of its code
- * (the field resolution of selectFields, the stamps, adjustStamp, equals, hashCode, toString) are transcribed from openjdk/jdk26u at baf63fb,
+ * jrt's own java.util.Calendar for the Go build (doc/go/JRT-NOTES.md, phase 2B "Dates" and "Text
+ * and locales"). Parts of its code (the field resolution of selectFields, the stamps,
+ * adjustStamp, equals, hashCode, toString; the week parameters by locale, setWeekCountData; the
+ * display names, getDisplayName, getDisplayNames and their helpers) are transcribed from openjdk/jdk26u at baf63fb,
  * src/java.base/share/classes/java/util/Calendar.java, Copyright (c) Oracle and/or its affiliates,
  * under the GNU General Public License version 2 with the Classpath Exception (LICENSE.md);
  * the rest is Arbace's own.
@@ -13,8 +15,8 @@ import java.time.Instant;
  * java.util.Calendar for the Go build, behaving as the JDK's: the fields, their lazy recomputation (set marks the time
  * unset; the time is computed from the fields in the zone current at that moment, as the JDK
  * computes it), the zone, leniency and the week parameters. Every instance is a
- * GregorianCalendar; the week parameters are en_US's (Sunday, 1) for every locale, and display
- * names English, the locale data being outside the closed world.
+ * GregorianCalendar (no Buddhist or Japanese calendars); the week parameters and display names
+ * are the locale's, from the locale providers (CalendarDataUtility, DateFormatSymbols).
  */
 public abstract class Calendar implements java.io.Serializable, Cloneable, Comparable<Calendar> {
     public static final int ERA = 0;
@@ -108,8 +110,25 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
         isSet = new boolean[FIELD_COUNT];
         stamp = new int[FIELD_COUNT];
         this.zone = zone;
-        firstDayOfWeek = SUNDAY;
-        minimalDaysInFirstWeek = 1;
+        setWeekCountData(aLocale);
+    }
+
+    // The week parameters by locale (jdk26u's cache and setWeekCountData)
+    private static final java.util.concurrent.ConcurrentMap<Locale, int[]> cachedLocaleData
+        = new java.util.concurrent.ConcurrentHashMap<>(3);
+
+    private void setWeekCountData(Locale desiredLocale)
+    {
+        /* try to get the Locale data from the cache */
+        int[] data = cachedLocaleData.get(desiredLocale);
+        if (data == null) {  /* cache miss */
+            data = new int[2];
+            data[0] = sun.util.locale.provider.CalendarDataUtility.retrieveFirstDayOfWeek(desiredLocale);
+            data[1] = sun.util.locale.provider.CalendarDataUtility.retrieveMinimalDaysInFirstWeek(desiredLocale);
+            cachedLocaleData.putIfAbsent(desiredLocale, data);
+        }
+        firstDayOfWeek = data[0];
+        minimalDaysInFirstWeek = data[1];
     }
 
     public static Calendar getInstance() {
@@ -129,7 +148,7 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
     }
 
     public static synchronized Locale[] getAvailableLocales() {
-        return new Locale[] { Locale.ROOT, Locale.ENGLISH, Locale.US, Locale.UK };
+        return java.text.DateFormat.getAvailableLocales();
     }
 
     public static Set<String> getAvailableCalendarTypes() {
@@ -244,92 +263,150 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
         return stamp[field] != UNSET;
     }
 
-    private static final String[] MONTHS = {
-        "January", "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December", ""
-    };
-    private static final String[] DAYS = {
-        "", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
-    };
+    // the fields with display names (jdk26u's masks)
+    static final int ERA_MASK = (1 << ERA);
+    static final int MONTH_MASK = (1 << MONTH);
+    static final int DAY_OF_WEEK_MASK = (1 << DAY_OF_WEEK);
+    static final int AM_PM_MASK = (1 << AM_PM);
 
-    private static String[] names(int field, int style) {
-        int base = style & ~STANDALONE_MASK;
-        String[] full;
-        switch (field) {
-        case ERA:
-            return base == LONG ? new String[] { "Before Christ", "Anno Domini" }
-                : base == NARROW_FORMAT ? new String[] { "B", "A" } : new String[] { "BC", "AD" };
-        case AM_PM:
-            return base == NARROW_FORMAT ? new String[] { "a", "p" } : new String[] { "AM", "PM" };
-        case MONTH:
-            full = MONTHS;
-            break;
-        case DAY_OF_WEEK:
-            full = DAYS;
-            break;
-        default:
-            return null;
-        }
-        String[] r = new String[full.length];
-        for (int i = 0; i < full.length; i++) {
-            String n = full[i];
-            if (base == SHORT && n.length() > 3) {
-                n = n.substring(0, 3);
-            } else if (base == NARROW_FORMAT && n.length() > 1) {
-                n = n.substring(0, 1);
-            }
-            r[i] = n;
-        }
-        return r;
-    }
+    // The display names (jdk26u's getDisplayName, getDisplayNames and their helpers): the
+    // locale's names from CalendarDataUtility and DateFormatSymbols
 
-    private static void checkStyle(int field, int style) {
-        if (field < 0 || field >= FIELD_COUNT) {
-            throw new IllegalArgumentException();
-        }
-        int base = style & ~STANDALONE_MASK;
-        if (style != ALL_STYLES && base != SHORT && base != LONG && base != NARROW_FORMAT) {
-            throw new IllegalArgumentException();
-        }
-    }
-
-    /** English names for every locale (the root locale's). */
     public String getDisplayName(int field, int style, Locale locale) {
-        checkStyle(field, style);
-        if (style == ALL_STYLES || locale == null) {
-            if (locale == null) {
-                throw new NullPointerException();
-            }
-            throw new IllegalArgumentException();
-        }
-        String[] n = names(field, style);
-        if (n == null) {
+        if (!checkDisplayNameParams(field, style, SHORT, NARROW_FORMAT, locale,
+                            ERA_MASK|MONTH_MASK|DAY_OF_WEEK_MASK|AM_PM_MASK)) {
             return null;
         }
-        int v = get(field);
-        return v >= 0 && v < n.length && !n[v].isEmpty() ? n[v] : null;
+
+        String calendarType = getCalendarType();
+        int fieldValue = get(field);
+        // the standalone/narrow styles and short era are supported only through
+        // CalendarNameProviders.
+        if (isStandaloneStyle(style) || isNarrowFormatStyle(style) ||
+            field == ERA && (style & SHORT) == SHORT) {
+            String val = sun.util.locale.provider.CalendarDataUtility.retrieveFieldValueName(calendarType,
+                                                                    field, fieldValue,
+                                                                    style, locale);
+            // Perform fallback here to follow the CLDR rules
+            if (val == null) {
+                if (isNarrowFormatStyle(style)) {
+                    val = sun.util.locale.provider.CalendarDataUtility.retrieveFieldValueName(calendarType,
+                                                                     field, fieldValue,
+                                                                     toStandaloneStyle(style),
+                                                                     locale);
+                } else if (isStandaloneStyle(style)) {
+                    val = sun.util.locale.provider.CalendarDataUtility.retrieveFieldValueName(calendarType,
+                                                                     field, fieldValue,
+                                                                     getBaseStyle(style),
+                                                                     locale);
+                }
+            }
+            return val;
+        }
+
+        java.text.DateFormatSymbols symbols = java.text.DateFormatSymbols.getInstance(locale);
+        String[] strings = getFieldStrings(field, style, symbols);
+        if (strings != null) {
+            if (fieldValue < strings.length) {
+                return strings[fieldValue];
+            }
+        }
+        return null;
     }
 
     public Map<String, Integer> getDisplayNames(int field, int style, Locale locale) {
-        checkStyle(field, style);
+        if (!checkDisplayNameParams(field, style, ALL_STYLES, NARROW_FORMAT, locale,
+                                    ERA_MASK|MONTH_MASK|DAY_OF_WEEK_MASK|AM_PM_MASK)) {
+            return null;
+        }
+
+        String calendarType = getCalendarType();
+        if (style == ALL_STYLES || isStandaloneStyle(style) || isNarrowFormatStyle(style) ||
+            field == ERA && (style & SHORT) == SHORT) {
+            Map<String, Integer> map;
+            map = sun.util.locale.provider.CalendarDataUtility.retrieveFieldValueNames(calendarType, field, style, locale);
+
+            // Perform fallback here to follow the CLDR rules
+            if (map == null) {
+                if (isNarrowFormatStyle(style)) {
+                    map = sun.util.locale.provider.CalendarDataUtility.retrieveFieldValueNames(calendarType, field,
+                                                                      toStandaloneStyle(style), locale);
+                } else if (style != ALL_STYLES) {
+                    map = sun.util.locale.provider.CalendarDataUtility.retrieveFieldValueNames(calendarType, field,
+                                                                      getBaseStyle(style), locale);
+                }
+            }
+            return map;
+        }
+
+        // SHORT or LONG
+        return getDisplayNamesImpl(field, style, locale);
+    }
+
+    private Map<String,Integer> getDisplayNamesImpl(int field, int style, Locale locale) {
+        java.text.DateFormatSymbols symbols = java.text.DateFormatSymbols.getInstance(locale);
+        String[] strings = getFieldStrings(field, style, symbols);
+        if (strings != null) {
+            Map<String,Integer> names = new HashMap<>();
+            for (int i = 0; i < strings.length; i++) {
+                if (strings[i].isEmpty()) {
+                    continue;
+                }
+                names.put(strings[i], i);
+            }
+            return names;
+        }
+        return null;
+    }
+
+    boolean checkDisplayNameParams(int field, int style, int minStyle, int maxStyle,
+                                   Locale locale, int fieldMask) {
+        int baseStyle = getBaseStyle(style); // Ignore the standalone mask
+        if (field < 0 || field >= fields.length ||
+            baseStyle < minStyle || baseStyle > maxStyle || baseStyle == 3) {
+            throw new IllegalArgumentException();
+        }
         if (locale == null) {
             throw new NullPointerException();
         }
-        Map<String, Integer> m = new HashMap<>();
-        int[] styles = style == ALL_STYLES ? new int[] { SHORT, LONG } : new int[] { style };
-        boolean any = false;
-        for (int st : styles) {
-            String[] n = names(field, st);
-            if (n != null) {
-                any = true;
-                for (int i = 0; i < n.length; i++) {
-                    if (!n[i].isEmpty()) {
-                        m.put(n[i], i);
-                    }
-                }
-            }
+        return isFieldSet(fieldMask, field);
+    }
+
+    private String[] getFieldStrings(int field, int style, java.text.DateFormatSymbols symbols) {
+        int baseStyle = getBaseStyle(style); // ignore the standalone mask
+
+        // DateFormatSymbols doesn't support any narrow names.
+        if (baseStyle == NARROW_FORMAT) {
+            return null;
         }
-        return any ? m : null;
+
+        return switch (field) {
+            case ERA         -> symbols.getEras();
+            case MONTH       -> (baseStyle == LONG) ? symbols.getMonths() : symbols.getShortMonths();
+            case DAY_OF_WEEK -> (baseStyle == LONG) ? symbols.getWeekdays() : symbols.getShortWeekdays();
+            case AM_PM       -> symbols.getAmPmStrings();
+            default -> null;
+        };
+    }
+
+    int getBaseStyle(int style) {
+        return style & ~STANDALONE_MASK;
+    }
+
+    private int toStandaloneStyle(int style) {
+        return style | STANDALONE_MASK;
+    }
+
+    private boolean isStandaloneStyle(int style) {
+        return (style & STANDALONE_MASK) != 0;
+    }
+
+    private boolean isNarrowStyle(int style) {
+        return style == NARROW_FORMAT || style == NARROW_STANDALONE;
+    }
+
+    private boolean isNarrowFormatStyle(int style) {
+        return style == NARROW_FORMAT;
     }
 
     protected void complete() {

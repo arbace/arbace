@@ -89,6 +89,9 @@
    ;; java.time.chrono.Era's namesake in sun.util.calendar, which ZoneInfo's calendars use
    ;; (JRT-NOTES.md, "Time")
    "sun/util/calendar/Era" "Calendar_Era"
+   ;; java.lang.annotation.Annotation's namesake in java.text, an attribute value's wrapper
+   ;; (JRT-NOTES.md, "Text and locales")
+   "java/text/Annotation" "Text_Annotation"
    ;; java.security.SecureRandom's namesake in sun.security.provider, the SHA1PRNG
    ;; (JRT-NOTES.md, "Security", amendment SC2)
    "sun/security/provider/SecureRandom" "Sun_SecureRandom"})

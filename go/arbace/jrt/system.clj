@@ -96,6 +96,12 @@ shutdown hooks registered with jrt run first.\n"
     (set "sun.jnu.encoding" "UTF-8")
     (set "stdout.encoding" "UTF-8")
     (set "stderr.encoding" "UTF-8")
+    (set "stdin.encoding" "UTF-8")
+    ;; the default locale (jdk26u's Locale reads it through StaticProperty: JRT-NOTES.md, "Text
+    ;; and locales"): en_US, as a JVM started in an English, US environment (C.UTF-8 too);
+    ;; JAVA_TOOL_OPTIONS' -Duser.language=... -Duser.country=... set another, as on the JVM
+    (set "user.language" "en")
+    (set "user.country" "US")
     (set "java.io.tmpdir" (env "TMPDIR" "/tmp"))
     (set "user.home" (env "HOME" "?"))
     (set "user.name" (env "USER" "?"))

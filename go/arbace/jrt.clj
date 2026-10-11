@@ -5,11 +5,11 @@
 
 (go/package jrt
   :path "arbace/jrt"
-  :files ["access.go" "array.go" "atomic.go" "charset.go" "class.go" "classloader.go" "codec.go" "date.go" "digests.go" "dyn.go"
+  :files ["access.go" "array.go" "atomic.go" "charset.go" "class.go" "classloader.go" "codec.go" "constarray.go" "date.go" "digests.go" "dyn.go"
           "enum.go" "executor.go" "fdlibm.go" "files.go" "filesystem.go" "forkjoin.go" "host.go" "hostfs.go" "hostfs_linux.go" "hostproc.go" "hostproc_linux.go" "hostrand_linux.go" "image.go" "locale.go" "locks.go" "math.go" "members.go" "monitor.go"
           "natives.go" "net.go" "numconv.go" "object.go" "process.go" "reference.go" "reflect.go" "reflect_array.go"
-          "reflect_tables.go" "standin_character.go" "standin_executor.go" "standin_lang.go" "standin_reflect.go"
-          "standin_timeunit.go" "string.go" "stringbuilder.go" "system.go" "thread.go" "threadid.go"
+          "reflect_tables.go" "standin_character.go" "standin_executor.go" "standin_lang.go" "standin_locale.go" "standin_reflect.go"
+          "standin_timeunit.go" "string.go" "stringbuilder.go" "system.go" "text.go" "thread.go" "threadid.go"
           "threadlocal.go" "throwable.go" "timezone.go" "tooloptions.go" "tuning.go" "unsafe.go" "varhandle.go" "volatile.go" "vm.go"]
   :test-files ["bench_test.go" "concurrent_test.go" "enum_test.go" "filesystem_test.go" "manifest_test.go" "math_test.go"
                "monitor_test.go" "net_test.go" "object_test.go" "process_test.go" "reflect_test.go" "security_test.go" "shims_test.go" "string_test.go"
@@ -22,6 +22,7 @@
 (load "jrt/class")
 (load "jrt/classloader")
 (load "jrt/codec")
+(load "jrt/constarray")
 (load "jrt/date")
 (load "jrt/digests")
 (load "jrt/dyn")
@@ -55,11 +56,13 @@
 (load "jrt/standin_character")
 (load "jrt/standin_executor")
 (load "jrt/standin_lang")
+(load "jrt/standin_locale")
 (load "jrt/standin_reflect")
 (load "jrt/standin_timeunit")
 (load "jrt/string")
 (load "jrt/stringbuilder")
 (load "jrt/system")
+(load "jrt/text")
 (load "jrt/thread")
 (load "jrt/threadid")
 (load "jrt/threadlocal")

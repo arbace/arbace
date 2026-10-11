@@ -120,6 +120,13 @@
         [n (:name mm) (:desc mm)])
       [[n "<clinit>" "()V"]]))))
 
+(def lazy-standins
+  "Replaced stand-ins initialized on first use like any translated class, not eagerly: jrt's
+  hand-written code (but its tests) reads none of their statics, and their initialization needs
+  much of the program initialized first (Locale's: its constants, the default locale from the
+  system properties; JRT-NOTES.md, \"Text and locales\")."
+  #{"java/util/Locale" "java/util/Locale$Category"})
+
 (defn standin-roots
   "Roots for the translated classes that replace jrt's stand-ins: their static initializer
   and the members the stand-in defined (jrt's code may use them)."
@@ -527,6 +534,7 @@
             (when (= pkg :jrt)
               (let [eager (sort (for [n T :let [j (get jc n)]
                                       :when (and j (:standin j) (a/decl n) (not (m/trivial-init? n))
+                                                 (not (lazy-standins n))
                                                  (contains? (:reached res) [n "<clinit>" "()V"]))]
                                   n))]
                 (when (seq eager)

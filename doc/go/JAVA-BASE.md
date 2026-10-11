@@ -20,7 +20,7 @@ classes (37.4%)**, and 91 more as names only, and provides **9,124 of the member
 something outside the build), 1,119 hand-written in jrt; 27 more exist as stubs that throw.
 The classes the Go build has are nearly complete (94.8% of their members); the rest is whole
 packages left out: `java.lang.classfile`, most of `java.security` (its basics are in:
-JRT-NOTES.md, "Security") and of `javax.*`, most of `java.text`,
+JRT-NOTES.md, "Security") and of `javax.*`,
 `java.nio`'s channels, `java.lang.invoke`, most of `java.lang.foreign`. Of the **896 members
 Arbace's runtime and REPL namespaces reference, 827 are provided (92.3%)**; the others are
 D6's cuts and reworks (method handles, class loading). The first measurement (main
@@ -28,6 +28,11 @@ at `6a33be8`: 5,598 members, 31.9%) found primitive `Arrays.sort` and
 `Comparator.naturalOrder` throwing on Go; the branch `jbase` fixed them and added java.util's
 plain Java ("java.util completed": 5,787 members, 33.0%); sockets, java.time and
 java.util.concurrent followed (JRT-NOTES.md, "Sockets (go-net)", "Time", "Concurrency").
+Since the branch `gotext` (2026-10-11; JRT-NOTES.md, "Text and locales"), with java.text whole,
+jdk26u's `Locale` and `Currency`, the measurement (`bin/jrt-coverage`, the default `JRT_LOCALES=none`
+build, main at `6cbed45` merged) is **9,807 of 17,546 members (55.9%)**, 666 classes in Go; `java.text`
+575 of 580 (99.1%; was 50, 8.6%), `java.util` 2,203 of 2,695 (81.7%); the tables below are the
+earlier measurement's, `doc/go/java-base-coverage.edn` this one.
 
 ## Method
 
@@ -283,7 +288,7 @@ cut classes Arbace names exist as names whose members throw; everything else is 
 | processes (`Process`, `ProcessBuilder`), `ProcessHandle` | translated (since 2026-10-10) | D6 reversed for them (amendments PR1-PR7; JRT-NOTES.md, "Processes"): over the host's `HostProc`; `sh` and `arbace.java.process` are in |
 | `java.net` sockets, `InetAddress`, `URLClassLoader`, other URL connections | cut or absent | D6 (sockets and the socket REPL are in progress on another branch) |
 | `java.nio` buffers, channels, charset coders, most of `java.nio.file` | absent | D6; the file system is reached through `File` and jrt's `Path`/`Files` (FS2) |
-| `java.time` (but `Instant`), `java.text` (but `DecimalFormatSymbols`) | cut or absent | D6; `#inst` over `Date`, `Calendar`, `Instant` (JAVA-SURFACE.md decision 7) |
+| `java.time`, `java.text` | translated (since 2026-10-10, 2026-10-11) | D6 reversed for them (JRT-NOTES.md, "Time", "Text and locales"); the shipped build's locale data are java.base's root and English (`JRT_LOCALES=none`), `common` or `all` add jdk.localedata's |
 | serialization (`ObjectInputStream`, `ObjectOutputStream`) | absent | D6, C2G-SPEC §12 |
 | `java.security`, `javax.crypto` beyond their basics (signatures, ciphers, keys, key stores, certificates, the providers but SUN and SunJCE); `javax.net`, `javax.security` (but `Destroyable`) | absent | not used by Arbace; the basics (`MessageDigest`, `SecureRandom`, `Mac`, `SecretKeySpec`, `Provider`, `Security`) are translated since 2026-10-10 (amendments SC1-SC7; JRT-NOTES.md, "Security") |
 | `java.util.jar`, `java.util.zip`, `ResourceBundle`, `ServiceLoader`, `java.util.spi`, `java.lang.module`, `Module`, `Package` | absent or cut | no jars or modules in a static executable |
@@ -331,7 +336,7 @@ What it would take, roughly by cost (agent-assisted days at the pace of B1a):
 3. **`java.time`** (2-4 days): 58,000 lines of plain Java; it needs the time-zone database
    (`tzdb.dat` as a resource of the executable, `ZoneRulesProvider`) and `java.text`-free
    formatting paths; `DateTimeFormatter`'s localized text needs locale data.
-4. **`java.text` and locales** (3-5 days): `DecimalFormat`, `SimpleDateFormat`,
+4. **`java.text` and locales** (done 2026-10-11, JRT-NOTES.md "Text and locales"): `DecimalFormat`, `SimpleDateFormat`,
    `MessageFormat`, `Collator`, `BreakIterator` need the CLDR locale providers (large generated
    data); a root-and-`en_US`-only provider, as jrt has for `DecimalFormatSymbols` (R17), is the
    small way.

@@ -357,7 +357,7 @@
         hash (fn [cm x]
                (case (:desc cm)
                  ("I" "S" "B" "C") (list 'conv 'int32 x)
-                 "Z" (list 'if x 1231 1237)
+                 "Z" (list (js "C2g_BoolHash") x)
                  "J" (list 'conv 'int32 (list 'bit-xor x (list 'conv 'int64 (list '>> (list 'conv 'uint64 x) 32))))
                  "F" (list (js "C2g_FloatBits") x)
                  "D" (let [b (list (js "C2g_DoubleBits") x)]
