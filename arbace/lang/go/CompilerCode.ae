@@ -157,6 +157,13 @@
       ;; preemption (jrt's native; nothing on Linux, where Go's runtime preempts)
       (method ^:public ^:static ^:native tick ^void [])
 
+      ;; this cleared before a call in tail position (CodeInvoke.clearThis;
+      ;; ObjMethod.emitClearThis): the frame's object and slot 0
+      (method ^:public ^:static clearThis ^void [^Frame f]
+        (aset (.-slots f) 0 nil)
+        (set! (.-fn f) nil)
+        (set! (.-self f) nil))
+
       ;; the body of frame f's method run until it does not recur, its result as the method
       ;; returns it
       (method ^:public ^:static run [^CMethod cm ^Frame f]
@@ -444,7 +451,8 @@
                     (CodeCompiler/chain (cast Code/1 (.toArray cs (new Code/1 (.size cs)))) 0))))
           (instance? InvokeExpr e)
             (let [ie (cast InvokeExpr e)]
-              (CodeInvoke. (.compile this (.-fexpr ie)) (.compileAll this (.-args ie)) (.-line ie)))
+              (CodeInvoke. (.compile this (.-fexpr ie)) (.compileAll this (.-args ie)) (.-line ie)
+                           (and (.-tailPosition ie) (not (.-canBeDirect objx)))))
           (instance? KeywordInvokeExpr e)
             (let [ke (cast KeywordInvokeExpr e)]
               (CodeKeywordInvoke. (.-k (.-kw ke)) (.compile this (.-target ke)) (.-line ke)))
@@ -1365,6 +1373,11 @@
     (defclass ^:public ^:static CodeInvoke
       :extends Code
       ;; a call of a fn value: up to six arguments in fields (CodeSeq), more in args
+      ;; clearThis: a call in tail position clears the frame's object (the fn or the deftype's
+      ;; or reify's object, and slot 0, this) once its arguments are evaluated, as the compiled
+      ;; call does (InvokeExpr.emitArgsAndCall, ObjMethod.emitClearThis): what the object
+      ;; closes over is not kept by the frame for the call's time (a reducer's collection, the
+      ;; suite's test-closed-over-clearing; doc/go/BOX-NOTES.md, S2)
       (field ^:public ^:final ^Code fexpr)
       (field ^:public ^:final ^Code/1 args)
       (field ^:public ^:final ^int n)
@@ -1375,7 +1388,9 @@
       (field ^:public ^:final ^Code a3)
       (field ^:public ^:final ^Code a4)
       (field ^:public ^:final ^Code a5)
-      (constructor ^:public [this ^Code fexpr ^Code/1 args ^int line]
+      (field ^:public ^:final ^boolean clearThis)
+      (constructor ^:public [this ^Code fexpr ^Code/1 args ^int line ^boolean clearThis]
+        (set! (.-clearThis this) clearThis)
         (set! (.-fexpr this) fexpr)
         (set! (.-args this) args)
         (set! (.-n this) (alength args))
@@ -1389,24 +1404,35 @@
       (method ^:public run [this ^Frame f]
         (let [fv (cast IFn (.run fexpr f))]
           (switch n
-            0 (do (set! (.-line f) line) (.invoke fv))
-            1 (let [x0 (.run a0 f)] (set! (.-line f) line) (.invoke fv x0))
-            2 (let [x0 (.run a0 f) x1 (.run a1 f)] (set! (.-line f) line) (.invoke fv x0 x1))
+            0 (do (set! (.-line f) line) (when clearThis (CodeRun/clearThis f)) (.invoke fv))
+            1 (let [x0 (.run a0 f)]
+                (set! (.-line f) line)
+                (when clearThis (CodeRun/clearThis f))
+                (.invoke fv x0))
+            2 (let [x0 (.run a0 f) x1 (.run a1 f)]
+                (set! (.-line f) line)
+                (when clearThis (CodeRun/clearThis f))
+                (.invoke fv x0 x1))
             3 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f)]
                 (set! (.-line f) line)
+                (when clearThis (CodeRun/clearThis f))
                 (.invoke fv x0 x1 x2))
             4 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f) x3 (.run a3 f)]
                 (set! (.-line f) line)
+                (when clearThis (CodeRun/clearThis f))
                 (.invoke fv x0 x1 x2 x3))
             5 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f) x3 (.run a3 f) x4 (.run a4 f)]
                 (set! (.-line f) line)
+                (when clearThis (CodeRun/clearThis f))
                 (.invoke fv x0 x1 x2 x3 x4))
             6 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f) x3 (.run a3 f) x4 (.run a4 f)
                     x5 (.run a5 f)]
                 (set! (.-line f) line)
+                (when clearThis (CodeRun/clearThis f))
                 (.invoke fv x0 x1 x2 x3 x4 x5))
             (let [vs (CodeRun/runAll args f)]
               (set! (.-line f) line)
+              (when clearThis (CodeRun/clearThis f))
               (switch n
                 7 (.invoke fv (aget vs 0) (aget vs 1) (aget vs 2) (aget vs 3) (aget vs 4) (aget vs 5)
                            (aget vs 6))

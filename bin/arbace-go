@@ -43,7 +43,9 @@
 # Environment:
 #   ARBACE_GO_ARCH    the architecture run (default amd64)
 #   ARBACE_GO_ARCHES  the architectures built and smoke-tested (default amd64,arm64)
-#   ARBACE_GO_SYMBOLS 1: keep the executables' symbol table and DWARF (stripped by default)
+#   ARBACE_GO_SYMBOLS 1: keep the executables' symbol table and DWARF (stripped by default),
+#                     and the box guest's whole symbol table (cut to the monitor's symbols by
+#                     default: tools/elfsyms)
 #   ARBACE_BOX_ARCHES the box's architectures built (default amd64; arm64 builds, and runs on
 #                     KVM/arm64 or Hypervisor.framework only: stage S4)
 #   ARBACE_BOX_*      the launcher's settings (box/go/arbace/box/cmd/arbace_box/main.ae: CPUS,
@@ -301,6 +303,10 @@ EOF
     check "data_readers.ae and .clj on ARBACE_PATH" "[[:ae 1] [:clj 2]]" \
       "$(ARBACE_PATH=$t/dr run "$a" -e '(require (quote dr.fns)) (prn (read-string "[#dr.ae/tag 1 #dr.clj/tag 2]"))' 2>&1)"
     check "the REPL's exit status at end of input" "0" "$st"
+    # an embedded namespace is loaded once, as the JVM initializes an AOT-compiled one's class
+    # once (doc/go/BOX-NOTES.md, S2): a require of arbace.core keeps its protocols' interfaces
+    check "an embedded namespace loaded once" "true" \
+      "$(run "$a" -e '(let [c arbace.core.protocols.CollReduce] (require (quote arbace.core) :reload) (print (identical? c arbace.core.protocols.CollReduce)))' 2>&1)"
     run "$a" -e '(/ 1 0)' > "$t/err.txt" 2>&1; local st=$?
     check "an error's exit status" "1" "$st"
     check "an error's message" "Divide by zero" "$(grep -o 'Divide by zero' "$t/err.txt" | head -1)"
@@ -380,6 +386,10 @@ box_arches=${ARBACE_BOX_ARCHES:-amd64}
 # a box guest's link (arbace.g2a.build/tamago-ldflags): text at 0x201000, 4 KiB segments,
 # the symbol table kept (the monitor reads it), DWARF dropped
 box_ldflags="-T 0x201000 -R 0x1000 -w"
+# the symbols the monitor reads (vmm: the vectors, the other vCPUs' entry, a TamaGo image's
+# mark): the guest's symbol table is cut to them (tools/elfsyms; doc/go/BOX-NOTES.md, S2,
+# BX11), unless ARBACE_GO_SYMBOLS=1
+box_symbols="whim_vectors whim_apentry runtime/goos.RamStart"
 
 # box_key: what the box's guest is built from, beside box/: a2g's program (the image's types)
 # and the image of prepared namespaces it embeds (R6: the image is valid for the same program)
@@ -410,6 +420,14 @@ box_build() {
        -buildvcs=false "-ldflags=$box_ldflags -X 'main.arbaceVersion=$v'" -overlay "$overlay" -o "$dir/box-$a/arbace.elf" arbace/cmd/arbace) \
        >> "$dir/build-box-$a.log" 2>&1 \
       || { tail -20 "$dir/build-box-$a.log" >&2; echo "arbace-go: box $a: link failed" >&2; return 1; }
+    if [ "${ARBACE_GO_SYMBOLS:-}" != 1 ]; then
+      (cd "$root/tools/elfsyms" && env -u GOOS -u GOARCH GOROOT="${G2A_GOROOT:-/root/tamago-go}" GOTOOLCHAIN=local \
+         GOFLAGS= GOWORK=off GOPROXY=off CGO_ENABLED=0 "${G2A_GOROOT:-/root/tamago-go}/bin/go" build -o "$dir/elfsyms" .) \
+         >> "$dir/build-box-$a.log" 2>&1 \
+        && "$dir/elfsyms" "$dir/box-$a/arbace.elf" "$dir/box-$a/arbace.elf.new" $box_symbols >> "$dir/build-box-$a.log" 2>&1 \
+        && mv -f "$dir/box-$a/arbace.elf.new" "$dir/box-$a/arbace.elf" \
+        || { tail -5 "$dir/build-box-$a.log" >&2; echo "arbace-go: box $a: the symbol table not cut" >&2; return 1; }
+    fi
     box_key > "$dir/box-$a/image.key"
     echo "   guest $a: $(since "$t0")" >&2
     echo "== bin/g2a build $a (the launcher, box/)" >&2
@@ -486,8 +504,14 @@ EOF
         "$(box -e '(spit "/tmp/s.ae" "(prn [:script (map inc [0 1])])")' /tmp/s.ae 2>&1)"
       check "-m, its namespace from the in-memory file system (ARBACE_PATH)" '("a" "b")' \
         "$(ARBACE_PATH=/tmp box -e '(spit "/tmp/hello.ae" "(ns hello) (defn -main [& args] (prn args))")' -m hello a b 2>&1)"
+      check "namespaces on ARBACE_PATH, one requiring another, in directories" "[:b 2]" \
+        "$(ARBACE_PATH=/x:/p box -e '(do (.mkdirs (java.io.File. "/p/pa")) (spit "/p/pa/b.ae" "(ns pa.b) (defn f [] [:b 2])") (spit "/p/pa/a.ae" "(ns pa.a (:require [pa.b :as b])) (defn f [] (b/f))") (require (quote pa.a)) (prn ((resolve (quote pa.a/f)))))' 2>&1)"
+      check "an embedded namespace loaded once (a require of arbace.core keeps its protocols)" "true" \
+        "$(box -e '(let [c arbace.core.protocols.CollReduce] (require (quote arbace.core) :reload) (print (identical? c arbace.core.protocols.CollReduce)))' 2>&1)"
       check "a resource of the image" "true" \
         "$(box -e '(print (some? (arbace.java.io/resource "arbace/set.ae")))' 2>&1)"
+      check "reducers' fold, and a reduction over a reducer holding no collection (S2)" "[5000050000 true]" \
+        "$(box -e '(do (require (quote [arbace.core.reducers :as r])) (prn [(r/fold + (r/map inc (vec (range 100000)))) (number? (reduce + 0 (r/map identity (range 1e7))))]))' 2>&1)"
       box -e '(/ 1 0)' > "$t/err.txt" 2>&1; st=$?
       check "an error's exit status" "1" "$st"
       check "an error's message" "Divide by zero" "$(grep -o 'Divide by zero' "$t/err.txt" | head -1)"

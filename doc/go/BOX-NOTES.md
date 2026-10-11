@@ -464,7 +464,7 @@ Numbered BX (a prefix not used in `doc/`); proposed 2026-10-11, accepted by the 
 - Open for S4: `board.NilPanics` and the vectors' return to `sigpanic` need their arm64 form
   (ELR_EL1, the link register) before the box's arm64 oracle can pass.
 
-## S2: the launcher maps the guest's image (2026-10-11)
+## S2, R1: the launcher maps the guest's image (2026-10-11)
 
 Branch `box-mmap`, R1's first item, decided by the user 2026-10-11 (above): the launcher read
 the 77 MB image appended to it into its own heap (`vmm.Appended`), and the monitor copied its
@@ -566,3 +566,225 @@ heap and no symbol tables made thrice.
 - BX11 accepted. The default stays mapped (258 MB, 0.55 s here; it shares the image's pages
   between boxes, and the slower start is nested virtualization's); `ARBACE_BOX_MAP=0` copies
   (293 MB, 0.32 s here).
+## S2, the rest: measured and hardened (2026-10-11)
+
+Branch `box-s2`, S2's items but R1 (the image mapped: branch `box-mmap`, BX11, the section
+before). The changes are in jrt, the evaluator's Go variants (`arbace/lang/go`, read by a2g
+only: no source the bootstrap compiles changed), `bin/arbace-go`, `bin/box-suite` and a new
+helper, `tools/elfsyms`; `box/` is unchanged.
+
+### The start: the `Random` exits, DWARF, the symbol table (BX12)
+
+- **The `Random` exits**: batched since S1 (TamaGo's seeds come through `getRandomData` once):
+  a start's counts (`ARBACE_BOX_STATS`) show `random 1` (the survey's 63).
+- **DWARF**: dropped since S1 (`-w`): with it the guest is 91.7 MB, without 76.8 MB; the start
+  is the same either way (the monitor never reads it: 370 ms both, best of 9).
+- **The symbol table**: the monitor needs three symbols of the guest's 152,806
+  (`whim_vectors`, `whim_apentry`, `runtime/goos.RamStart`), but the table is 11 MB of the
+  image (3.6 MB of symbols, 7.2 MB of names). `bin/arbace-go --build --box` now cuts it to
+  those three after the link (`tools/elfsyms`, a Go program of 170 lines on `debug/elf`: the
+  loaded segments, the other sections and the section headers stay as gc wrote them; only the
+  symbol table, its strings and the section names move, and the result is read back and
+  checked). GNU objcopy (`--strip-all --keep-symbol`) does the same for amd64, but the host's
+  binutils know x86 only, and an arm64 guest is built here too; `-s` would drop the three.
+  `ARBACE_GO_SYMBOLS=1` keeps the whole table, as for the executables. The guest: 76.8 MB ->
+  65.9 MB; the launcher with it 80.5 -> 69.6 MB.
+- Measured (best of 9): with S1's launcher, which read the image whole and made the symbol
+  table's 150,000 `Symbol`s twice, the cut table took the start from 370 to 310-320 ms and the
+  resident size from 448 to 346 MB. With BX11's launcher (main `7417981`; the table read once,
+  without `Symbol`s), copied (`ARBACE_BOX_MAP=0`): 320 -> 310 ms, 295 -> 283 MB; mapped: no
+  difference beyond the noise of the page cache (below).
+
+**A finding for the mapped start (BX11).** The mapped start (0.53-0.57 s here, against 0.31-0.32
+copied) depends on how the image's file is in the page cache, not on the image: the same bytes
+written by one large write (`dd bs=128M`, Go's `os.WriteFile`, Python's `write`) start mapped in
+0.36-0.38 s, written by `cat` or `cp` in 0.54-0.57 s, and after the file's pages are dropped
+(`posix_fadvise(DONTNEED)`) and read again through the guest's faults, in 0.54-0.55 s whatever
+wrote them. Linux 6.18's ext4 keeps a file written in large writes in large folios, which the
+host maps (and the guest's nested paging then faults) in larger pieces; faults read 4 KiB pages
+back. So the fast mapped start is not to be had by writing the launcher differently (it would not
+survive the cache); a fix is the monitor's (copy the read-only data, or prefault), which BX11's
+notes measured at 0.44 s for the text alone mapped.
+
+### The collector in the box (BX13)
+
+The guest's RAM is fixed (`vmm.GoRAMBytes`, 3 GiB from the image's base) and TamaGo's runtime
+takes its heap by `sbrk` from it, never giving memory back; the host has no swap. jrt's settings
+are GOGC 200 (`DefaultGOGC`) and a 64 MiB minimum heap: the collector's goal is three times the
+live heap, so a guest holding a third of its RAM ran out of memory, and `GOMEMLIMIT`, passed by
+the launcher, was not applied (TamaGo's runtime reads it before jrt's `init` sets the
+environment from the entry; S1 applied `GOGC` only).
+
+Measured with a program that holds ever more live data (16 MiB arrays, each written) while it
+allocates 64 MiB of garbage per array (`.tmp/gc/live.ae` of the branch's work), the live data
+reached before the guest ran out of memory:
+
+| memory limit | live data reached | time to the end |
+|---|---:|---:|
+| none (S1; `GOMEMLIMIT` not applied) | 1,152 MiB | 27 s |
+| 2,560 MiB (RAM less 512 MiB) | 2,176 MiB | 54 s |
+| 2,304 MiB | 2,304 MiB | 72 s |
+| 2,048 MiB (RAM less 1 GiB) | 2,432 MiB | 102 s |
+| 1,792 MiB | 2,304 MiB | 115 s |
+| 1,536 MiB | 2,432 MiB | 151 s |
+| native, no limit (killed at 3.5 GB) | 3,584 MiB | |
+
+Past the limit the collector runs continuously (hence the times); below it, the limit costs
+nothing. GOGC, measured on `fold` over 2 million elements (allocating: 600 MB of garbage a
+fold): 100 is 5% slower than 200 at 200 MB less resident (568 against 770 MB), 400 2-3% faster
+at 400 MB more; 200 stays.
+
+So the box's host (`hostbox_tamago.ae`'s `init`) applies `GOMEMLIMIT` as Go's runtime reads it
+(`off`, or bytes with `B`, `KiB`, `MiB`, `GiB`, `TiB`), and without it sets the limit to the
+guest's RAM (`goos.RamSize`) less 1 GiB (`boxMemoryHeadroom`): 2 GiB in the 3 GiB slot, the
+setting that kept the most live data. GOGC stays 200 and the minimum heap 64 MiB (on TamaGo the
+ballast is resident: `sbrk` clears what it takes).
+
+### The watchdog: off (decided, no change)
+
+`ARBACE_BOX_WATCHDOG` stays unset by default, for these reasons:
+- it ends a vCPU that runs the guest for its duration without a hypercall, and an evaluation
+  makes none while it computes (the evaluator's yield is `runtime.Gosched`, in the guest): the
+  suite's reducers case computes for 75 s, and any long evaluation at the REPL would be ended,
+  where the JVM computes until Ctrl-C;
+- what it would catch is no hang the box has: a guest whose goroutines all wait parks its vCPUs
+  (calls), which the watchdog counts as not running, and costs nothing (`@(promise)` at `-e`, 5 s:
+  0.3-0.4 s of host CPU on 1 or 4 vCPUs, the runtime's own timers); a runaway loop is ended as
+  under the JVM, by Ctrl-C (R8) or the caller's timeout (`bin/box-suite`'s and the oracle's);
+- unattended runs set it when they want it (`ARBACE_BOX_WATCHDOG=10m`).
+
+### The suite's file tests and `ARBACE_PATH` (BX17)
+
+The one file test that failed in the box was `sequences`' `test-iteration`, which reads
+`readme.txt` by a relative path: `bin/clojure-tests` runs the suite in its directory, where it
+copies Clojure's top-level files. `bin/box-suite` now writes the suite directory's files
+(`readme.txt` and the six others, 196 KB) into the guest's working directory (`/`), as its
+setup; the test is unchanged and passes. `java.io`'s files tests pass as in S1 (its one error is
+`test-socket-iofactory`: no network, S5). `ARBACE_PATH` in the box: `bin/box-suite` loads the
+whole suite and its libraries from it (`/lib/...:/suite/test`), and the smoke test gained a
+check of two namespaces in directories on a two-element path, one requiring the other.
+
+### Reducers: why 4.9 GB, and `fold` on 4 vCPUs (BX14, BX15, BX16)
+
+Two defects of the Go build, natively as in the box:
+
+- **The 4.9 GB (BX14).** `(reduce + 0 (r/map identity (range 1e8)))` (the suite's
+  `test-closed-over-clearing`, "will throw OutOfMemory without proper reference clearing")
+  grew by 45 bytes an element natively: 0.6 GB at 1e7, 2.0 GB at 4e7, 4.9 GB at 1e8, while
+  `(arbace.core.protocols/coll-reduce (range 2e7) + 0)` alone stayed at 0.3 GB. The reducer is a
+  `reify` closing over its collection, a `Range`, which the `CollReduce` protocol reduces as an
+  `ASeq` (`seq-reduce`), caching its chunks as the walk realizes them; the reify's method calls
+  `coll-reduce` in tail position, and its frame held the reify (its slot 0 and `self`) for the
+  whole reduction, and through it the head of the range. The JVM's compiled call clears `this`
+  first (`InvokeExpr.emitArgsAndCall`, `ObjMethod.emitClearThis`, CLJ-1250's fix: a call in tail
+  position in a method that cannot be direct). The closure compiler now does the same:
+  `CodeInvoke`'s `clearThis` (set when the `InvokeExpr` is in tail position and its `ObjExpr`
+  not direct) clears slot 0, the frame's fn and its object once the arguments are evaluated
+  (`CodeRun.clearThis`); `Evaluator.trace` names a frame's method by the method's kind, not by
+  its fn. Natively the case now peaks at 0.30 GB (43 s), in the box it runs (75 s on 4 vCPUs).
+  Only fn calls clear, as the JVM's boxed calls do; its unboxed host calls (`emitUnboxed`) also
+  clear, which the evaluator does not (they hold no closure in the cases the suite has).
+- **The reducers' tests failed when their namespace was loaded first (BX15).** After
+  `clojure.data.generators` (which the test requires) was loaded, a reducer no longer satisfied
+  `CollReduce`: "Don't know how to create ISeq from: arbace.core.reducers$folder$reify". The
+  library says `(:require [arbace.core :as core])`; `arbace.core` is not in `*loaded-libs*`
+  (on the JVM neither), so `require` loads it, and the Go build's `RT.load` evaluated the
+  embedded source again, `defprotocol` and all: `arbace.core.protocols.CollReduce` was a new
+  interface, which the reducers' reify, made before, does not implement. On the JVM the
+  namespace is AOT-compiled and `RT.load` initializes its `__init` class, which the JVM does
+  once. `RT.load` now loads an embedded source once (`LOADED_EMBEDDED`, by script base): a
+  second load, `:reload` included, is the JVM's no-op; sources on `ARBACE_PATH` load every
+  time, as the JVM's do. With every test namespace loaded first (`bin/clojure-tests`,
+  `bin/box-suite`) the order hid it.
+- **`fold` on 4 vCPUs (BX16).** Measured on `(r/fold + (r/map work v))` against `reduce`, `v`
+  2 million longs and `work` 20 boxed iterations (allocating), and a computing case (200,000
+  elements, 300 primitive iterations each):
+
+  | ms, best of 3-5 | box 1 vCPU | box 4 vCPUs, S1 | box 4 vCPUs, S2 | native `GOMAXPROCS=1` | native `GOMAXPROCS=4` |
+  |---|---:|---:|---:|---:|---:|
+  | `reduce`, allocating | 5,820-6,050 | 5,520-5,920 | 5,690 | 4,520-4,820 | 4,510-4,580 |
+  | `fold`, allocating | 6,290-6,570 | 2,810-5,460 | 1,980-2,000 | 6,500-6,620 | 1,790-1,860 |
+  | `reduce`, computing | 4,490-4,840 | 4,510 | 4,690 | 3,600 | 3,600 |
+  | `fold`, computing | 4,620-4,800 | 3,770 | 1,430 | 5,050 | 1,560 |
+
+  On S1's box 4 vCPUs used 72-103 s of host CPU for 30 s and folded 1.2-2x faster than one: the
+  evaluator's yield counted its calls in one global (`evalTicks`), which every vCPU wrote at every
+  method run and recur, one cache line fought over through nested paging. The count is now the
+  thread's (`Thread.evalTicks`, through the goroutine-local slot, about 4 ns): `fold` is 3.2x
+  (allocating) and 3.4x (computing) one vCPU's, as native's 3.5x and 3.2x. jrt's own fork-join
+  (`BigInteger.parallelMultiply` of two 1.4-million-digit numbers, no evaluator) was 2.3x on 4
+  vCPUs on S1's box: the box's fork-join itself scaled. A larger pool does not help in the box (on S1's: 4,141 ms
+  at parallelism 4, 6,677 at 64). The evaluation speed is unchanged (below).
+
+### Measured (amd64, nested KVM on the shared 64-core machine, other builds running; best of 9)
+
+| | box S1, 4 vCPUs | box S2, 4 vCPUs | box S2, 1 vCPU | native |
+|---|---:|---:|---:|---:|
+| start to `-e nil` done | 370-380 ms | 330 ms | 300 ms | 200-210 ms |
+| resident (the launcher's process) | 448 MB | 349 MB | 348 MB | 164-228 MB |
+| `(reduce + (map inc (range 1000000)))` | 936-977 ms | 968-979 ms | 1,047-1,156 ms | 904-944 ms |
+| `(fib 25)` | 60-69 ms | 62-64 ms | 62-63 ms | 50-53 ms |
+| `(count (sort (map str (range 200000))))` | 275-300 ms | 289-292 ms | 274-284 ms | 252-259 ms |
+
+(S2's launcher copies the image, as S1's; BX11's maps it, its own table above.)
+
+Clojure's suite, each namespace alone (the box's `bin/box-suite -j 1`, against the shipped
+executable running bin/clojure-tests's runner the same way: every test namespace loaded first,
+about 18 s of each run):
+
+| namespace | box, 4 vCPUs | box, 1 vCPU | native |
+|---|---:|---:|---:|
+| `clojure-set` (mostly the loading) | 20.7 s | 24.8 s | 18.7 s |
+| `numbers` | 19.9 s | | 18.8 s |
+| `sequences` | 34.7 s | | 30.9 s |
+| `reducers` | 77.8 s | 95.7 s | 62.7 s |
+
+The whole suite, 12 at a time: the box's subset (67 namespaces, 685 tests, 19,646 assertions)
+222 s (S1: 66 namespaces, 258 s); the native test build's (76 namespaces and test.generative)
+214 s.
+
+### Checks
+
+- `bin/arbace-go --build` (amd64; 66,527,392 bytes: the evaluator's and `RT`'s changes) and
+  `--build --box` (the guest 65,917,262 bytes, the launcher 69,606,071).
+- `bin/arbace-go --smoke` (amd64): 42 checks, one new (an embedded namespace loaded once).
+  `--smoke --box`: 70 checks on 4 and 1 vCPUs and on a terminal, three new (namespaces on
+  `ARBACE_PATH`, an embedded namespace loaded once, reducers' `fold` and a reduction over a
+  reducer).
+- The native oracle against `known-go-amd64.edn`: 22,232 of 22,278, the 46 recorded.
+- The box's oracle subset against `known-go-box-amd64.edn`: 21,696 of 21,742, the native's 46;
+  `harvest/reducers.ae` runs (5 of 5, 74 s); its group and `:incomplete` are gone from the file.
+- `bin/box-suite` against `test/arbace-box-results.edn`: 67 namespaces, 19,645 of 19,646
+  assertions, as the reference (`reducers` back, `sequences` without its error; the one error
+  is `java.io`'s socket test).
+- Clojure's suite on the native test build (`--build-tests`): 76 namespaces, 777 tests, 20,506
+  of 20,520 assertions, no regression against `arbace-go-results.edn`; `bin/jrt test` (linux
+  amd64 and arm64).
+- `bin/box-vendor roundtrip` (16 of 16) and `kvm-tests` (all pass): `box/` is unchanged.
+- The essential `bin/gate` was not run: no source the bootstrap compiles changed.
+
+### Amendments (proposed 2026-10-11)
+
+- **BX12 (BUILD.md; bin/arbace-go) The guest's symbol table cut** to the monitor's three
+  symbols by `tools/elfsyms` (`ARBACE_GO_SYMBOLS=1` keeps it).
+- **BX13 (A2G-SPEC §9.4: the box's host) The collector in the box**: `GOMEMLIMIT` applied, and
+  a default memory limit of the guest's RAM less 1 GiB; GOGC 200 and the 64 MiB minimum heap
+  kept.
+- **BX14 (A2G-SPEC §16; SPEED-NOTES' closure compiler) A call in tail position clears the
+  method's object** (`CodeInvoke.clearThis`, `CodeRun.clearThis`), as `emitClearThis`;
+  `Evaluator.trace` by the method's kind.
+- **BX15 (A2G-SPEC §10.3; EVAL-NOTES' RT.load) An embedded namespace loads once**
+  (`RT.LOADED_EMBEDDED`), as the JVM initializes an AOT-compiled namespace once.
+- **BX16 (BX5) The evaluator's yield counted per thread** (`Thread.evalTicks`).
+- **BX17 (checks) `bin/box-suite`'s setup writes the suite directory's files into the guest's
+  working directory**; reducers in `test/arbace-box-results.edn` and in the box oracle's
+  reference; the smoke tests' new checks.
+
+### For the user to decide
+
+- BX12-BX17.
+- The watchdog stays off by default (above): agree, or a default for non-interactive runs.
+- `tools/elfsyms` is a new Go helper beside godump and gocmp (BX12): its gain is smaller since
+  BX11 reads the symbol table once (11 MB of image and 12 MB resident, 10 ms of start copied);
+  keep it, or keep the whole table.
+- BX11's mapped start and the page cache (above): copy the read-only data, prefault, or keep.

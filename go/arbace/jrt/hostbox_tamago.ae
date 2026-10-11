@@ -10,9 +10,16 @@
 
 (go/file "hostbox_tamago.go"
   :build ["//go:build tamago"]
-  :imports [[io "io"] [fs "io/fs"] [os "os"] [runtime "runtime"] [debug "runtime/debug"]
+  :imports [[io "io"] [fs "io/fs"] [math "math"] [os "os"] [runtime "runtime"] [debug "runtime/debug"]
             [strconv "strconv"] [strings "strings"] [syscall "syscall"] [time "time"]
-            [abi "arbace/box/abi"] [board "arbace/box/board"]])
+            [goos "runtime/goos"] [abi "arbace/box/abi"] [board "arbace/box/board"]])
+
+(go/const ^{:tag uint :val 1073741824
+            :doc "boxMemoryHeadroom is what the box's default memory limit leaves of the guest's RAM (goos.RamSize):
+the image, its bss and the first stack are in the RAM too, and the limit is the collector's
+goal, which a large allocation may pass for a while (doc/go/BOX-NOTES.md, S2).
+"}
+  boxMemoryHeadroom (<< 1 30))
 
 (go/const ^{:tag bool :val true
             :doc "boxYield: the evaluator yields every yieldEvery calls and recurs (Compiler$CodeRun.tick): TamaGo's\nruntime has no preemption.\n"}
@@ -21,9 +28,12 @@
 (go/func init
   "init makes the command line and the environment the monitor wrote at the entry the program's
 (os.Args, os.Getenv: TamaGo's runtime gives it neither), before jrt's other inits (tuning.go's
-reads the environment), and applies GOGC, which TamaGo's runtime read before it was set; and
-makes a nil dereference the run-time panic it is on Linux (board.NilPanics: jrt's implicit
-NullPointerException, A2G-SPEC §7.9.5).\n"
+reads the environment), and applies GOGC and GOMEMLIMIT, which TamaGo's runtime read before
+they were set; and makes a nil dereference the run-time panic it is on Linux (board.NilPanics:
+jrt's implicit NullPointerException, A2G-SPEC §7.9.5). Without GOMEMLIMIT the memory limit is the
+guest's RAM less boxMemoryHeadroom: the RAM is fixed and the host has no swap for it, and with
+GOGC's goal alone (DefaultGOGC: three times the live heap) a guest holding a third of its RAM
+would run out of memory (doc/go/BOX-NOTES.md, S2).\n"
   []
   (board/NilPanics)
   (set! os/Args (board/Args))
@@ -36,7 +46,30 @@ NullPointerException, A2G-SPEC §7.9.5).\n"
       (debug/SetGCPercent -1)
       (let [(values n err) (strconv/Atoi g)]
         (when (== err nil)
-          (debug/SetGCPercent n))))))
+          (debug/SetGCPercent n)))))
+  (let [(values n ok) (parseByteCount (os/Getenv "GOMEMLIMIT"))]
+    (cond
+      ok (debug/SetMemoryLimit n)
+      (> goos/RamSize boxMemoryHeadroom)
+        (debug/SetMemoryLimit (conv int64 (- goos/RamSize boxMemoryHeadroom))))))
+
+(go/func parseByteCount
+  "parseByteCount reads a GOMEMLIMIT as Go's runtime does: off, or a count of bytes with an
+optional unit B, KiB, MiB, GiB or TiB.\n"
+  [^string s] :results [int64 bool]
+  (when (== s "off")
+    (return math/MaxInt64 true))
+  (let [^int64 unit 1]
+    (range [i u (lit (slice string) "KiB" "MiB" "GiB" "TiB")]
+      (when (strings/HasSuffix s u)
+        (set! unit (<< 1 (* 10 (+ i 1))))
+        (set! s (strings/TrimSuffix s u))))
+    (when (== unit 1)
+      (set! s (strings/TrimSuffix s "B")))
+    (let [(values n err) (strconv/ParseInt s 10 64)]
+      (when (or (!= err nil) (< n 0) (> n (/ math/MaxInt64 unit)))
+        (return 0 false))
+      (return (* n unit) true))))
 
 (go/func ProgramHost
   "ProgramHost is the program's host (the main package's): the box's, with the program's embedded
