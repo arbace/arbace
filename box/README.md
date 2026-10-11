@@ -15,6 +15,7 @@ the box into a program.
 | `arbace/box/abi` | `go/arbace/box/abi.ae`, `abi/` | `guest/abi/` |
 | `arbace/box/board` | `go/arbace/box/board.ae`, `board/` (with `boot_amd64.s`, `boot_arm64.s`) | `guest/tamago/board/` |
 | `arbace/box/libsys` | `go/arbace/box/libsys.ae`, `libsys/` | `internal/libsys/` |
+| `arbace/box/cmd/arbace-box` | `go/arbace/box/cmd/arbace_box.ae`, `arbace_box/` | Arbace's own (S1): the launcher, modelled on `vmm/cmd/whim-guest` |
 
 Origin: https://github.com/arbace/go-whim (local clone `/root/go-whim`) at
 `80c49bf53cd6340487ac623f3d6d135b77ac1db6` (2026-10-06; the box's files last changed at
@@ -32,10 +33,13 @@ which the printer does not reproduce (SPEC §10.4).
 oracle), go-whim's monitor and TamaGo guests built from the printed files are byte-identical to
 go-whim's own (without build IDs), and go-whim's tests pass on them, on /dev/kvm.
 
-Not standalone yet: `vmm` imports go-whim's editor (`github.com/arbace/go-whim/editor`: its
-`Config.Host` is an `editor.Host`, and `editor.Exit` ends a run), which stays in go-whim; stage
-S1 makes the dispatch generic. On darwin, `hv` and `libsys` import purego
-(`github.com/ebitengine/purego` v0.11.1), not vendored.
+Since S1 (doc/go/BOX-NOTES.md) the packages are Arbace's to change and changed: `vmm` has a host
+interface of its own (`vmm.Host`, `vmm.TermHost`, `vmm.Exit`) and imports no part of go-whim's
+editor, the ABI carries the environment and the wall clock at entry, the board parks one idle
+vCPU and makes nil dereferences panics on request, and the launcher is new. `bin/box-vendor
+check`'s byte identity is S0's record; `bin/box-vendor roundtrip` and `kvm-tests` check `box/`
+as it is. On darwin, `hv` and `libsys` import purego (`github.com/ebitengine/purego` v0.11.1),
+not vendored.
 
 Licence: the Eclipse Public License 1.0, as Arbace ([LICENSE.md](../LICENSE.md)): the user's own
 code, licensed so by the user on 2026-10-11 (D8). Maintained by hand from here on; go-whim keeps

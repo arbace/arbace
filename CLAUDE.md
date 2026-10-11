@@ -81,7 +81,8 @@ Prior art:
   TamaGo (`GOOS=tamago`) as a guest of a monitor on /dev/kvm (amd64) and Hypervisor.framework
   (arm64). `box/` holds the hypervisor API, the monitor, the doorbell ABI and the TamaGo board,
   vendored as Go forms from go-whim (`box/README.md` records the origin; `bin/box-vendor`
-  reproduces and proves it); import paths `arbace/box/*`.
+  reproduces and proves it); import paths `arbace/box/*`. `bin/arbace-go --build --box` builds the
+  guest image and Arbace's launcher `arbace-box` (`--smoke --box`; `bin/box-suite`).
 - `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then
   concurrently Clojure's suite on stage 2, `bin/class-forms-tests` and the Go executable's
   smoke test on amd64 (`bin/arbace-go --gate`; about 4 minutes). The smoke test runs on an
@@ -90,7 +91,8 @@ Prior art:
   they are unchanged, else it is built again beside the suite (`bin/jrt-convert`'s conversion,
   a2g, the Go build, the image: the gate then takes about 7 minutes).
   `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2a-check --suite`, the
-  g2a round trip on amd64 for tamago and linux (`bin/g2a roundtrip amd64`, `linux/amd64`) and
+  g2a round trip on amd64 for tamago and linux (`bin/g2a roundtrip amd64`, `linux/amd64`), the
+  box's round trip and go-whim's KVM tests on it (`bin/box-vendor roundtrip`, `kvm-tests`) and
   the Go build on amd64: `bin/jrt-convert`, `bin/arbace-go --build`, then its smoke test,
   Clojure's suite on its test build (`bin/arbace-go --build-tests`: the program with the
   suite's Java fixtures; `test/arbace-go-results.edn`) and the oracle on it, against its known

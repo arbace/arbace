@@ -116,7 +116,10 @@ pinned by commit, or vendored) is decided then. The survey and its stages S0-S6:
 [BOX-SURVEY.md](BOX-SURVEY.md). Decided 2026-10-11 (D3, D8-D14, all as recommended): vendored
 as Go forms. S0 done 2026-10-11: go-whim's box copied unchanged as Go forms under `box/`,
 proved by the round trip's oracle, byte-identical builds of go-whim's monitor and guests and
-go-whim's tests on /dev/kvm ([BOX-NOTES.md](BOX-NOTES.md)).
+go-whim's tests on /dev/kvm ([BOX-NOTES.md](BOX-NOTES.md)). S1 done 2026-10-11: the same
+program built with `GOOS=tamago` runs its REPL, `-e`, `-m` and scripts in the box on /dev/kvm,
+on one and four vCPUs, under Arbace's own launcher `arbace-box` (`bin/arbace-go --build --box`,
+`--smoke --box`; BOX-NOTES.md, S1; amendments BX1-BX10 proposed).
 
 ## Decisions (the user's, 2026-10-08)
 
