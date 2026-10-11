@@ -440,3 +440,4 @@ the first. The history before it is on the frozen branches and in git history:
 - The user: when S3 and S5 are done, the milestone is marked by `bin/gate --full` and a tag on
   main; no branch, no freeze, and so the journal does not start over (unlike the freezes of
   `arbace-for-java-26` and `arbace-for-golang`).
+- The tag's name, accepted by the user: `arbace-box-amd64-v1`.
