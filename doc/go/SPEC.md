@@ -1251,7 +1251,13 @@ Positions are lines, and they are carried by the layout of the forms text:
   child indexes that begin a new line. An index is the child's index as `nth` gives it, the
   head being 0, and `:go/breaks` applies to every list, statement lists included: a final
   `nil`, `-1` or `"?"` that begins its Go line as `return nil` is a break of its function or
-  `let` form (amendment, accepted 2026-10-08). The rows of `utf8`'s `first` table begin with
+  `let` form (amendment, accepted 2026-10-08). The printer puts such a literal on the line
+  after the last one it wrote; when its Go line is a later one (blank or comment lines, or a
+  closing brace, between), the entry is `[index line]`, the line recorded: `^{:go/breaks [[8
+  1462]]} (go/func ...)` for a function whose final `return true` (index 8) follows a comment
+  (amendment BX20, proposed 2026-10-11, B1b S6: without it gc's line tables differed from the
+  original's for such returns, 8 functions of a small TamaGo program, which the round trip's
+  code level does not see; BOX-NOTES.md, S6). The rows of `utf8`'s `first` table begin with
   the symbol `as` and need nothing; a table of numbers with 16 to a row, each row on a line of
   its own, gets `^{:go/breaks [2 18 34 50]} (lit (array 64 uint8) ...)` (`lit` is 0, the type
   1, the first element 2).
