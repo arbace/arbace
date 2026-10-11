@@ -434,3 +434,9 @@ the first. The history before it is on the frozen branches and in git history:
   jrt's Linux build already has it, rather than UDP too or TLS required; the socket REPL by the
   same `arbace.server.repl` mechanism as natively, its port on the host's loopback, rather than a
   launcher flag.
+
+## 2026-10-11: The box on amd64 is a milestone, not a freeze
+
+- The user: when S3 and S5 are done, the milestone is marked by `bin/gate --full` and a tag on
+  main; no branch, no freeze, and so the journal does not start over (unlike the freezes of
+  `arbace-for-java-26` and `arbace-for-golang`).
