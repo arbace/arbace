@@ -1,5 +1,9 @@
 # Go forms: Go programs written in Clojure
 
+> Names: g2a (`arbace/g2a/`, `bin/g2a*`, `test/g2a/`) was g2c until 2026-10-11, as the frozen
+> branches, the survey and the records before that date name it; this document uses the current
+> name throughout.
+
 Status: accepted (2026-10-08), milestone G0 of g2a ([G2C-SURVEY.md](../G2C-SURVEY.md) §7), with the
 37 amendments found while implementing the helper, the printer and the converter and in B1a's step 0
 folded in (2026-10-08, §15). G0-G2 are done (the round trip closed on 2026-10-08,

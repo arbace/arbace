@@ -1,5 +1,11 @@
 # a2g: class forms compiled to Go forms
 
+> Names: this translator is a2g (`arbace/a2g/`, `bin/a2g`), this file `A2G-SPEC.md`; until
+> 2026-10-11 they were c2g and `C2G-SPEC.md`, as the frozen branch `arbace-for-golang` and the
+> records before that date name them. The overlays' directives (`a2g/add`, `a2g/variant`,
+> `a2g/cut`) and the generated program's support names (`a2g_*.go`, `A2g_*`) were renamed with
+> it. This document uses the current names throughout, also where it records earlier work.
+
 Status: accepted (2026-10-08; the user took the recommendation of each of the 23 questions of
 §16), B1a step 2 ([B1-PLAN.md](B1-PLAN.md)), with every amendment set of §16 accepted by the user
 and folded in: the 25 found while implementing jrt (J1-J10, R11-R19, T11-T16,

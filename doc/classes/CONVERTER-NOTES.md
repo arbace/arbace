@@ -1,5 +1,10 @@
 # Java → class forms converter: implementation notes
 
+> Names: the converter is j2a (`arbace/j2a/`, `bin/j2a`, `bin/j2a-check`); until 2026-10-11 it
+> was j2c, as the frozen branches and the records before that date name it, and its renaming
+> rules `arbace.j2c.rename`, since moved into c2a ([../C2A.md](../C2A.md)). This document uses
+> the current names, but where it records the derivation, replayed with the old ones.
+
 The converter of agenda step 3: it turns Java sources into the class forms of [SPEC.md](SPEC.md),
 making explicit what §7 lists. These notes say how it is built and used, what it was checked on,
 how its output compares with the spec's worked examples (§11), and where converting showed that
@@ -20,7 +25,6 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/j2a/build.ae` | `arbace.j2a.build` | compiles converted files with the class forms compiler into class files |
 | `arbace/j2a/coverage.ae` | `arbace.j2a.coverage` | coverage summary from run reports |
 | `arbace/j2a/resolve.ae` | `arbace.j2a.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
-| `arbace/j2a/rename.ae` | `arbace.j2a.rename` | the `clojure` → `arbace` renaming rules, for Clojure's test suite (`bin/clojure-tests`); they derived the vendored sources (`doc/VENDOR-NOTES.md`) |
 | `bin/j2a` | | starts Arbace (`target/stage2`, `bin/lib/tools.bash`) with access to javac's internals |
 | `bin/j2a-check` | | the checks (below) |
 | `test/j2a/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4; `Pins.java`: overloads that need pins and that must not get them, constructor calls of every kind, `o.new Inner(...) {...}` |

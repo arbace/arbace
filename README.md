@@ -48,7 +48,7 @@ bin/arbace-image         # target/arbace-image: a self-contained jlink image (ja
 
 The branch `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`, 2026-10-11) holds Arbace as one
 static executable for Linux, amd64 and arm64, with no JVM ([doc/go/B1-PLAN.md](doc/go/B1-PLAN.md),
-milestone B1a): a2g translates Arbace's runtime and the part of jdk26u it needs (`java.base`'s
+milestone B1a): a2g (c2g on the branch) translates Arbace's runtime and the part of jdk26u it needs (`java.base`'s
 collections, concurrency, time, text, regex, files, sockets, processes and security basics,
 among others) into Go, built with TamaGo's go1.27.1; the evaluator analyses forms and runs them
 as compiled closures; the core namespaces are prepared at build time, so it starts in about 0.2
@@ -67,6 +67,26 @@ bin/arbace-go --build --pgo    # target/arbace-go/{amd64,arm64}/arbace, profile-
 bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)', a script
 ```
 
+## Clojure code on Arbace
+
+c2a translates Clojure source into Arbace's: the names of the Clojure Arbace vendors
+(`clojure.core` → `arbace.core`, `clojure.lang` → `arbace.lang`, ...), `.clj` and `.cljc` files
+into `.ae` files (a `.cljc` file's reader conditionals resolved for `:clj`), and the source
+changes the dialects' few divergences call for, by a table of rules; layout and comments are
+kept ([doc/C2A.md](doc/C2A.md)). Clojure's test suite and its libraries run on Arbace through
+it.
+
+```sh
+bin/c2a -o lib/ae path/to/library/src                       # .clj/.cljc -> .ae, into lib/ae
+ARBACE_CLASSPATH=lib/ae bin/arbace-j -e "(require 'my.lib)"  # the JVM build
+ARBACE_PATH=lib/ae bin/arbace-go -e "(require 'my.lib)"      # the Go build
+```
+
+The translators name Arbace (`a`) as their target or source: c2a (Clojure → Arbace), j2a
+(Java → class forms), g2a (Go → Go forms, and back) and a2g (Arbace's class forms → Go, for
+the Go executable). Until 2026-10-11 the last three were j2c, g2c and c2g, as the frozen branches,
+the journals and the dated records name them.
+
 ## Documentation
 
 - [doc/AGENDA.md](doc/AGENDA.md): where the work stands and what comes next
@@ -79,7 +99,8 @@ bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+
   [doc/go/JAVA-BASE.md](doc/go/JAVA-BASE.md), how much of `java.base` it implements;
   [doc/go/SPEED-NOTES.md](doc/go/SPEED-NOTES.md), its speed; [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md),
   the box (B1b, after the freeze); the rest of `doc/go/`, the notes of each part
-- [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): g2a, Go as Arbace forms
+- [doc/C2A.md](doc/C2A.md): c2a, Clojure source translated into Arbace's
+- [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): the survey for g2a (then g2c), Go as Arbace forms
 - [doc/VENDOR-NOTES.md](doc/VENDOR-NOTES.md): how Clojure became Arbace, and every change since
 - [doc/BENCHMARKS.md](doc/BENCHMARKS.md): Arbace on the JVM against Clojure 1.12
 - [doc/ARBACE.md](doc/ARBACE.md): what `arbace/` holds, and its origin

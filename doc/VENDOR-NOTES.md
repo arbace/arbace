@@ -26,7 +26,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 | `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause) |
 | `arbace/java/api.ae`, `arbace/java/api/Clojure.ae` | `arbace.java.api` |
 | `arbace/lang/Main.ae` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
-| `arbace/classes/`, `arbace/j2c/` | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them |
+| `arbace/classes/`, `arbace/j2a/` (then `arbace/j2c/`) | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them. Later tools there: `arbace/g2a/`, `arbace/a2g/`, `arbace/c2a/` (the renaming rules below, now c2a's, doc/C2A.md) |
 | `doc/ARBACE.md` (was `arbace/README.md`) | what `arbace/` holds and its origin (licenses: `LICENSE.md`) |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it; on the branch `arbace-for-java-26` only |
 | `arbace/spec/**.ae`, `arbace/core/specs/alpha.ae` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
@@ -74,6 +74,10 @@ as the Java would be. `diff -r .tmp/vendor/tree/arbace arbace` showed only the t
 README (now `doc/ARBACE.md`); since then the hand changes below differ too.
 
 ## What is renamed
+
+(Since 2026-10-11 these rules are c2a's rule `:rename`, `arbace.c2a.rename/rename`, unchanged;
+c2a, the Clojure → Arbace translator, adds the rules the dialect divergences below call for:
+doc/C2A.md.)
 
 One function, `arbace.j2c.rename/rename`, a textual rewrite of `clojure` to `arbace` where it
 starts one of the names below. It is used for the vendored sources and for the renamed copy of
@@ -348,7 +352,10 @@ image: `-e`, a REPL, `#inst` read, printed and round-tripped (also through `arba
 
 ## Clojure's test suite on stages 1 and 2
 
-`bin/clojure-tests` has a rename mode, `CLOJURE_TESTS_RENAME=arbace`:
+`bin/clojure-tests` has a rename mode, `CLOJURE_TESTS_RENAME=arbace` (since 2026-10-11 the
+suite and its libraries are translated by c2a, `bin/c2a --in-place --keep-ext`, doc/C2A.md:
+the same trees, `arbace.j2c.rename`'s rules being its rule `:rename` and the second `sed` below
+its rule `:proxy-methods`):
 
 - the fetched suite (`test/`, `src/script/`, and the checkout's top-level files, as
   `sequences.clj` reads `readme.txt`) is copied to `.tmp/clojure-tests/RUN/suite/` and renamed
@@ -859,8 +866,8 @@ step 4 (2026-10-07); the others came with later work, as each says:
 
 Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
 (`clojure.*` → `arbace.*`) and Java 26: code written for one may not behave the same on the
-other. The list for c2a, the Clojure → Arbace translator (after the `arbace-for-golang` freeze),
-and for anyone porting code. Included: differences in what code computes, prints or can name;
+other. The list for c2a, the Clojure → Arbace translator (doc/C2A.md, which says per entry
+which rule answers it or why none can), and for anyone porting code. Included: differences in what code computes, prints or can name;
 the runtime-visible renames are listed once, as c2a's mechanical part.
 
 - **`reduce` without an init on an `IReduceInit`-only reducible** (hand change 18; on
@@ -880,6 +887,12 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
 - **Source files** (hand change 19): Arbace's own sources are `.ae`; a namespace loads from
   its `.ae` before its `.clj` (a library may ship both: Arbace takes the `.ae`), and the
   not-found message names four files.
+- **Names `arbace.core` adds** (hand change 3 and the class forms since): the class forms'
+  macros and operators (`return`, `switch`, `label`, `lambda`, `bit-and-int`, ..., marked
+  `{:added "arbace"}`) are public in `arbace.core` and referred into every namespace: a file
+  defining a var of one of those names replaces the referral with a warning (`return already
+  refers to: #'arbace.core/return`; test.check's `generators` defines `return`), where
+  upstream, which has no such var, is silent.
 - **Runtime-visible names** (hand change 2, step 4's cleanups): agent, socket server and process
   thread names, the error report files' prefix and the proxy methods (`__initArbaceFnMappings`
   and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.

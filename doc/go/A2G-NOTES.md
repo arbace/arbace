@@ -1,5 +1,8 @@
 # a2g, phase 1: the core
 
+> Names: a2g and this file were c2g and `C2G-NOTES.md` until 2026-10-11 (A2G-SPEC.md, "Names");
+> the current names are used throughout.
+
 B1a step 4 ([B1-PLAN.md](B1-PLAN.md)), first phase: **a2g**, the translator of class forms into
 Go forms ([A2G-SPEC.md](A2G-SPEC.md)), printed by `arbace.g2a.print` and built with
 `bin/g2a build` against jrt ([JRT-NOTES.md](JRT-NOTES.md)). Phase 1 is the translator itself

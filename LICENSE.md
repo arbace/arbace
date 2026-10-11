@@ -12,8 +12,8 @@ full in this file. Source files keep the copyright and license notices they came
 covers what.
 
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
-  `arbace/j2a/`, `arbace/g2a/` and `arbace/a2g/`, which are Arbace's own) is derived from
-  Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
+  `arbace/c2a/`, `arbace/j2a/`, `arbace/g2a/` and `arbace/a2g/`, which are Arbace's own) is
+  derived from Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
   with its Java converted to Clojure class forms (doc/VENDOR-NOTES.md). Each file stays under its
@@ -316,7 +316,7 @@ covers what.
 
   The test build, `target/arbace-go/<arch>/arbace-tests` (`bin/arbace-go --build-tests`), adds
   Clojure's suite's Java fixtures (`test/java` of https://github.com/clojure/clojure at
-  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed and converted by j2a): under the Eclipse
+  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed by c2a and converted by j2a): under the Eclipse
   Public License 1.0, as Clojure.
 
   So a distribution of an executable carries this file (the texts of the Eclipse Public License

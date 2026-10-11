@@ -640,7 +640,7 @@ it; since `gofix` (FX1, "The suite's Java fixtures", below) that is the test bui
     CLOJURE_TESTS_GO=$PWD/target/arbace-go/amd64/arbace-tests bin/clojure-tests -j 16
 
 It implies rename mode: the suite and the test libraries renamed as for the JVM (the same
-`arbace.j2a.rename`, on the JVM), into `.tmp/clojure-tests/go/` (`CLOJURE_TESTS_RUN`, default `go`).
+`arbace.j2c.rename`, on the JVM; since 2026-10-11 c2a, doc/C2A.md), into `.tmp/clojure-tests/go/` (`CLOJURE_TESTS_RUN`, default `go`).
 Listing the namespaces and the report run on the JVM's `target/stage2` (`CLOJURE_SRC`); each test
 namespace runs in its own Go process (`TMPDIR` the run's `tmp/`, `ARBACE_PATH` the renamed libraries
 then the suite's `test/`), which, as upstream's JVM does, requires every test namespace first. The

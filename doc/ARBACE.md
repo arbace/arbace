@@ -4,7 +4,8 @@ What `arbace/` holds (all `.ae`, Arbace's source extension since 2026-10-11: Clo
 class forms, which Clojure cannot evaluate; VENDOR-NOTES.md, hand change 19): Arbace's Clojure
 code. Two kinds of things live here:
 
-- Arbace's own tools: `classes/` (the class forms compiler, `arbace.classes.*`), `j2a/`
+- Arbace's own tools: `classes/` (the class forms compiler, `arbace.classes.*`), `c2a/` (the
+  Clojure to Arbace translator, `arbace.c2a.*`; doc/C2A.md), `j2a/`
   (the Java to class forms converter, `arbace.j2a.*`), `g2a/` (Go to Arbace forms,
   `arbace.g2a.*`, with its Go helpers under `tools/godump/` and `tools/gocmp/`; doc/go/) and
   `a2g/` (the class forms to Go forms translator of the Go build, `arbace.a2g.*`;

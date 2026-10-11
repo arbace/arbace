@@ -63,6 +63,9 @@ Prior art:
     with `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
     --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
+  - `arbace/c2a/`: the Clojure → Arbace translator (`doc/C2A.md`; `bin/c2a`, `bin/c2a-check`):
+    the names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the
+    dialects' divergences; `bin/clojure-tests` translates Clojure's suite with it.
   - `arbace/j2a/`: the Java → class forms converter.
   - `arbace/g2a/`: Go as Go forms and back (spec `doc/go/SPEC.md`; helpers `tools/godump`,
     `tools/gocmp`; `bin/g2a`).
@@ -110,7 +113,9 @@ Prior art:
 
 - Data and source formats target the Clojure reader (`read`), not strict EDN; the two differ
   slightly, and where in doubt the Clojure reader wins.
-- The tools (j2a, the class forms checks, the suite runner, the bench driver) run on Arbace's
+- The translators name Arbace (`a`) as their target or source: c2a, j2a, g2a, a2g (until
+  2026-10-11 j2c, g2c, c2g, as the frozen branches and dated records name them).
+- The tools (c2a, j2a, the class forms checks, the suite runner, the bench driver) run on Arbace's
   `target/stage2` plus the checkout (`bin/lib/tools.bash`), so build first.
 - Put temporary and scratch files in `.tmp/`, which is gitignored.
 - Never create or modify anything under `.claude/`.
