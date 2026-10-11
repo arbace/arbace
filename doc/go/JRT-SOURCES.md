@@ -461,7 +461,8 @@ converted and compiled to javac's class shapes, 713 identical and the 4 known di
 ## Text and locales (2026-10-10)
 
 java.text and jdk.localedata's locales in the Go build (JRT-NOTES.md, "Text and locales"; the
-user's decision of 2026-10-10; proposed amendments TL4, TL5), from jdk26u at `baf63fb`,
+user's decision of 2026-10-10; amendments TL4, TL5 and TL8, accepted 2026-10-11 and folded
+here and in C2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`,
 `test/g2c/jrt_sources.clj`'s `text-sources`, `text-locales` and `added-gensrc`:
 
 - **Sources added** (`text-sources`, paths below `src/java.base/share/classes`): `java/text/` but
@@ -506,10 +507,11 @@ user's decision of 2026-10-10; proposed amendments TL4, TL5), from jdk26u at `ba
   `support/gensrc/jdk.localedata`); the JRE collation data of the selected locales,
   `src/jdk.localedata/share/classes/sun/text/resources/ext/CollationData_X.java` (KIND
   `share:jdk.localedata`); and jrt's `jdk/internal/jrt/LocaleDataIndex.java` (KIND `jrtgen`,
-  written by `g2c.jrt-sources/write-locale-data`). `sources.txt`'s line `java.base locales SPEC`
-  (`JRT_LOCALES`) is expanded into these by the generate step (`expand-locales`). **All 144
-  generated sources of the default selection (1,562 with `all`) are byte-identical to the JDK
-  build's.**
+  written by `g2c.jrt-sources/write-locale-data`). The selection is `JRT_LOCALES`: unset or
+  `none` (the default, the user's decision of 2026-10-11: no jdk.localedata bundle), `common`
+  (`text-locales`, 27 locales), `all`, or language tags. `sources.txt`'s line `java.base locales SPEC`
+  (`JRT_LOCALES`) is expanded into these by the generate step (`expand-locales`). **All generated
+  sources are byte-identical to the JDK build's** (144 with `common`, 1,562 with `all`).
 - **Data** (`$JRT_WORK/data`, embedded): `java/util/currency.data` (`make/modules/java.base/Gendata.gmk`:
   `build.tools.generatecurrencydata.GenerateCurrencyData` on
   `src/java.base/share/data/currency/CurrencyData.properties`); `sun/text/resources/WordBreakIteratorData`,
@@ -521,5 +523,5 @@ user's decision of 2026-10-10; proposed amendments TL4, TL5), from jdk26u at `ba
   `jdk/internal/icu/impl/data/icudata/ubidi.icu` (copied). All equal to the build's image (9 of 9
   data files).
 - **The shape check**: `java/util/Locale.clj` is a known difference (one checkcast, TL8).
-- **Result**: 867 files by default (2,310 with `JRT_LOCALES=all`), all converted and compiled to
+- **Result**: 867 files with `JRT_LOCALES=common` (2,310 with `all`), all converted and compiled to
   javac's class shapes, 862 identical and the 5 known differences, 2,144 classes.

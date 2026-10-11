@@ -3562,7 +3562,8 @@ is looked for right after the `I` (the JDK skips other combining marks between t
 `bin/jrt-convert`'s generate step runs `CLDRConverter` a second time as
 `make/modules/jdk.localedata/Gensrc.gmk` does (`-baselocales en-US`, without `-basemodule`: every
 locale's bundles, 1,531 files), and takes the selection: `JRT_LOCALES` (unset or `default`:
-`text-locales` of `test/g2c/jrt_sources.clj`; `all`; `none`; or comma-separated language tags).
+`text-locales` of `test/g2c/jrt_sources.clj`; `all`; `none`; or comma-separated language tags; since the user's decision of 2026-10-11 the
+default is `none`, and `text-locales` is the named set `common`).
 The selection is expanded in the generate step (`expand-locales`): each tag's candidate
 locales, with CLDR's parent locales read from the generated `CLDRBaseLocaleDataMetaInfo` (en-GB
 takes en-001's, es-MX es-419's, zh-TW zh-Hant's), and of each the generated bundles that exist
@@ -3578,13 +3579,19 @@ build's** `support/gensrc/jdk.localedata` (`generated.edn`; 113 files by default
 (`java/util/currency.data`, `sun/text/resources/WordBreakIteratorData`, `LineBreakIteratorData`,
 `SentenceBreakIteratorData`, ICU's `ubidi.icu`) to its image.
 
-The default set, 27 locales (and their parents): the languages `ar de es fr hi id it ja ko nl pl
+The set `common` (`JRT_LOCALES=common`; the default until 2026-10-11), 27 locales (and their parents): the languages `ar de es fr hi id it ja ko nl pl
 pt ru sv tr uk zh` and the regions `en-GB en-CA en-AU en-IN fr-CA de-CH es-MX pt-PT zh-TW ar-EG`,
 which cover the JDK's locale constants (`FRANCE`, `GERMANY`, `ITALY`, `JAPAN`, `KOREA`, `CHINA`,
 `TAIWAN`, `UK`, `CANADA`, `CANADA_FRENCH`) and the most used languages; ar-EG for its Arabic
 digits (`ar` alone has Latin ones). A locale outside the selection takes the data of its
 nearest candidate locale that is in (`fr-BE` French's, `sw` the root locale's), where the JVM
 has its own: the remaining deviation, which `JRT_LOCALES=all` removes.
+
+**The default selection is `none`** (the user's decision of 2026-10-11, for the shipped
+executables and the freeze): java.base's root and English data alone, java.text whole. Every
+other locale takes the root locale's data (another English region `en`'s), as under TM4; the
+oracle's locale-dependent cases are recorded as one group of known mismatches
+(`test/oracle/known-go-amd64.edn`), which `JRT_LOCALES=common` or `all` make pass.
 
 **Constant arrays as data (c2g, TL1).** The generated bundles are `getContents` methods whose
 bodies are array initializers of string literals, thousands of rows each; translated as code
@@ -3665,7 +3672,15 @@ encoded in a Go string (arrays as `[class,count,`, strings length-prefixed, `n`u
   20,520 assertions, 76 namespaces, no regressions against `test/arbace-go-results.edn`,
   test.generative 27 of 27; the smoke test and `bin/jrt test` pass; coverage 9,807 of 17,546
   (55.9%).
-- **Start** (amd64, `-e nil`): 0.22-0.26 s (main 0.21-0.23 s). First uses: a French
+- **The default `none`** (2026-10-11, main at `6cbed45` merged): `bin/jrt-convert` 835 files
+  (830 identical, the 5 known differences); the executable **66,355,360 bytes** (main's of the
+  same day 65,077,408: +1.28 MB for java.text, `Locale`, `Currency` and the providers; `common`
+  74,051,744, +7.70 MB more); start (`-e nil`) 0.20-0.21 s, as main's; the smoke test passes; the
+  whole oracle on Go 22,232 of 22,278 with `--expected`: the 4 known mismatches and one new group
+  of 42, the locale-dependent cases of `text.clj` and `time.clj` (the 3 of TM4 among them),
+  recorded with the decision as their reason in `test/oracle/known-go-amd64.edn`; Clojure's suite
+  on the test build without regressions (it has no locale-dependent assertions).
+- **Start** (amd64, `-e nil`, the `common` build): 0.22-0.26 s (main 0.21-0.23 s). First uses: a French
   `NumberFormat` 1.7 ms, a German `SimpleDateFormat` 2.5 ms, a French `Collator` 1.5 ms.
 
 ## Size
@@ -3703,24 +3718,27 @@ the hole arguments of its table), Go's function tables for them, and the encoded
   the bundles stay the JDK's generated sources, translated as any class; every constant array of
   the world benefits (the JDK's tables too).
 
-## Amendments (proposed, for the user's review)
+## Amendments (accepted by the user 2026-10-11)
 
-Numbered TL (text and locales); no TL appears elsewhere in doc/.
+Numbered TL (text and locales). All eight were accepted on 2026-10-11 and folded into C2G-SPEC
+(§16, "Text and locales") and JRT-SOURCES.md; each says where below. With them the user chose
+`none` as the default locale selection of the shipped executables and the freeze (below,
+"The default selection").
 
 - **TL1 (C2G-SPEC §7, arrays; §5.9)** A reference array initializer whose elements are, to any
   depth, string literals, null, nested such initializers and immutable locals, with at least 4
   strings, is written as one call of jrt's `ConstRefArray(enc, classes, holes...)`: the tree
   encoded in a Go string, decoded when the expression is evaluated; its strings are interned as
-  literals, the locals are evaluated in order before the call.
+  literals, the locals are evaluated in order before the call. *Accepted 2026-10-11: C2G-SPEC §5.9.*
 - **TL2 (C2G-SPEC §4.3, stand-ins, C3)** `java.util.Locale` and `Locale.Category` are translated
   from jdk26u; jrt's hand-written ones become stand-ins (`standin_locale.clj`, for jrt's own
   build), and jrt's `DecimalFormatSymbols` is removed. Replaced stand-ins whose statics jrt's
   hand-written code does not read (c2g's `lazy-standins`: `Locale`, `Locale.Category`) are not
-  initialized eagerly.
+  initialized eagerly. *Accepted 2026-10-11: C2G-SPEC §4.3, §12 (R17).*
 - **TL3 (C2G-SPEC §9.1, the manifest; §4.3)** A static or instance method of a hand-written
   class that the program's support code provides counts as jrt's: `System.getProperties()`
   (c2g writes `System_GetProperties__Properties` when `Properties` is translated) and String's
-  `chars()` and `codePoints()` (c2g's forwarders to `CharSequence`'s default methods).
+  `chars()` and `codePoints()` (c2g's forwarders to `CharSequence`'s default methods). *Accepted 2026-10-11: C2G-SPEC §9.1.*
 - **TL4 (C2G-SPEC §4.1, the inputs; JRT-SOURCES.md, RD4, TM3)** The world takes java.text, its
   providers, `Currency`, `Locale` with `sun.util.locale` and `LocaleEquivalentMaps` (generated),
   `StaticProperty`, the referenced-key caches, `LazyConstant`, `CDS` (natives jrt's: no archive),
@@ -3729,23 +3747,23 @@ Numbered TL (text and locales); no TL appears elsewhere in doc/.
   does and compared with the build's), their JRE collation data (KIND `share:jdk.localedata`)
   and jrt's generated index `jdk.internal.jrt.LocaleDataIndex` (KIND `jrtgen`); the selection is
   `JRT_LOCALES` (default 27 locales, `all`, `none`, or tags). The resource data gain
-  `currency.data`, the break iterators' rule data and `ubidi.icu`.
+  `currency.data`, the break iterators' rule data and `ubidi.icu`. *Accepted 2026-10-11: C2G-SPEC §4.1, §10.3, JRT-SOURCES.md "Text and locales".*
 - **TL5 (C2G-SPEC §4.1, jrt's own Java, K1; TM4 revised)** The locale data are java.base's and
   the selected locales of jdk.localedata, not the root and English alone: jrt's
   `LocaleProviderAdapter` hands out jdk26u's provider implementations; jrt's own
   `sun.util.resources.LocaleData` chains a locale's bundles; `sun.util.cldr.CLDRParentLocales`
   gives the CLDR candidate locales; jrt's `ResourceBundle` gains `Control` (without loading);
   jrt's `Calendar` takes the locale's week data and names. `CLDRBaseLocaleDataMetaInfo`'s
-  variant is removed.
+  variant is removed. *Accepted 2026-10-11, the default selection `none`: C2G-SPEC §4.1.*
 - **TL6 (C2G-SPEC §4.6, variants)** `sun.util.resources.BreakIteratorResourceBundle`'s
   `handleGetObject` reads the rule data through `Class.getResourceAsStream` (absolute) where the
-  JDK reads them from its module.
+  JDK reads them from its module. *Accepted 2026-10-11: C2G-SPEC §4.6.*
 - **TL7 (jrt; JRT-NOTES.md "Charsets, locales, dates")** jrt's system properties gain
   `user.language=en`, `user.country=US` and `stdin.encoding`; String's Locale overloads apply
   Turkish and Azerbaijani's i (not Lithuanian's rules); jrt's `SoftReference` has the
-  constructors a translated subclass calls.
+  constructors a translated subclass calls. *Accepted 2026-10-11: C2G-SPEC §12 (R17).*
 - **TL8 (`bin/jrt-convert`'s shape check)** `java/util/Locale.clj` is a known difference: one
-  checkcast javac emits for a switch expression of strings and the class forms do not.
+  checkcast javac emits for a switch expression of strings and the class forms do not. *Accepted 2026-10-11: JRT-SOURCES.md "Text and locales".*
 
 ## Sources
 
