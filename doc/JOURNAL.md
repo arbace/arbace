@@ -411,3 +411,13 @@ the first. The history before it is on the frozen branches and in git history:
 - The user's decisions: BX20-BX24 accepted; `tamago/` kept as committed; `tamago-vendor verify`
   joins `bin/gate --full`'s `box` step and the box's build from the forms with `check` its go
   chain (`box-forms`; run at the milestone's freeze, not yet run in `--full`).
+
+## 2026-10-11: B1b S3 started: the store
+
+- Agent, branch `box-s3`. The user's decisions before it, all as recommended: no store unless
+  `ARBACE_BOX_STORE` (or a launcher flag) names a directory (else `arbace.box` refuses), rather
+  than a default under `~/.arbace`; `arbace.box` on the native build too, over a host directory
+  in the same format, rather than box-only; loading by a `store:` entry kind in `ARBACE_PATH` and
+  scripts by `ref:NAME`, rather than an explicit call only; the in-memory fs saved to and seeded
+  from a ref as a tar, explicitly (`save-fs!`, `ARBACE_BOX_FS`), rather than EDN or not in S3;
+  a host tool in the launcher (`arbace-box --store DIR put|get|ref|ls`).

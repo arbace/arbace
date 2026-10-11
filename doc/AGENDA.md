@@ -61,8 +61,12 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   forms in `tamago/` (`bin/tamago-vendor`; 32 MB), the box's guest built from them by default,
   byte-identical to one built from TamaGo's originals (BX20-BX24, accepted); `bin/gate --full`
   runs `tamago-vendor verify` and the proof (`box-forms`).
-- Next: S3, the store; then S5, the network (D12 decided there); each re-runs S6's proof. Then
-  this milestone's freeze (`bin/gate --full`).
+- S3 in progress, the store: `arbace.box` (`put`, `get`, `ref`, `ref!`) on both builds; no store
+  unless `ARBACE_BOX_STORE` names a directory; namespaces and scripts from refs (`store:` in
+  `ARBACE_PATH`, `ref:NAME`); the in-memory fs saved to and seeded from a tar in a ref; a host
+  tool `arbace-box --store DIR put|get|ref|ls` (the user's decisions, 2026-10-11).
+- Then S5, the network (D12 decided there); each re-runs S6's proof. Then this milestone's
+  freeze (`bin/gate --full`).
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 
