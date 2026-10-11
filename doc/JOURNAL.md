@@ -121,3 +121,7 @@ the first. The history before it is on the frozen branches and in git history:
 - The user's decisions on c2a's open points: living documents keep the new tool names, dated
   passages included; c2a translates a library's `data_readers.clj`/`.cljc` into
   `data_readers.ae` (now that Arbace reads it).
+- The user's decisions on the version's open points: describe keeps every tag (main tags come at
+  the next milestone); the `arbace.version` property overrides on both builds; a tarball's
+  `:dirty false` is acceptable (patches are the packager's record); the gate's cache keyed on
+  inputs, not the commit; the old banner in dated transcripts stays.
