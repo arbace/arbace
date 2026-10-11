@@ -1,9 +1,11 @@
 # The evaluator: plan (B1a step 5)
 
-Status: proposal (2026-10-09, c2g phase 2B); the user decided Q1-Q7 as recommended (§9), and
-step 5 built it ([EVAL-NOTES.md](EVAL-NOTES.md), whose "Deviations from EVAL-PLAN" list where
-the evaluator differs from this plan; its amendments M1-M8, X1-X4 and S1-S8, accepted
-2026-10-09, are folded into C2G-SPEC and noted below where they touch this plan). B1a step 5
+Status: decided 2026-10-09 (proposed in c2g phase 2B; the user decided Q1-Q7 as recommended,
+§9), built in step 5 ([EVAL-NOTES.md](EVAL-NOTES.md), whose "Deviations from EVAL-PLAN" list
+where the evaluator differs from this plan) and amended through step 7. Amendments folded here,
+each noted where it touches this plan: M1-M8, X1-X4, S1-S8 (2026-10-09), U1 (step 6,
+2026-10-09), SL1-SL2, EC1-EC6 (step 7b), FX3-FX4 (2026-10-10); EVAL-NOTES.md and SPEED-NOTES.md
+list them, C2G-SPEC §16 too. B1a step 5
 ([B1-PLAN.md](B1-PLAN.md), decision D2): Arbace on Go evaluates the `Expr` trees of its
 translated `Compiler` instead of emitting bytecode. This document fixes the evaluator's design
 over the translated tree, records what phase 2B built and proved, estimates the rest, and asks
@@ -119,8 +121,8 @@ kinds the compiler does not know.
   (`arbace.core$map`), which `getClass` answers through `EvalFn`'s field `c2g$class`; `EvalFn`
   binds the arguments from `RestFn`'s seq, the rest parameter unrealized (EVAL-NOTES.md,
   "Functions").
-- Step 7 replaces `doInvoke`'s seq with per-arity `invoke` methods (Q3) and the tree walk with
-  closures.
+- Step 7 was to replace `doInvoke`'s seq with per-arity `invoke` methods (Q3) and the tree walk
+  with closures; it did (below, and §2's "As built in step 7").
 - **As built in step 7** (amendment EC3, accepted 2026-10-10): `EvalFn` answers `invoke` of 0 to
   5 arguments itself, calling the compiled method of that fixed arity (`FnExpr.evalArities`)
   with the arguments bound in a frame, without a seq; variadic calls and `apply` go through
@@ -130,11 +132,12 @@ kinds the compiler does not know.
 
 ### 2.3 Control
 
-- `if`, `do`, `let` (`LetExpr`), `loop` (`LetExpr.isLoop`) and `recur` are cases of
-  `Evaluator.eval` (done in phase 2B). `recur` assigns the loop's (or the fn method's
-  parameter) slots and returns a sentinel (`Evaluator.RECUR`) that the loop or `invokeFn`
-  restarts on; the analyzer guarantees tail position, so the sentinel cannot escape into a
-  value. No exception and no Go `goto` is needed.
+- `if`, `do`, `let` (`LetExpr`), `loop` (`LetExpr.isLoop`) and `recur` are cases of `Evaluator.eval`
+  (done in phase 2B; as built, each node evaluates itself, `evalIn`, EVAL-NOTES.md deviation 1, and
+  since step 7 methods are compiled to `Code` nodes: §2's "As built in step 7"). `recur` assigns the
+  loop's (or the fn method's parameter) slots and returns a sentinel (`Evaluator.RECUR`) that the
+  loop or `invokeFn` restarts on; the analyzer guarantees tail position, so the sentinel cannot
+  escape into a value. No exception and no Go `goto` is needed.
 - `try`/`catch`/`finally` (`TryExpr`): a Java `try` in the evaluator's class forms (c2g makes
   it Go's panics and recovers), each `catch` matching by `Class.isInstance`, its binding stored
   in its slot; `finally` as Java's. `throw` (`ThrowExpr`) throws.
@@ -188,7 +191,16 @@ kinds the compiler does not know.
   (`Writer`, `Reader`, `PushbackReader`, `InputStream`, `OutputStream`, `APersistentMap`, jrt's
   `ThreadLocal`) is a `DynSub_C`, which c2g writes ahead of time; the namespace variant
   `core_proxy.clj` replaces only `generate-proxy`. A class made at run time that defines a
-  method twice throws `ClassFormatError`, as on the JVM.
+  method twice throws `ClassFormatError`, as on the JVM. The list is
+  `arbace.c2g.model/proxy-supers`; it gained `BufferedWriter` (amendment Z1, accepted
+  2026-10-10), and the class forms' superclasses (`arbace.c2g.dyn/class-supers`, CF4;
+  CLASSFORMS-REPL.md §7) get `DynSub_C` types too, so they can be proxied as well.
+- **The JVM's errors of `new` and of a stub's name** (amendment FX4, accepted 2026-10-10;
+  EVAL-NOTES.md, "The suite's Java fixtures"): the resolved `new` of an abstract class throws
+  `InstantiationError` naming the class before evaluating its arguments, as the JVM's `new`
+  instruction does (the reflective path keeps `Constructor.newInstance`'s
+  `InstantiationException`); a `deftype*` stub whose name has `/` or a leading `[` is
+  `NoClassDefFoundError: IllegalName: NAME`, as `ClassLoader.preDefineClass` refuses it.
 
 ### 2.6 Interop
 
@@ -202,12 +214,19 @@ kinds the compiler does not know.
   them (the bytecode's casts and conversions, a fn adapted for a functional interface as
   `Reflector.boxArg` adapts it), no selection, no `boxArgs` copy, an exception propagating as it
   is (what Reflector's unwrapping of `InvocationTargetException` gave); a method of a non-public
-  class keeps Reflector's path (its accessible-base search). Step 7 may call the invoker with Go
-  values (§10.1).
+  class keeps Reflector's path (its accessible-base search). Step 7 was to call the invoker with
+  Go values (C2G-SPEC §10.1); it did in part: hot static methods called directly (EC2), other
+  resolved members through their invoker (EC5; §6 below).
 - Un-hinted calls: `Reflector` at run time, as on the JVM.
 - Functional interfaces: `Reflector.boxArg` adapts an `IFn` with `jrt.AdaptFn`, which is the
-  interface's `ClassInfo.FromFn` that c2g now generates (phase 2B, §7 of the notes); inside
-  class bodies the analyzer's `:fi-adapter` is translated.
+  interface's `ClassInfo.FromFn` that c2g now generates (C2G-SPEC §7.11; C2G-NOTES.md, phase
+  2B, amendment B5, E5 in C2G-SPEC); inside class bodies the analyzer's `:fi-adapter` is
+  translated.
+- **Functional interfaces of let and loop locals** (amendment FX3, accepted 2026-10-10;
+  EVAL-NOTES.md, "The suite's Java fixtures"): the init of an object local whose tag names a
+  functional interface is adapted when it is a fn not already an instance, else cast, as
+  `LetExpr.doEmit` compiles it (`FISupport.maybeEmitFIAdapter`); in the evaluator's `evalIn`
+  and in the closure compiler alike.
 - What the REPL can name is the closed world: every public member of every class built in must
   be translated, not only what the runtime reaches, since reflection reaches it (Q2).
 
@@ -238,7 +257,8 @@ kinds the compiler does not know.
   limit (Q4).
 - Errors: `CompilerException` with phase `:execution` around invokes and interop, as the
   bytecode's line tables give it on the JVM (done for invoke and the method calls). Stack
-  traces show the evaluator's Go frames, not the Clojure fns (Q6).
+  traces: before Q6, the evaluator's Go frames, not the Clojure fns; Q6 decided for the Clojure
+  frames (below).
 - **As built** (EVAL-NOTES.md, deviation 5; amendment M6, accepted 2026-10-09, C2G-SPEC §10.7):
   exceptions are not wrapped in `CompilerException` inside fns, as compiled code does not wrap
   them; stack traces show the evaluated Clojure frames (Q6's (a)), which jrt's frame mapping
@@ -247,13 +267,12 @@ kinds the compiler does not know.
 ## 3. Primitive fns
 
 `(fn [^long x] ...)` makes the analyzer pick a primitive interface (`IFn$LL`) for the fn and
-`(.invokePrim ...)` calls for its callers (`InvokeExpr.parse`), which an `EvalFn` cannot answer:
-Go has no type for each of the 322 interfaces made at run time, and `Dyn` covers only the
-interfaces the world uses. Proposed: the Go build's variant makes `FnMethod.primInterface`
-return nil (no primitive fns: callers call `invoke`), and `invokeFn` converts a `^long` or
-`^double` parameter with `RT.longCast`/`doubleCast` on entry and a primitive return on exit, so
-the arithmetic stays the same; `IFn$LL` and the rest stay in the closed world for translated
-code (Q1).
+`(.invokePrim ...)` calls for its callers (`InvokeExpr.parse`), which an `EvalFn` cannot answer: Go
+has no type for each of the 322 interfaces made at run time, and `Dyn` covers only the interfaces
+the world uses. Decided (Q1 (a)): the Go build's variant makes `FnMethod.primInterface` return nil
+(no primitive fns: callers call `invoke`), and `invokeFn` converts a `^long` or `^double` parameter
+with `RT.longCast`/`doubleCast` on entry and a primitive return on exit, so the arithmetic stays the
+same; `IFn$LL` and the rest stay in the closed world for translated code (Q1).
 
 ## 4. What the evaluator needs from the others
 
@@ -263,7 +282,7 @@ code (Q1).
   without streams (`(. foo (valAt :k))` on a run-time class reaches `getMethods`' stream code
   today).
 - jrt (2C): files (`Compiler.loadFile`), the rest of the JDK closure the namespaces name.
-- c2g (2D): the whole-program `--main` (every public member as a root, Q2), line positions for
+- c2g (2D): the whole-program `--program` (every public member as a root, Q2), line positions for
   stack traces, unused locals when an operation is missing (seen with `removeIf` on a world
   without `Predicate`: `declared and not used`).
 
@@ -287,7 +306,7 @@ and protocols at run time (Q5) were not in its estimate.
 
 A tree walk per form with seq-packed arguments and boxed locals: expect Joker's order of speed
 (10-50x slower than the JVM's compiled code on loops), acceptable for a first REPL. The step-7
-plan stays: per-arity `invoke`, closure compilation of the tree (each `Expr` to a Go closure
+plan was: per-arity `invoke`, closure compilation of the tree (each `Expr` to a Go closure
 once, at `fn*` evaluation), invokers called with Go values on hinted interop, then AOT of the
 core namespaces to Go forms.
 
@@ -295,7 +314,8 @@ core namespaces to Go forms.
 compilation is per method at its first call, not at `fn*` evaluation; the hot static methods
 are called directly (EC2, generated `CodeOpN`), other resolved members through their invoker
 (EC5). The benchmarks run 5 to 69 times faster than the tree walk (geometric mean 12.8x), about
-54 times slower than the JVM. AOT to Go forms remains.
+54 times slower than the JVM. AOT of namespaces to Go forms is not scheduled (the user,
+2026-10-10).
 
 ## 7. Checks
 
@@ -307,11 +327,13 @@ are called directly (EC2, generated `CodeOpN`), other resolved members through t
 
 ## 8. Amendments found (listed with reasons in C2G-NOTES.md, phase 2B)
 
-B1 nested-class variants, B2 erased packages, B3 the evaluator's classes in the `Compiler`
-variant, B4 `Dyn` as built (its API, `jrt.Dynamic`, `jrt.DefineDynamic`), B5 `FromFn` from
-c2g in `arbace/lang`, B6 natives in their class's package, B7 the root spec `CLASS$*`, B8
-`clj-fi-method` for classes from source. Accepted 2026-10-09 and folded into C2G-SPEC as
-E1-E8, with the decisions of §9 that touch its §10 (C2G-SPEC §16).
+By their C2G-SPEC names (C2G-NOTES.md proposed them as B1-B8, not EVAL-NOTES.md's phase 2B
+amendments, which became S1-S8): E1 nested-class variants, E2 erased packages, E3 the
+evaluator's classes in the `Compiler` variant, E4 `Dyn` as built (its API, `jrt.Dynamic`,
+`jrt.DefineDynamic`), E5 `FromFn` from c2g in `arbace/lang`, E6 natives in their class's
+package, E7 the root spec `CLASS$*`, E8 `clj-fi-method` for classes from source. Accepted
+2026-10-09 and folded into C2G-SPEC, with the decisions of §9 that touch its §10 (C2G-SPEC
+§16).
 
 ## 9. Open questions, with recommendations
 

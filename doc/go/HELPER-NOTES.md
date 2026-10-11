@@ -6,7 +6,8 @@ the rest, using only Go's standard library (BSD-licensed APIs, no third-party mo
 seeded from the experiment `godump` of survey §2.4 and §10. It loads Go packages for one build
 configuration, type-checks them with `go/types`, and writes per package one forms file. The
 helper is dumb and complete: it writes the typed AST generically, plus what `go/types` decided.
-The converter (`arbace.g2c`, in Clojure, to come) makes every decision about forms.
+The converter (`arbace.g2c.convert`, in Clojure, [CONVERTER-NOTES.md](CONVERTER-NOTES.md))
+makes every decision about forms.
 
 ## Building and running
 
@@ -33,7 +34,8 @@ bin/g2c dump -goos linux -goarch arm64 -o DIR std
   version: `go1.27` for std and single files, the `go` line of a module otherwise. It refuses a
   module or file whose language version is newer than go1.27. Files whose build constraint
   needs a newer release (`//go:build go1.28`) are excluded by the configuration, as the go
-  command does. Moving the pin is a recorded decision (journal, 2026-10-07).
+  command does. Moving the pin is a recorded decision (the journal on `arbace-for-java-26`,
+  2026-10-07).
 - **Configuration.** There is one per run, written into every dump: `-goos` (default
   `tamago`; g2c's configurations are `tamago` and `linux`: amendments L1 and L2, accepted
   2026-10-08, folded into SPEC §1 item 7 and §4.2), `-goarch` (`amd64` or `arm64`) and
@@ -62,7 +64,7 @@ bin/g2c dump -goos linux -goarch arm64 -o DIR std
   goes to `DIR/IMPORT/PATH.edn` (an external test package to `DIR/IMPORT/PATH_test.edn`), and
   a single file to `DIR/FILE.go.edn` (relative to `$GOROOT/test`, `$GOROOT` or the working
   directory). `.edn` follows `test/*.edn`: the format targets the Clojure reader, not strict
-  EDN. Dumps are regenerated, not tracked (journal, 2026-10-07).
+  EDN. Dumps are regenerated, not tracked (the journal on `arbace-for-java-26`, 2026-10-07).
 - **Summary.** On stdout, one line per package:
   `STATUS<TAB>KEY<TAB>FILES<TAB>BYTES<TAB>MS<TAB>TYPE-ERRORS[<TAB>FIRST-MESSAGE]`. STATUS is
   `ok`, `errors` (type errors; the dump is still written), `fail` (no dump: parse errors, `go
@@ -428,8 +430,6 @@ helper's (SPEC §15, "Amendments (2026-10-08)").
 
 ## What is left
 
-- **The converter** `arbace.g2c` (G1's other half, per `doc/go/SPEC.md`): the forms of survey
-  §3 from these dumps.
 - **Not emitted:** each named type's interface satisfactions within the program (survey §2.2,
   for an itab cache), `go/types`' scopes (`Info.Scopes`, not needed: SPEC §11.2), a
   signature's receiver and receiver type parameters in the type table (the method objects carry

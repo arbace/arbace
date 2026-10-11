@@ -160,16 +160,17 @@ linked to the newest class of a name, as SPEC §10 says for the JVM.
   (maps to node objects, once per method) is that namespace: it runs once.
 - **Translate class forms to Go at run time.** There is no Go compiler in the program (nor in the
   box, B1b). Rejected; AOT translation of class forms in files is c2g's, not the REPL's.
-- **Compile to Go closures** (each node a Go `func`, as EVAL-PLAN §6 proposes for the evaluator):
-  faster dispatch, but closures cannot be written in class forms; the node objects are its
-  equivalent in class forms (an interface call per node), and step 7 may lower them further.
+- **Compile to Go closures** (each node a Go `func`, as EVAL-PLAN §6 proposed for the evaluator,
+  built in step 7b, per method at its first call): faster dispatch, but closures cannot be written
+  in class forms; the node objects are its equivalent in class forms (an interface call per
+  node). Step 7 did not lower the interpreter further.
 - **A carrier class per superclass of the world** (`CF$Ex extends RuntimeException` ...) instead of
   `Dyn`'s `DynSub_C`: rejected for the general case (each overridable method written by hand);
   used for Clojure fn classes only (`CF$FnObj`), whose superclass `RestFn` has one entry point.
 - **Analysis in class forms** (porting arbace.classes to the Java subset, so that c2g translates
   it): the analysis is 5,500 lines of Clojure; evaluated it costs 2.3 s once and 20 ms per class.
-  Not worth a port now; AOT-compiling the embedded namespaces (step 6 and 7's pre-analysis) is
-  the general remedy.
+  Not worth a port now; step 6's image (the embedded namespaces pre-analyzed) is the remedy in
+  place; AOT of namespaces to Go is not scheduled.
 
 ## 4. What is built
 
@@ -230,7 +231,7 @@ On amd64 (this machine, 2026-10-09/10), the branch `cf-repl`:
 - **On the JVM**, `test/classforms/jvm_check.clj` runs the interpreter against the compiled classes
   (over the test host): 74 forms calling static methods match; the others need Class objects.
 
-**Times** (amd64; `test/classforms/bench.clj`, second run; JVM warm, `bin/arbace`):
+**Times** (amd64; `test/classforms/bench.clj`, second run; JVM warm, `bin/arbace-j`):
 
 | | JVM, compiled | Go, interpreted | Go, the same as a Clojure fn (evaluator) |
 |---|---:|---:|---:|
@@ -244,21 +245,25 @@ The interpreter is 14-40 times faster than the evaluator on the same work and 5-
 than HotSpot's compiled code. The first class form of a session loads the analysis: 3.2 s (2.3 s
 of it evaluating the namespaces); then a small class takes 10-60 ms to define.
 
-**Size**: the static amd64 executable is 74.0 MB against 63.1 MB for main at `b20b577` (built the
-same way, same day): +10.9 MB (+17%). Most of it is the DynSub types of the nine new
-superclasses (about 0.5 MB each: `c2g_dyn.go`'s forms grow from 5.1 to 9.7 MB); then the
-interpreter and the host (the `Compiler` variant's forms grow by 350 KB, `c2g_cf.go` 81 KB, and
-their member tables), the embedded analysis (360 KB of sources) and `generics.edn` (106 KB,
-restricted to what an interpreted class can extend or implement; 674 KB for the whole world).
+**Size** (on `cf-repl`, before SZ1-SZ4, unstripped): the static amd64 executable is 74.0 MB against
+63.1 MB for main at `b20b577` (built the same way, same day): +10.9 MB (+17%). Most of it is the
+DynSub types of the nine new superclasses (about 0.5 MB each: `c2g_dyn.go`'s forms grow from 5.1 to
+9.7 MB); then the interpreter and the host (the `Compiler` variant's forms grow by 350 KB,
+`c2g_cf.go` 81 KB, and their member tables), the embedded analysis (360 KB of sources) and
+`generics.edn` (106 KB, restricted to what an interpreted class can extend or implement; 674 KB for
+the whole world). Since SZ1-SZ4 (stripped, the `DynSub_C` types sharing one `dynCore`; JRT-NOTES.md,
+"Size: trimming the executable") the whole executable was 61.9 MB; about 63-65 MB since
+java.security and java.text.
 
 ## 7. What remains
 
 - **Superclasses of the world** beyond the list (`arbace.c2g.dyn/class-supers`: `Throwable`,
   `Exception`, `RuntimeException`, `Error`, `IllegalArgumentException`, `IllegalStateException`,
-  `Enum`, `Record`, `AFn`, and the proxies' `Writer`, `Reader`, `InputStream`, `OutputStream`,
-  `APersistentMap`, `ThreadLocal`, `BufferedWriter`): a class extending another class of the world
-  is refused when defined ("cannot extend ... yet"). Leaf classes (`UnsupportedOperationException`)
-  cannot get a DynSub type without changing their translation. Each addition costs about 0.5 MB.
+  `Enum`, `Record`, `AFn`, and the proxies' `Writer`, `Reader`, `PushbackReader`, `InputStream`,
+  `OutputStream`, `APersistentMap`, `ThreadLocal`, `BufferedWriter`): a class extending another
+  class of the world is refused when defined ("cannot extend ... yet"). Leaf classes
+  (`UnsupportedOperationException`) cannot get a DynSub type without changing their translation.
+  Each addition costs about 0.5 MB.
 - **Stack traces** show no interpreted frames (the evaluator's do, EVAL-NOTES "Stack traces");
   `CF$Frame` would need the method and the line.
 - **Reflection's view**: `getDeclaredMethods` of an interpreted class lists the inherited methods
@@ -270,13 +275,14 @@ restricted to what an interpreted class can extend or implement; 674 KB for the 
   cannot be deserialized; varargs method references; annotations of classes of the world
   (`getAnnotation`) and the source path lookup (§9.2) at the REPL; `defmodule` and `defpackage`
   write nothing (no class files).
-- **Speed**: frames are allocated per call and arguments of reflective calls boxed; step 7's
-  remedies apply (direct invokers of the member tables, closures).
+- **Speed**: frames are allocated per call and arguments of reflective calls boxed. Not covered
+  by step 7: its remedies (direct invokers of the member tables, closures; step 7b) were done
+  for the evaluator only (step 7a's runtime changes apply to all Go code); open.
 
 ## 8. Amendments
 
-All accepted by the user on 2026-10-10 and folded where each says (size tuning is later, with
-step 7):
+All accepted by the user on 2026-10-10 and folded where each says (size: JRT-NOTES.md, "Size:
+trimming the executable", SZ1-SZ4):
 
 - **CF1** A cut class's constants (static final primitive or `String` fields) are readable: its
   member table's getter returns the JVM's value instead of throwing (`arbace.c2g.out`). The class

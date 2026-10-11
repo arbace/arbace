@@ -238,25 +238,25 @@ checked (times include reading the dumps and the check):
 | std amd64, mode `:full` | 379 | 1,742 | 86.4 MB | 10.3 s | 0 | 0 |
 | `$GOROOT/test`, mode `:full` | 1,705 | 1,706 | 20.2 MB | 3.2 s | 0 | 0 |
 
-The linux rows were measured later the same day (2026-10-08) with the conversion's printing
-into the candidate included (`bin/g2c roundtrip`, `--print`); the tamago corpora measured that
-way take the same time as linux's (std about 20 s). Every node kind of the linux corpora is
-converted (nodes consumed equal the dumps' per kind; std linux/amd64: 2,357,789 nodes), with
-no node kind, directive or marker that tamago's corpora lacked. The JVM's start adds about 2 s. Measured with `-Xmx16g`, the process peaked at about 14 GB
-(the heap grows to its allowance; runtime's dump alone is 24.8 MB of text); the default is
-now `-Xmx12g`.
+The linux rows were measured later the same day (2026-10-08) with the conversion's printing into the
+candidate included (`bin/g2c roundtrip`, `--print`); the tamago corpora measured that way take the
+same time as linux's (std about 20 s). Every node kind of the linux corpora is converted (nodes
+consumed equal the dumps' per kind; std linux/amd64: 2,357,789 nodes), with no node kind, directive
+or marker that tamago's corpora lacked. The JVM's start adds about 2 s. Measured with `-Xmx16g`, the
+process peaked at about 14 GB (the heap grows to its allowance; runtime's dump alone is 24.8 MB of
+text); the default is now `-Xmx12g`.
 
 Two runs give byte-identical forms trees (checked on std amd64).
 
 ## The round trip
 
-`bin/g2c roundtrip` converts, prints with `arbace.g2c.print/print-package` (lines layout)
-into a candidate tree and runs `bin/g2c-check` (tree, export, code; [ROUNDTRIP.md](ROUNDTRIP.md))
-against a recorded reference, `test/g2c/roundtrip-ARCH.edn` for tamago and
-`test/g2c/roundtrip-linux-ARCH.edn` for linux (Clojure-reader format, one entry per line): it exits non-zero on a regression, an entry and level passing in the reference and
-not now (or missing). `--record` rewrites the reference. The `$GOROOT/test` programs are the
-oracle's list (`bin/g2c-check --list-tests`, `gocmp tests`), dumped by the helper as they are:
-one rule for both. Result (2026-10-08, closing milestone G2):
+`bin/g2c roundtrip` converts, prints with `arbace.g2c.print/print-package` (lines layout) into a
+candidate tree and runs `bin/g2c-check` (tree, export, code; [ROUNDTRIP.md](ROUNDTRIP.md)) against a
+recorded reference, `test/g2c/roundtrip-ARCH.edn` for tamago and `test/g2c/roundtrip-linux-ARCH.edn`
+for linux (Clojure-reader format, one entry per line): it exits non-zero on a regression, an entry
+and level passing in the reference and not now (or missing). `--record` rewrites the reference. The
+`$GOROOT/test` programs are the oracle's list (`bin/g2c-check --list-tests`, `gocmp tests`), dumped
+by the helper as they are: one rule for both. Result (2026-10-08, closing milestone G2):
 
 | corpus | entries | tree pass/fail/err | export pass/fail/err/skip | code pass/fail/err/skip |
 |---|---:|---|---|---|
@@ -270,6 +270,8 @@ one rule for both. Result (2026-10-08, closing milestone G2):
 | std, linux/arm64 | 374 | 374 / 0 / 0 | 373 / 0 / 0 / 1 | 373 / 0 / 0 / 1 |
 | `$GOROOT/test`, linux/arm64 | 1,707 | 1,707 / 0 / 0 | 1,707 / 0 / 0 / 0 | 1,707 / 0 / 0 / 0 |
 
+`unsafe` has no export data or code (skip).
+
 The linux rows (2026-10-08, B1a step 0) needed no change to the helper, the converter or the
 printer: the configuration was already a parameter of the helper (`-goos`), written into every
 dump and every package's `:config` (§4.2), and the printer's build takes its environment from
@@ -282,12 +284,13 @@ passed the code level vacuously, their listings empty from the build cache
 their generated tables, `os`, `net`, `internal/poll`, the runtime's linux files and vDSO
 code; 173 files not in tamago's configuration) hold no construct tamago's lacked; their
 assembly, like tamago's, is not converted (`:other-files`).
-`unsafe` has no export data or code (skip). The nine code differences of std with its tests
-are known and explained in `test/g2c/roundtrip-tests-known.edn`: TamaGo's
-`testdata_tamago_test.go` files embed the packages' own Go sources (`//go:embed *.go` and the
-like), and the oracle compiles the candidate's sources in the original's place, so the test
-binaries embed other text. With `--tests` the oracle compares the `_test.go` files' trees and
-the export data and code of the package and its test variants (`gocmp -tests`).
+
+The nine code differences of std with its tests are known and explained in
+`test/g2c/roundtrip-tests-known.edn`: TamaGo's `testdata_tamago_test.go` files embed the packages'
+own Go sources (`//go:embed *.go` and the like), and the oracle compiles the candidate's sources in
+the original's place, so the test binaries embed other text. With `--tests` the oracle compares the
+`_test.go` files' trees and the export data and code of the package and its test variants (`gocmp
+-tests`).
 
 Times (64 cores, warm build cache): `bin/g2c roundtrip` amd64 about 40 s (convert and print
 std and `$GOROOT/test` 29 s, of which std 21 s; the check 11 s); arm64 the same; linux/amd64

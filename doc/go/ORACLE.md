@@ -12,49 +12,59 @@ Under `test/oracle/`:
 
 | part | sources | what | size |
 |---|---|---|---|
-| forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 7,305 forms, 16 files |
+| forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 8,753 forms, 25 files |
 | forms | `forms/harvest/*.clj` (generated) | the self-contained expressions of the assertions of Clojure's test suite | 3,189 forms, 29 files |
 | classes | `classes/*.clj` | operation scripts on the runtime's classes, by reflection | 8,943 steps, 18 files |
 | regex | `regex/*.clj` | patterns × flag sets × inputs for `java.util.regex` | 1,233 patterns × flag sets, 11,682 inputs, 11 files |
 
 and `driver.clj` (sent to the implementation under test), `runner.clj` (the runner, on the JVM
 Arbace), `harvest.clj` (the harvest), and the recorded results in `expected/<part>/<file>.edn`,
-one per source file. Expected files total 5.3 MB (forms 1.2 MB, classes 2.5 MB, regex 1.6 MB).
+one per source file. Expected files total 5.8 MB (forms 1.7 MB, classes 2.5 MB, regex 1.6 MB).
+Counts and sizes as of 2026-10-10 (after `gosec`): 22,118 cases in all.
 
 Hand-written forms (`forms/`): `numbers` (overflow and promotion, ratios, BigInt, BigDecimal,
 doubles, casts, bit operations, literals, `parse-*`, hashes), `strings` (UTF-16 and non-BMP
-characters, `arbace.string`, `Character`, escapes), `printing` (the print functions, every
-literal and collection, `*print-length*`, `*print-level*`, `*print-meta*`, `*print-dup*`,
-`*print-readably*`, namespaced maps, `print-method`, pprint, cl-format), `format`, `reader`
-(every literal, syntax-quote, `#()`, reader conditionals, tagged literals, `*data-readers*`,
-`*read-eval*`, `arbace.edn`, reader errors), `hashing`, `sorting`, `inst` (`#inst`, `#uuid`,
-`arbace.instant`), `collections`, `seqs` (laziness and chunking made visible by side effects,
-transducers), `destructuring_macros`, `polymorphism` (multimethods and hierarchies, protocols,
-records, `deftype`, `reify`; no `defclass` or `gen-class`, D6), `types` (types made at run
-time: `definterface`, protocols on host types and nil, records as maps, mutable and primitive
-fields, `IFn` and collection implementations, `proxy`, `bean`; EVAL-NOTES.md phase 2A),
-`state_errors` (dynamic
-vars and `binding`, atoms, refs, delays, exceptions and their messages, metadata, namespaces,
-keywords and symbols, the regex functions, `eval`), `files` (`java.io.File`, `arbace.java.io` on
-files and `file:` URLs, `java.net.URL`, `java.nio.file`'s `Path` and `Files`, `load-file`, in a
-temporary directory made for the run whose path never shows; JRT-NOTES.md, "Files"), `net`
-(`InetAddress` from literals and bytes, its printing, equality and kinds, `InetSocketAddress`, a
-`ServerSocket` and `Socket` over the loopback address on ports the host chooses, their states,
-the values they carry and the exceptions of misuse, `arbace.java.io` on sockets; no host names,
-ports, buffer sizes or timings in the results; JRT-NOTES.md, "Sockets (go-net)"),
-`defclass` (the class forms at the REPL: arithmetic, control flow, arrays, objects and statics,
-inheritance and interfaces, nested and anonymous classes, lambdas, `switch` and patterns,
+characters, `arbace.string`, `Character`, escapes), `printing` (the print functions, every literal
+and collection, `*print-length*`, `*print-level*`, `*print-meta*`, `*print-dup*`,
+`*print-readably*`, namespaced maps, `print-method`, pprint, cl-format), `format`, `reader` (every
+literal, syntax-quote, `#()`, reader conditionals, tagged literals, `*data-readers*`, `*read-eval*`,
+`arbace.edn`, reader errors), `hashing`, `sorting`, `inst` (`#inst`, `#uuid`, `arbace.instant`),
+`collections`, `seqs` (laziness and chunking made visible by side effects, transducers),
+`destructuring_macros`, `polymorphism` (multimethods and hierarchies, protocols, records, `deftype`,
+`reify`; no `gen-class`, D6; `defclass` is in `defclass`), `types` (types made at run time:
+`definterface`, protocols on host types and nil, records as maps, mutable and primitive fields,
+`IFn` and collection implementations, `proxy`, `bean`; EVAL-NOTES.md phase 2A), `state_errors`
+(dynamic vars and `binding`, atoms, refs, delays, exceptions and their messages, metadata,
+namespaces, keywords and symbols, the regex functions, `eval`), `files` (`java.io.File`,
+`arbace.java.io` on files and `file:` URLs, `java.net.URL`, `java.nio.file`'s `Path` and `Files`,
+`load-file`, in a temporary directory made for the run whose path never shows; JRT-NOTES.md,
+"Files"), `net` (`InetAddress` from literals and bytes, its printing, equality and kinds,
+`InetSocketAddress`, a `ServerSocket` and `Socket` over the loopback address on ports the host
+chooses, their states, the values they carry and the exceptions of misuse, `arbace.java.io` on
+sockets; no host names, ports, buffer sizes or timings in the results; JRT-NOTES.md, "Sockets
+(go-net)"), `defclass` (the class forms at the REPL: arithmetic, control flow, arrays, objects and
+statics, inheritance and interfaces, nested and anonymous classes, lambdas, `switch` and patterns,
 records, enums, exceptions, Clojure in class bodies, code forms in fns and deftypes;
 CLASSFORMS-REPL.md), and `defclass_corpus` (generated by `test/classforms/gen_corpus.clj`: the
 vectors of class forms of the class forms compiler's tests, each defined by `defclasses`), and
 `java_util` (java.util's plain Java added for the Go build: primitive and parallel sorts,
-natural-order and serializable comparators, `SortedSet` views, `TreeMap`'s sorted copies,
-`BitSet`, `PriorityQueue`, `WeakHashMap`, `StringTokenizer`, `Base64`, the random streams;
-JAVA-BASE.md, "java.util completed"), and `concurrency` (java.util.concurrent from Clojure: the
-concurrent collections and queues, the synchronizers, `CompletableFuture`, the executors and
-scheduled executors, the atomic arrays, adders and accumulators, `StampedLock`, `LockSupport`,
+natural-order and serializable comparators, `SortedSet` views, `TreeMap`'s sorted copies, `BitSet`,
+`PriorityQueue`, `WeakHashMap`, `StringTokenizer`, `Base64`, the random streams; JAVA-BASE.md,
+"java.util completed"), and `concurrency` (java.util.concurrent from Clojure: the concurrent
+collections and queues, the synchronizers, `CompletableFuture`, the executors and scheduled
+executors, the atomic arrays, adders and accumulators, `StampedLock`, `LockSupport`,
 `ThreadLocalRandom`; threads meet through joins, latches and timed waits; JRT-NOTES.md,
-"Concurrency").
+"Concurrency"), `time` (java.time: local and zoned date-times, instants, durations and periods, the
+time-zone database and its rules, the formatters, `java.time.temporal`, the interplay with
+`TimeZone`, `Calendar`, `Date` and `#inst`; fixed instants and zones, no clock; JRT-NOTES.md,
+"Time"), `time_zones` (every time zone's standard, daylight and generic names in the US English and
+root locales), `processes` (`ProcessBuilder`, `Process`, `Runtime.exec`, `ProcessHandle`,
+`arbace.java.shell` and `arbace.java.process` on this machine's `sh`, `echo`, `cat`, `sort`,
+`sleep`; no process IDs, paths, user names or times in the results; JRT-NOTES.md, "Processes"),
+`hint_namespaces` (type hints resolved in the namespace the code is analyzed in, whatever `*ns*` is
+when it runs), and `security` (java.security basics: `MessageDigest`, HMACs, the providers `SUN` and
+`SunJCE`, `SecureRandom` as far as it is deterministic, `UUID`'s `randomUUID` (its shape) and
+`nameUUIDFromBytes`; JRT-NOTES.md, "Security").
 
 Class scripts (`classes/`): `PersistentVector` (across the 32 and 1,056 element boundaries,
 transients, chunked seqs), `PersistentHashMap` (collisions, nil key, transients),
@@ -83,10 +93,10 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
 - `record` regenerates the expected files of the selected parts from the JVM Arbace
   (`bin/arbace-j -`). The result is byte-identical across runs (checked: two records, same
   files). It fails when a run does not complete or a class script step cannot be resolved.
-- `check IMPL` runs every expected file against `IMPL` and compares; `jvm` stands for
-  `bin/arbace-j -`, and `bin/oracle check jvm` passes (20,587 of 20,587 cases). It prints a line per file, the
-  first mismatches of each, and writes all of them to `.tmp/oracle/check.txt`; the exit status
-  is 0 when every case matches.
+- `check IMPL` runs every expected file against `IMPL` and compares; `jvm` stands for `bin/arbace-j
+  -`, and `bin/oracle check jvm` passes on a build of the same tree (22,118 cases, 2026-10-10). It
+  prints a line per file, the first mismatches of each, and writes all of them to
+  `.tmp/oracle/check.txt`; the exit status is 0 when every case matches.
 - `check IMPL --expected FILE` passes instead when the set of mismatching cases equals the one
   recorded in `FILE`, a reference of the implementation's known mismatches: it prints the new
   mismatches and the newly passing cases, and fails on either (or on a run that did not
@@ -111,22 +121,26 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
 
   `:form` is the case's text (shortened), for the reader; only `:case` is compared.
   `test/oracle/known-go-amd64.edn` is the Go build's on amd64 (34 cases in 7 groups,
-  2026-10-09; 6 cases in 4 groups since the branch `gofix`, 2026-10-10), against which `bin/gate --full` checks it (with `--timeout 900`: the reducers
-  file takes about 285 s there).
+  2026-10-09; 6 cases in 4 groups since the branch `gofix`; 7 in 5 since `gosec`, 2026-10-10),
+  against which `bin/gate --full` checks it (with `--timeout 900`: the reducers file takes
+  about 285 s there).
 - `SEL` selects parts (`forms`, `classes`, `regex`) or files by a part of their path
   (`forms/numbers`, `harvest`); `-j` the concurrent runs (default 16), `--timeout` the seconds
   allowed to one run (default 300).
 - `harvest` regenerates `forms/harvest/` (below).
 
-Times on this machine (64 cores): `record` of everything about 10 s with `-j 16` (6 CPU-minutes), `check jvm`
-the same; one file takes 0.6-2 s, mostly the JVM's start.
+Times on this machine (64 cores; 2026-10-09, before the files, time, processes, concurrency and
+net files, whose timed waits and children take longer): `record` of everything about 10 s with
+`-j 16` (6 CPU-minutes), `check jvm` the same; one file takes 0.6-2 s, mostly the JVM's start.
+(2026-10-11: `check jvm` of the 22,118 cases about 70 s with `-j 16`.)
 
 ### The implementation under test
 
 `IMPL` is a shell command (run with `bash -c` in the repository root) that evaluates the forms
 on its standard input in order, as `arbace.main -` does (a script read from stdin: `*ns*` is
 `user`, the print and reader variables bound so that `set!` works), letting them print to its
-standard output. The Go executable plugs in as, say, `bin/oracle check 'target/arbace-go -'`.
+standard output. The Go executable plugs in as, say, `bin/oracle check
+'target/arbace-go/amd64/arbace -'`.
 
 Each source file is one run of `IMPL`. Its input is the driver (`test/oracle/driver.clj`, namespace
 `oracle.driver`, which ends with `(in-ns 'user)`), then one call per case, then
@@ -176,9 +190,9 @@ the user's decision (2026-10-09) such an exception is compared by class only:
   as equal whatever its message. A case that matches only so is counted, per file (`N by V11`)
   and in the summary.
 
-The expected files hold 54 marked entries (52 forms, 2 class script steps). On the Go build
-(2026-10-09) the 52 forms all match by the rule; `bin/oracle check jvm` matches all cases with
-none of them needing it.
+The expected files hold 55 marked entries (53 forms, 2 class script steps; 2026-10-10:
+`defclass.edn` added one to the 54 of 2026-10-09). On the Go build (2026-10-09) the 52 forms of then
+all matched by the rule; `bin/oracle check jvm` matches all cases with none of them needing it.
 
 ## Formats
 
@@ -222,20 +236,20 @@ Source: a `.clj` file of steps, read as data (not evaluated):
   `(new Class args...)` or `(Class. args...)`, `(.-field recv)`.
 - Short class names resolve in `arbace.lang`, `java.lang`, `java.util`, `java.math`,
   `java.util.regex`; arrays as `T[]`.
-- Arguments: `nil`, booleans, longs, doubles (`##NaN`, `##Inf`), strings, characters; a symbol
-  (a bound name); `Class/FIELD` (a static field); `(int 3)`, `(long 3)`, `(short 3)`, `(byte 3)`, `(char 65)`, `(float 1.5)`,
-  `(double 2)`, `(boolean true)`, boxed primitives of that type; `(biginteger "123")`,
-  `(bigdecimal "1.50")`; `(array T x...)`, an array of `T`.
+- Arguments: `nil`, booleans, longs, doubles (`##NaN`, `##Inf`), strings, characters; a symbol (a
+  bound name); `Class/FIELD` (a static field); `(int 3)`, `(long 3)`, `(short 3)`, `(byte 3)`,
+  `(char 65)`, `(float 1.5)`, `(double 2)`, `(boolean true)`, boxed primitives of that type;
+  `(biginteger "123")`, `(bigdecimal "1.50")`; `(array T x...)`, an array of `T`.
 - The overload is chosen from the argument types (applicable, then most specific, then most
   exact; an ambiguity is an error); `^{:sig [int Object]} (...)` gives it explicitly.
 - `(each [x [1 2] y [3 4]] STEP...)` repeats the steps for every combination.
 
 Case (a step): `:i`, `:src` (its source text), `:op` (`:new`, `:invoke`, `:static`, `:get`,
 `:get-static`), `:class` (where the member is looked up), `:name`, `:target` (the receiver's
-binding), `:args` (as data: the literals; `{:ref name}`, `{:static class :name field}`,
-`{:char n}` (a surrogate, which has no character literal; results print it so too), `{:box "int" :value 3}`,
-`{:biginteger s}`, `{:bigdecimal s}`, `{:array T :items [...]}`), `:sig` (the parameter types,
-Java names, resolved at recording), `:bind`, then the result:
+binding), `:args` (as data: the literals; `{:ref name}`, `{:static class :name field}`, `{:char n}`
+(a surrogate, which has no character literal; results print it so too), `{:box "int" :value 3}`,
+`{:biginteger s}`, `{:bigdecimal s}`, `{:array T :items [...]}`), `:sig` (the parameter types, Java
+names, resolved at recording), `:bind`, then the result:
 - `:ret` the declared return type (or field type) and `:result`: `{:type T}` plus `:value` for
   nil, booleans, numbers of the primitive wrappers, strings, characters (BigInteger and
   BigDecimal as their string), or `:pr` (`RT.printString`) for collections, seqs, keywords,
@@ -284,41 +298,46 @@ not compile. Positions are in UTF-16 units.
 
 ## Exclusions
 
-Everything recorded is deterministic; left out:
+Everything recorded is deterministic; left out is what is nondeterministic in an area, the
+rest of it being covered deterministically by the files named:
 
-- Time and the host: the current time, `System` properties and environment, files, the default
-  time zone and locale (`(str (java.util.Date. 0))`, `%s` of a Date, `%,d`).
-- Randomness: `rand`, `shuffle`, `random-uuid`, `random-sample`.
-- Concurrency and timing: futures, agents, `pmap`, threads; refs and atoms only single-threaded.
+- Time and the host: the current time and the clock, the host's `System` properties, the default
+  time zone and locale (`(str (java.util.Date. 0))`, `%s` of a Date, `%,d`), host paths, user
+  names and process IDs (`time` and `time_zones` use fixed instants, zones and locales; `files`
+  works in a temporary directory whose path never shows; `processes` checks the environment's
+  shape and children's results).
+- Randomness: random values beyond their shape (`rand`, `shuffle`, `random-sample`;
+  `security` checks `randomUUID`'s shape and SecureRandom's lengths only).
+- Concurrency and timing: timings and interleavings (`concurrency` runs futures and threads that
+  meet through joins, latches and timed waits, and prints only their results; agents and `pmap` are
+  not run concurrently); refs and atoms only single-threaded.
 - Identity: identity hashes and the printing of objects without value semantics (fns, atoms,
   transients, arrays, `PersistentQueue`'s `#object` form, regex patterns' hashes, `deftype`s
   without `hashCode`); what remains in messages and `#object[...]` is normalized (above).
-- `gen-class` (D6), and compiling files. The class forms are covered since the Go build has
-  them at the REPL (amendment CF6, accepted 2026-10-10; C2G-SPEC §16): `forms/defclass.clj` and
-  `forms/defclass_corpus.clj`; `test/classforms/class_scripts.clj` runs a class script on
-  classes defined at the REPL from the runtime's class forms (Murmur3). `proxy` is
-  covered (amendment X4, accepted 2026-10-09; C2G-SPEC §16): the Go build has it since the
-  user's decision reversing D6 for it (C2G-SPEC §10.4), and `forms/types.clj` checks it (proxies
-  of `Object`, of interfaces, of `Writer`, `PushbackReader`, `InputStream` and `OutputStream`,
-  `proxy-super`, `update-proxy`, `bean`, pprint's writers). The harvest takes the forms naming
-  `proxy` too (amendment Y4, accepted 2026-10-09; C2G-SPEC §16; since 2026-10-09; before, `harvest.clj`'s `excluded` and `unsafe` left them out,
-  from when D6 cut it): the suite's proxy tests are in `java_interop.clj` (its `proxy`
-  directory only defines the AOT-compiled classes they use), a namespace left out whole, of
-  which the harvest keeps the assertions naming `proxy`, `proxy-super`, `update-proxy`,
-  `get-proxy-class`, `construct-proxy`, `init-proxy`, `proxy-mappings` or
-  `proxy-call-with-super` (`harvest.clj`, `proxy-forms`): `forms/harvest/java_interop.clj`,
-  3 forms after the 7 of its preamble (the others use the test's locals or its `proxy.examples` namespace, and do not stand
-  alone). On the Go build 2 of the 3 pass; the third serializes a proxy
-  (`java.io.ObjectOutputStream`, cut by D6). `protocols.clj`'s one proxy form needs the test's
-  own protocol and is not kept; pprint's proxies are in `pprint/`, which the harvest does not
-  read (it takes the top-level test files).
+- `gen-class` (D6), and compiling files. The class forms are covered since the Go build has them at
+  the REPL (amendment CF6, accepted 2026-10-10; C2G-SPEC §16): `forms/defclass.clj` and
+  `forms/defclass_corpus.clj`; `test/classforms/class_scripts.clj` runs a class script on classes
+  defined at the REPL from the runtime's class forms (Murmur3). `proxy` is covered (amendment X4,
+  accepted 2026-10-09; C2G-SPEC §16): the Go build has it since the user's decision reversing D6 for
+  it (C2G-SPEC §10.4), and `forms/types.clj` checks it (proxies of `Object`, of interfaces, of
+  `Writer`, `PushbackReader`, `InputStream` and `OutputStream`, `proxy-super`, `update-proxy`,
+  `bean`, pprint's writers). The harvest takes the forms naming `proxy` too (amendment Y4, accepted
+  2026-10-09; C2G-SPEC §16). Before, `harvest.clj`'s `excluded` and `unsafe` left them out, since D6
+  cut `proxy`. The suite's proxy tests are in `java_interop.clj` (its `proxy` directory only defines
+  the AOT-compiled classes they use), a namespace left out whole, of which the harvest keeps the
+  assertions naming `proxy`, `proxy-super`, `update-proxy`, `get-proxy-class`, `construct-proxy`,
+  `init-proxy`, `proxy-mappings` or `proxy-call-with-super` (`harvest.clj`, `proxy-forms`):
+  `forms/harvest/java_interop.clj`, 3 forms after the 7 of its preamble (the others use the test's
+  locals or its `proxy.examples` namespace, and do not stand alone). On the Go build 2 of the 3
+  pass; the third serializes a proxy (`java.io.ObjectOutputStream`, cut by D6). `protocols.clj`'s
+  one proxy form needs the test's own protocol and is not kept; pprint's proxies are in `pprint/`,
+  which the harvest does not read (it takes the top-level test files).
 - In the harvest, whole test namespaces: `agents`, `annotations`, `clearing`, `compilation`,
-  `errors`, `genclass`, `generators`, the `generated_*` adapters, `java_interop` (but for its
-  proxy forms, above), `main`,
-  `method_thunks`, `ns_libs`, `parallel`, `param_tags`, `reflect`, `refs`, `repl`, `rt`,
-  `run_single_test`, `serialization`, `server`, `streams`, `tap`, `test`, `test_fixtures`
-  (`harvest.clj`, `excluded`); and any form mentioning time, randomness, threads, files,
-  loading, `gensym`, `promise`, `locking` and the like (`unsafe`).
+  `errors`, `genclass`, `generators`, the `generated_*` adapters, `java_interop` (but for its proxy
+  forms, above), `main`, `method_thunks`, `ns_libs`, `ns_libs_load_later`, `parallel`, `param_tags`,
+  `reflect`, `refs`, `repl`, `rt`, `run_single_test`, `serialization`, `server`, `streams`, `tap`,
+  `test`, `test_fixtures` (`harvest.clj`, `excluded`); and any form mentioning time, randomness,
+  threads, files, loading, `gensym`, `promise`, `locking` and the like (`unsafe`).
 - In regex: inputs that could exhaust the stack (deep recursion in `java.util.regex` throws
   `StackOverflowError` depending on the stack size); backtracking-prone patterns get inputs of
   14 characters or fewer.

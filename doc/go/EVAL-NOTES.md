@@ -1,11 +1,24 @@
-# The evaluator, phase 1: the core, loading arbace.core
+# The evaluator (B1a step 5 and after): notes
 
-B1a step 5 ([B1-PLAN.md](B1-PLAN.md)), first phase (branch `eval-core`, 2026-10-09): the
-evaluator over the translated `Compiler`'s `Expr` tree ([EVAL-PLAN.md](EVAL-PLAN.md), the user's
-decisions Q1-Q7), loading `arbace.core` and the namespaces `arbace.main` needs from sources
-embedded in the executable, and the checks: the program from `bin/c2g --program` starts, loads
-`arbace.core`, and runs `arbace.main` (`-e`, scripts, `-` for stdin, the REPL) on linux/amd64
-and, under `qemu-aarch64`, linux/arm64.
+**Status (2026-10-11, main before the `arbace-for-golang` freeze).** Clojure's suite on the
+test build `arbace-tests` (below, "The suite's Java fixtures"): 76 namespaces, 777 tests,
+20,506 of 20,520 assertions (11 failures and 3 errors recorded in `test/arbace-go-results.edn`),
+9 namespaces skipped, test.generative 27 of 27 specs (the JVM: 20,750 of 20,750). The oracle:
+22,118 cases, 7 recorded Go mismatches in 5 groups (`test/oracle/known-go-amd64.edn`). The
+executable (amd64) about 63-65 MB, start about 0.2 s (step 6's image of prepared namespaces);
+the evaluator's speed (step 7a, 7b: closure compilation) is in [SPEED-NOTES.md](SPEED-NOTES.md).
+The sections below are dated records, in the order the work was done: phase 1 (the core), phase
+2A (types made at run time), phase 2C (the suite, the oracle's NPE rule), phase 2B (jrt's
+surface), its follow-up, pprint's `BufferedWriter`, the suite's last failures, the suite's Java
+fixtures.
+
+**Phase 1: the core, loading `arbace.core`** (the sections up to "Phase 2A"). B1a step 5
+([B1-PLAN.md](B1-PLAN.md)), first phase (branch `eval-core`, 2026-10-09): the evaluator over the
+translated `Compiler`'s `Expr` tree ([EVAL-PLAN.md](EVAL-PLAN.md), the user's decisions Q1-Q7),
+loading `arbace.core` and the namespaces `arbace.main` needs from sources embedded in the
+executable, and the checks: the program from `bin/c2g --program` starts, loads `arbace.core`, and
+runs `arbace.main` (`-e`, scripts, `-` for stdin, the REPL) on linux/amd64 and, under
+`qemu-aarch64`, linux/arm64.
 
 ```
 $ bin/arbace-go -e '(+ 1 2)'
@@ -17,18 +30,19 @@ user=> #'user/sq
 user=> 49
 ```
 
-Summary of the results (details below): the oracle's forms corpus passes 9,364 of 9,652 cases (97.0%); its class
-scripts and regex corpus run through the evaluator too (8,940 of 8,943 and 1,204 of 1,233; identical on arm64); `bin/c2g-check` with
-`arbace.core` loaded passes all 9,002 steps, the 47 that needed `arbace.core` among them;
-`bin/arbace-go --smoke` passes on both architectures. `arbace.core` loads in about 1.9 s
-(amd64), the whole start of `arbace.main` takes about 4.2 s; the executable is about 37 MB.
+Phase 1's results (2026-10-09; details below): the oracle's forms corpus passes 9,364 of 9,652 cases
+(97.0%); its class scripts and regex corpus run through the evaluator too (8,940 of 8,943 and 1,204
+of 1,233; identical on arm64); `bin/c2g-check` with `arbace.core` loaded passes all 9,002 steps, the
+47 that needed `arbace.core` among them; `bin/arbace-go --smoke` passes on both architectures.
+`arbace.core` loads in about 1.9 s (amd64), the whole start of `arbace.main` takes about 4.2 s; the
+executable is about 37 MB.
 
 ## Structure
 
 | where | what |
 |---|---|
 | `arbace/lang/go/Compiler.clj` | the evaluator (below): `Compiler$Frame`, `EvalFn`, `EvalMethod`, `EvalState`, `Dyn` (natives), `Evaluator`; an `evalIn(Frame)` method for every node kind that can hold locals, in the variants of the `Expr` classes; `ObjExpr.compile` defines the classes of `deftype`/`reify`; `NewInstanceExpr.compileStub`; `FnMethod.primInterface` (nil, Q1); `loadFile` without `java.io.File` |
-| `arbace/lang/go/RT.clj` | `RT.load` over `resourceAsStream`: the program's embedded sources (jrt's host `Resource`), then the directories of `ARBACE_PATH`; RT's initialization loads `arbace.core` when the program has its sources; `doInit` without the socket server; `ARBACE_LOAD_TIMES` |
+| `arbace/lang/go/RT.clj` | `RT.load` over `resourceAsStream`: the program's embedded sources (jrt's host `Resource`), then the directories of `ARBACE_PATH`; RT's initialization loads `arbace.core` when the program has its sources; `doInit` without the socket server (phase 1; since sockets it starts the `arbace.server.*` servers, JRT-NOTES.md "Sockets"); `ARBACE_LOAD_TIMES` |
 | `arbace/lang/go/ns/` (new) | the Go build's namespace variants (below): `genclass.clj` (`gen-interface` at run time), `core_proxy.clj` (`proxy` throws when evaluated), `instant.clj` (decision 7, over `java.util.Date`), `main.after.clj`, `main.subst.clj`, `java/io.subst.clj` |
 | `arbace/c2g/embed.clj` (new) | `bin/c2g --program`: the embedded sources, the namespace variants applied, and the classes the namespaces name outside the world |
 | `arbace/c2g/main.clj` | `--program`: the REPL's world (every public member of every class with class forms, Q2), the embedded sources (`go:embed` of `res/`, the host's `Resources`), the cut classes the namespaces name; registrations of both packages before the cut classes; the `:after` hook last |
@@ -157,34 +171,43 @@ suite nor timed; `extend` on run-time classes works through `Class` objects as o
 **The sources** are embedded in the executable: `bin/c2g --program` writes them under the main
 package's forms (`go/arbace/cmd/arbace/res/arbace/...`, 41 files, 825 KB), lists them as the
 package's `:embed-files`, declares `//go:embed res`, and `main` sets the host's `Resources` to
-`fs.Sub(resources, "res")` before `Main.main`. The embedded tree is `arbace/**/*.clj` less the
-tools (`classes`, `j2c`, `g2c`, `c2g`), the runtime's class forms (`arbace/lang`, compiled into
+`fs.Sub(resources, "res")` before `Main.main`. The embedded tree (phase 1) is `arbace/**/*.clj` less
+the tools (`classes`, `j2c`, `g2c`, `c2g`), the runtime's class forms (`arbace/lang`, compiled into
 the program), ASM, and the namespaces decision 6 leaves out (`core.server`, `repl.deps`,
-`java.basis`, `tools.deps.interop`, `java.process`, `java.shell`, `java.browse`, `java.javadoc`)
-and D6's Swing and SAX (`inspector`, `xml`). Alternatives considered: reading the checkout at run
+`java.basis`, `tools.deps.interop`, `java.process`, `java.shell`, `java.browse`, `java.javadoc`) and
+D6's Swing and SAX (`inspector`, `xml`). Since then (the list is `arbace.c2g.embed/excluded`):
+`arbace.core.server` is embedded (2026-10-09, sockets), `java.process` and `java.shell` (2026-10-10,
+processes), and the class forms' analysis (only the compiler's bytecode back end and its tools stay
+out; CLASSFORMS-REPL.md); `arbace/java/api` is translated instead (SL6) and `instant_timestamp.clj`
+left out (the Go `instant.clj` holds its part). Alternatives considered: reading the checkout at run
 time (not standalone), pre-read forms (step 6's start-up work).
 
 `RT.load` (variant) finds `NAME.clj` or `.cljc` among the embedded sources, then in the
 directories of `ARBACE_PATH` (the JVM's class path; Clojure's test suite will need it), and
 evaluates it with `Compiler.load`; there are no class files. RT's initialization loads
 `arbace.core` when the program has its sources (the check programs without them, and the
-evaluator's proof, run as before). `RT.doInit` has no socket server. `Compiler.loadFile` works
+evaluator's proof, run as before). `RT.doInit` has no socket server (phase 1; since sockets it
+loads `arbace.core.server` and starts the `arbace.server.*` servers). `Compiler.loadFile` works
 without `java.io.File`.
 
-**Namespace variants** (`arbace/lang/go/ns/`, proposed amendment V1): the Go build's differences
-in the namespaces, applied when the sources are embedded: `P.clj` replaces `arbace/P.clj`,
-`P.after.clj` is appended to it, `P.subst.clj` (a vector of strings, old and new) replaces text
-found exactly once. Used for:
+**Namespace variants** (`arbace/lang/go/ns/`, amendment V1, M1 in C2G-SPEC §10.3): the Go
+build's differences in the namespaces, applied when the sources are embedded: `P.clj` replaces
+`arbace/P.clj`, `P.after.clj` is appended to it, `P.subst.clj` (a vector of strings, old and
+new) replaces text found exactly once. Each file's header says why; as of 2026-10-11:
 
 | variant | why |
 |---|---|
 | `genclass.clj` | `gen-interface` at run time (Q5); `gen-class` throws (D6); ASM's imports out |
-| `core_proxy.clj` | `proxy` expands to a throw (D6: core_print's `PrintWriter-on` and pprint's writers load, and fail when used) |
+| `core_proxy.clj` | `proxy` over `Dyn` (phase 2A; in phase 1 it expanded to a throw); a proxy of a class outside `proxy-supers` expands to a throw |
 | `core_bean.subst.clj` | `bean` (`arbace/core_bean.clj`, shared with the JVM since 2026-10-10, VENDOR-NOTES hand change 15): no modules, every package counts as exported |
-| `instant.clj` | decision 7: `#inst` read and printed over `java.util.Date`'s milliseconds, with GregorianCalendar's arithmetic (Julian before 1582-10-15, years of era); Calendar and Timestamp instants throw |
-| `main.after.clj` | the REPL's requires trimmed (decision 6: no javadoc, no repl.deps; pprint needs proxy) |
-| `main.subst.clj` | no `DynamicClassLoader` for the REPL's thread; the error report printed with `prn` into `java.io.tmpdir` through `FileOutputStream` |
-| `java/io.subst.clj` | no reflection warnings at every start for the members D6 cuts (`java.nio` channels, `File`) |
+| `instant.clj` | decision 7: `#inst` read and printed over `java.util.Date`'s milliseconds, with GregorianCalendar's arithmetic (Julian before 1582-10-15, years of era); Calendar and Timestamp instants as `arbace/instant.clj` has them (phase 2B; they threw in phase 1) |
+| `main.after.clj` | the REPL's requires trimmed (decision 6: no javadoc, no repl.deps; no pprint, whose load took about 8 s on the evaluator, phase 2A) |
+| `main.subst.clj` | no `DynamicClassLoader` for the REPL's thread; the error report printed with `prn`, to a temporary file as on the JVM |
+| `java/io.subst.clj` | no reflection warnings at every start; the escape of `+` written out (`URLEncoder` is outside the world); `copy` between files through streams, not channels |
+| `core/server.subst.clj` | prepl makes no `DynamicClassLoader` for its thread (sockets, JRT-NOTES.md "Sockets") |
+| `reflect/java.subst.clj` | `arbace.reflect` without ASM: the names ASM's `Type` gives, computed (FX5, "The suite's Java fixtures") |
+| `classes/go.clj`, `classes/interp.clj` | the class forms at the REPL: ASM's `TypeReference` and the world's generic signatures; the interpreter's nodes (CLASSFORMS-REPL.md) |
+| `classes/{analyze,env,native,types}.subst.clj` | the class forms' analysis on the Go build: no weak references, no `Package` objects, classes interpreted, not compiled (CLASSFORMS-REPL.md) |
 
 **Cut classes.** The namespaces name classes outside the world (`(:import (java.nio.file
 Files))`, `^java.util.stream.BaseStream`, `arbace.asm.Type/getDescriptor` in core's annotation
@@ -199,12 +222,12 @@ them analyzes, as on the JVM, and fails when it runs (D6's "names exist and thro
 classes in the REPL's program. `java.sql.Timestamp` is always cut: core's `when-class` guard
 loads `instant` on it.
 
-**jrt's reflection** grew by what core and the REPL ask at load: `System`'s `Class` and table,
-the context class loader with resources (`getResourceAsStream` from the host, `getResources`
-empty: no `data_readers.clj`), `String.format` and the regex methods, `System.out`,
-`CASE_INSENSITIVE_ORDER`; a nil pointer result is null (`Box`); and overloads are listed in the
-JVM's order, which `Reflector`'s choice among applicable overloads follows (`(Math/floorDiv c
-1461)` with `c` an `Object` chose `(int, int)` before).
+**jrt's reflection** grew by what core and the REPL ask at load: `System`'s `Class` and table, the
+context class loader with resources (`getResourceAsStream` from the host, `getResources` empty: no
+`data_readers.clj`; since `gofix` both, by URL: JRT-NOTES.md "Resources by URL"), `String.format`
+and the regex methods, `System.out`, `CASE_INSENSITIVE_ORDER`; a nil pointer result is null (`Box`);
+and overloads are listed in the JVM's order, which `Reflector`'s choice among applicable overloads
+follows (`(Math/floorDiv c 1461)` with `c` an `Object` chose `(int, int)` before).
 
 ## Deviations from EVAL-PLAN
 
@@ -249,10 +272,10 @@ Load times per namespace on amd64 (`ARBACE_LOAD_TIMES=1`, nested loads included 
 | `string.clj` | 66 | `uuid.clj`, `genclass.clj`, `core_proxy.clj`, `core_classes.clj` | 22, 13, 6, 33 |
 
 
-The JVM's `bin/arbace` starts in 0.2 s (AOT-compiled namespaces in a CDS cache). The evaluator
-loads 8,436 lines of core and its helpers in 1.9 s; most of the rest is `spec.alpha` (its specs
-of core's macros). The garbage collector is a large part: with `GOGC=400` the start takes 3.6 s
-(user time 5.9 s against 14.9 s), with `GOMAXPROCS=1` 7.0 s. EVAL-PLAN §6 and step 6/7 are the
+The JVM's `bin/arbace-j` starts in 0.2 s (AOT-compiled namespaces in the JDK AOT cache). The
+evaluator loads 8,436 lines of core and its helpers in 1.9 s; most of the rest is `spec.alpha` (its
+specs of core's macros). The garbage collector is a large part: with `GOGC=400` the start takes 3.6
+s (user time 5.9 s against 14.9 s), with `GOMAXPROCS=1` 7.0 s. EVAL-PLAN §6 and step 6/7 are the
 remedies (pre-read or pre-analyzed core, closure compilation, D7's `GOGC`).
 
 ## Checks
@@ -296,8 +319,11 @@ data). **linux/arm64 under `qemu-aarch64` gives the same results file for file**
 10x slower to run: the start under qemu is about 44 s).
 
 **`bin/c2g-check -- --program`**: the check programs embed the sources and load `arbace.core`,
-binding `*print-namespace-maps*` as `arbace.main` does: 9,002 of 9,002 steps pass on linux/amd64 and linux/arm64 alike, the 47 that needed `arbace.core` among them (a check program is 38 MB; each builds in about 14 s once the packages are cached). Without `--program` the
-check is as before (`test/c2g/needs-core.edn` still applies to it): 8,955 pass, 47 need core, 0 fail (amd64; no regression from the c2g changes).
+binding `*print-namespace-maps*` as `arbace.main` does: 9,002 of 9,002 steps pass on linux/amd64 and
+linux/arm64 alike, the 47 that needed `arbace.core` among them (a check program is 38 MB; each
+builds in about 14 s once the packages are cached). Without `--program` the check is as before
+(`test/c2g/needs-core.edn` still applies to it): 8,955 pass, 47 need core, 0 fail (amd64; no
+regression from the c2g changes).
 
 **`bin/c2g-evalproof`**: the proof grows by `try`/`catch`/`finally`, `letfn*`, `case*`,
 collection literals with locals, keyword invokes, monitors, `instance?` and `StackOverflowError`:
@@ -341,13 +367,13 @@ can; the shared files are `arbace/lang/go/Compiler.clj`, `arbace/c2g/out.clj` an
    `ns/core_proxy.clj`.
 2. **jrt's surface for the REPL** (Q2 for the hand-written classes): the hand-written classes'
    tables list only what the manifest declared for the runtime: `Math`'s trigonometric and
-   exponential functions (all of `arbace.math`, 145 cases), `String.join(CharSequence,
-   Iterable)`, `Thread`, `ClassLoader`; the JDK 21 sequenced collections (`LinkedHashMap`'s
-   views need `SequencedSet`); more charsets (`UTF-16BE`); `java.time.Instant`, `Calendar`,
-   `Timestamp` (decision 7's rest); the helpful `NullPointerException` messages or their
-   acceptance in the oracle as `bin/c2g-check` accepts them (V11); the REPL's `(source f)`
-   (a `NullPointerException`: `source-fn` reads the resource through the base loader). Files: `go/arbace/jrt`,
-   `test/jrt`, `bin/jrt-convert`'s sources.
+   exponential functions (all of `arbace.math`, 145 cases), `String.join(CharSequence, Iterable)`,
+   `Thread`, `ClassLoader`; the JDK 21 sequenced collections (`LinkedHashMap`'s views need
+   `SequencedSet`); more charsets (`UTF-16BE`); `java.time.Instant`, `Calendar`, `Timestamp`
+   (decision 7's rest); the helpful `NullPointerException` messages or their acceptance in the
+   oracle as `bin/c2g-check` accepts them (V11); the REPL's `(source f)` (a `NullPointerException`:
+   `source-fn` reads the resource through the base loader). Files: `go/arbace/jrt`, `test/jrt`,
+   `bin/jrt-convert`'s sources.
 3. **Clojure's test suite on the Go build**: a runner (`bin/clojure-tests` with the Go executable,
    the suite through `ARBACE_PATH`), recorded per namespace as `test/arbace-results.edn` is; then
    the failures by namespace. Files: `bin/`, `test/`.
@@ -356,7 +382,7 @@ can; the shared files are `arbace/lang/go/Compiler.clj`, `arbace/c2g/out.clj` an
    clears a local after its last use: the evaluator keeps it, so a head held in a frame slot
    is not collected).
 
-## Proposed amendments (for the user's review)
+## Amendments (accepted 2026-10-09)
 
 All accepted 2026-10-09 and folded, renamed M1-M8 so as not to collide with C2G-SPEC's
 deviations V1-V13 (C2G-SPEC §16 has the scheme: phase 1 M, phase 2A X, phase 2B S).
@@ -419,15 +445,16 @@ non-private ones: allocate the `DynSub_C`, run `C`'s initialization and construc
 `proxy-supers` (the classes a proxy may extend besides `Object`): `java.io.Writer` (pprint's
 writers, `PrintWriter-on`, cl-format's case writers), `Reader`, `PushbackReader` (`arbace.repl`'s
 `source-fn`), `InputStream`, `OutputStream`, `arbace.lang.APersistentMap` (`bean`), and jrt's
-hand-written `ThreadLocal` (`clojure.test.check.random`; its constructor body and `Impl_`
-methods follow the shapes of translated non-leaf classes). A class must be translated or
-hand-written, not final and not a leaf (a leaf's values are `*C`, §5.3: `BufferedWriter` or
-`BitSet` cannot be extended without making them non-leaf, which changes every use; a proxy of
-one, or of a class outside the list, expands to a throw of `UnsupportedOperationException`
-"proxy of C is not in the Go build", so code naming it loads). Each type has about 650 methods;
-the seven add about 4 MB to the executable (amd64 37.4 to 41.6 MB, arm64 35.5 to 39.3 MB). Their
-roots (`dyn/proxy-roots`: `C`'s constructors and instance methods, up its superclass chain) keep
-the implementations translated.
+hand-written `ThreadLocal` (`clojure.test.check.random`; its constructor body and `Impl_` methods
+follow the shapes of translated non-leaf classes). A class must be translated or hand-written, not
+final and not a leaf (a leaf's values are `*C`, §5.3: `BufferedWriter` or `BitSet` cannot be
+extended without making them non-leaf, which changes every use; a proxy of one, or of a class
+outside the list, expands to a throw of `UnsupportedOperationException` "proxy of C is not in the Go
+build", so code naming it loads). Each type has about 650 methods (1,039 by `pprint-bw`, below, as
+the world grew; since SZ4 the methods live in one shared `dynCore`, JRT-NOTES.md "Size: trimming the
+executable"); the seven add about 4 MB to the executable (amd64 37.4 to 41.6 MB, arm64 35.5 to 39.3
+MB). Their roots (`dyn/proxy-roots`: `C`'s constructors and instance methods, up its superclass
+chain) keep the implementations translated.
 
 `Compiler$Dyn` gains two natives: `defineProxyClass(name, super, interfaces)` (a `Dyn` class
 with one private field, the fn map, and a no-argument constructor for `Object`; else a class
@@ -469,7 +496,9 @@ require it at start and the error report stays `prn` (`main.after.clj`, `main.su
 both go back to the JVM's once start-up work (pre-analyzed namespaces, steps 6-7) makes the
 load cheap. Loading `core_proxy` itself takes about 0.1 s more than the throwing variant (the
 proxy classes of `bean` and, in `core_print`, `PrintWriter-on` are made at load, as the JVM
-loads them).
+loads them). (2026-10-11, after steps 6 and 7: `(require 'arbace.pprint)` takes about 60 ms on
+the shipped executable, but `main.after.clj` and `main.subst.clj` still leave pprint out:
+restoring the JVM's REPL requires and error report is open.)
 
 ### Fixes found by the checks
 
@@ -556,7 +585,7 @@ for other reasons (`java_interop`: `arbace.inspector`, the suite's Java classes;
 `bin/arbace-go --smoke` (amd64), `bin/c2g-evalproof` (amd64), `bin/jrt test` (amd64) and
 `bin/c2g-check -- --program` (amd64: 9,002 of 9,002 steps) pass.
 
-### Proposed amendments (for the user's review)
+### Amendments (accepted 2026-10-09)
 
 All accepted 2026-10-09 and folded, renamed X1-X4 (C2G-SPEC §16).
 
@@ -595,7 +624,7 @@ counts the cases that match only so (`N by V11` per file and in the summary). Ex
 [ORACLE.md](ORACLE.md), "Helpful NullPointerException messages", has the details. Re-recorded:
 12 expected files, 54 entries marked (52 forms, 2 class script steps), nothing else changed. (The
 rule is the user's decision, so no amendment: ORACLE.md describes it, and C2G-SPEC §7.9.5 and
-V11 refer to it. The gate proposal below is still open.)
+V11 refer to it. The gate proposal below was then open; done: "For the gate", below.)
 
 Results: `bin/oracle check jvm` 19,828 of 19,828 (none by V11). On the Go build (amd64) the 52
 forms all pass now: the forms corpus 9,416 of 9,652 (9,364 before), the whole oracle 19,562 of
@@ -605,20 +634,21 @@ remains), regex 1,204 of 1,233 (unchanged).
 ### The runner
 
 `bin/clojure-tests` runs the suite on the Go build with `CLOJURE_TESTS_GO`, the command running
-it:
+it; since `gofix` (FX1, "The suite's Java fixtures", below) that is the test build, made by
+`bin/arbace-go --build-tests`, and the runner refuses an executable without the fixtures:
 
-    CLOJURE_TESTS_GO=$PWD/target/arbace-go/amd64/arbace bin/clojure-tests -j 16
+    CLOJURE_TESTS_GO=$PWD/target/arbace-go/amd64/arbace-tests bin/clojure-tests -j 16
 
 It implies rename mode: the suite and the test libraries renamed as for the JVM (the same
-`arbace.j2c.rename`, on the JVM), into `.tmp/clojure-tests/go/` (`CLOJURE_TESTS_RUN`, default
-`go`). Listing the namespaces and the report run on the JVM's `target/stage2` (`CLOJURE_SRC`);
-each test namespace runs in its own Go process (`TMPDIR` the run's `tmp/`, `ARBACE_PATH` the
-renamed libraries then the suite's `test/`), which, as upstream's JVM does, requires every test
-namespace first. The fixtures step is skipped: the Go build loads no class files, so the AOT
-fixtures load from source and the Java fixtures do not exist. The reference is
-`test/arbace-go-results.edn` (the default `CLOJURE_TESTS_EXPECTED` in this mode), in the shape
-of `test/arbace-results.edn`, with a comment per namespace that fails saying why. Exit status as
-for the JVM: 0 when nothing differs from the reference (the counts of tests are compared
+`arbace.j2c.rename`, on the JVM), into `.tmp/clojure-tests/go/` (`CLOJURE_TESTS_RUN`, default `go`).
+Listing the namespaces and the report run on the JVM's `target/stage2` (`CLOJURE_SRC`); each test
+namespace runs in its own Go process (`TMPDIR` the run's `tmp/`, `ARBACE_PATH` the renamed libraries
+then the suite's `test/`), which, as upstream's JVM does, requires every test namespace first. The
+fixtures step is skipped: the Go build loads no class files, so the AOT fixtures load from source;
+the Java fixtures are translated into the test build (FX1; before `gofix` they did not exist). The
+reference is `test/arbace-go-results.edn` (the default `CLOJURE_TESTS_EXPECTED` in this mode), in
+the shape of `test/arbace-results.edn`, with a comment per namespace that fails saying why. Exit
+status as for the JVM: 0 when nothing differs from the reference (the counts of tests are compared
 exactly, so an improvement is reported too, and the reference is then rewritten from
 `.tmp/clojure-tests/go/results.edn`).
 
@@ -629,17 +659,23 @@ tests' `:test` before running the namespace; `bin/clojure-tests` passes it the r
 namespace's process gets its own timeout instead of `CLOJURE_TESTS_TIMEOUT`'s, default 900 s).
 Both are written back into `results.edn`. Checked with a timeout of 2 s on `clearing` and 600 s
 on `string`: `clearing` is killed (exit 124, "no result (crashed or timed out)"), `string` passes,
-on the JVM's stage 2 and on the Go build alike. The Go reference has no `:timeouts` yet:
-`transducers`' `seq-and-transducer` stays skipped until step 7's speed (closure compilation)
-lands, then gets a timeout instead.
+on the JVM's stage 2 and on the Go build alike. The Go reference has no `:timeouts`:
+`transducers`' `seq-and-transducer` stays skipped (`:skipped-tests`); EC7, a timeout instead
+after step 7, was not taken (the user, 2026-10-10; SPEED-NOTES.md, "Amendments"). Since `gofix`
+a skipped test is not compiled either (FX2, "The suite's Java fixtures").
 
 `test/run_clojure_tests.clj` reads and writes its files through `FileInputStream` and
 `FileOutputStream` (the Go build has no `java.io.File`; `slurp` of a path string goes through
 `io/as-url`, cut); its `generative` mode takes the namespaces from a file when given one
 (`tools.namespace` searches directories with `File`).
 
-**Exclusions** (`:skipped`, 19 besides upstream's two fixtures), the namespaces that cannot load
-in the Go build by design:
+**Exclusions** (as of phase 2C: `:skipped`, 19 besides upstream's two fixtures), the namespaces
+that could not load in the Go build by design. Since then `reducers` (phase 2B), `server`
+(sockets), `java.process` and `java.shell` (processes), and `compilation`, the three
+`generated-*`, `java-interop`, `param-tags`, `reflect` and `try-catch` (the test build, FX1) run;
+9 are skipped now (`test/arbace-go-results.edn`): `clojure-xml`, `genclass`,
+`genclass.examples`, `java.javadoc`, `metadata`, `repl.deps`, `serialization` and upstream's two
+fixtures. The table as of phase 2C:
 
 | namespace | why |
 |---|---|
@@ -658,7 +694,8 @@ in the Go build by design:
 On the JVM these hold 138 tests and 1,148 assertions. The other namespaces run, and their load
 errors are recorded, so that the work of parts 1 and 2 shows in the reference.
 
-**test.generative** does not run on the Go build (the runner's `--generative` forces it): its
+**test.generative** did not run on the Go build then (it does since "The suite's last failures",
+below; 27 specs pass now; the runner's `--generative` forced it): its
 runner requires `clojure.data.generators` (`java.util.Random`, below) and
 `clojure.tools.namespace.find`, which imports `java.util.jar.JarFile` (cut, D6).
 
@@ -731,13 +768,14 @@ assertions), pprint and two tests of `protocols`, and `reify`'s duplicate method
 
 ### Times and resources
 
-On this machine (64 cores, shared with two other agents' work): the suite takes **4 min 36 s**
-with `-j 16` (102 CPU-minutes); the JVM's, in the gate, 3 min 15 s with `-j 24` (renaming and fixtures included). A namespace's process takes 58 to 102 s,
-almost all of it requiring the test namespaces (and their libraries) through the evaluator.
-`GOGC` matters here: one process with the default `GOGC=100` takes 63 s and 203 s of CPU (289
-MB resident), with `GOGC=400` 56 s and 89 s of CPU (650 MB), with `GOMAXPROCS=4` 88 s (339 MB).
-The runner sets `GOGC=400` for its processes unless `GOGC` is set: 16 processes need about 10
-GB. Start-up work (part 4: pre-read or pre-analyzed namespaces) would shorten every process.
+On this machine (64 cores, shared with two other agents' work): the suite takes **4 min 36 s** with
+`-j 16` (102 CPU-minutes); the JVM's, in the gate, 3 min 15 s with `-j 24` (renaming and fixtures
+included). A namespace's process takes 58 to 102 s, almost all of it requiring the test namespaces
+(and their libraries) through the evaluator. `GOGC` matters here: one process with the default
+`GOGC=100` takes 63 s and 203 s of CPU (289 MB resident), with `GOGC=400` 56 s and 89 s of CPU (650
+MB), with `GOMAXPROCS=4` 88 s (339 MB). The runner sets `GOGC=400` for its processes unless `GOGC`
+is set: 16 processes need about 10 GB. Start-up work (part 4: pre-read or pre-analyzed namespaces)
+would shorten every process.
 
 ### For the gate (done, 2026-10-09; `bin/gate` unchanged)
 
@@ -752,12 +790,18 @@ The user's decision (2026-10-09): `bin/gate --full` runs one more chain (each st
    `test/arbace-go-results.edn`); and `oracle-go` (`bin/oracle check 'target/arbace-go/amd64/arbace
    -' --timeout 900 --expected test/oracle/known-go-amd64.edn`).
 
-The oracle's new `--expected FILE` (ORACLE.md) passes when the mismatching cases are exactly
-those of the reference, `test/oracle/known-go-amd64.edn`: the 32 of main at `4284edc`, in five
-groups with their reasons (`deftype Foo/2`'s error source, the `StringBuilder` identity hash, the
-JVM's recorded `dcmpg` bug, 5 `\N{name}` and 24 `CANON_EQ` regex cases needing the JDK's
-resource data); `--write-expected FILE` rewrites it. The timeout is 900 s, not 300: the reducers
-file takes about 285 s on the Go build. Measured (64 cores; the host's memory read 46 GB in the morning, 62-64 GB in the afternoon):
+(Since `gofix`, `go-build-tests` builds the test build after `go-build`, and `suite-go` runs on
+`target/arbace-go/amd64/arbace-tests`: "The test build", below.)
+
+The oracle's new `--expected FILE` (ORACLE.md) passes when the mismatching cases are exactly those
+of the reference, `test/oracle/known-go-amd64.edn`: the 32 of main at `4284edc`, in five groups with
+their reasons (`deftype Foo/2`'s error source, the `StringBuilder` identity hash, the boxed NaN's
+identity (`(Util/equiv ##NaN ##NaN)`: Go answers `true`, its two boxed NaNs being one object; the
+reference's reason, blaming the JVM's `dcmpg` bug, is wrong: that bug was fixed and the oracle
+re-recorded on 2026-10-08), 5 `\N{name}` and 24 `CANON_EQ` regex cases needing the JDK's resource
+data); `--write-expected FILE` rewrites it. The timeout is 900 s, not 300: the reducers file takes
+about 285 s on the Go build. Measured (64 cores; the host's memory read 46 GB in the morning, 62-64
+GB in the afternoon):
 
 - The proposal's layout, everything concurrent from the start, does not fit: the three suites
   (24 test JVMs each) use 40-59 GB at their peak by themselves, and the OOM killer took g2c's
@@ -822,11 +866,12 @@ were part B's:
 | `String/join` of an `Iterable`, `.formatted` | 2 | 0 |
 | `UUID/nameUUIDFromBytes` (MD5) | 1 | 0 |
 
-With phases 2A and 2C merged (main at `29e73d6`), the forms corpus passes **10,075 of 10,077**
-(the two: `deftype Foo/2`'s error source, part A's, and the identity hash); the whole oracle
-**20,221 of 20,253** (forms; the class scripts 8,942 of 8,943, `(Util/equiv ##NaN ##NaN)`, the
-JVM's recorded `dcmpg` bug, C2G-NOTES.md; regex 1,204 of 1,233, the 29 that need the JDK's
-resource data). linux/arm64 under `qemu-aarch64`: the forms corpus the same, 10,075 of 10,077, the same two (with `--timeout 5000`: the reducers file takes about 70 minutes there).
+With phases 2A and 2C merged (main at `29e73d6`), the forms corpus passes **10,075 of 10,077** (the
+two: `deftype Foo/2`'s error source, part A's, and the identity hash); the whole oracle **20,221 of
+20,253** (forms; the class scripts 8,942 of 8,943, `(Util/equiv ##NaN ##NaN)`, the boxed NaN's
+identity (Go answers `true`: its two boxed NaNs are one object); regex 1,204 of 1,233, the 29 that
+need the JDK's resource data). linux/arm64 under `qemu-aarch64`: the forms corpus the same, 10,075
+of 10,077, the same two (with `--timeout 5000`: the reducers file takes about 70 minutes there).
 
 **Clojure's suite on the Go build** (`CLOJURE_TESTS_GO`, amd64, against main's reference after
 phases 2A and 2C: 1,874 assertions passing): **18,781 of 18,806 assertions pass** (588 tests;
@@ -852,7 +897,7 @@ unchanged); `bin/jrt test` on amd64 (and `--race` for the pool) and arm64; `bin/
 of it), 56 MB on arm64; `bin/c2g --program` about 55 s; `bin/jrt-convert` 340 files in about
 85 s; start-up unchanged.
 
-### Proposed amendments (for the user's review)
+### Amendments (accepted 2026-10-09)
 
 All accepted 2026-10-09 and folded, renamed S1-S8 (C2G-SPEC §16); B7 by keeping the
 transcribed code under its license. JRT-NOTES.md's W1-W4 ("Dates") are B1, B2, B3 and B7.
@@ -898,10 +943,11 @@ transcribed code under its license. JRT-NOTES.md's W1-W4 ("Dates") are B1, B2, B
 
 Branch `smalls` (2026-10-09), three small items left by phase 2B.
 
-**`Semaphore`** (JRT-NOTES.md, "Semaphore"): why c2g left `AbstractQueuedSynchronizer$ConditionObject`
-untranslated (jrt registers that JDK name for `ReentrantLock`'s conditions under another Go
-name, and c2g named the type by the derived name: fixed in c2g, amendment Y1), and the decision
-for a hand-written `Semaphore` in jrt over the translated AQS (amendment Y3).
+**`Semaphore`** (JRT-NOTES.md, "Semaphore"): why c2g left
+`AbstractQueuedSynchronizer$ConditionObject` untranslated (jrt registers that JDK name for
+`ReentrantLock`'s conditions under another Go name, and c2g named the type by the derived name:
+fixed in c2g, amendment Y1), and the decision for a hand-written `Semaphore` in jrt over the
+translated AQS (amendment Y3).
 
 **Dyn implements jrt's hand-written interfaces** (`arbace/c2g/dyn.clj`, `interfaces`). With
 `Semaphore` the pprint tests loaded but `(future-cancel f)` threw `ClassCastException`:
@@ -941,7 +987,7 @@ only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendm
 - **Checks**: `bin/gate` passes; `bin/jrt test` on amd64 (and `--race` for the locks and
   `Semaphore`) and arm64.
 
-### The regex cases that need the JDK's data (not done)
+### The regex cases that need the JDK's data (done later: JRT-NOTES.md, "The JDK's resource data")
 
 29 of the oracle's regex cases fail on the Go build for want of JDK resource data:
 
@@ -963,9 +1009,10 @@ only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendm
   variant of `NormalizerImpl.load` over a `byte[]`, or a hand-written NFD over Go's tables
   (Go's std has none exported: `golang.org/x/text/unicode/norm` is vendored inside std, and
   its Unicode version, 15.0, is older than JDK 26's). Several days for one flag Clojure code
-  rarely uses: not worth it now; to report to the user.
+  rarely uses: not worth it now; to report to the user. (Both were done afterwards, amendments RD:
+  no regex case is left among the recorded Go mismatches.)
 
-### Proposed amendments (for the user's review)
+### Amendments (accepted 2026-10-09)
 
 - **Y1 (C2G-SPEC §4.4, Names)** c2g names a class jrt provides, and does not translate, by the
   Go name jrt registers for it (the class variable's name less `_class`), which may differ from
@@ -1000,7 +1047,7 @@ its methods split into `Impl_` and dispatch methods, and c2g writes `DynSub_C` o
 other change: the rule a class must be non-leaf to be listed becomes a consequence of being
 listed. (A hand-written class stays as jrt declares it: `ThreadLocal` is non-leaf in jrt.) For
 `BufferedWriter` the change touches its own file, `PrintStream` (which holds one) and the class
-table; `DynSub_BufferedWriter` has 1,039 methods, as the other `DynSub_C`.
+table; `DynSub_BufferedWriter` has 1,039 methods, as the other `DynSub_C` now do.
 
 **Behaviour as on the JVM.** The oracle's `forms/types.clj` gains 13 forms (appended, so the
 other cases keep their lines): a `BufferedWriter` proxy whose `flush` calls `proxy-super` and
@@ -1020,17 +1067,19 @@ and nil (flushes counted as the JVM counts them), `pprint` (the pretty writer ov
   to 59,584,911 bytes, +981 KB (+1.7%): `DynSub_BufferedWriter` and `BufferedWriter`'s split.
 - **The oracle**: `bin/oracle check jvm` 20,276 of 20,276. The Go build (amd64): 20,243 of
   20,276 (the 13 new cases match); the 33 mismatches are those `known-go-amd64.edn` records.
-- **Checks**: `bin/c2g-check -- --program` 9,010 of 9,010 steps on amd64 and on arm64; `bin/jrt test` (amd64) passes.
-  The change is in c2g only (not compiled by the bootstrap), so `bin/gate` was not needed.
+- **Checks**: `bin/c2g-check -- --program` 9,010 of 9,010 steps on amd64 and on arm64; `bin/jrt
+  test` (amd64) passes. The change is in c2g only (not compiled by the bootstrap), so `bin/gate` was
+  not needed.
 
-### Proposed amendments (for the user's review)
+### Amendments (accepted 2026-10-10)
 
-- **Z1 (C2G-SPEC §5.3, §5.12; accepted by the user 2026-10-10, folded there and in §16)** A translated, non-final class of `proxy-supers` is not a leaf:
-  its `DynSub_C` is a subclass in the program, so leafness counts it (it was a condition on the
-  list, now a consequence of it; X1's "leafness stays a property of the closed world" reads: of
-  the closed world and the proxy types c2g adds to it). The list moves to
-  `arbace.c2g.model/proxy-supers` and gains `java.io.BufferedWriter` (pprint's tests); §5.12's
-  "a proxy of a leaf class throws (`BufferedWriter` ...)" keeps `BitSet` as its example.
+- **Z1 (C2G-SPEC §5.3, §5.12; accepted by the user 2026-10-10, folded there and in §16)** A
+  translated, non-final class of `proxy-supers` is not a leaf: its `DynSub_C` is a subclass in the
+  program, so leafness counts it (it was a condition on the list, now a consequence of it; X1's
+  "leafness stays a property of the closed world" reads: of the closed world and the proxy types c2g
+  adds to it). The list moves to `arbace.c2g.model/proxy-supers` and gains `java.io.BufferedWriter`
+  (pprint's tests); §5.12's "a proxy of a leaf class throws (`BufferedWriter` ...)" keeps `BitSet`
+  as its example.
 
 ## The suite's last failures
 
@@ -1142,7 +1191,9 @@ reason}}`; `test/run_clojure_tests.clj` removes their `:test` before running the
 `bin/clojure-tests` passes it the reference), and skips `seq-and-transducer` only: `transducers`
 runs its other 18 tests (108 assertions, all passing) instead of being skipped whole. Proposed
 for when step 7 lands (SL3): a per-namespace timeout in the reference (`:timeouts {ns s}`) to
-run the test again, about 30 minutes at today's speed.
+run the test again, about 30 minutes at today's speed. (Outcome: the timeouts were done, but
+after step 7 EC7, the timeout for this test, was not taken: it stays skipped; SPEED-NOTES.md,
+"Amendments".)
 
 ### Other skipped namespaces (item 4)
 
@@ -1163,9 +1214,15 @@ elsewhere (`java.io`, `method-thunks`, `reader`'s and `sequences`' `File` errors
 | `genclass`, `genclass.examples` (54) | `gen-class` stays out (the user's decision) | | |
 | `repl.deps` (0) | `arbace.repl.deps` (D6: tools.deps) | | |
 
+(Decided since: the Java fixtures were done (FX1, "The suite's Java fixtures"), and processes
+(`java.shell`, `java.process`: JRT-NOTES.md, "Processes"); XML (SAX), gen-class and Java
+serialization stay out for good (the user, 2026-10-10; JOURNAL.md, "what comes after the
+freeze").)
+
 Fixed here as the cheap ones: `transducers` (its 18 other tests run), `api` (loads, its specs
 run) and test.generative (above). Nothing else on the list is cheap: the Java fixtures (SL4) are
-the next best value (about 450 assertions in five namespaces for half a day), then SL5.
+the next best value (about 450 assertions in five namespaces for half a day), then SL5. (SL4
+was done as FX1; SL5 was not taken.)
 
 ### arm64
 
@@ -1203,12 +1260,13 @@ work's). `bin/arbace-go --smoke` passes (amd64). `test/arbace-go-results.edn` is
 is unchanged by the runner's change (`clearing`, `transducers`, `api` checked: 19 tests, 108
 assertions for `transducers` there).
 
-### Proposed amendments (for the user's review)
+### Amendments (decided 2026-10-10)
 
 Prefix SL (this branch). **Decided by the user 2026-10-10:** SL1, SL2, SL3 (the per-test skip
 and the per-namespace timeouts, both done), SL6 and SL7 accepted and folded (each marked below
 with where it went, and in C2G-SPEC §16); SL4 and SL5 not taken for now (nor `ProcessBuilder`
-for `java.shell`/`java.process`).
+for `java.shell`/`java.process`). (SL4 was taken later the same day as FX1, "The suite's Java
+fixtures", below; processes were done too: JRT-NOTES.md, "Processes".)
 
 - **SL1 (EVAL-PLAN §2.1; C2G-SPEC §10.2) Locals clearing.** The evaluator clears locals as
   compiled code does: `ObjExpr.compile`'s variant makes `closesExprs` (the analysis's clear
@@ -1231,22 +1289,28 @@ for `java.shell`/`java.process`).
   removes their `:test`; `bin/clojure-tests` passes the reference); used for `transducers`'
   `seq-and-transducer` (about 1,700 s on the evaluator). Proposed, for when step 7's speed
   lands: per-namespace timeouts in the reference (`:timeouts {ns seconds}`) so that the test
-  runs again, then the skip removed. *Accepted 2026-10-10 (the skip and the timeouts), folded into "Phase 2C", "The runner", above; the timeouts done (`:timeouts {ns seconds}`).*
+  runs again, then the skip removed. *Accepted 2026-10-10 (the skip and the timeouts), folded
+  into "Phase 2C", "The runner", above; the timeouts done (`:timeouts {ns seconds}`). The skip
+  stays: EC7, the timeout for `seq-and-transducer` after step 7 (574 s alone), was not taken
+  (SPEED-NOTES.md, "Amendments").*
 - **SL4 (proposal; B1-PLAN D6, the gate) A test build with the suite's Java fixtures.** j2c
   converts `test/java` (12 files, done in 1 s, no error); `bin/arbace-go --build-tests` would
   translate them with the program (`bin/c2g --program --input`) into a second executable
   `arbace-tests` that `suite-go` uses: `generated-*` (297 assertions), `param-tags` (136),
   `reflect` (7), `try-catch` (5) and most of `compilation` could run. Cost: half a day, and
   about 3 minutes more in the gate's Go chain (a second link with the fixtures, or the fixtures
-  in every executable: smaller cost, but test classes in the product). *Not taken (the user, 2026-10-10).*
+  in every executable: smaller cost, but test classes in the product). *Not taken (the user,
+  2026-10-10); taken later the same day as FX1 ("The suite's Java fixtures").*
 - **SL5 (proposal; B1-PLAN D6) Embed D6's namespaces with their classes cut.** `arbace.inspector`,
   `arbace.xml`, `arbace.java.browse`, `javadoc`, `shell` embedded, Swing, SAX, `Desktop` and
   `ProcessBuilder` cut (their members throw): `metadata` (53) and `java.javadoc` (5) would pass,
   `java-interop` gets past its `require`; a REPL user gets "not in the Go build" errors when
-  calling them instead of a missing namespace. Half a day; it reverses part of D6. *Not taken (the user, 2026-10-10).*
+  calling them instead of a missing namespace. Half a day; it reverses part of D6. *Not taken
+  (the user, 2026-10-10).*
 - **SL6 (C2G-SPEC §10.6) The Java API in the program.** `bin/c2g --program` translates
   `arbace/java/api/Clojure.clj` with `arbace/lang`: `arbace.java.api.Clojure` exists in the Go
-  build as on the JVM (it is not among the embedded namespaces' sources). *Accepted 2026-10-10, folded into C2G-SPEC §10.6.*
+  build as on the JVM (it is not among the embedded namespaces' sources). *Accepted 2026-10-10,
+  folded into C2G-SPEC §10.6.*
 - **SL7 (C2G-SPEC §4.1, M3; the runner) Library cuts and test.generative on Go.** Besides the
   classes the embedded namespaces name, c2g cuts a fixed list of JDK classes that libraries
   loaded from `ARBACE_PATH` import (`arbace.c2g.embed/library-cuts`: `java.util.jar.JarFile`,
@@ -1322,7 +1386,8 @@ through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle diff
   leading `[`): `NoClassDefFoundError: IllegalName: compile__stub.user.Foo/2`. The Go build's
   `compileStub` now refuses it the same way, so the error is the JVM's, from the same place.
 
-Both cases match now; `test/oracle/known-go-amd64.edn` holds 6 cases in 4 groups (was 8 in 6).
+Both cases match now; `test/oracle/known-go-amd64.edn` holds 6 cases in 4 groups (was 8 in 6;
+7 in 5 since `gosec` added the providers case, `security.clj:172`).
 
 ### Results
 
@@ -1359,10 +1424,10 @@ reference:
   superclasses.
 
 Other checks: `bin/arbace-go --smoke` passes; the whole oracle on the shipped executable,
-`--expected test/oracle/known-go-amd64.edn`: 21,794 of 21,800, the 6 recorded, none new; the
-JVM's suite on stage 2 is unchanged by the runner's change (`java.io`, `reflect`, `try-catch`
-checked, and the reference has no `:skipped-tests`). No source the bootstrap compiles changed
-(the Go variants, c2g, the overlay and jrt are the Go build's).
+`--expected test/oracle/known-go-amd64.edn`: 21,794 of 21,800, the 6 recorded, none new (after
+`gosec`: 22,118 cases, 7 recorded); the JVM's suite on stage 2 is unchanged by the runner's change
+(`java.io`, `reflect`, `try-catch` checked, and the reference has no `:skipped-tests`). No source
+the bootstrap compiles changed (the Go variants, c2g, the overlay and jrt are the Go build's).
 
 ### The gate's cost
 
@@ -1374,35 +1439,40 @@ critical path, the suite, grows by about 2.5 to 3.5 minutes; the suite itself ru
 namespaces (each in its own process beside the others: a few seconds more). The essential gate
 is unchanged (its Go check is the shipped executable's smoke test).
 
-### Proposed amendments (for the user's review)
+### Amendments FX1-FX7 (accepted by the user 2026-10-10)
 
-Prefix FX (this branch; no FX appears elsewhere in doc/).
+Prefix FX (unique to this branch). Accepted by the user 2026-10-10 (JOURNAL.md, "the suite's
+Java fixtures, resources by URL"); where each is folded is marked below.
 
 - **FX1 (B1-PLAN D6; C2G-SPEC §10.6; the gate) The test build.** `bin/arbace-go --build-tests`
   makes `arbace-tests`, the program with the suite's Java fixtures (`bin/clojure-tests
   --java-fixtures`: j2c on the renamed `test/java`), which `bin/clojure-tests` requires of
   `CLOJURE_TESTS_GO` and `bin/gate --full`'s `suite-go` uses; `test/arbace-go-results.edn` is
   its reference, with `compilation`, `generated-*` ×3, `java-interop`, `param-tags`, `reflect`
-  and `try-catch` no longer skipped. Supersedes SL4.
+  and `try-catch` no longer skipped. Supersedes SL4. *Accepted 2026-10-10; to fold into
+  B1-PLAN D6 and C2G-SPEC §10.6 and §16 (pending there).*
 - **FX2 (EVAL-NOTES "Phase 2C", the runner; SL3) Skipped tests are not compiled**, and a
   stand-in `arbace.inspector` on the suite's `ARBACE_PATH` for the Go runs (`test/suite-go`).
+  *Accepted 2026-10-10, folded into "Phase 2C", "The runner", above.*
 - **FX3 (EVAL-PLAN §2; C2G-SPEC §10.2) Functional interfaces of let and loop locals.** The
   evaluator adapts or casts the init of an object local tagged with a functional interface, as
-  `LetExpr.doEmit` compiles it.
+  `LetExpr.doEmit` compiles it. *Accepted 2026-10-10, folded into EVAL-PLAN §2.6; C2G-SPEC
+  §10.2 pending.*
 - **FX4 (EVAL-PLAN §2.5, C2G-SPEC §10.2) The JVM's errors of `new` and of a stub's name.** The
   resolved `new` of an abstract class throws `InstantiationError` before its arguments; a
   `deftype*` stub whose name has `/` or a leading `[` is `NoClassDefFoundError: IllegalName:
   NAME`, as `ClassLoader.preDefineClass` refuses it; `java.lang.InstantiationError` joins the
-  closure.
+  closure. *Accepted 2026-10-10, folded into EVAL-PLAN §2.5; C2G-SPEC §10.2 pending.*
 - **FX5 (C2G-SPEC §10.3, namespace variants) `arbace.reflect` without ASM**: the variant
-  `arbace/lang/go/ns/reflect/java.subst.clj`.
+  `arbace/lang/go/ns/reflect/java.subst.clj`. *Accepted 2026-10-10, listed in "Namespace
+  variants", above; C2G-SPEC §10.3 pending.*
 - **FX6 (C2G-SPEC §10.3, M5, RD1; §4.1, SL7) Resources by URL**: JRT-NOTES.md "Resources by URL"
   (`ClassPathResources`, the class loaders' `getResource` and `getResources`, `URLClassLoader`
   in the world and out of the library cuts, `VM.isSystemDomainLoader`, the optional host
-  interface `HostExecutable`).
+  interface `HostExecutable`). *Accepted 2026-10-10; C2G-SPEC §10.3 and §4.1 pending.*
 - **FX7 (JRT-NOTES "Files", FS2) `Files.newDirectoryStream`** in jrt's `Files`, with jdk26u's
   `DirectoryStream`, `NotDirectoryException` and `Globs`; the entries listed when the stream is
-  opened.
+  opened. *Accepted 2026-10-10; JRT-NOTES "Files" pending.*
 
 Not done, proposed for after the freeze or for the user to choose: annotations on interfaces
 made at run time and `AdaptFn` for them (2 java-interop tests); `java.util.BitSet` among the
