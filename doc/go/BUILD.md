@@ -157,6 +157,20 @@ of forms: its packages but a main one join the program (`box/`, whose board and 
 imports, and whose launcher is a program of its own: `bin/g2a build --module arbace box`).
 `--print-only` takes `--root` too. No form changes, so SPEC is not amended.
 
+## The standard library and the goos module from forms (amendment BX21, proposed 2026-10-11)
+
+B1b S6 (doc/go/BOX-NOTES.md, S6; `tamago/`): `--print-only --module std` prints a root whose
+packages are the standard library's: each at its import path, as GOROOT/src lays them out
+(`runtime` in `mod/runtime/`), without a `go.mod` (GOROOT/src's `go.mod`, `go.sum` and
+`vendor/modules.txt` are files of the root that `bin/tamago-vendor print` copies beside them).
+`--goos-dir DIR`, with `--goos tamago`, takes TamaGo's `goos` module from DIR instead of Go's
+module cache: the printed `go.mod` requires it and replaces it by DIR (absolute), and no
+`go.sum` is written. Neither changes what is built from the same sources: the replace is not in
+the executable's build information (the module provides only `runtime/goos`, which the go
+command resolves through `GOOSPKG`), and `-trimpath` names the files by import path whichever
+GOROOT or directory they are in. Packages are printed in parallel (`pmap`): std, 373 packages,
+in about 20 s. No form changes, so SPEC is not amended by this.
+
 ## Cross-compilation and arm64
 
 gc cross-compiles without a C toolchain: `--arch arm64` gives an `ARM aarch64` executable on

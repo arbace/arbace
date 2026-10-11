@@ -88,6 +88,21 @@ covers what.
   v1.27.1, BSD 3-Clause License, Copyright (c) The TamaGo Authors) and TamaGo's Go tree (Go's
   BSD 3-Clause License, below): the box's build (below) has the latter two; purego's entry is
   made when a build of Arbace's contains it (the darwin monitor, stage S4).
+- `tamago/` (tamago/README.md, doc/go/BOX-NOTES.md, S6): the box guest's own Go as Go forms,
+  converted by `bin/g2a convert` (`bin/tamago-vendor`), with the assembly, headers, embedded
+  files and module files they came with, unchanged:
+  - `tamago/goroot/`: the standard library of TamaGo's go1.27.1 tree
+    (https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1", 2026-08-28; the Go
+    distribution with TamaGo's changes), every package of `go list std` with Go files for
+    `tamago/amd64` from its `src/` (but `internal/trace/traceviewer` and
+    `encoding/json/internal/jsontest`, which embed third-party data: not held here), and the
+    header `src/runtime/cgo/abi_amd64.h`: Copyright The Go Authors (and, for TamaGo's
+    additions, their authors as the files state), under Go's BSD 3-Clause License (text below).
+  - `tamago/goos/`: TamaGo's `goos` module, https://github.com/usbarmory/tamago v1.27.1 (go.sum
+    `h1:Zl4w3hu5DaogGvcLzunS4gjwNEqdjFFJedMO3pDQa5k=`), its packages that build for
+    `tamago/amd64` and its `go.mod`: Copyright (c) The TamaGo Authors, under the BSD 3-Clause
+    License (text below).
+  Each Go file's notice is kept, as `;;` lines of its forms.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"), written for Arbace in place of jdk26u's files of the same names (from their
   documented APIs, without their code): Arbace's own, under the Eclipse Public License 1.0. The
@@ -359,9 +374,11 @@ covers what.
   `box/`'s `arbace/box/board` and `abi` (the Eclipse Public License 1.0, as above), and TamaGo's
   `goos` module, https://github.com/usbarmory/tamago v1.27.1 (go.sum
   `h1:Zl4w3hu5DaogGvcLzunS4gjwNEqdjFFJedMO3pDQa5k=`; its `goos` package, the `runtime/goos`
-  the build names as `GOOSPKG`, linked from Go's module cache, not held here): Copyright (c) The
-  TamaGo Authors, under the BSD 3-Clause License (text below); its Go is TamaGo's go1.27.1 tree
-  built for `GOOS=tamago` (Go's BSD 3-Clause License). The launcher holds `box/`'s `hv`, `vmm`,
+  the build names as `GOOSPKG`, printed from `tamago/goos/` since S6, or with
+  `ARBACE_BOX_GO=orig` linked from Go's module cache): Copyright (c) The TamaGo Authors, under
+  the BSD 3-Clause License (text below); its Go is TamaGo's go1.27.1 runtime and standard
+  library built for `GOOS=tamago`, printed from `tamago/goroot/` since S6 (Go's BSD 3-Clause
+  License). The launcher holds `box/`'s `hv`, `vmm`,
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.

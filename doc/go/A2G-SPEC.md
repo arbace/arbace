@@ -1144,7 +1144,7 @@ The tables' entry types (jrt's `class.ae`):
   (`getMethods` merges as `java.lang.PublicMethods` does). The order is the table's (the JVM's is
   unspecified), and a name's overloads are listed in the order the JVM's reflection gives them
   (a2g's tables by `getDeclaredMethods` of the class on the JVM running a2g, jrt's by
-  `getMethods`, `test/jrt/tables.ae`), since `Reflector`'s choice among applicable overloads
+  `getMethods`, `test/jrt/tables.ae`, which follows RP1 too since 2026-10-11), since `Reflector`'s choice among applicable overloads
   follows the order (amendment M4, accepted 2026-10-09: `(Math/floorDiv c 1461)` with `c` an
   `Object` chose `(int, int)` before). The JVM's order is stable only for a class of the JDK's
   CDS archive (its `lib/classlist`, when the JVM maps the archive): HotSpot sorts a class's

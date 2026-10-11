@@ -1,0 +1,353 @@
+#!/bin/bash
+# The box guest's own Go as Go forms (B1b stage S6, doc/go/BOX-NOTES.md; tamago/README.md):
+# the standard library of TamaGo's Go distribution (GOROOT/src: the runtime and every package of
+# `go list std` for tamago/amd64) and TamaGo's goos module (github.com/usbarmory/tamago v1.27.1,
+# the runtime/goos a guest names as GOOSPKG), converted by g2a into tamago/, which is their
+# source from then on; printed back to Go for the box's build (bin/arbace-go --build --box).
+#
+#   bin/tamago-vendor convert  convert them into OUT (default tamago/): std with `bin/g2a convert
+#                              --corpus amd64` (dumped afresh) into OUT/goroot/go, the packages
+#                              that have Go files for tamago/amd64 (371 of 379: the 6 with test
+#                              files only left out, and the 2 that embed third-party data and
+#                              only cmd/ or tests import: internal/trace/traceviewer,
+#                              encoding/json/internal/jsontest), each package's other files (.s, .h) and embedded
+#                              files copied from GOROOT/src into its forms directory (SPEC §9.5,
+#                              §9.6), and GOROOT/src's go.mod, go.sum and vendor/modules.txt into
+#                              OUT/goroot/src; the goos module (from Go's module cache, its hash
+#                              checked) with `bin/g2a convert --goos tamago --goarch amd64 ./...`
+#                              in a copy of it into OUT/goos/go, the packages that dump without
+#                              errors for tamago/amd64 (69 of 94: the others are other ISAs'
+#                              boards and SoCs), their other files likewise, and its go.mod
+#   bin/tamago-vendor verify   convert into WORK/fresh and compare it with OUT (diff -r): the tree
+#                              is what the conversion gives, byte for byte
+#   bin/tamago-vendor print [DIR]
+#                              print OUT into DIR (default WORK/print): DIR/goroot, a GOROOT whose
+#                              src holds std printed (lines layout: the forms' lines are Go's) and
+#                              GOROOT/src's files, the rest of the toolchain's tree linked
+#                              (bin, pkg, lib ...: the compiler, the linker, pkg/include); DIR/goos,
+#                              the goos module printed; DIR/overlay.json, jrt's runtime overlay
+#                              (bin/jrt overlay) for that GOROOT; DIR/key, the hash of OUT printed
+#                              (a print whose key is OUT's is reused)
+#   bin/tamago-vendor check    the proofs, after bin/arbace-go --build --box (its guest's module,
+#                              target/arbace-go/work-box-amd64/mod):
+#                              1. std printed against GOROOT/src, package by package (bin/g2a-check:
+#                                 gocmp's tree, export and code levels) against the round trip's
+#                                 reference test/g2a/roundtrip-amd64.edn (but the 2 packages left
+#                                 out, which fail here)
+#                              2. the goos module's packages printed against the originals (gocmp)
+#                              3. the guest image built from the originals (GOROOT /root/tamago-go,
+#                                 the goos module from Go's module cache) and from the printed
+#                                 forms (GOROOT DIR/goroot, the goos module DIR/goos by a replace),
+#                                 both with an empty build ID (-ldflags=-buildid=: the build ID
+#                                 hashes the source text, and the printer keeps no comments):
+#                                 byte-identical
+#   bin/tamago-vendor all      convert, then check
+#
+# Options (before the command): --work DIR (default .tmp/tamago-vendor), --out DIR (default
+# tamago/). Environment: G2A_GOROOT / TAMAGO_ROOT (default /root/tamago-go: TamaGo's go1.27.1,
+# the source of std and the toolchain). Runs on Arbace (bin/lib/tools.bash: target/stage2).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+work=$root/.tmp/tamago-vendor out=$root/tamago
+while [ $# -gt 0 ]; do
+  case $1 in
+    --work) work=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $work in /*) ;; *) work=$root/$work ;; esac
+case $out in /*) ;; *) out=$root/$out ;; esac
+tg=${TAMAGO_ROOT:-${G2A_GOROOT:-/root/tamago-go}}
+export G2A_GOROOT=$tg GOPROXY=off GOFLAGS= GOTOOLCHAIN=local
+
+# The origin, pinned: TamaGo's go1.27.1 tree (https://github.com/usbarmory/tamago-go, VERSION
+# "go1.27.1", 2026-08-28), the hash of every file of its src/ but src/cmd/ (sha256sum of the
+# sorted list, then of that), and the goos module's go.sum hashes (arbace.g2a.build/tamago-goos)
+src_hash=415d2301a19dfc6890100c6dc5e04496856c29cb77db3ab822168a916a6f5202
+goos_mod=github.com/usbarmory/tamago goos_ver=v1.27.1
+goos_zip=h1:Zl4w3hu5DaogGvcLzunS4gjwNEqdjFFJedMO3pDQa5k=
+
+fail() { echo "tamago-vendor: $*" >&2; exit 1; }
+
+src_digest() {
+  (cd "$tg/src" && find . -type f ! -path './cmd/*' | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
+}
+
+goos_dir() {
+  local c
+  c=$(env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" env GOMODCACHE)
+  [ "$(cat "$c/cache/download/$goos_mod/@v/$goos_ver.ziphash" 2>/dev/null)" = "$goos_zip" ] \
+    || fail "$goos_mod@$goos_ver is not in Go's module cache with the pinned hash $goos_zip"
+  echo "$c/$goos_mod@$goos_ver"
+}
+
+# go_sum: go.sum's two lines for the goos module, from Go's module cache (as bin/g2a build
+# --goos tamago writes them)
+go_sum() {
+  local c
+  c=$(env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" env GOMODCACHE)/cache/download/$goos_mod/@v
+  printf '%s %s %s\n%s %s/go.mod %s\n' "$goos_mod" "$goos_ver" "$(cat "$c/$goos_ver.ziphash")" "$goos_mod" "$goos_ver" \
+    "$(python3 -I -c 'import sys,hashlib,base64; d=open(sys.argv[1],"rb").read(); print("h1:"+base64.b64encode(hashlib.sha256(("%s  go.mod\n" % hashlib.sha256(d).hexdigest()).encode()).digest()).decode())' "$c/$goos_ver.mod")"
+}
+
+# assemble FORMS ORIG DST [OK-LIST]: the converter's tree FORMS/go into DST/go, without the
+# package files whose :files is empty (std's 6 packages of test files only) or whose path is not
+# in OK-LIST (a file of import paths: the goos module's packages that dumped without errors),
+# and without the files they load; each kept package's :other-files and :embed-files copied
+# from ORIG/<its directory> (ORIG GOROOT/src, or the module's root with PREFIX stripped) into
+# its forms directory, embedded files checked against their hashes
+assemble() {
+  python3 -I - "$@" <<'EOF'
+import hashlib, os, re, shutil, sys
+forms, orig, dst = sys.argv[1], sys.argv[2], sys.argv[3]
+ok = set(open(sys.argv[4]).read().split()) if len(sys.argv) > 4 else None
+prefix = sys.argv[5] + "/" if len(sys.argv) > 5 else ""
+src = os.path.join(forms, "go")
+shutil.rmtree(os.path.join(dst, "go"), ignore_errors=True)
+shutil.copytree(src, os.path.join(dst, "go"))
+kept = dropped = others = embeds = 0
+for d, _, fs in sorted(os.walk(os.path.join(dst, "go"))):
+    for f in sorted(fs):
+        p = os.path.join(d, f)
+        if not f.endswith(".ae") or not os.path.exists(p):
+            continue
+        s = open(p, encoding="utf-8").read()
+        if "\n(go/package " not in s:
+            continue
+        path = re.search(r'\n  :path "([^"]+)"', s).group(1)
+        files = re.search(r'\n  :files \[([^\]]*)\]', s).group(1)
+        if not files.strip() or (ok is not None and path not in ok):
+            os.remove(p)
+            for l in re.findall(r'\n\(load "([^"]+)"\)', s):
+                os.remove(os.path.join(d, l + ".ae"))
+            dropped += 1
+            continue
+        kept += 1
+        fdir = p[:-3]
+        pdir = os.path.join(orig, path[len(prefix):] if prefix and path.startswith(prefix) else path)
+        m = re.search(r'\n  :other-files \[([^\]]*)\]', s)
+        for o in re.findall(r'"([^"]+)"', m.group(1)) if m else []:
+            os.makedirs(fdir, exist_ok=True)
+            shutil.copyfile(os.path.join(pdir, o), os.path.join(fdir, o))
+            others += 1
+        m = re.search(r'\n  :embed-files \[(.*?)\]\n', s)
+        for e, h in re.findall(r'\["([^"]+)" "([0-9a-f]+)"\]', m.group(1)) if m else []:
+            t = os.path.join(fdir, e)
+            os.makedirs(os.path.dirname(t), exist_ok=True)
+            shutil.copyfile(os.path.join(pdir, e), t)
+            if hashlib.sha256(open(t, "rb").read()).hexdigest() != h:
+                sys.exit("embedded file %s of %s: not the hash the forms record" % (e, path))
+            embeds += 1
+# directories left empty by the dropped packages
+for d, ds, fs in sorted(os.walk(os.path.join(dst, "go")), reverse=True):
+    if not os.listdir(d):
+        os.rmdir(d)
+print("%s: %d packages (%d left out), %d other files, %d embedded files"
+      % (os.path.relpath(dst), kept, dropped, others, embeds), file=sys.stderr)
+EOF
+}
+
+# headers DST: the headers that the kept packages' assembly includes from outside their own
+# files (runtime's asm_amd64.s includes "cgo/abi_amd64.h", runtime/cgo's, a package without Go
+# files when cgo is off), copied from GOROOT/src to DST/src at their paths; followed through the
+# headers they include
+headers() {
+  python3 -I - "$tg/src" "$1" <<'EOF'
+import os, re, shutil, sys
+src, dst = sys.argv[1], sys.argv[2]
+fdirs = {}
+for d, _, fs in os.walk(os.path.join(dst, "go")):
+    for f in fs:
+        if f.endswith(".ae"):
+            s = open(os.path.join(d, f), encoding="utf-8").read()
+            m = re.search(r'\n  :path "([^"]+)"', s) if "\n(go/package " in s else None
+            if m:
+                fdirs[m.group(1)] = os.path.join(d, f[:-3])
+todo = []
+for path, fdir in fdirs.items():
+    if os.path.isdir(fdir):
+        for f in os.listdir(fdir):
+            if f.endswith((".s", ".h")):
+                todo.append((os.path.join(fdir, f), path))
+copied = set()
+while todo:
+    f, path = todo.pop()
+    for inc in re.findall(r'^#include "([^"]+)"', open(f, encoding="utf-8", errors="replace").read(), re.M):
+        rel = os.path.normpath(os.path.join(path, inc))
+        if rel in copied or not os.path.isfile(os.path.join(src, rel)):
+            continue
+        # the package's own file (in its forms directory) needs nothing
+        if path in fdirs and os.path.isfile(os.path.join(fdirs[path], inc)):
+            continue
+        t = os.path.join(dst, "src", rel)
+        os.makedirs(os.path.dirname(t), exist_ok=True)
+        shutil.copyfile(os.path.join(src, rel), t)
+        copied.add(rel)
+        todo.append((t, os.path.dirname(rel)))
+print("%s/src: %d headers included from outside the packages: %s"
+      % (os.path.relpath(dst), len(copied), " ".join(sorted(copied))), file=sys.stderr)
+EOF
+}
+
+convert() {
+  local o=$1 gd n
+  [ "$(src_digest)" = "$src_hash" ] || fail "$tg/src is not the pinned tree (digest $(src_digest), pinned $src_hash)"
+  gd=$(goos_dir)
+  mkdir -p "$work" "$o"
+  echo "== std for tamago/amd64 (bin/g2a convert --corpus amd64)" >&2
+  # dumped afresh: bin/g2a reuses a corpus's dumps when they exist
+  rm -rf "$root/.tmp/godump/corpus/amd64" "$root/.tmp/godump/corpus/amd64.tsv"
+  "$root/bin/g2a" convert --corpus amd64 --out "$work/forms-std" > "$work/convert-std.log" 2>&1 \
+    || { tail -20 "$work/convert-std.log" >&2; fail "std: the conversion failed ($work/convert-std.log)"; }
+  grep -q '; 0 failed, 0 did not read back$' "$work/convert-std.log" \
+    || { tail -3 "$work/convert-std.log" >&2; fail "std: packages failed to convert ($work/convert-std.log)"; }
+  grep -v -P '^ok\t' "$root/.tmp/godump/corpus/amd64.tsv" >&2 && fail "std: packages failed to dump"
+  rm -rf "$o/goroot"; mkdir -p "$o/goroot/src/vendor"
+  # left out: the two std packages that embed third-party data, internal to std and imported
+  # only by cmd/trace (internal/trace/traceviewer: Catapult's trace viewer, 2.7 MB) and by
+  # encoding/json's tests (encoding/json/internal/jsontest: JSON corpora, 0.3 MB); no program
+  # outside GOROOT can import them
+  awk -F'\t' '$1 == "ok" { print $2 }' "$root/.tmp/godump/corpus/amd64.tsv" \
+    | grep -v -x -e internal/trace/traceviewer -e encoding/json/internal/jsontest > "$work/std-ok.txt"
+  assemble "$work/forms-std" "$tg/src" "$o/goroot" "$work/std-ok.txt"
+  cp "$tg/src/go.mod" "$tg/src/go.sum" "$o/goroot/src/"
+  cp "$tg/src/vendor/modules.txt" "$o/goroot/src/vendor/"
+  headers "$o/goroot"
+  echo "== the goos module $goos_mod@$goos_ver for tamago/amd64 (bin/g2a convert ./...)" >&2
+  rm -rf "$work/goosmod"
+  cp -r "$gd" "$work/goosmod"
+  chmod -R u+w "$work/goosmod"
+  (cd "$work/goosmod" && "$root/bin/g2a" convert --goos tamago --goarch amd64 --out "$work/forms-goos" ./...) \
+    > "$work/convert-goos.log" 2>&1 || true
+  awk -F'\t' '$1 == "ok" { print $2 }' "$root/.tmp/g2a/dumps.tsv" > "$work/goos-ok.txt"
+  n=$(wc -l < "$work/goos-ok.txt")
+  echo "   $n of $(wc -l < "$root/.tmp/g2a/dumps.tsv") packages dump without errors for tamago/amd64" >&2
+  grep -q "^$goos_mod/goos\$" "$work/goos-ok.txt" || fail "goos: $goos_mod/goos did not convert ($work/convert-goos.log)"
+  # every package that dumped converted
+  if grep '^FAIL' "$work/convert-goos.log" | awk '{ print $2 }' | grep -qxF -f "$work/goos-ok.txt"; then
+    fail "goos: a package that dumped failed to convert ($work/convert-goos.log)"
+  fi
+  rm -rf "$o/goos"; mkdir -p "$o/goos"
+  assemble "$work/forms-goos" "$work/goosmod" "$o/goos" "$work/goos-ok.txt" "$goos_mod"
+  cp "$work/goosmod/go.mod" "$o/goos/go.mod"
+  echo "converted into ${o#$root/}: $(find "$o" -name '*.ae' | wc -l) forms files, $(find "$o" -type f | wc -l) files, $(du -sb "$o" | cut -f1) bytes" >&2
+}
+
+# tree_key: the hash of OUT (every file, by path and content)
+tree_key() {
+  (cd "$out" && find . -type f | LC_ALL=C sort | xargs -d '\n' sha256sum; cat "$tg/VERSION") | sha256sum | cut -c1-64
+}
+
+# overlay_json DIR: jrt's runtime overlay (bin/jrt overlay: proc.go, runtime2.go and
+# arbace_local.go printed from overlay/go) for the GOROOT DIR/goroot, DIR/overlay.json
+overlay_json() {
+  local ovl
+  ovl=$(cd "$root" && bin/jrt overlay | tail -1)
+  sed "s#\"$tg/src/runtime/#\"$1/goroot/src/runtime/#" "$ovl" > "$1/overlay.json"
+}
+
+# print_tree DIR: OUT printed into DIR (goroot, goos, overlay.json), unless DIR/key is OUT's
+print_tree() {
+  local d=$1 key e
+  key=$(tree_key)
+  if [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then
+    echo "== tamago/ printed (unchanged, key ${key:0:12}): ${d#$root/}" >&2
+    overlay_json "$d"
+    return 0
+  fi
+  echo "== print tamago/ into ${d#$root/}" >&2
+  rm -rf "$d"; mkdir -p "$d/goroot"
+  # the toolchain's tree but src, linked; src printed
+  for e in "$tg"/* "$tg"/.[!.]*; do
+    [ -e "$e" ] || continue
+    [ "$(basename "$e")" = src ] || ln -s "$e" "$d/goroot/"
+  done
+  "$root/bin/g2a" build --print-only --module std --layout lines --work "$d/std" "$out/goroot" >&2
+  mv "$d/std/mod" "$d/goroot/src"; rmdir "$d/std"
+  cp -r "$out/goroot/src/." "$d/goroot/src/"
+  "$root/bin/g2a" build --print-only --module "$goos_mod" --layout lines --work "$d/g" "$out/goos" >&2
+  mv "$d/g/mod" "$d/goos"; rmdir "$d/g"
+  cp "$out/goos/go.mod" "$d/goos/go.mod"
+  overlay_json "$d"
+  echo "$key" > "$d/key"
+  echo "   $(find "$d/goroot/src" "$d/goos" -name '*.go' | wc -l) Go files, $(du -sbL "$d/goroot/src" "$d/goos" | awk '{ s += $1 } END { print s }') bytes" >&2
+}
+
+check() {
+  local d=$work/print mod=$root/target/arbace-go/work-box-amd64/mod status=0 gocmp=$work/gocmp p f r v
+  [ -f "$mod/go.mod" ] || fail "no $mod: bin/arbace-go --build --box first"
+  print_tree "$d"
+  echo "== 1. std printed against GOROOT/src (bin/g2a-check, reference test/g2a/roundtrip-amd64.edn)" >&2
+  # the reference without the two packages convert leaves out (they fail here: not printed)
+  grep -v -e '"internal/trace/traceviewer"' -e '"encoding/json/internal/jsontest"' \
+    "$root/test/g2a/roundtrip-amd64.edn" > "$work/roundtrip-amd64.edn"
+  G2A_GOOS=tamago G2A_GOARCH=amd64 "$root/bin/g2a-check" --no-tests -j "${TAMAGO_VENDOR_JOBS:-16}" \
+    --reference "$work/roundtrip-amd64.edn" "$d/goroot" > "$work/check-std.log" 2>&1 || status=1
+  tail -4 "$work/check-std.log"
+  echo "== 2. the goos module's packages printed against the originals (gocmp: tree, export, code)" >&2
+  (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" build -o "$gocmp" .)
+  [ -d "$work/goosmod" ] || { rm -rf "$work/goosmod"; cp -r "$(goos_dir)" "$work/goosmod"; chmod -R u+w "$work/goosmod"; }
+  local np=0 nf=0
+  for p in $(cd "$d/goos" && find . -name '*.go' -printf '%h\n' | sort -u); do
+    p=${p#./}
+    f=$work/gocmp-goos-${p//\//_}.log
+    if (cd "$work/goosmod" && env GOOS=tamago GOARCH=amd64 GOAMD64=v1 GOROOT="$tg" CGO_ENABLED=0 \
+          "$gocmp" "$work/goosmod/$p" "$d/goos/$p") > "$f" 2>&1; then
+      np=$((np + 1))
+    else
+      nf=$((nf + 1)); status=1
+      echo "FAIL $goos_mod/$p  $(tail -1 "$f")"
+    fi
+  done
+  echo "goos module: $np of $((np + nf)) packages pass at all three levels"
+  echo "== 3. the guest image from the originals and from the printed forms (build ID empty)" >&2
+  . "$root/bin/lib/version.bash"
+  v=$(arbace_version "$root")
+  mkdir -p "$work/proof"
+  # the guest's module (bin/arbace-go --build --box) with two go.mod files (-modfile): TamaGo's
+  # goos module from Go's module cache (as bin/g2a build --goos tamago writes it), or printed
+  grep -v -e '^replace ' -e '^// from its Go forms' "$mod/go.mod" > "$work/proof/orig.mod"
+  go_sum > "$work/proof/orig.sum"
+  { cat "$work/proof/orig.mod"; printf '\nreplace %s %s => %s\n' "$goos_mod" "$goos_ver" "$d/goos"; } > "$work/proof/printed.mod"
+  : > "$work/proof/printed.sum"
+  local ovl
+  ovl=$(cd "$root" && bin/jrt overlay | tail -1)
+  build_guest() { # GOROOT MODFILE OVERLAY OUT
+    (cd "$mod" && env GOROOT="$1" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off GOEXPERIMENT= \
+       CGO_ENABLED=0 GOOS=tamago GOARCH=amd64 GOAMD64=v1 GOOSPKG=$goos_mod \
+       "$1/bin/go" build -trimpath -buildvcs=false -modfile "$2" \
+       "-ldflags=-T 0x201000 -R 0x1000 -w -X 'main.arbaceVersion=$v' -buildid=" -overlay "$3" -o "$4" arbace/cmd/arbace)
+  }
+  build_guest "$tg" "$work/proof/orig.mod" "$ovl" "$work/proof/arbace-orig.elf" || fail "the guest from the originals failed to build"
+  build_guest "$d/goroot" "$work/proof/printed.mod" "$d/overlay.json" "$work/proof/arbace-printed.elf" \
+    || fail "the guest from the printed forms failed to build"
+  for f in orig printed; do
+    printf '%-26s %10d bytes  sha256 %s\n' "arbace-$f.elf" "$(stat -c %s "$work/proof/arbace-$f.elf")" \
+      "$(sha256sum < "$work/proof/arbace-$f.elf" | cut -c1-64)"
+  done
+  if cmp -s "$work/proof/arbace-orig.elf" "$work/proof/arbace-printed.elf"; then
+    echo "the guest image: identical"
+  else
+    echo "the guest image: DIFFERENT ($(cmp -l "$work/proof/arbace-orig.elf" "$work/proof/arbace-printed.elf" | wc -l) bytes)"
+    status=1
+  fi
+  return $status
+}
+
+case $cmd in
+  convert) convert "$out" ;;
+  verify)
+    convert "$work/fresh"
+    if diff -r -x README.md "$out" "$work/fresh" > "$work/verify.diff"; then
+      echo "verify: ${out#$root/} is the conversion, byte for byte"
+    else
+      echo "verify: ${out#$root/} differs from a fresh conversion ($work/verify.diff: $(wc -l < "$work/verify.diff") lines)"; exit 1
+    fi ;;
+  print) print_tree "${1:-$work/print}" ;;
+  check) check ;;
+  all) convert "$out" && check ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac
