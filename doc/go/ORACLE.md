@@ -87,7 +87,8 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
 ## The runner
 
     bin/oracle record [-j JOBS] [--timeout S] [SEL...]
-    bin/oracle check IMPL [-j JOBS] [--timeout S] [--expected FILE | --write-expected FILE] [SEL...]
+    bin/oracle check IMPL [-j JOBS] [--timeout S] [--expected FILE | --write-expected FILE]
+                          [--exclude PART]... [SEL...]
     bin/oracle harvest [SUITE]
 
 - `record` regenerates the expected files of the selected parts from the JVM Arbace
@@ -124,9 +125,21 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
   2026-10-09; 6 cases in 4 groups since the branch `gofix`; 7 in 5 since `gosec`, 2026-10-10),
   against which `bin/gate --full` checks it (with `--timeout 900`: the reducers file takes
   about 285 s there).
+  A reference may also name, under `:incomplete`, the corpus files whose run is known not to
+  complete (the box's memory, below): the check then passes when the runs that did not
+  complete are exactly those (their cases after the end mismatch, and are recorded like the
+  others); `--write-expected` writes the key from the run (amendment BX10, proposed 2026-10-11;
+  BOX-NOTES.md, S1).
 - `SEL` selects parts (`forms`, `classes`, `regex`) or files by a part of their path
-  (`forms/numbers`, `harvest`); `-j` the concurrent runs (default 16), `--timeout` the seconds
-  allowed to one run (default 300).
+  (`forms/numbers`, `harvest`); `--exclude PART` leaves out the files whose path holds `PART`;
+  `-j` the concurrent runs (default 16), `--timeout` the seconds allowed to one run (default
+  300).
+- **The box's subset** (BOX-NOTES.md, S1): every corpus but those of the host's files,
+  sockets and processes, which the box has not: `bin/oracle check
+  'target/arbace-go/box-amd64/arbace-box -' --timeout 900 --exclude forms/files. --exclude
+  forms/net. --exclude forms/processes. --expected test/oracle/known-go-box-amd64.edn`
+  (21,742 of the 22,278 cases; the native build's 46 known mismatches, and one more: the
+  reducers case whose 4.9 GB heap does not fit the guest's 3 GiB, its run incomplete).
 - `harvest` regenerates `forms/harvest/` (below).
 
 Times on this machine (64 cores; 2026-10-09, before the files, time, processes, concurrency and
