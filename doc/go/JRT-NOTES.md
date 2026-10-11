@@ -1,4 +1,66 @@
-# jrt, phase 1: the core
+# jrt: notes
+
+jrt is the Go build's Java runtime: hand-written Go forms in `go/arbace/jrt/` (the package
+`arbace/jrt`), jrt's own Java and the Go-build variants of JDK classes in `overlay/jdk/`, and
+jdk26u's sources that `bin/jrt-convert` converts ([JRT-SOURCES.md](JRT-SOURCES.md)), all
+translated by c2g ([C2G-SPEC.md](C2G-SPEC.md)). This file is its record, one part per phase or
+branch, in the order the work was done. A later part revises what an earlier one describes;
+the earlier text is kept as written then, so read a part with the table below.
+
+## Reading guide and state (2026-10-11)
+
+**State on main** (B1a, before the `arbace-for-golang` freeze): `bin/jrt-convert` translates 835
+files (JRT-SOURCES.md, "The closure as grown"); the Go build provides 9,807 of java.base's 17,546
+API members (55.9%; [JAVA-BASE.md](JAVA-BASE.md)); `bin/jrt test` passes on amd64 and arm64
+(under `qemu-aarch64`). jrt's phases 1, 2a and 2b are B1a step 3's; phase 2C is step 4's (c2g's
+parts, C2G-NOTES.md) and phase 2B step 5's (the evaluator's parts, EVAL-NOTES.md): a letter's
+case alone does not tell them apart, the step does.
+
+| part | branch, date | revised later by |
+|---|---|---|
+| Phase 1 (step 3): the core | `jrt-core`, 2026-10-08 | phases 2a and 2b; the stand-ins mostly replaced by translated classes (phase 2C) |
+| Phase 2b (step 3): reflection and the remaining shims | `jrt-reflect`, 2026-10-08 | charsets: six since phase 2B (step 5); locales: "Time" (TM4), then jdk26u's `Locale` ("Text and locales", TL5); `Date`'s default zone the host's ("Time", TM5); the `Calendar` and `Timestamp` readers: phase 2B, "Dates"; `UUID`'s MD5 and `SecureRandom`: "Security" (SC4) |
+| Phase 2a (step 3): threads, concurrency, `Unsafe`, `System` and the host | `jrt-threads`, 2026-10-08 | the executors and `FutureTask` translated ("Concurrency", JC5), `ThreadLocalRandom` too (JC4); `Semaphore` ("Semaphore"); `CyclicBarrier` translated (phase 2B); `Runtime.exec` ("Processes", PR4); `System.getProperties()` ("Sockets") |
+| Phase 2C (step 4): the rest of the JDK closure | `c2g-2c`, 2026-10-09 | its "Not done": "The JDK's resource data" (`Normalizer`, `CharacterName`), "Files" (`File`) |
+| Phase 2B (step 5): jrt's surface for the REPL | `eval-2b`, 2026-10-09 | `Instant` and the dates: "Time" |
+| Semaphore (step 5 follow-up) | `smalls`, 2026-10-09 | |
+| Sockets (go-net) | `go-net`, 2026-10-09 | |
+| Files | `go-file`, 2026-10-09 | its "Not done": "Sockets", "Resources by URL" (`URLClassLoader`), FX7 (`Files.newDirectoryStream`) |
+| The JDK's resource data | `regex-res`, 2026-10-09 | |
+| Monitors: the late deflation | `monfix`, 2026-10-10 | |
+| Time | `go-time`, 2026-10-10 | the locale providers: "Text and locales" (TL5) |
+| Concurrency | `go-juc`, 2026-10-10 | |
+| Size | `gosize`, 2026-10-10 | |
+| Processes | `goproc`, 2026-10-10 | |
+| Resources by URL | `gofix`, 2026-10-10 | |
+| Security | `gosec`, 2026-10-10 | |
+| Text and locales | `gotext`, 2026-10-10 and 11 | |
+
+Each part's amendments were accepted by the user (C2G-SPEC §16 names them by series); the
+measurements in each part are its branch's, before merging main unless it says otherwise.
+
+**jrt's files now** (`go/arbace/jrt/`; the tests are `*_test.clj`, the generated files say so):
+
+| files | what | described in |
+|---|---|---|
+| `object.clj`, `class.clj`, `array.clj`, `enum.clj`, `volatile.clj`, `throwable.clj`, `numconv.clj`, `math.clj`, `fdlibm.clj`, `string.clj`, `stringbuilder.clj`, `codec.clj` | the object model, classes, arrays, exceptions, numbers, strings | phase 1 |
+| `monitor.clj`, `threadid.clj`, `thread.clj`, `threadlocal.clj`, `atomic.clj`, `locks.clj`, `executor.clj`, `forkjoin.clj`, `reference.clj`, `unsafe.clj`, `varhandle.clj`, `standin_timeunit.clj`, `standin_executor.clj` | threads and concurrency | phase 2a; "Semaphore"; "Concurrency" |
+| `host.clj`, `system.clj`, `tooloptions.clj` | the host interface, `System`, `Runtime`, `JAVA_TOOL_OPTIONS` | phase 2a; "Sockets" |
+| `reflect.clj`, `reflect_array.clj`, `reflect_tables.clj`, `members.clj`, `classloader.clj`, `standin_reflect.clj` | reflection over the member tables, the class loaders | phase 2b; "Size" (SZ3) |
+| `charset.clj`, `locale.clj`, `date.clj`, `text.clj`, `standin_locale.clj` | charsets, `String`'s locale overloads, `Date`, `CDS`' natives | phase 2b; "Text and locales" |
+| `access.clj`, `vm.clj`, `natives.clj`, `dyn.clj`, `image.clj`, `tuning.clj` | `SharedSecrets`, `VM`, the translated classes' natives; the evaluator's `Dyn`, the image, the Go runtime's settings | C2G-NOTES.md; EVAL-PLAN.md, EVAL-NOTES.md; EXEC-NOTES.md; SPEED-NOTES.md |
+| `files.clj`, `filesystem.clj`, `hostfs.clj`, `hostfs_linux.clj` | the standard streams' and files' natives, `java.io.File` over the host | phase 2C; "Files" |
+| `net.clj` | sockets and the name service | "Sockets" |
+| `timezone.clj`, `constarray.clj` | `TimeZone`'s and `CRC32`'s natives; constant arrays as data | "Time"; "Text and locales" (TL1) |
+| `process.clj`, `hostproc.clj`, `hostproc_linux.clj` | processes | "Processes" |
+| `resources.clj`, `resources_linux.clj` | the class path's resources by URL, `HostExecutable` | "Resources by URL" |
+| `digests.clj`, `hostrand_linux.clj` | the digests' block functions over Go's crypto, the host's random source | "Security" |
+| `standin_lang.clj`, `standin_character.clj`, `manifest.edn`, `manifest_test.clj` | generated: stand-ins, the manifest | phase 1, "Stand-ins", "The manifest" |
+
+`overlay/jdk/java.base/` holds jrt's own Java (40 files), `overlay/jdk/variants/` the Go-build
+variants of jdk26u's classes (69); each part names those it added.
+
+# Phase 1 (step 3): the core
 
 B1a step 3 ([B1-PLAN.md](B1-PLAN.md)), first phase: the hand-written core of **jrt**, the Java
 runtime under the classes c2g translates ([C2G-SPEC.md](C2G-SPEC.md)), as Go forms
@@ -28,7 +90,7 @@ implemented except 13, all of them phase 2's or waiting for translated classes (
 | `standin_lang.clj`, `standin_character.clj` | **generated** stand-ins for JDK classes c2g will translate (below) |
 | `manifest.edn`, `manifest_test.clj` | **generated**: the manifest (C2G-SPEC §9.1) and a test file naming every manifest member by its Go name |
 | `*_test.clj` | the tests, Go forms printed as `_test.go` files (SPEC §15 Q14) |
-| `bin/jrt` | `build`, `test`, `testdata`, `standins`, `manifest`, `print` (below) |
+| `bin/jrt` | `build`, `test`, `testdata`, `standins`, `manifest`, `print` (below), and since phase 2a `overlay` |
 | `test/jrt/*.clj` | the generators, run on the JVM Arbace: `testdata.clj` (with `testdata_numbers.clj`, `testdata_util.clj`), `standins.clj`, `manifest.clj` |
 
 Hand-written forms are about 4,700 lines (the core) and 1,600 (the tests); with the generated
@@ -55,8 +117,8 @@ as Go forms, is phase 2's.
 
 ## The API (C2G-SPEC §11, as implemented)
 
-All in package `arbace/jrt`. Names in **bold** are additions to §11's table (proposed
-amendment A5).
+All in package `arbace/jrt`. Names in **bold** are additions to §11's table (amendment A5, J5
+in C2G-SPEC, accepted 2026-10-08).
 
 | group | names |
 |---|---|
@@ -488,7 +550,7 @@ when profiles show exceptions on hot paths.
   - forwarders for `CharSequence`'s default methods;
   - the `Dyn` check in c2g's `InstanceOf` for interfaces (§5.12).
 
-## Proposed amendments to C2G-SPEC (for the user's review)
+## Amendments to C2G-SPEC (accepted 2026-10-08)
 
 All accepted 2026-10-08; C2G-SPEC names them J1-J10 (§16).
 
@@ -560,7 +622,7 @@ All accepted 2026-10-08; C2G-SPEC names them J1-J10 (§16).
   ([JRT-SOURCES.md](JRT-SOURCES.md)); the prototype `.tmp/c2g-proto/` (its `jrt.clj`, whose
   header, `Lit`, `Catch` and `ClassInit` this generalizes).
 
-# Phase 2b: reflection and the remaining shims
+# Phase 2b (step 3): reflection and the remaining shims
 
 B1a step 3, phase 2b (branch `jrt-reflect`, 2026-10-08; phase 2a, threads, concurrency,
 `Unsafe`, `System` and the host, is a parallel branch): reflection over the member tables, the
@@ -751,8 +813,12 @@ one), `forName(name, fallback)`, `isSupported`, `defaultCharset` (UTF-8, JEP 400
 `US_ASCII`; `new String(byte[], Charset)`, `new String(byte[], int, int, Charset)`,
 `getBytes(Charset)` over phase 1's coding. jrt has these three charsets only (V9);
 `StandardCharsets.UTF_16*` are left out. Encoders, decoders and buffers (`java.nio`) are cut.
+(Since: six charsets, `UTF_16*` added in phase 2B (step 5); the heap buffers translated, "The
+JDK's resource data".)
 
-**Locales** (root locale data only, as decided for `Formatter`):
+**Locales** (root locale data only, as decided for `Formatter`; superseded: jrt's own locale
+providers in "Time" (TM4), then jdk26u's `Locale`, `DecimalFormatSymbols` and java.text in "Text
+and locales" (TL5); the hand-written `LocaleProviderAdapter` and `LocaleResources` are gone):
 
 - `Locale`: `ROOT`, `ENGLISH`, `US`, `UK`, `of` and the deprecated constructors (language
   lower case, country upper case), `getLanguage`, `getCountry`, `getVariant`, `toString`,
@@ -777,7 +843,8 @@ one), `forName(name, fallback)`, `isSupported`, `defaultCharset` (UTF-8, JEP 400
   `before`, `after`, `equals`, `hashCode`, `compareTo`, `clone`, `toString` (`Thu Jan 01
   00:00:00 GMT 1970`), `toGMTString`, the deprecated getters `getYear` ... `getSeconds`,
   `getDay`, `getTimezoneOffset` (0) and `Date.UTC`.
-- The default time zone is GMT, so the deprecated getters and `Date.UTC` are UTC.
+- The default time zone is GMT, so the deprecated getters and `Date.UTC` are UTC. (Since
+  "Time", TM5: the host's zone, through jdk26u's `TimeZone`, as on the JVM.)
 - The calendar is Java's: Julian before the cutover 1582-10-15, Gregorian from it.
   - `Date.UTC` normalizes as jdk26u's `Date.normalize` does: out-of-range fields count on,
     the year's calendar is chosen first and the other one when the result falls across the
@@ -794,7 +861,8 @@ one), `forName(name, fallback)`, `isSupported`, `defaultCharset` (UTF-8, JEP 400
     + 1`, `getDate`, `getHours`, `getMinutes`, `getSeconds`, and `getTime()` mod 1000
     (floored). `Date.InstantText` (Go) is the same text, for jrt's own use.
   - The `Calendar` and `Timestamp` readers and printers are cut: `read-instant-calendar` and
-    `read-instant-timestamp` are dropped by the variant.
+    `read-instant-timestamp` are dropped by the variant. (Restored in phase 2B (step 5),
+    "Dates".)
   - `ThreadLocal`, `SimpleDateFormat`, `TimeZone` and `GregorianCalendar` are no longer
     needed by it.
 
@@ -841,7 +909,8 @@ except `getAnnotation`, `getModule`, `getPackage`, `getNestHost`, `getRecordComp
 - `ObjectMethods.bootstrap` (a record's `equals`, `hashCode`, `toString`): c2g generates them
   (§7.13); no jrt code.
 
-**Left to phase 2a** (the host and `SharedSecrets`): `SecureRandom` (seeded by the host),
+**Left to phase 2a** (the host and `SharedSecrets`): `SecureRandom` (seeded by the host; since
+"Security", SC4, jdk26u's),
 `JavaObjectInputStreamAccess.checkArray` and `JavaUtilCollectionAccess` (with
 `SharedSecrets`), `PrintStream`, `OutputStreamWriter`, `FileOutputStream`, `File`. `System`'s
 `Class` object `System_class` is also 2a's: once it exists, `bin/jrt manifest` generates
@@ -890,7 +959,7 @@ Results (2026-10-08), the whole package: linux/amd64 2.0 s, linux/arm64 under `q
 - **`Object`'s table** lists its 9 public methods and its protected `clone` (a declared member
   `NewInstanceExpr.gatherMethods` offers `deftype` and `reify`).
 
-## Proposed amendments (phase 2b, for the user's review)
+## Amendments (phase 2b, accepted 2026-10-08)
 
 All accepted 2026-10-08; C2G-SPEC names them R11-R19 (§16), apart from phase 2a's A11-A16.
 
@@ -947,7 +1016,7 @@ All accepted 2026-10-08; C2G-SPEC names them R11-R19 (§16), apart from phase 2a
 - Arbace: `arbace/lang/Reflector.clj`, `Compiler.clj` (`FISupport`, `QualifiedMethodExpr`,
   `NewInstanceExpr.gatherMethods`, `subsumes`), `arbace/instant.clj`.
 
-# jrt, phase 2a: threads, concurrency, Unsafe, System and the host
+# Phase 2a (step 3): threads, concurrency, Unsafe, System and the host
 
 B1a step 3, phase 2a (branch `jrt-threads`, 2026-10-08): the goroutine-local slot of the patched
 Go runtime, `Thread` over it, thread locals, interrupts, the `java.util.concurrent` classes the
@@ -1072,7 +1141,8 @@ build constraints.
   second map, copied by `start`.
 - `ThreadLocalRandom`'s probes (`getProbe`, `advanceProbe`, `localInit`, used by
   `ConcurrentHashMap`'s counter cells) live in the Thread, with Java's constants.
-  `ThreadLocalRandom.current()` waits for the translated `Random`, its superclass.
+  `ThreadLocalRandom.current()` waits for the translated `Random`, its superclass. (Since
+  "Concurrency", JC4: `ThreadLocalRandom` translated, the probes jdk26u's.)
 
 ## Concurrency
 
@@ -1110,13 +1180,15 @@ so they are Java threads with their slot. A task given to `execute` that throws 
 whose thread reports the exception (Java's `ThreadPoolExecutor`); `submit` wraps the task in a
 `FutureTask`, which keeps it. `shutdown`, `isShutdown`, `isTerminated`, `awaitTermination`,
 `close`; `shutdownNow` (it returns a `List`) and `invokeAll`/`invokeAny` are not there.
-Rejection: `RejectedExecutionException("Task ... rejected from ...")`.
+Rejection: `RejectedExecutionException("Task ... rejected from ...")`. (Superseded: the pools,
+`Executors` and `FutureTask` are jdk26u's since "Concurrency", JC5.)
 
 **`FutureTask`**: `get` (with `ExecutionException(cause)`, `CancellationException`,
 `InterruptedException`, and `TimeoutException` for the timed one), `cancel(mayInterrupt)`
 (succeeds on a running task, as Java's, and interrupts its runner), `isDone`, `isCancelled`.
 **`CountDownLatch`**: the count under a mutex, a channel closed at zero.
-`CyclicBarrier` and `Semaphore` are not used by Arbace or the translated classes.
+`CyclicBarrier` and `Semaphore` are not used by Arbace or the translated classes. (Since:
+`CyclicBarrier` translated in phase 2B (step 5); `Semaphore` hand-written, "Semaphore".)
 
 **References.** A `WeakReference` holds a `weak.Pointer` to the referent's header (every Java
 object's first field, so its address is the object's) and the referent's type word, from which
@@ -1216,8 +1288,8 @@ The members the translated JDK classes call (`.tmp/jrt/edge.edn`), for phase 2a'
 | `Runtime` | 2 | 2 | |
 
 Arbace's own uses (JAVA-SURFACE.md) of these classes are all there but `Thread`'s context class
-loader, `Runtime.version()`, `Runtime.exec` (cut), `System.in`/`out`/`err`,
-`System.getProperties()` and `loadLibrary` (cut). `sun.misc.Signal` (the REPL's interrupt
+loader, `Runtime.version()`, `Runtime.exec` (cut; since "Processes", PR4), `System.in`/`out`/`err`,
+`System.getProperties()` (since "Sockets") and `loadLibrary` (cut). `sun.misc.Signal` (the REPL's interrupt
 handler) is not in phase 2a.
 
 The manifest (`bin/jrt manifest`) now lists 29 more classes, among them the interfaces jrt
@@ -1303,9 +1375,9 @@ if profiles ask.
 - Executors' workers made by the factory, as Java's, so that Arbace's factories name them and
   its threads are Java threads.
 
-## Proposed amendments (for the user's review)
+## Amendments (phase 2a, accepted 2026-10-08)
 
-All accepted 2026-10-08; C2G-SPEC names them T11-T16 (§16), apart from phase 2b's A11-A16.
+All accepted 2026-10-08; C2G-SPEC names them T11-T16 (§16), apart from phase 2b's A11-A19.
 
 - **A11** (§9.2, §5.11): c2g calls `jrt.RegisterGoType(C_class, reflect.TypeFor[C]())` in its
   init for every class whose fields reach `Unsafe.objectFieldOffset` (or every class, if
@@ -1353,7 +1425,7 @@ All accepted 2026-10-08; C2G-SPEC names them T11-T16 (§16), apart from phase 2b
   `.tmp/jrt/conv` (`ConcurrentHashMap`, `BufferedInputStream`, `BigInteger`, `BigDecimal`,
   `HashMap`, `Random`, `ArraysSupport`, `DecimalDigits`).
 
-# Phase 2C: the rest of the JDK closure
+# Phase 2C (step 4): the rest of the JDK closure
 
 B1a step 4, phase 2, part C (branch `c2g-2c`, 2026-10-09; parts A, B and D are parallel
 branches, C2G-NOTES.md): every stand-in replaced by a translated class, the standard streams,
@@ -1445,8 +1517,8 @@ None was cut.
 - `java.text.Normalizer` (regex `CANON_EQ`) and `CharacterName` (`\N{name}`) need the JDK's
   resource data (ICU's `nfc.nrm` read through `java.nio.ByteBuffer`, `uniName.dat` through
   `java.util.zip`): resources and those classes are a later step (`getResourceAsStream` stays
-  undefined).
-- `File`, so `new FileInputStream(File)` and `PrintStream(File)` are stubs.
+  undefined). (Done: "The JDK's resource data".)
+- `File`, so `new FileInputStream(File)` and `PrintStream(File)` are stubs. (Done: "Files".)
 
 # Phase 2B (step 5): jrt's surface for the REPL
 
@@ -1638,7 +1710,8 @@ suite's namespaces); `URI` (its static initializer's `SharedSecrets.setJavaNetUr
 `ReferencePipeline.toList` and `Collectors.toUnmodifiableList` (`SharedSecrets`'
 `JavaUtilCollectionAccess`, which `ImmutableCollections` would register: an unmodifiable list
 over the array, `List.copyOf`); `GathererOp`, `Gatherers` (above); `UUID.nameUUIDFromBytes`
-(MD5 from the host: Go's `crypto/md5`, a native `UUID.md5`).
+(MD5 from the host: Go's `crypto/md5`, a native `UUID.md5`; that variant is gone with "Security",
+SC4: jdk26u's `MessageDigest`).
 
 **`bin/jrt-convert`**: `J2C_PATCH_ALL` (j2c's `jdk` conversion, `arbace/j2c/main.clj`): each
 chunk of packages sees the other chunks' sources on its patch path, its own first. jrt's own
@@ -2007,7 +2080,11 @@ and interfaces, `FileAttribute`, and the exceptions (`NoSuchFileException`,
 `FileAlreadyExistsException`, `DirectoryNotEmptyException`, `AccessDeniedException`,
 `InvalidPathException`, `ProviderMismatchException`, `FileSystemException`). `Files`' errors are
 the documented ones; its readers replace malformed input as `InputStreamReader` does where the
-JDK's report it (`MalformedInputException`).
+JDK's report it (`MalformedInputException`). Since `gofix` (amendment FX7, accepted 2026-10-10;
+"Resources by URL"), `Files.newDirectoryStream`'s three overloads too, with jdk26u's
+`DirectoryStream`, `NotDirectoryException` and `sun.nio.fs.Globs` (the glob as
+`UnixFileSystem.getPathMatcher` reads it); the entries are listed and filtered when the stream
+is opened, so a filter's `IOException` comes from `newDirectoryStream`.
 
 **`java.net.URL` translated, with the `file:` connection.** `slurp` of a path string tries
 `(URL. s)` first, so `URL` is needed for the plainest file read. Translated from jdk26u: `URL`,
@@ -2021,7 +2098,8 @@ syntax and default ports; their connections stay outside the world); what they u
 hands its handler to `SharedSecrets`, without the `ScopedValue` and `ObjectStreamField` fields,
 the providers' lookup finding none, and a default factory of the four handlers; `URLStreamHandler`'s
 `hashCode` and `hostsEqual` by host name (the address lookup, `InetAddress`, is outside the world:
-they answer as the JDK for a host that does not resolve, exactly as the JDK for `file:` URLs);
+they answer as the JDK for a host that does not resolve, exactly as the JDK for `file:` URLs;
+removed with the sockets' merge, "Sockets (go-net)", its variants);
 the `file:` handler's `openConnection(URL)` without the `Proxy` overload; `ParseUtil.decode`
 over `String`'s UTF-8 with the decoder's REPORT (valid UTF-8 is what encodes back to the same
 bytes); `URLConnection.getFileNameMap` knowing no MIME type (the JDK's table is a resource of
@@ -2041,7 +2119,8 @@ report goes to a temporary file as on the JVM. `Compiler.loadFile`'s Go-build va
 channels, buffers and coders (`FileChannel`, `URLEncoder`); `Files`' attribute views, directory
 streams, walks and links; `jar:`, `http:` and `https:` connections; `URLClassLoader`
 (`java.io` suite's two resource tests); `java.net.ServerSocket` and `Socket` (the sockets
-branch).
+branch). Done since: sockets ("Sockets (go-net)"), `URLClassLoader` ("Resources by URL"),
+`Files.newDirectoryStream` (FX7, below).
 
 ## Decisions
 
@@ -2103,7 +2182,7 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
 - **FS5 (C2G-SPEC §8.4, threads) Shutdown hooks at the end of main.** `RunMain` runs them once
   main and the non-daemon threads have ended, as the JVM does; before, only `System.exit` ran
   them. *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (and `Runtime.addShutdownHook`'s
-  description in "`System`, `Runtime` and the host" below holds as amended).*
+  description in "`System`, `Runtime` and the host" above holds as amended).*
 - **FS6 (C2G-SPEC §4.1 and §10.3, the world and the namespace variants) `java.io.File`,
   `java.net.URL` with the `file:` connection, and the `java.nio.file` subset in the closed
   world**, with the variants listed above; `java/io.subst.clj` (copy between files by streams,
@@ -2262,8 +2341,8 @@ code and most of the reflection tables' growth.
   mismatches), the regex corpus 1,233 of 1,233, `bin/jrt test` on amd64 pass again; Clojure's
   suite on the Go build 19,379 of 19,398 assertions, no regression against
   `test/arbace-go-results.edn`.
-- The amendments are numbered RD (resource data): the single letters are taken (Z since by
-  EVAL-NOTES.md's proxies of `BufferedWriter`).
+- The amendments are numbered RD (resource data): the single letters are taken (Z too, since
+  EVAL-NOTES.md's amendment for the proxies of `BufferedWriter`).
 
 ## Decisions
 
@@ -2720,13 +2799,14 @@ code is what one would write by hand: `NEXT.compareAndSet(p, null, newNode)` is
 `ConcurrentLinkedQueue`, `ConcurrentLinkedDeque`, `ConcurrentSkipListMap`,
 `ConcurrentSkipListSet`, `CopyOnWriteArrayList`, `CopyOnWriteArraySet`, `LinkedBlockingDeque`,
 `PriorityBlockingQueue`, `DelayQueue`, `SynchronousQueue`, `LinkedTransferQueue`, `Exchanger`,
-`Phaser`, `CompletableFuture`, `ThreadPoolExecutor`, `ScheduledThreadPoolExecutor`,
+`Phaser`, `CompletableFuture`, `RecursiveAction`, `Flow` and `SubmissionPublisher`,
+`ThreadPoolExecutor`, `ScheduledThreadPoolExecutor`,
 `AbstractExecutorService`, `FutureTask`, `Executors`, `ExecutorCompletionService`,
 `ThreadLocalRandom` (with `RandomSupport`), `AtomicReferenceArray`, `AtomicIntegerArray`,
 `AtomicLongArray`, `Striped64`, `LongAdder`, `DoubleAdder`, `LongAccumulator`,
 `DoubleAccumulator`, `AtomicStampedReference`, `AtomicMarkableReference`, `StampedLock`,
-`AbstractQueuedSynchronizer` (`ThreadPoolExecutor`'s workers), `AbstractOwnableSynchronizer`,
-and the interfaces they implement (`BlockingDeque`, `TransferQueue`, `ConcurrentNavigableMap`,
+`AbstractQueuedSynchronizer` (`ThreadPoolExecutor`'s workers), `AbstractQueuedLongSynchronizer`,
+`AbstractOwnableSynchronizer`, and the interfaces they implement (`BlockingDeque`, `TransferQueue`, `ConcurrentNavigableMap`,
 `Delayed`, `CompletionStage`, `RunnableFuture`, `ScheduledExecutorService`, `ScheduledFuture`,
 `RunnableScheduledFuture`, `RejectedExecutionHandler`, `CompletionService`, `ReadWriteLock`),
 `CompletionException`, and of `java.util` `PriorityQueue` (`DelayQueue`'s) and `SortedSet`
@@ -2752,8 +2832,10 @@ probe). Variants (`overlay/jdk/variants/`): `Executors` (the thread-per-task exe
 `newWorkStealingPool` over jrt's `ForkJoinPool(int)`, `DefaultThreadFactory` without
 `ThreadGroup`, `AutoShutdownDelegatedExecutorService` without its `Cleaner`), `CompletableFuture`
 (`orTimeout`, `completeOnTimeout`, `delayedExecutor` through `Delays`),
-`AbstractQueuedSynchronizer$Node` and `AbstractOwnableSynchronizer` (the waiter and the owner
-volatile, JC6), `Striped64` (the probe without `SharedSecrets`), `ThreadLocalRandom` and
+`AbstractQueuedSynchronizer$Node`, `AbstractQueuedLongSynchronizer`'s and `StampedLock`'s nodes
+and `AbstractOwnableSynchronizer` (the waiter and the owner volatile, JC6), `LinkedTransferQueue`
+(a node's waiter volatile) and `SubmissionPublisher` (the fields other threads read without a
+lock volatile), `Striped64` (the probe without `SharedSecrets`), `ThreadLocalRandom` and
 `ForkJoinWorkerThread` (no offsets of the thread-local maps, which are jrt's Go maps: without it
 `ForkJoinWorkerThread` failed to initialize, and with it every wait of `LinkedTransferQueue` and
 `SynchronousQueue`, which ask its static `hasKnownQueuedWork`).
@@ -2847,7 +2929,9 @@ On the branch `go-juc` after merging main (2026-10-10), amd64:
 | `bin/arbace-go --smoke` | pass, with the three new checks of main's end |
 | size, amd64 | 95.66 MB against main's 88.25 MB (main at `70e6701`): +7.4 MB |
 
-Coverage (`bin/jrt-coverage`, JAVA-BASE.md's measure; before: main after `jbase`):
+Coverage (`bin/jrt-coverage`, JAVA-BASE.md's measure, on `go-juc`; before: main after `jbase`;
+JAVA-BASE.md's later measurements count 1,107 (92.3%) for the package and 1,536 (89.4%) for the
+family, `locks` with 68 hand-written members):
 
 | | classes in Go | members provided | before |
 |---|---:|---:|---:|
@@ -2899,8 +2983,6 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
   agents without and with `shutdown-agents`). *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (`RunMain`).*
 - **JC10 (`bin/arbace-go`) The gate's key** includes `test/g2c/jrt_sources.clj`, which says
   what the executable is built from (it changes the conversion, but the key did not see it). *Accepted 2026-10-10, it stays here, `bin/arbace-go` holds it.*
-
-  what the executable is built from (it changes the conversion, but the key did not see it).
 
 # Size: trimming the executable
 
@@ -3001,7 +3083,7 @@ slightly lower (158 MB, 162 before), the member tables no longer built at the st
 
 ## Amendments (SZ): accepted by the user 2026-10-10, folded into C2G-SPEC §16 ("Size")
 
-Numbered SZ (size); no SZ appears elsewhere in doc/.
+Numbered SZ (size); no other series uses SZ.
 
 - **SZ1 (BUILD.md, `bin/arbace-go`; C2G-SPEC §10.6)** The executables are linked without the
   symbol table and DWARF (`-ldflags=-s -w`); Go's function table stays, so traces and profiles
@@ -3258,6 +3340,24 @@ errors), as on the JVM. `test-resource` and `test-resources-with-spaces` pass: a
 through a `URLClassLoader` of a temporary directory equals the file's URL (`as-url`), and
 `spit` and `slurp` through it work.
 
+## Amendments
+
+FX6 (resources by URL: `ClassPathResources`, the class loaders' `getResource` and
+`getResources`, `URLClassLoader` in the world and out of the library cuts,
+`VM.isSystemDomainLoader`, `HostExecutable`) and FX7 (`Files.newDirectoryStream`, folded into
+"Files" above), with the branch's others, are EVAL-NOTES.md's "Amendments FX1-FX7", accepted by
+the user 2026-10-10.
+
+## Sources
+
+https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/share/classes/java/nio/file/DirectoryStream.java`,
+`NotDirectoryException.java` and `sun/nio/fs/Globs.java`, translated (`file-sources`;
+JRT-SOURCES.md, "Resources by URL"); studied for jrt's own Java, below
+`src/java.base/share/classes`: `java/net/URLClassLoader.java` (its public API),
+`jdk/internal/loader/URLClassPath.java` (`FileLoader`: a directory's resources by URL) and
+`java/nio/file/Files.java` (`newDirectoryStream`); `src/java.base/unix/classes/sun/nio/fs/UnixFileSystem.java`
+(`getPathMatcher`).
+
 # Security: java.security basics in the Go build
 
 Branch `gosec` (2026-10-10, the user's decision): what server code commonly uses of
@@ -3368,6 +3468,9 @@ at a time (single blocks), and short digests are unchanged, 3 to 8 times slower 
 
 ## Results
 
+On the branch `gosec` before merging main (processes and resources by URL came with main; the
+merged coverage is JAVA-BASE.md's, 9,124 members, 52.0%):
+
 - **The oracle**: `test/oracle/forms/security.clj`, 181 cases recorded on the JVM (digests of
   fixed inputs for every algorithm, across block boundaries and of a million `a`s; names,
   aliases and OIDs; update, digest, reset, clone, partial digests and their exceptions;
@@ -3425,7 +3528,8 @@ Numbered SC (security). SC1-SC6 were accepted on 2026-10-10 and folded into C2G-
   below the length less the element's size less one, else `ArrayIndexOutOfBoundsException` with
   that reduced length); its other access modes remain operation-level stubs.
   (`sun.security.provider.ByteArrayAccess`, `SHA3`; `jdk.internal.util.ByteArray`'s variant could
-  now go.) *Accepted 2026-10-10: C2G-SPEC §8.5.*
+  now go: not done, `overlay/jdk/variants/ByteArray.clj` and `ByteArrayLittleEndian.clj` stay, a
+  cleanup for after the freeze.) *Accepted 2026-10-10: C2G-SPEC §8.5.*
 - **SC2 (C2G-SPEC §4.4, the rename table)** `sun/security/provider/SecureRandom` →
   `Sun_SecureRandom` (java.security's `SecureRandom` is `SecureRandom`). *Accepted 2026-10-10: C2G-SPEC §4.4.*
 - **SC3 (C2G-SPEC §4.2, Go packages)** Classes of `com/sun/` are the JDK's: jrt's package (they
