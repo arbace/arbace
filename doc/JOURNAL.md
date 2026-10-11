@@ -255,3 +255,26 @@ the first. The history before it is on the frozen branches and in git history:
   both in the pty's child, as a login shell would; the old test fails the same way under
   `trap '' INT QUIT`, the new one passes. The gate then passed (4m05s); the box's build and
   `--smoke --box` passed on the merged tree.
+
+## 2026-10-11: `doc/go/java-surface.edn` regenerated
+
+- Agent, branch `jsurface` (`da5cd2b`), merged into main; the essential `bin/gate` passed on its
+  tree (7m49s). Generated once before, at `67e56cd` (2026-10-08). Its per-source j2a statuses
+  need a `bin/j2a-check --jdk java.base` run first (3,003 of 3,025 shape-identical), or every
+  source reads `:unchecked` (most of the 1,250 lines the tidy-up saw); the real diff is 187
+  lines, deterministic.
+- What changed: the REPL group 2,779 → 2,811 classes (the 39 `core$bean*` classes of hand change
+  15, with reflection instead of `java.beans`: its 4 classes gone, 319 → 315 JDK classes),
+  class forms 1,449 → 1,454 (the NaN fix, `shape.ae`); the version's `readAllBytes`; `Optional`
+  in the shipped closure (hand change 17's module checks). jrt's closure (runtime + REPL) is
+  unchanged: 422 classes, 184 files, the same boundary and natives; `bin/jrt-convert` the same
+  835 files (830 identical, 5 known); java.base coverage 55.9%, Arbace's use 837 of 901 provided
+  (`Module.isExported` absent: the Go build's `bean` has no modules). JAVA-SURFACE.md,
+  JAVA-BASE.md, JRT-NOTES.md and `java-base-coverage.edn` follow.
+- Checks: the executable unchanged (66,523,296 bytes), `--smoke` 41 of 41, the oracle 22,232 of
+  22,278 (the 46 known), `bin/jrt test` (amd64); the box's build unchanged, `--smoke --box` 64 of
+  64. The suite on the test build skipped: the closure did not change.
+- Noted, not caused by this: a2g's member tables order same-name overloads differently from
+  main's previous build (4 classes in jrt, about 17 in `lang`; that build was from a dirty tree,
+  so not conclusive); 21 files of jrt-convert's output differ only in a header naming a numbered
+  temporary directory (`.tmp/j2a-patch/java.base-N`).
