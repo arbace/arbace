@@ -4,8 +4,9 @@ B1a step 6 ([B1-PLAN.md](B1-PLAN.md), branch `step6`, 2026-10-09): `bin/arbace-g
 static executables of Arbace for `linux/amd64` and `linux/arm64`, running `arbace.main`'s REPL,
 `-e` and scripts; the core namespaces are prepared at build time, so that the executable starts
 in about 0.3 s instead of 4.2 s. This document describes the image of prepared namespaces (the
-step's main lever), the build, the measurements against the JVM's `bin/arbace` and against
-Joker, the REPL as a user process, the gate question, the results, and the amendments proposed.
+step's main lever), the build, the measurements against the JVM's `bin/arbace` (now
+`bin/arbace-j`) and against Joker, the REPL as a user process, the gate question, the results,
+and the amendments (accepted).
 
 ```
 $ bin/arbace-go --build                    # c2g, the Go builds, the image, the links
@@ -132,7 +133,7 @@ the image's skipped fields. Start went from 0.33 s to 0.21 s, preparing the imag
 1. `bin/c2g --program` writes the program: the main package now has `image.go` (copied from
    `go/arbace/cmd/arbace/image.clj`), `image_types.go` (generated) and an empty `image.bin`;
 2. `bin/g2c build` for each architecture, the host's first;
-3. the host's executable prepares the namespaces (`ARBACE_PREPARE`; about 35 s, all 41
+3. the host's executable prepares the namespaces (`ARBACE_PREPARE`; about 35 s at step 6, 11 s since EC6; all 41
    embedded sources, 27 namespaces);
 4. each executable is linked again with the image (`go build` in the printed module: only the
    main package changes, the rest comes from Go's build cache; a few seconds).
@@ -152,8 +153,9 @@ With Go's default (`GOGC=100`) the collector runs many cycles while the heap gro
 until `Main.main` has loaded `arbace.main` (a variant of `Main`, `arbace/lang/go/Main.clj`,
 calls `Compiler$Image.started`), the program runs it at `GOGC=400` unless `GOGC` is set, then
 sets it back. Measured: amd64, best of 10 runs, `-e nil`: 0.32 s with the start's `GOGC=400`, 0.41 s with
-`GOGC=100` throughout; with the collector off the start takes 0.28 s (and 280 MB). The setting of the running program stays D7's
-question (step 7).
+`GOGC=100` throughout; with the collector off the start takes 0.28 s (and 280 MB). The setting of the running program was D7's
+question, decided by step 7a (amendment O1, `GOGC=200` and a 64 MiB minimum heap:
+SPEED-NOTES.md).
 
 ## Measurements
 
@@ -179,8 +181,9 @@ initialization 11 ms; decoding the 16 sources of the start (239,000 objects) abo
 of `arbace.core`'s 700 public vars, evaluated: 15 to 25 ms per namespace) and `arbace.main`'s
 and `spec.alpha`'s top-level defs; the rest the collector. Joker starts from Go-initialized
 data structures with nothing evaluated; the JVM from classes already loaded and linked (the AOT
-cache) with compiled code. The remaining levers are step 7's: closure compilation (the `refer`s
-and the other evaluated start code), then namespaces compiled to Go (no decoding at all).
+cache) with compiled code. The remaining levers were step 7's: closure compilation (the `refer`s
+and the other evaluated start code; done, start 0.21 s: "With the closure compiler" above), then
+namespaces compiled to Go (no decoding at all; not scheduled, the user, 2026-10-10).
 
 Before this step's decoding was made direct (field offsets, cached method tables, member lists
 cached per class) it took 580 ms; with `ObjExpr.src` and the clearing paths encoded the image
@@ -190,7 +193,7 @@ was 5.1 MB and 380,000 objects for the start.
 
 `bin/arbace-go --smoke` (each of `ARBACE_GO_ARCHES`; arm64 under `qemu-aarch64`) checks, besides
 `-e`, a script, `-` and an error's exit status and message, a REPL session against the JVM's
-transcript (`bin/arbace` gives the same, but for the number of the `eval` class in the error
+transcript (`bin/arbace-j` gives the same, but for the number of the `eval` class in the error
 message): reading and printing, multi-line input, `doc`, an error that the REPL reports and goes
 on after, `*1`, `*2`, `*3` and `*e`, and the end of input ending the REPL with status 0.
 
@@ -259,7 +262,7 @@ would execute the arm64 executable directly.
 The smoke test itself is fast: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke` takes 3.5 s. Getting
 an executable is not. After the bootstrap, the chain is `bin/jrt-convert` (about 95 s; its output
 `.tmp/jrt/conv` is what `bin/c2g` translates), `bin/c2g --program` (about 75 s), `bin/g2c build`
-amd64 (60 s of CPU with Go's build cache warm, minutes cold), the image (32 s) and the link (a
+amd64 (60 s of CPU with Go's build cache warm, minutes cold), the image (32 s then; 11 s since EC6) and the link (a
 few seconds): 4 to 5 minutes, against the 3.2 minutes the suite on stage 2 runs concurrently. It
 would add 1 to 2 minutes to the essential gate, and load the machine beside the suite. So, by the
 rule given, `bin/gate` is not changed. Options for the user:
@@ -282,8 +285,9 @@ every change that can change it, and costs nothing on the others.
 check `go` runs `bin/arbace-go --gate`, concurrently with the suite on stage 2 and the class
 forms tests (not with `--full`, whose Go chain builds and smoke-tests anew). It computes a key,
 the SHA-256 of the contents of `arbace/`, `go/`, `overlay/` and `bin/lib/`, of
-`doc/go/java-surface.edn`, the seed's hash and the scripts of the build (`bin/arbace-go`, `c2g`,
-`g2c`, `j2c`, `jrt`, `jrt-convert`, `arbace`, `build-arbace`), and of the toolchains (TamaGo's
+`doc/go/java-surface.edn` and `test/g2c/jrt_sources.clj` (JC10), the seed's hash and the
+scripts of the build (`bin/arbace-go`, `c2g`, `g2c`, `j2c`, `jrt`, `jrt-convert`, `arbace-j`
+(then `arbace`), `build-arbace`), and of the toolchains (TamaGo's
 `VERSION`, `java -version`, jdk26u's commit): about 0.1 s. When `.tmp/arbace-go-gate/key` holds
 that key, it smoke-tests `.tmp/arbace-go-gate/amd64/arbace` (`--smoke` on amd64); otherwise it
 runs `bin/jrt-convert`'s steps `sources,generate,convert` (what `bin/c2g` reads: the javac
@@ -299,6 +303,7 @@ executable and the key into the cache, and smoke-tests it. Measured on this mach
 At the first miss the machine's peak memory use was 25 GB of 62 (the suite's 24 JVMs, the class
 forms tests, and the build's JVMs and `go build` beside them); during the second pair of runs,
 with other agents' work beside, it reached 40 GB, 6 GB left available.
+
 ## Results
 
 - **Oracle on Go** (`bin/oracle check 'target/arbace-go/amd64/arbace -'`), on this branch before

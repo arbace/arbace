@@ -3,11 +3,11 @@
 A Go program held as Go forms ([SPEC.md](SPEC.md)) is printed back to Go (`arbace.g2c.print`,
 [PRINTER-NOTES.md](PRINTER-NOTES.md)) into a temporary module and built by gc into a static
 executable for `linux/amd64` or `linux/arm64`. This is B1a's step 0 ([B1-PLAN.md](B1-PLAN.md)):
-the path by which Arbace itself will be built from forms.
+the path by which Arbace itself is built from forms (`bin/arbace-go`).
 
 ```sh
 bin/g2c build [--arch amd64|arm64] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR]
-              [--overlay FILE] DIR
+              [--overlay FILE] [--pgo FILE] DIR
 bin/g2c build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
               [--line-file] SRC
 bin/g2c-build-tests [--arch amd64|arm64]... [PROG...]
@@ -87,7 +87,9 @@ DIR/
    ```
 
    `OUT` defaults to the main package path's last element in the current directory, as
-   `go build` names it. Go's output and exit status are the command's.
+   `go build` names it. Go's output and exit status are the command's. `--overlay FILE` adds
+   `-overlay FILE` ("Overlays" below), `--pgo FILE` adds `-pgo FILE` (made absolute): a CPU
+   profile for gc's profile-guided optimization (amendment O5, SPEED-NOTES.md).
 
 **Toolchain.** `$G2C_GOROOT/bin/go`, by default TamaGo's go1.27.1 at `/root/tamago-go`, the
 toolchain of the rest of g2c (the round trip); it builds `linux` targets like upstream Go.
@@ -97,7 +99,8 @@ trees differ in `cmd/` and std, TamaGo's additions and Alpine's patches); each i
 
 **Static.** `CGO_ENABLED=0` makes gc's internal linker write a static executable: `file` says
 "statically linked", `readelf -l` shows no `INTERP` segment and `readelf -d` no dynamic
-section. (The executables keep their symbols and DWARF; `-ldflags=-s -w` would strip them.)
+section. (The executables keep their symbols and DWARF; `-ldflags=-s -w` would strip them.
+`bin/arbace-go` strips its executables (amendment SZ1; `ARBACE_GO_SYMBOLS=1` keeps them).)
 
 **Reproducible.** Two builds of one program are byte-identical, from the same directory or
 another, with a warm or a cold build cache (checked with a fresh `GOCACHE`): `-trimpath`
