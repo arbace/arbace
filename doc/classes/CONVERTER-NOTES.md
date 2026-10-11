@@ -10,21 +10,21 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 
 | file | namespace | role |
 |---|---|---|
-| `arbace/j2c/javac.ae` | `arbace.j2c.javac` | runs the JDK's javac (`JavacTask.parse` + `analyze`: attribution and flow, no desugaring) |
-| `arbace/j2c/jtypes.ae` | `arbace.j2c.jtypes` | javac types and symbols: erasure, boxing, widening, flags, binary names, renaming |
-| `arbace/j2c/forms.ae` | `arbace.j2c.forms` | output data: forms, class references named later (`CRef`), raw tokens, ordered metadata |
-| `arbace/j2c/convert.ae` | `arbace.j2c.convert` | the conversion of attributed trees: declarations, code, control flow, patterns, switches, lambdas |
-| `arbace/j2c/names.ae` | `arbace.j2c.names` | one namespace per package: which class gets which simple name, imports, file layout |
-| `arbace/j2c/print.ae` | `arbace.j2c.print` | printing with metadata and a Clojure-style layout |
-| `arbace/j2c/main.ae` | `arbace.j2c.main` | command line: `convert`, `jdk` |
-| `arbace/j2c/build.ae` | `arbace.j2c.build` | compiles converted files with the class forms compiler into class files |
-| `arbace/j2c/coverage.ae` | `arbace.j2c.coverage` | coverage summary from run reports |
-| `arbace/j2c/resolve.ae` | `arbace.j2c.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
-| `arbace/j2c/rename.ae` | `arbace.j2c.rename` | the `clojure` → `arbace` renaming rules, for Clojure's test suite (`bin/clojure-tests`); they derived the vendored sources (`doc/VENDOR-NOTES.md`) |
-| `bin/j2c` | | starts Arbace (`target/stage2`, `bin/lib/tools.bash`) with access to javac's internals |
-| `bin/j2c-check` | | the checks (below) |
-| `test/j2c/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4; `Pins.java`: overloads that need pins and that must not get them, constructor calls of every kind, `o.new Inner(...) {...}` |
-| `test/j2c/module/` | | a module declaration and package annotations |
+| `arbace/j2a/javac.ae` | `arbace.j2a.javac` | runs the JDK's javac (`JavacTask.parse` + `analyze`: attribution and flow, no desugaring) |
+| `arbace/j2a/jtypes.ae` | `arbace.j2a.jtypes` | javac types and symbols: erasure, boxing, widening, flags, binary names, renaming |
+| `arbace/j2a/forms.ae` | `arbace.j2a.forms` | output data: forms, class references named later (`CRef`), raw tokens, ordered metadata |
+| `arbace/j2a/convert.ae` | `arbace.j2a.convert` | the conversion of attributed trees: declarations, code, control flow, patterns, switches, lambdas |
+| `arbace/j2a/names.ae` | `arbace.j2a.names` | one namespace per package: which class gets which simple name, imports, file layout |
+| `arbace/j2a/print.ae` | `arbace.j2a.print` | printing with metadata and a Clojure-style layout |
+| `arbace/j2a/main.ae` | `arbace.j2a.main` | command line: `convert`, `jdk` |
+| `arbace/j2a/build.ae` | `arbace.j2a.build` | compiles converted files with the class forms compiler into class files |
+| `arbace/j2a/coverage.ae` | `arbace.j2a.coverage` | coverage summary from run reports |
+| `arbace/j2a/resolve.ae` | `arbace.j2a.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
+| `arbace/j2a/rename.ae` | `arbace.j2a.rename` | the `clojure` → `arbace` renaming rules, for Clojure's test suite (`bin/clojure-tests`); they derived the vendored sources (`doc/VENDOR-NOTES.md`) |
+| `bin/j2a` | | starts Arbace (`target/stage2`, `bin/lib/tools.bash`) with access to javac's internals |
+| `bin/j2a-check` | | the checks (below) |
+| `test/j2a/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4; `Pins.java`: overloads that need pins and that must not get them, constructor calls of every kind, `o.new Inner(...) {...}` |
+| `test/j2a/module/` | | a module declaration and package annotations |
 
 The converted files are not kept in the repository: they are regenerated (the user's decision).
 
@@ -33,41 +33,41 @@ by `bin/build-arbace`) before the checkout on the class path, so the converter a
 compiler namespace load from source and the rest from the stage's classes. Until then it ran on
 the frozen Clojure. Its output names the running core: a head shadowed by a local or field is
 qualified `arbace.core/` (before, `clojure.core/` for Clojure's own names). The baseline
-`clojure/` is no longer in main's tree: `bin/j2c-check` extracts it from the tag
+`clojure/` is no longer in main's tree: `bin/j2a-check` extracts it from the tag
 `arbace-for-java-26-v1` into `.tmp/frozen/` once (`frozen_clojure` in `bin/lib/tools.bash`).
 
 ## Use
 
 ```
-bin/j2c -m arbace.j2c.main convert [--rename FROM=TO] [--javac OPT]... [--check] OUT ROOT [PATH...]
-bin/j2c -m arbace.j2c.main jdk [--check] OUT MODULE MODULE-SRC [PATH...]
-bin/j2c -m arbace.j2c.build CONVERTED-DIR CLASSES-DIR [PACKAGE-DIR...]
-bin/j2c -m arbace.j2c.coverage REPORT.edn...
-bin/j2c-check [--suite]
-bin/j2c-check --jdk [MODULE...]
+bin/j2a -m arbace.j2a.main convert [--rename FROM=TO] [--javac OPT]... [--check] OUT ROOT [PATH...]
+bin/j2a -m arbace.j2a.main jdk [--check] OUT MODULE MODULE-SRC [PATH...]
+bin/j2a -m arbace.j2a.build CONVERTED-DIR CLASSES-DIR [PACKAGE-DIR...]
+bin/j2a -m arbace.j2a.coverage REPORT.edn...
+bin/j2a-check [--suite]
+bin/j2a-check --jdk [MODULE...]
 ```
 
 - `convert` converts the `.java` files under `ROOT` (or under the `PATH`s) into `OUT`, with
-  `ROOT` as javac's source path. `bin/j2c -m arbace.j2c.main convert .tmp/j2c/clojure-out
-  .tmp/frozen clojure` converts the baseline (extracted by `bin/j2c-check`); put the output
+  `ROOT` as javac's source path. `bin/j2a -m arbace.j2a.main convert .tmp/j2a/clojure-out
+  .tmp/frozen clojure` converts the baseline (extracted by `bin/j2a-check`); put the output
   under `.tmp/`.
 - `--rename clojure=arbace` renames the package prefix in every class name, namespace and path
   (agenda step 4). String literals are left alone (`"clojure.core"` in `RT` stays); step 4
-  renamed them afterwards with `arbace.j2c.rename` (`doc/VENDOR-NOTES.md`; `bin/vendor-arbace`
+  renamed them afterwards with `arbace.j2a.rename` (`doc/VENDOR-NOTES.md`; `bin/vendor-arbace`
   on the branch `arbace-for-java-26`).
 - `--check` reads every output file back with the core's `read` and the EDN reader (on Arbace
   `arbace.core/read`, `arbace.edn/read`), and
-  writes `OUT/j2c-report.edn`: failures, unreadable files, counters of tree kinds met and of the
+  writes `OUT/j2a-report.edn`: failures, unreadable files, counters of tree kinds met and of the
   forms and conversions written.
 - `jdk` converts a JDK module's sources against the running JDK's own classes: the files are
-  copied into `--patch-module` directories under `.tmp/j2c-patch/`, in chunks of packages
-  converted in parallel (`J2C_THREADS`, default 12). A `module-info.java` cannot be patched in
-  and is skipped (modules are converted from ordinary source trees, `test/j2c/module`).
+  copied into `--patch-module` directories under `.tmp/j2a-patch/`, in chunks of packages
+  converted in parallel (`J2A_THREADS`, default 12). A `module-info.java` cannot be patched in
+  and is skipped (modules are converted from ordinary source trees, `test/j2a/module`).
 - `bin/jrt-convert` (doc/go/JRT-SOURCES.md) runs `jdk --check` on java.base's translation
   closure for the Go build's runtime jrt, then checks the output with `bin/class-forms-check`.
 - `build` compiles converted files with the class forms compiler (`arbace.classes`, the other
   half of the work, loaded through `arbace.classes.boot`) and writes the class files. Classes
-  it does not compile are looked up on the class path: `J2C_CP` adds to it (`bin/j2c-check`
+  it does not compile are looked up on the class path: `J2A_CP` adds to it (`bin/j2a-check`
   passes the frozen tree's javac classes).
 
 Output layout (§9.1): for package `p.q`, `p/q.ae` holds `(ns p.q)` and a `(load "q/File")` per
@@ -90,7 +90,7 @@ file; Java's comments are not carried over.
    members), unboxing from non-wrapper types, boxing of literals, narrowing, constant
    promotions (`(unchecked-multiply-float c (float 2.0))`, `(< side 0.0)`).
 3. **Overloads.** Pins are decided by the class forms compiler's own resolution (SPEC §5.6,
-   §7.3; `arbace.j2c.resolve`): for every call, constructor call and method reference the
+   §7.3; `arbace.j2a.resolve`): for every call, constructor call and method reference the
    converter asks `arbace.classes.analyze/select-method`, with the compiler's candidates
    (`instance-candidates`, `static-candidates`, `ctor-candidates`), what the compiler will
    choose for the call as written without param-tags, and pins only where that is not javac's
@@ -148,7 +148,7 @@ On 2026-10-06 (the table) and 2026-10-07 (as dated below), jdk26u at the system 
 |---|---:|---:|---:|---:|
 | baseline `clojure/` | 183 | 183 | 0 | 0 |
 | jdk26u `src/*/share/classes`, all 68 modules (module-infos skipped) | 12,730 | 12,730 | 0 | 0 |
-| `test/j2c/java`, `test/j2c/module` (14 files since: `Pins`, `TypeAnns`) | 9 | 9 | 0 | 0 |
+| `test/j2a/java`, `test/j2a/module` (14 files since: `Pins`, `TypeAnns`) | 9 | 9 | 0 | 0 |
 
 - **Compiled with the class forms compiler** (`bin/class-forms-check`, compiler at `origin/main`
   of the same day): every one of the 183 converted baseline files with class forms compiles, and
@@ -170,11 +170,11 @@ On 2026-10-06 (the table) and 2026-10-07 (as dated below), jdk26u at the system 
   converted forms, with the baseline's `.clj` sources: 83 namespaces, 809 tests, 20,718 of
   20,750 assertions pass and 27 of 27 test.generative specs pass, the same as the baseline (the
   32 failures expect spec's messages). No regressions.
-- `test/j2c/java/sample`: all 6 files shape-identical to javac, §11.4 included (2026-10-07;
+- `test/j2a/java/sample`: all 6 files shape-identical to javac, §11.4 included (2026-10-07;
   before, `Features` differed in the constants of `d + (z ? 1 : 2)`, a serializable lambda's
   name and record pattern merging, all fixed in the compiler since; `Pins` was added). Later
   `TypeAnns.java` and its annotation types `TypeUseA` to `TypeUseC` were added (10 files, all
-  shape-identical; `bin/j2c-check`).
+  shape-identical; `bin/j2a-check`).
 - A sample of the JDK conversion compiled the same way (`javax/security/auth/x500`,
   `sun/util/calendar`, `jdk/internal/util`): the differences are javac's string concatenation
   with `StringBuilder` (java.base is built with `-XDstringConcat=inline`), one array upcast
@@ -183,13 +183,13 @@ On 2026-10-06 (the table) and 2026-10-07 (as dated below), jdk26u at the system 
 - `clojure.edn/read` reads none of the files that use Clojure 1.12 syntax: array class
   symbols (`int/1`) and param-tags (`^[int]`) are not EDN (amendment 2).
 
-`bin/j2c-check` reruns the baseline, compiler and sample checks (one minute); with `--suite` it
+`bin/j2a-check` reruns the baseline, compiler and sample checks (one minute); with `--suite` it
 also builds the converted baseline and runs Clojure's test suite on it.
 
 ### The converted JDK
 
-`bin/j2c-check --jdk [MODULE...]` (about 10 minutes on 64 cores; not part of the default
-checks) converts every module of jdk26u's `src/*/share/classes` with `bin/j2c ... jdk`,
+`bin/j2a-check --jdk [MODULE...]` (about 10 minutes on 64 cores; not part of the default
+checks) converts every module of jdk26u's `src/*/share/classes` with `bin/j2a ... jdk`,
 compiles the same Java files twice with javac (`--patch-module` against the running JDK, which
 is built from the same sources, with the options of the JDK build for the module:
 `-XDstringConcat=inline` for `java.base`, `jdk.compiler`, `jdk.jfr`, `jdk.jartool`,
@@ -199,13 +199,13 @@ converted module on the class path for classes found nowhere else) and compares 
 shape with javac's (SPEC §3). Classes whose two javac runs differ are not compared (2 do);
 classes javac made from a Java file (by `SourceFile`) that the forms did not make count as
 differences; `defpackage` forms are compiled and compared too. The report,
-`.tmp/j2c-jdk/report.md`, counts per module the Java files converted, the converted files with
+`.tmp/j2a-jdk/report.md`, counts per module the Java files converted, the converted files with
 class forms compiled without error, those whose classes are all shape-identical, those with
 differences, and the compile errors, and lists differences and errors by kind with an example.
 
 Results (2026-10-07; "before" is the first run, with the compiler and converter of
 `origin/main` at `f425bc8`, where one chunk of 60 `java.base` files did not finish because
-`java.lang.Object` sent the compiler into a loop; "after" is `bin/j2c-check --jdk` at the end of
+`java.lang.Object` sent the compiler into a loop; "after" is `bin/j2a-check --jdk` at the end of
 the work). Files are converted Java files with class forms; 286 have none (no annotations in a
 `package-info.java`):
 
@@ -265,7 +265,7 @@ end (68 files), by cause:
 ## Coverage
 
 Tree kinds met in the whole corpus (baseline, jdk26u, samples) and what they become. Every kind
-met was converted without failure. Generated by `arbace.j2c.coverage` (rounded counts).
+met was converted without failure. Generated by `arbace.j2a.coverage` (rounded counts).
 
 | tree kinds | met | written as |
 |---|---|---|
@@ -273,7 +273,7 @@ met was converted without failure. Generated by `arbace.j2c.coverage` (rounded c
 | `MODULE`, `REQUIRES`, `EXPORTS`, `OPENS`, `USES`, `PROVIDES` | test module | `defmodule` |
 | `CLASS`, `INTERFACE`, `ENUM`, `RECORD`, `ANNOTATION_TYPE` | ✓ | `defclass` with kind metadata, `anon`, `letclass`, `constants` |
 | `METHOD`, `VARIABLE`, `BLOCK`, `MODIFIERS`, `ANNOTATION`, `TYPE_PARAMETER` | ✓ | `method`, `constructor`, `field`, bindings, metadata, `:type-params` |
-| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | ✓ | metadata on the type forms' nodes; in code on the operand of `cast`, `instance?`, `new`, `catch`; `^{:type-args [...]}`, `^{:qualifier T}` on method symbols (`test/j2c/java/sample/TypeAnns.java`) |
+| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | ✓ | metadata on the type forms' nodes; in code on the operand of `cast`, `instance?`, `new`, `catch`; `^{:type-args [...]}`, `^{:qualifier T}` on method symbols (`test/j2a/java/sample/TypeAnns.java`) |
 | type kinds, wildcards, `UNION_TYPE`, `INTERSECTION_TYPE` | ✓ | type forms, `(catch [A B] e)`, `(& A B)` |
 | `IF`, `CONDITIONAL_EXPRESSION` | ✓ | `if`, `when`, `when-not`, `cond`, folding |
 | loops | ✓ | `loop`/`recur`, `while`, `for-each` |
@@ -310,7 +310,7 @@ and the shape comparison above covers it for the baseline.
     converter keeps Java's order, a `^:mutable` `newroot` assigned in both branches.
   None of these change the classes (the shapes compare equal).
 - **§11.3** `Numbers.Category`: identical.
-- **§11.4** (`test/j2c/java/sample`): identical apart from `rowOf`'s last test written as
+- **§11.4** (`test/j2a/java/sample`): identical apart from `rowOf`'s last test written as
   `(if (== ...) (return i) (recur ...))`, the `with-resources` binding untagged (`var` in Java),
   and `(when (< side 0.0) ...)`. All four files compile to javac's shapes.
 
@@ -370,5 +370,5 @@ they are marked "amendment, accepted 2026-10-07".
 - Module declarations of the JDK are not converted (`--patch-module` cannot take them). An
   experiment showed the way: javac attributes a module's `module-info.java` with
   `--module-source-path` naming only that module's sources (the others come from the system
-  image), so `bin/j2c-check --jdk` could convert and compare them with `defmodule`; not done.
+  image), so `bin/j2a-check --jdk` could convert and compare them with `defmodule`; not done.
 - The JDK differences listed in "The converted JDK" above.

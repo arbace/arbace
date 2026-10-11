@@ -1,34 +1,34 @@
-# g2c's front end helper: notes
+# g2a's front end helper: notes
 
-`tools/godump` is the front end of g2c (Go as Arbace forms), milestone G1 of
+`tools/godump` is the front end of g2a (Go as Arbace forms), milestone G1 of
 [G2C-SURVEY.md](../G2C-SURVEY.md) §7. It is a Go program, Arbace's own code under the EPL like
 the rest, using only Go's standard library (BSD-licensed APIs, no third-party modules). It was
 seeded from the experiment `godump` of survey §2.4 and §10. It loads Go packages for one build
 configuration, type-checks them with `go/types`, and writes per package one forms file. The
 helper is dumb and complete: it writes the typed AST generically, plus what `go/types` decided.
-The converter (`arbace.g2c.convert`, in Clojure, [CONVERTER-NOTES.md](CONVERTER-NOTES.md))
+The converter (`arbace.g2a.convert`, in Clojure, [CONVERTER-NOTES.md](CONVERTER-NOTES.md))
 makes every decision about forms.
 
 ## Building and running
 
 ```sh
-bin/g2c build                        # .tmp/godump/godump, built with TamaGo's go for the host
-bin/g2c dump fmt runtime             # .tmp/godump/out/fmt.edn, .tmp/godump/out/runtime.edn
-bin/g2c dump -goarch arm64 -o DIR std
-bin/g2c dump -tests fmt              # fmt.edn with fmt's _test.go files, and fmt_test.edn
-bin/g2c dump -files prog.go a.go,b.go   # single-file programs; a.go,b.go is one program
-bin/g2c read .tmp/godump/out         # read on Arbace (needs bin/build-arbace), print a summary
-bin/g2c corpus [amd64|arm64|test|test-arm64|tests]  # the coverage runs below, into .tmp/godump/corpus/
-bin/g2c corpus linux-amd64 linux-test linux-arm64 linux-test-arm64   # the same for GOOS=linux
-bin/g2c dump -goos linux -goarch arm64 -o DIR std
+bin/g2a build                        # .tmp/godump/godump, built with TamaGo's go for the host
+bin/g2a dump fmt runtime             # .tmp/godump/out/fmt.edn, .tmp/godump/out/runtime.edn
+bin/g2a dump -goarch arm64 -o DIR std
+bin/g2a dump -tests fmt              # fmt.edn with fmt's _test.go files, and fmt_test.edn
+bin/g2a dump -files prog.go a.go,b.go   # single-file programs; a.go,b.go is one program
+bin/g2a read .tmp/godump/out         # read on Arbace (needs bin/build-arbace), print a summary
+bin/g2a corpus [amd64|arm64|test|test-arm64|tests]  # the coverage runs below, into .tmp/godump/corpus/
+bin/g2a corpus linux-amd64 linux-test linux-arm64 linux-test-arm64   # the same for GOOS=linux
+bin/g2a dump -goos linux -goarch arm64 -o DIR std
 ```
 
-- **Toolchain.** `G2C_GOROOT` names TamaGo's Go tree (default `/root/tamago-go`). The system Go
+- **Toolchain.** `G2A_GOROOT` names TamaGo's Go tree (default `/root/tamago-go`). The system Go
   (plain go1.27.1) lacks `GOOS=tamago`. TamaGo's go also builds `GOOS=linux`, and is used for it
   too: one tree and one build cache for every configuration; its std differs from upstream's
-  only by `tamago` build constraints, its own files and the GOOS tables (ROUNDTRIP.md). `bin/g2c` builds the helper with `$G2C_GOROOT/bin/go`
-  for the host (it runs at conversion time, like javac for j2c). It then runs the helper with
-  `-go $G2C_GOROOT/bin/go`, which the helper uses for `go env` and `go list`.
+  only by `tamago` build constraints, its own files and the GOOS tables (ROUNDTRIP.md). `bin/g2a` builds the helper with `$G2A_GOROOT/bin/go`
+  for the host (it runs at conversion time, like javac for j2a). It then runs the helper with
+  `-go $G2A_GOROOT/bin/go`, which the helper uses for `go env` and `go list`.
 - **Pinned Go.** The helper checks that it was built with go1.27 (its `go/types` is the
   language) and that the go command is go1.27.1. It type-checks at the package's language
   version: `go1.27` for std and single files, the `go` line of a module otherwise. It refuses a
@@ -37,7 +37,7 @@ bin/g2c dump -goos linux -goarch arm64 -o DIR std
   command does. Moving the pin is a recorded decision (the journal on `arbace-for-java-26`,
   2026-10-07).
 - **Configuration.** There is one per run, written into every dump: `-goos` (default
-  `tamago`; g2c's configurations are `tamago` and `linux`: amendments L1 and L2, accepted
+  `tamago`; g2a's configurations are `tamago` and `linux`: amendments L1 and L2, accepted
   2026-10-08, folded into SPEC §1 item 7 and §4.2), `-goarch` (`amd64` or `arm64`) and
   `-tags`. `CGO_ENABLED=0`, `GOFLAGS` is
   emptied, and `GOTOOLCHAIN=local`. `GOAMD64`/`GOARM64` and `GOEXPERIMENT` come from `go env`
@@ -60,7 +60,7 @@ bin/g2c dump -goos linux -goarch arm64 -o DIR std
   the tests make go list rebuild (`q [p.test]`) are imported as rebuilt. The generated test
   main (`p.test`) is not dumped. A package without in-package test files is dumped as without
   `-tests`. The first run builds every test variant's export data (about 15 s for std).
-- **Output.** `-o DIR` (default `godump.out`; `bin/g2c` uses `.tmp/godump/out`). A package
+- **Output.** `-o DIR` (default `godump.out`; `bin/g2a` uses `.tmp/godump/out`). A package
   goes to `DIR/IMPORT/PATH.edn` (an external test package to `DIR/IMPORT/PATH_test.edn`), and
   a single file to `DIR/FILE.go.edn` (relative to `$GOROOT/test`, `$GOROOT` or the working
   directory). `.edn` follows `test/*.edn`: the format targets the Clojure reader, not strict
@@ -80,10 +80,10 @@ bin/g2c dump -goos linux -goarch arm64 -o DIR std
 
 Format version 2 (2026-10-08; version 1 had `types.TypeString` strings where it now has type
 ids, a flat comment list, and floats as plain numbers). One form per package, read with `read`
-and `*read-eval*` false (`arbace.g2c.read/read-dump`):
+and `*read-eval*` false (`arbace.g2a.read/read-dump`):
 
 ```clojure
-;; godump: the typed AST of a Go package for arbace.g2c (doc/go/HELPER-NOTES.md)
+;; godump: the typed AST of a Go package for arbace.g2a (doc/go/HELPER-NOTES.md)
 {:godump 2                                  ; format version
  :package "fmt" :name "fmt"                 ; import path ("command-line-arguments" for files)
  :config {:goos "tamago" :goarch "amd64" :goamd64 "v1" :tags [] :tool-tags [...]
@@ -221,7 +221,7 @@ An object is `{:kind K :name N ...}`, with K one of `:var`, `:field`, `:func`, `
 `:type-table` is a vector: the type with id N is its Nth entry. It holds every type the dump
 mentions, each once, as structured data, so that types can be written as type forms (SPEC
 §5) and told apart. Component types are ids of earlier entries: the table is in dependency
-order, and `arbace.g2c.read/check-type-table` checks it. A named type, an alias and a type
+order, and `arbace.g2a.read/check-type-table` checks it. A named type, an alias and a type
 parameter are leaves, named and not expanded (a named type's underlying type is in the `:types`
 of the dump of its package), which also ends recursive types.
 
@@ -343,7 +343,7 @@ embedded struct `N{P; Name string}`, a generic function and two local types `T`:
 
 ## Coverage
 
-Measured on 2026-10-08 with `bin/g2c corpus`: TamaGo go1.27.1 (`/root/tamago-go`), 64 cores,
+Measured on 2026-10-08 with `bin/g2a corpus`: TamaGo go1.27.1 (`/root/tamago-go`), 64 cores,
 helper `-j 64`, Arbace stage 2, reading with 64 threads (which includes checking each type
 table). Dump times exclude `go list`: 0.3 s when the export data is cached, about 6 s the
 first time per GOARCH, when it builds std for the configuration (about 15 s for std with
@@ -375,14 +375,14 @@ three, in 1.4 s, 1.3 s and 0.8 s, read in 5.7 s, 5.5 s and 2.5 s: the type ids m
   taken: the 290 directory tests (`*dir` actions, several packages each) and the 678 error
   tests (`errorcheck*`, which must not compile).
 
-  Since 2026-10-08 (closing the round trip) the list is the oracle's, `bin/g2c-check
+  Since 2026-10-08 (closing the round trip) the list is the oracle's, `bin/g2a-check
   --list-tests` (`gocmp tests`, [ROUNDTRIP.md](ROUNDTRIP.md)): one rule, in one place, for
   both corpora. It is the rule above with the test driver's reading of the action line
   (`//run` without a space counts: 2 more programs) and go/build's matching of build
   constraints and file names: 1,707 programs for tamago/amd64 (1,708 files), 1,702 for
-  tamago/arm64 (`bin/g2c corpus test-arm64`), all dumped, 0 excluded by the helper, 0 type
+  tamago/arm64 (`bin/g2a corpus test-arm64`), all dumped, 0 excluded by the helper, 0 type
   errors.
-- **linux** (2026-10-08, B1a's configuration, `bin/g2c corpus linux-amd64 linux-test ...`):
+- **linux** (2026-10-08, B1a's configuration, `bin/g2a corpus linux-amd64 linux-test ...`):
   std has 382 packages on amd64 (380 on arm64), three more than tamago's
   (`internal/cgrouptest`, `internal/runtime/syscall/linux`, `runtime/race/internal/amd64v1` on
   amd64), and 1,834 files (173 that tamago's configuration leaves out: system calls and their
@@ -394,7 +394,7 @@ three, in 1.4 s, 1.3 s and 0.8 s, read in 5.7 s, 5.5 s and 2.5 s: the type ids m
   variants, `net`'s and `os/user`'s, are not this configuration; amendment L3, accepted
   2026-10-08, folded into SPEC §9.4). The linux std dumps in 1.3 s,
   the first time 5 to 10 s (go list builds its export data).
-- **std with tests** (`bin/g2c corpus tests`, not run by default): every std package with its
+- **std with tests** (`bin/g2a corpus tests`, not run by default): every std package with its
   in-package test files, and the 175 external test packages. All type-check for tamago/amd64.
 - **Reading on Arbace:** every dump of the corpora reads with `arbace.core/read`
   (`*read-eval*` false) as exactly one form, and its type table is in dependency order.

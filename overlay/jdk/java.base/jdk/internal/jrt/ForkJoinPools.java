@@ -1,8 +1,8 @@
 /*
  * Arbace (overlay/jdk, doc/go/JRT-NOTES.md "Concurrency", JC7): the methods of ExecutorService
  * that jrt's hand-written ForkJoinPool cannot define itself, their types (List, Collection)
- * being translated classes jrt's own build cannot name. c2g gives ForkJoinPool Go methods that
- * call these (c2g_support) once ExecutorService is translated. They follow the JDK's documented
+ * being translated classes jrt's own build cannot name. a2g gives ForkJoinPool Go methods that
+ * call these (a2g_support) once ExecutorService is translated. They follow the JDK's documented
  * behaviour over the pool's public API: invokeAll waits for every task and returns their
  * futures; invokeAny returns the result of one task that completed normally, cancelling the
  * others (as AbstractExecutorService's), else throws ExecutionException; shutdownNow shuts the

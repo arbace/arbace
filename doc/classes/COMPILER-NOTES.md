@@ -34,8 +34,8 @@ metadata such as type hints), so the same sources ran on the frozen Clojure and 
 Its other dependencies are ordinary core functions, `proxy` (for ASM's `ClassWriter` and
 visitors) and `arbace.lang.DynamicClassLoader`/`RT` for the REPL loaders.
 
-The front end (`types`, `env`, `parse`, `lower`, `analyze`) also serves the Go build: c2g
-translates its analysis into Go forms (doc/go/C2G-SPEC.md), and the Go executable's REPL
+The front end (`types`, `env`, `parse`, `lower`, `analyze`) also serves the Go build: a2g
+translates its analysis into Go forms (doc/go/A2G-SPEC.md), and the Go executable's REPL
 evaluates it for class forms (doc/go/CLASSFORMS-REPL.md). Amendment 15 came from that use.
 
 ## Use
@@ -232,7 +232,7 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
   calls the method, as for Clojure's own operators (`test/native/inline_test.ae` reads the
   instructions of AOT-compiled fns).
 - **Loading `arbace.classes`.** `bin/build-arbace` AOT-compiles the `arbace.classes`
-  namespaces (`compile 'arbace.classes.boot`, not `arbace.j2c`) into each stage with that
+  namespaces (`compile 'arbace.classes.boot`, not `arbace.j2a`) into each stage with that
   stage's runtime, after its class forms are built. Since 2026-10-07 this is one
   `arbace.lang.Compile` run with direct linking that first compiles `arbace.core` and the other
   namespaces Clojure ships compiled, so the libraries `arbace.classes` requires are classes too
@@ -353,7 +353,7 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
 `bin/class-forms-check DIR [PACKAGE-DIR]` compiles converted files (one file per Java file:
 `in-ns`, `import`, `defclass` forms) without defining anything, and compares the shape of every
 class with the class of the same name on the class path. For `clojure/lang` and `clojure/asm`
-those are the baseline's javac classes (`CLASS_FORMS_CP`: `bin/j2c-check` puts the frozen tree
+those are the baseline's javac classes (`CLASS_FORMS_CP`: `bin/j2a-check` puts the frozen tree
 of `.tmp/frozen/` there). It runs on Arbace (`bin/lib/tools.bash`). On 2026-10-06 the converter's output for the 183 baseline
 files (read from its work area, not committed) first gave 138 of 139 `clojure/lang` files and
 4 of 5 `clojure/asm/commons` ones shape-identical to javac (the others all), after patching two
@@ -383,7 +383,7 @@ shape-identical (94%), 174 compile errors, 517 files with differences; the same 
 converter's earlier output (conservative pins) gave 11,745 / 177 / 522, and no file identical
 there differs with the new output.
 
-Since 2026-10-07 this is repeatable: `bin/j2c-check --jdk` (about 10 minutes on 64 cores) and
+Since 2026-10-07 this is repeatable: `bin/j2a-check --jdk` (about 10 minutes on 64 cores) and
 its report, with javac's classes compiled from the same sources as the reference rather than
 the JDK's own (results and remaining differences in CONVERTER-NOTES.md, "The converted JDK").
 It took the files whose classes are all shape-identical from 11,699 to 12,376 of 12,444, the
@@ -427,7 +427,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `VARIABLE` | done ≡: fields, parameters, `let`/`loop` locals (`^:mutable`, `^:const`, primitive tags), catch parameters, resources, pattern bindings |
 | `BLOCK` | done ≡: bodies, `initializer`, `static-initializer` |
 | `MODIFIERS`, `ANNOTATION` | done ≡ (declaration annotations by retention, element values of every kind, defaults) |
-| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | done ≡ in declarations (field, return, parameter, receiver, type parameters and bounds, supertypes, throws, with type paths; `TYPE_USE` annotations on declared names) and in code (local variables, for-each and pattern bindings, `cast`, `instance?`, `new` of classes and arrays, catch parameters, explicit type arguments of calls and method references `^{:type-args [...]}`, qualifying types of method references `^{:qualifier T}`); bridges carry them (`test/j2c/java/sample/TypeAnns.java`) |
+| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | done ≡ in declarations (field, return, parameter, receiver, type parameters and bounds, supertypes, throws, with type paths; `TYPE_USE` annotations on declared names) and in code (local variables, for-each and pattern bindings, `cast`, `instance?`, `new` of classes and arrays, catch parameters, explicit type arguments of calls and method references `^{:type-args [...]}`, qualifying types of method references `^{:qualifier T}`); bridges carry them (`test/j2a/java/sample/TypeAnns.java`) |
 | `TYPE_PARAMETER` | done ≡ (`Signature` of classes, methods, fields, record components) |
 | `PRIMITIVE_TYPE`, `ARRAY_TYPE`, `PARAMETERIZED_TYPE`, wildcards, `INTERSECTION_TYPE`, `UNION_TYPE` | done ≡ |
 | `IF`, `CONDITIONAL_EXPRESSION` | done ≡ |
@@ -551,8 +551,8 @@ All accepted by the user and folded into SPEC.md; the original texts are in git 
 15. **Bridges under the subclass's bounds.** When bridges are computed, a supertype method's
     class type variables are substituted by the subclass's view of them, so they are bounded as
     the subclass bounds them (`arbace.classes.analyze/erased-params`). With `Map` from source
-    (c2g's world), `Map.put(K, V)`'s own scope bounded `K` by `Object` over `EnumMap`'s `K
+    (a2g's world), `Map.put(K, V)`'s own scope bounded `K` by `Object` over `EnumMap`'s `K
     extends Enum<K>`, and `EnumMap` got no bridge `put(Object, Object)`; the class forms checks
     compile against the JDK's classes by reflection, which carry no such scope, and the stages
     were unchanged by the fix. Found in B1a step 5 (doc/go/EVAL-NOTES.md, phase 2B, B8; S8 in
-    doc/go/C2G-SPEC.md §16). Accepted (2026-10-09), folded into SPEC §6.
+    doc/go/A2G-SPEC.md §16). Accepted (2026-10-09), folded into SPEC §6.

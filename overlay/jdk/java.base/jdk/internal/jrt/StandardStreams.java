@@ -4,7 +4,7 @@
  * over the standard input's FileInputStream, and PrintStreams with autoflush over a
  * 128-byte BufferedOutputStream of the standard output's and error's FileOutputStream, in the
  * stdout.encoding and stderr.encoding properties' charsets. jrt's System is hand-written Go;
- * c2g's support code (System_out ...) calls these when it starts.
+ * a2g's support code (System_out ...) calls these when it starts.
  * newPrintStream keeps the code of jdk26u's System.newPrintStream, from
  * https://github.com/openjdk/jdk26u at baf63fb, src/java.base/share/classes/java/lang/System.java:
  * Copyright (c) 1994, 2025, Oracle and/or its affiliates, GNU General Public License version 2

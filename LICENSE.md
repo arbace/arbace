@@ -12,7 +12,7 @@ full in this file. Source files keep the copyright and license notices they came
 covers what.
 
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
-  `arbace/j2c/`, `arbace/g2c/` and `arbace/c2g/`, which are Arbace's own) is derived from
+  `arbace/j2a/`, `arbace/g2a/` and `arbace/a2g/`, which are Arbace's own) is derived from
   Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
@@ -30,7 +30,7 @@ covers what.
 
   Files there that are Arbace's own, not derived from Clojure (they say so in their header, such
   as `arbace/lang/KeywordInvokeSite.ae`), are under the Eclipse Public License 1.0 as Arbace.
-  The Go-build variants of vendored files (`arbace/lang/go/`, read by c2g only) are derived
+  The Go-build variants of vendored files (`arbace/lang/go/`, read by a2g only) are derived
   from the files they vary, under their licenses.
 - `arbace/spec/` (`arbace/spec/alpha.ae`, `gen/alpha.ae`, `test/alpha.ae`): spec.alpha,
   https://github.com/clojure/spec.alpha at `v0.6.249`
@@ -48,15 +48,15 @@ covers what.
 - `overlay/go/runtime/proc.ae` and `overlay/go/runtime/runtime2.ae`: Go's runtime, the files
   `src/runtime/proc.go` and `runtime2.go` of TamaGo's go1.27.1 tree
   (https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1", 2026-08-28; the Go
-  distribution with TamaGo's changes), converted to Go forms by `bin/g2c convert` and patched
+  distribution with TamaGo's changes), converted to Go forms by `bin/g2a convert` and patched
   (doc/go/JRT-NOTES.md, phase 2a): Copyright 2009 The Go Authors, under Go's BSD 3-Clause
   License (text below). `overlay/go/runtime/arbace_local.ae` and `overlay/go/runtime.ae` are
   Arbace's own.
-- Excerpts of Go's standard library in g2c's cases, tests and spec: `test/g2c/cases/s14_2_utf8.go`
+- Excerpts of Go's standard library in g2a's cases, tests and spec: `test/g2a/cases/s14_2_utf8.go`
   (from `src/unicode/utf8/utf8.go`), `s14_3_sort.go` (from `src/sort/sort.go` and
   `zsortinterface.go`), `s02_search.go` (`sort.Search`, from `src/sort/search.go`), the Go forms
-  of the same names (`.ae`) that hold them converted, `test/g2c/convert/search.go`
-  (`sort.Search`) and the expected forms `test/g2c/convert/expected/s02_search.ae`,
+  of the same names (`.ae`) that hold them converted, `test/g2a/convert/search.go`
+  (`sort.Search`) and the expected forms `test/g2a/convert/expected/s02_search.ae`,
   `s14_2_utf8.ae` and `s14_3_sort.ae`, and their code and forms in doc/go/SPEC.md §2
   (`sort.Search`), §14.2 and §14.3: from TamaGo's go1.27.1 tree, as above, Copyright 2009
   (`utf8.go`, `sort.go`), 2010 (`search.go`) and 2022 (`zsortinterface.go`) The Go Authors,
@@ -167,7 +167,7 @@ covers what.
   branch, and its other members keep the code of the members they replace: Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below), by the rule of B7; the rest of the file is Arbace's own.
-- Other Go-build variants (C2G-SPEC §4.6; recorded by the rule of B7):
+- Other Go-build variants (A2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,
   `URI.ae`, `URL.ae`, `URLConnection.ae`, `ZoneInfoFile.ae` and `ZoneOffset.ae` keep the code
@@ -196,7 +196,7 @@ covers what.
   safe, by the rule of B7 (step 5).
 - The JDK's resource data in the Go build's executables (doc/go/JRT-NOTES.md, "The JDK's resource
   data"): not kept here; `bin/jrt-convert` makes them from https://github.com/openjdk/jdk26u at
-  `baf63fb` into `.tmp/jrt/data`, and `bin/c2g --program` embeds them, so `bin/arbace-go`'s
+  `baf63fb` into `.tmp/jrt/data`, and `bin/a2g --program` embeds them, so `bin/arbace-go`'s
   executables carry them:
   - `jdk/internal/icu/impl/data/icudata/nfc.nrm` and `nfkc.nrm`, copied from jdk26u's
     `src/java.base/share/classes/jdk/internal/icu/impl/data/icudata/`: ICU4J's normalization data
@@ -234,7 +234,7 @@ covers what.
 
   Likewise jdk.localedata's CLDR locale data of the locales `bin/jrt-convert` selects
   (doc/go/JRT-NOTES.md, "Text and locales"; `JRT_LOCALES`: none by default, the
-  shipped executables' choice; `common`, the 27 locales of `test/g2c/jrt_sources.ae`'s
+  shipped executables' choice; `common`, the 27 locales of `test/g2a/jrt_sources.ae`'s
   `text-locales` with their parent locales; `all`), generated as
   `make/modules/jdk.localedata/Gensrc.gmk` generates it (the same `CLDRConverter`, on the same
   CLDR 48 data) into the bundles `sun.text.resources.cldr.ext.FormatData_*` and
@@ -267,7 +267,7 @@ covers what.
   `ResourceBundleBasedAdapter.java`, `sun/util/cldr/CLDRLocaleProviderAdapter.java`; each file's
   header names the parts): under the GNU General Public License version 2 with the Classpath
   Exception, by the rule of B7; the rest of those files is Arbace's own.
-  `test/g2c/jrt_sources.ae`'s `default-list` and `cldr-candidates` (the candidate locales of
+  `test/g2a/jrt_sources.ae`'s `default-list` and `cldr-candidates` (the candidate locales of
   the locale selection) follow `ResourceBundle.java`'s and `CLDRLocaleProviderAdapter.java`'s
   candidate lists likewise. `overlay/jdk/variants/BreakIteratorResourceBundle.ae` keeps the
   code of the method it replaces (`sun/util/resources/BreakIteratorResourceBundle.java`), likewise.
@@ -277,21 +277,21 @@ covers what.
   normalizer, ported from ICU4J): those files carry their notices, and are covered by jdk26u's
   GPLv2 with the Classpath Exception and, for their Unicode and ICU parts, by the licenses below.
 - The Go build's executables, `target/arbace-go/<arch>/arbace` (amd64 and arm64), which
-  `bin/arbace-go --build` makes (doc/go/EVAL-NOTES.md, doc/go/EXEC-NOTES.md): `bin/c2g --program`
-  translates the program into Go forms and `bin/g2c build` builds them with TamaGo's go1.27.1
-  toolchain (`G2C_GOROOT`) into static executables (`CGO_ENABLED=0`: no C code, no libc). Each
+  `bin/arbace-go --build` makes (doc/go/EVAL-NOTES.md, doc/go/EXEC-NOTES.md): `bin/a2g --program`
+  translates the program into Go forms and `bin/g2a build` builds them with TamaGo's go1.27.1
+  toolchain (`G2A_GOROOT`) into static executables (`CGO_ENABLED=0`: no C code, no libc). Each
   combines works under several licenses, each covering its part:
   - Arbace: the `arbace/` namespaces the executable carries (the vendored Clojure, spec.alpha,
-    core.specs.alpha and Arbace's own, translated by c2g and embedded as sources with the image
+    core.specs.alpha and Arbace's own, translated by a2g and embedded as sources with the image
     of their analyzed forms), jrt (`go/`, and `overlay/jdk/` translated with jdk26u's Java) and
-    the main package (`go/arbace/cmd/arbace/` with what c2g writes): under the licenses given
+    the main package (`go/arbace/cmd/arbace/` with what a2g writes): under the licenses given
     above for their files, the Eclipse Public License 1.0 but for `arbace/lang/Murmur3.ae`
     (the Apache License 2.0) and the parts derived from jdk26u (the GNU General Public License
     version 2 with the Classpath Exception). ASM (`arbace/asm/`) is not in them.
   - jdk26u: the classes of java.base that `bin/jrt-convert` converts to class forms from
     https://github.com/openjdk/jdk26u at `baf63fb` (835 files with the default locale set, the
     sources the JDK build generates among them; with `JRT_LOCALES`, jdk.localedata's bundles of
-    the locales selected) and c2g translates into Go, with the generic signatures c2g writes from
+    the locales selected) and a2g translates into Go, with the generic signatures a2g writes from
     them (`arbace/classes/generics.edn`, embedded): Copyright (c) Oracle and/or its affiliates,
     under the GNU General Public License version 2 with the Classpath Exception (text below).
     With them, the third-party data and code the JDK bundles that they hold or embed, under
@@ -316,7 +316,7 @@ covers what.
 
   The test build, `target/arbace-go/<arch>/arbace-tests` (`bin/arbace-go --build-tests`), adds
   Clojure's suite's Java fixtures (`test/java` of https://github.com/clojure/clojure at
-  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed and converted by j2c): under the Eclipse
+  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed and converted by j2a): under the Eclipse
   Public License 1.0, as Clojure.
 
   So a distribution of an executable carries this file (the texts of the Eclipse Public License

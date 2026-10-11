@@ -154,7 +154,7 @@ func dump(cfg *config, exports *exportMap, j *job) (r result) {
 
 func (d *dumper) write(files []*ast.File, errs []string) {
 	w, j, c := d.w, d.job, d.cfg
-	w.WriteString(";; godump: the typed AST of a Go package for arbace.g2c (doc/go/HELPER-NOTES.md)\n")
+	w.WriteString(";; godump: the typed AST of a Go package for arbace.g2a (doc/go/HELPER-NOTES.md)\n")
 	w.WriteString("{:godump 2\n :package ")
 	w.str(j.path)
 	w.WriteString(" :name ")

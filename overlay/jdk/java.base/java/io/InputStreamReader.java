@@ -2,7 +2,7 @@
  * Arbace (overlay/jdk, doc/go/JRT-NOTES.md "Phase 2C"): jrt's java.io.InputStreamReader,
  * written for jrt in place of jdk26u's (whose sun.nio.cs.StreamDecoder needs java.nio's
  * buffers and decoders, cut). It decodes jrt's three charsets (UTF-8, ISO-8859-1, US-ASCII;
- * C2G-SPEC §12) as StreamDecoder does with the decoder's REPLACE actions: UTF-8's malformed
+ * A2G-SPEC §12) as StreamDecoder does with the decoder's REPLACE actions: UTF-8's malformed
  * sequences become U+FFFD with the lengths of jdk26u's sun.nio.cs.UTF_8.Decoder, bytes
  * outside US-ASCII become U+FFFD, and an incomplete sequence at the end of the input becomes
  * one U+FFFD. Like StreamDecoder, a read blocks on the stream only while it has decoded

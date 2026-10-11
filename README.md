@@ -5,7 +5,7 @@ Arbace is a Clojure derivative written entirely in Clojure.
 - **Extended to represent its own implementation.** Clojure gained the class forms
   ([spec](doc/classes/SPEC.md)): every construct of a Java class file as idiomatic Clojure
   (`defclass`, `method`, `switch`, `label`, ...). With them, and the Java → class forms converter
-  j2c, Clojure's Java half became Clojure too. Arbace is that vendored Clojure, all `.ae`,
+  j2a, Clojure's Java half became Clojure too. Arbace is that vendored Clojure, all `.ae`,
   bootstrapping itself in stages that rebuild each other byte for byte and pass Clojure's whole
   test suite.
 - **Modernized for Java 26.** `invokedynamic` call sites for reflection, keywords and `str`, the
@@ -14,7 +14,7 @@ Arbace is a Clojure derivative written entirely in Clojure.
   ([benchmarks](doc/BENCHMARKS.md)).
 - **Evolving to represent its runtime too, down to the bare metal.** Arbace is leaving the JVM
   and the `.class` format behind: a standalone ecosystem whose language is Clojure plus forms for
-  Java (kept usable at the source level through j2c) and later Go. Its runtime is already a
+  Java (kept usable at the source level through j2a) and later Go. Its runtime is already a
   static Go executable, translated from Arbace's own sources and a part of the JDK's. The goal
   is a self-sustaining REPL in a virtual sandbox, written in Arbace all the way down to the ISA,
   in the way of Go and TamaGo: /dev/kvm on amd64 and Hypervisor.framework on arm64.
@@ -48,7 +48,7 @@ bin/arbace-image         # target/arbace-image: a self-contained jlink image (ja
 
 The branch `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`, 2026-10-11) holds Arbace as one
 static executable for Linux, amd64 and arm64, with no JVM ([doc/go/B1-PLAN.md](doc/go/B1-PLAN.md),
-milestone B1a): c2g translates Arbace's runtime and the part of jdk26u it needs (`java.base`'s
+milestone B1a): a2g translates Arbace's runtime and the part of jdk26u it needs (`java.base`'s
 collections, concurrency, time, text, regex, files, sockets, processes and security basics,
 among others) into Go, built with TamaGo's go1.27.1; the evaluator analyses forms and runs them
 as compiled closures; the core namespaces are prepared at build time, so it starts in about 0.2
@@ -74,12 +74,12 @@ bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+
   (on `arbace-for-golang`): Arbace for Golang: build, run, verify, the frozen branch
 - [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the class forms
-- [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/C2G-SPEC.md](doc/go/C2G-SPEC.md),
+- [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/A2G-SPEC.md](doc/go/A2G-SPEC.md),
   its translation; [doc/go/EXEC-NOTES.md](doc/go/EXEC-NOTES.md), the executable;
   [doc/go/JAVA-BASE.md](doc/go/JAVA-BASE.md), how much of `java.base` it implements;
   [doc/go/SPEED-NOTES.md](doc/go/SPEED-NOTES.md), its speed; [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md),
   the box (B1b, after the freeze); the rest of `doc/go/`, the notes of each part
-- [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): g2c, Go as Arbace forms
+- [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): g2a, Go as Arbace forms
 - [doc/VENDOR-NOTES.md](doc/VENDOR-NOTES.md): how Clojure became Arbace, and every change since
 - [doc/BENCHMARKS.md](doc/BENCHMARKS.md): Arbace on the JVM against Clojure 1.12
 - [doc/ARBACE.md](doc/ARBACE.md): what `arbace/` holds, and its origin

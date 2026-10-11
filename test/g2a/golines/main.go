@@ -1,4 +1,4 @@
-// Command golines compares the lines of two Go files as g2c's printer promises them in
+// Command golines compares the lines of two Go files as g2a's printer promises them in
 // positions mode :lines (doc/go/SPEC.md §10.1, §12.3): the line, as gc sees it (after
 // //line directives), of every declaration, spec, struct field, statement, case clause and
 // function closing brace, in source order.

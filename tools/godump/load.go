@@ -88,7 +88,7 @@ func loadConfig() (*config, error) {
 			c.toolTags = append(c.toolTags, fmt.Sprintf("arm64.v8.%d", i))
 		}
 	default:
-		return nil, fmt.Errorf("GOARCH=%s: only amd64 and arm64 are configurations of g2c", c.goarch)
+		return nil, fmt.Errorf("GOARCH=%s: only amd64 and arm64 are configurations of g2a", c.goarch)
 	}
 	for _, t := range build.Default.ToolTags {
 		if strings.HasPrefix(t, "goexperiment.") {

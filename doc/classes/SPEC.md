@@ -3,7 +3,7 @@
 Status: accepted (2026-10-06), with the amendments found while implementing it folded in
 (2026-10-07 to 2026-10-09, §12). Implemented by `arbace/classes/` (the compiler, behind the
 special forms of `arbace.lang.Compiler` at every stage, the seed's stage 0 included, §9.5, §9.6)
-and `arbace/j2c/` (the converter).
+and `arbace/j2a/` (the converter).
 
 This spec defines the **class forms**: how every construct javac can put into a class file is
 written as idiomatic Clojure, in ordinary Arbace sources (`.ae` files), and compiled by Arbace's own compiler
@@ -1499,7 +1499,7 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
   in another loader.
 - **The Go build** has no bytecode and no class loader: its REPL gives the class forms their
   meaning by the same analysis, classes made at run time and an interpreter of the analyzed code
-  (doc/go/CLASSFORMS-REPL.md, doc/go/C2G-SPEC.md §16).
+  (doc/go/CLASSFORMS-REPL.md, doc/go/A2G-SPEC.md §16).
 
 ## 11. Worked examples
 
@@ -1976,7 +1976,7 @@ with their date where they apply.
 
 **Amendment (2026-10-09):** B1a step 5 found one more, `COMPILER-NOTES.md` 15 (bridges computed
 under the subclass's bounds of a supertype's type variables; doc/go/EVAL-NOTES.md's B8,
-doc/go/C2G-SPEC.md's S8), accepted and folded into §6.
+doc/go/A2G-SPEC.md's S8), accepted and folded into §6.
 
 Each with the recommendation the spec follows.
 

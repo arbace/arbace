@@ -1,21 +1,21 @@
 #!/bin/bash
-# bin/j2c-check --jdk [MODULE...]: the converted JDK compiled with the class forms compiler and
-# compared with javac. Run through bin/j2c-check (from the repository root).
+# bin/j2a-check --jdk [MODULE...]: the converted JDK compiled with the class forms compiler and
+# compared with javac. Run through bin/j2a-check (from the repository root).
 #
 # Per module M of $JDK_SRC/*/share/classes (largest first):
-#   convert   bin/j2c ... jdk: the module's Java files into class forms, $work/conv/M
+#   convert   bin/j2a ... jdk: the module's Java files into class forms, $work/conv/M
 #   javac     the same files compiled twice by javac, $work/ref1/M and $work/ref2/M, with
 #             --patch-module against the running JDK (built from the same sources) and the
 #             options the JDK build uses for the module (make/modules/*/Java.gmk)
 #   check     bin/class-forms-check on chunks of the converted files, in parallel, against
 #             $work/ref1/M (REF), results in $work/res/M.*.edn
-#   report    test/j2c/jdk_report.ae: $work/report.md and $work/report.edn
+#   report    test/j2a/jdk_report.ae: $work/report.md and $work/report.edn
 # Runs on Arbace (bin/lib/tools.bash).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 . "$root/bin/lib/tools.bash"
 arbace_runtime || exit 1
-work=.tmp/j2c-jdk
+work=.tmp/j2a-jdk
 src=${JDK_SRC:-/root/jdk26u/src}
 jobs=${JDK_JOBS:-40}
 steps=${JDK_STEPS:-convert,javac,check,report}
@@ -49,7 +49,7 @@ has() { case ",$steps," in *",$1,"*) return 0 ;; esac; return 1; }
 convert_one() {
   local m=$1
   rm -rf "$work/conv/$m"
-  J2C_THREADS=8 J2C_JVM_OPTS=-Xmx10g bin/j2c -m arbace.j2c.main jdk --check "$work/conv/$m" "$m" \
+  J2A_THREADS=8 J2A_JVM_OPTS=-Xmx10g bin/j2a -m arbace.j2a.main jdk --check "$work/conv/$m" "$m" \
     "$src/$m/share/classes" > "$work/log/convert-$m.log" 2>&1
   echo "convert $m: $(tail -1 "$work/log/convert-$m.log")"
 }
@@ -103,5 +103,5 @@ if has check; then
 fi
 if has report; then
   echo "== report"
-  java -cp "$ARBACE_CP" arbace.lang.Main test/j2c/jdk_report.ae "$work" $modules
+  java -cp "$ARBACE_CP" arbace.lang.Main test/j2a/jdk_report.ae "$work" $modules
 fi

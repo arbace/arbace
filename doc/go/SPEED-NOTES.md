@@ -2,7 +2,7 @@
 
 B1a step 7 ([B1-PLAN.md](B1-PLAN.md)'s row: "closure compilation of `Expr`s, then AOT of
 namespaces to Go forms"; D7 the collector), part b, branch `step7b`, 2026-10-10: the evaluator's speed. (Part a,
-the runtime below the evaluator, c2g's code and jrt, is described under its own heading.)
+the runtime below the evaluator, a2g's code and jrt, is described under its own heading.)
 Before this step each node of an analyzed `Expr` tree interpreted itself at every call
 (`evalIn(Frame)`, [EVAL-NOTES.md](EVAL-NOTES.md)); hinted static calls such as
 `Numbers.add(long, long)` went through `Reflector.invokeMatchingMethod`, boxing every
@@ -21,7 +21,7 @@ slowest namespaces run 4 to 5 times faster (reducers 345 → 67 s, parse 306 →
 
 ## The design
 
-`arbace/lang/go/CompilerCode.ae` (a second variant file of `Compiler`, read by c2g only) and
+`arbace/lang/go/CompilerCode.ae` (a second variant file of `Compiler`, read by a2g only) and
 `arbace/lang/go/CompilerOps.ae` (generated):
 
 - **`Code`**, an abstract class: `run(Frame)` is the node's value as an `Object`, boxed as the
@@ -36,12 +36,12 @@ slowest namespaces run 4 to 5 times faster (reducers 345 → 67 s, parse 306 →
   `double`, or its closed-over index (the fn's values, the deftype's fields); constants are made
   once (`CodeConst`, with their `long` and `double` values); a Var node holds its `Var`, a
   keyword call its `Keyword`.
-- **Direct static calls**: `test/c2g/eval_ops.ae` (run on the JVM's stage 2) lists the 578
+- **Direct static calls**: `test/a2g/eval_ops.ae` (run on the JVM's stage 2) lists the 578
   public static methods of `Numbers`, `RT`, `Util` and jrt's `Math` with at most three
   parameters of the kinds `long`, `int`, `double`, `boolean` or a reference, and writes
   `CodeOp0` .. `CodeOp3`: per arity one class whose `run`, `runLong`, `runDouble`, `runBool`
   are a `switch` over the methods, each case computing its arguments in their primitive types,
-  setting the frame's line (stack traces) and calling the method, which c2g makes a direct Go
+  setting the frame's line (stack traces) and calling the method, which a2g makes a direct Go
   call (`Numbers_Add_J_J__J`). `CodeRun.op` finds a method by its key (`class.name(desc)`).
 - **Other resolved members** (`CodeHostStatic`, `CodeHostInstance`, `CodeHostNew`): the
   argument conversions of `Evaluator.typedArgs`, then jrt's natives
@@ -55,8 +55,8 @@ slowest namespaces run 4 to 5 times faster (reducers 345 → 67 s, parse 306 →
 - **Calls**: `EvalFn` answers `invoke` of arities 0 to 5 itself: the compiled method of that
   fixed arity (`FnExpr.evalArities`) is called with the arguments bound in a frame, without a
   seq; other calls (variadic, `apply`) go through `RestFn` to `doInvoke` as before.
-  `EvalMethod` (a deftype's method) answers `invoke` of 1 to 4 arguments, and c2g's `Dyn`
-  dispatch (`dynCallFast`, `arbace/c2g/dyn.ae`) calls `invoke` of the arity instead of
+  `EvalMethod` (a deftype's method) answers `invoke` of 1 to 4 arguments, and a2g's `Dyn`
+  dispatch (`dynCallFast`, `arbace/a2g/dyn.ae`) calls `invoke` of the arity instead of
   `applyTo`.
 - **Frames are reused**: calls nest, and no frame outlives its call (a fn closes over values,
   copied when it is made), so each thread's `EvalState` keeps its frames by depth; a call takes
@@ -159,14 +159,14 @@ settings are part a's (D7).
 ## Checks
 
 - `bin/arbace-go --smoke` (amd64) passes.
-- `bin/c2g-evalproof`: as expected on amd64 and arm64 (31 forms).
+- `bin/a2g-evalproof`: as expected on amd64 and arm64 (31 forms).
 - The oracle on Go (`bin/oracle check 'target/arbace-go/amd64/arbace -' --timeout 900
   --expected test/oracle/known-go-amd64.edn`): 20,566 of 20,600, the 34 recorded mismatches, 0
   new, 0 now passing (main merged at `b20b577`, with `java.io.File`; before that merge 20,243 of
   20,276, the 33 then recorded).
 - After merging main at `5ced273` (suite-last): the oracle 20,566 of 20,600, as recorded;
   Clojure's suite on Go 19,506 of 19,506 assertions (664 tests, `clearing` 31 of 31), no
-  regressions; smoke and `bin/c2g-evalproof` pass.
+  regressions; smoke and `bin/a2g-evalproof` pass.
 - Clojure's suite on Go (`CLOJURE_TESTS_GO=... bin/clojure-tests -j 12`): 19,379 of 19,398
   assertions (646 tests, 0 errors), no regressions against `test/arbace-go-results.edn` (before
   that merge 19,255 of 19,280); `transducers` alone (not skipped) 108 of 108.
@@ -176,8 +176,8 @@ settings are part a's (D7).
   against `test/oracle/known-go-amd64.edn`, all in `defclass.ae` and `defclass_corpus.ae`
   (`Unable to resolve classname: Compiler$CF$Node`): main's own executable of that commit fails
   the same way (class forms at the REPL after the merges), so they are not this branch's.
-  `bin/gate` was not run: no source the bootstrap compiles changed (the variants and c2g are
-  read by c2g only).
+  `bin/gate` was not run: no source the bootstrap compiles changed (the variants and a2g are
+  read by a2g only).
 
 ## Tried and dropped
 
@@ -188,8 +188,8 @@ settings are part a's (D7).
 - **A class per signature shape for direct calls** (`CodeJJ_J` ...): more classes for the same
   calls; one class per arity with a `switch` on the method is as fast (gc compiles the switch
   to a jump table and inlines the small `Numbers` methods).
-- **Typed function values in c2g's member tables** (an invoker per method taking Go values):
-  general, but a change to c2g's tables and jrt's `MethodInfo` where part a works; the generated
+- **Typed function values in a2g's member tables** (an invoker per method taking Go values):
+  general, but a change to a2g's tables and jrt's `MethodInfo` where part a works; the generated
   `CodeOpN` cover the hot methods without it.
 - **Compiling the image's trees at replay**: start would compile code that never runs; lazy
   compilation at the first call made start faster (0.33 → 0.21 s).
@@ -213,27 +213,27 @@ settings are part a's (D7).
 Numbered EC. The user accepted EC1-EC6 on 2026-10-10 (folded where each says); EC7 was not
 taken.
 
-- **EC1 (EVAL-PLAN §2, §6; C2G-SPEC §10.1) Closure compilation.** Each method of an evaluated
+- **EC1 (EVAL-PLAN §2, §6; A2G-SPEC §10.1) Closure compilation.** Each method of an evaluated
   fn or deftype is compiled at its first call into `Code` nodes (`CompilerCode.ae`); `evalIn`
   stays the evaluation of top-level forms and of compat-mode nodes. `long` and `double` locals
   live unboxed in the frame's `prims`; `recur` sets the frame's flag.
-  *Accepted 2026-10-10: EVAL-PLAN §2, §2.1, §6; C2G-SPEC §10.1, §16.*
-- **EC2 (C2G-SPEC §10.1) Direct static calls generated.** `arbace/lang/go/CompilerOps.ae` is
-  generated by `test/c2g/eval_ops.ae` from the JVM's classes and checked in (regenerated when
+  *Accepted 2026-10-10: EVAL-PLAN §2, §2.1, §6; A2G-SPEC §10.1, §16.*
+- **EC2 (A2G-SPEC §10.1) Direct static calls generated.** `arbace/lang/go/CompilerOps.ae` is
+  generated by `test/a2g/eval_ops.ae` from the JVM's classes and checked in (regenerated when
   `Numbers`, `RT`, `Util` or jrt's `Math` change their public static methods).
-  *Accepted 2026-10-10: C2G-SPEC §10.1, §16.*
+  *Accepted 2026-10-10: A2G-SPEC §10.1, §16.*
 - **EC3 (EVAL-PLAN §2.2, Q3 as built) Calls of fixed arity without a seq**: `EvalFn.invoke` of
   0 to 5 arguments, `EvalMethod.invoke` of 1 to 4, `Dyn`'s dispatch by arity (`dynCallFast`).
-  *Accepted 2026-10-10: EVAL-PLAN §2.2; C2G-SPEC §16.*
+  *Accepted 2026-10-10: EVAL-PLAN §2.2; A2G-SPEC §16.*
 - **EC4 (EVAL-PLAN §2.1) Frames reused per thread by depth**, cleared when the call returns.
-  *Accepted 2026-10-10: EVAL-PLAN §2.1; C2G-SPEC §16.*
-- **EC5 (C2G-SPEC §10.7; jrt) Resolved members called through their invoker** by jrt's natives
+  *Accepted 2026-10-10: EVAL-PLAN §2.1; A2G-SPEC §16.*
+- **EC5 (A2G-SPEC §10.7; jrt) Resolved members called through their invoker** by jrt's natives
   `Compiler_CodeRun_Call_Method_O_O1__O` and `..._Construct_Constructor_O1__O`, exceptions not
   wrapped; jrt's stack-trace mapping knows the `Compiler_Code*` frames.
-  *Accepted 2026-10-10: C2G-SPEC §10.1, §10.7, §16 (with SL2, through `Evaluator.invokeResolved`).*
+  *Accepted 2026-10-10: A2G-SPEC §10.1, §10.7, §16 (with SL2, through `Evaluator.invokeResolved`).*
 - **EC6 (EXEC-NOTES, U1) The image stores the analyzed trees; methods are compiled lazily at
   their first call**, the compiler's caches being skipped fields of the image.
-  *Accepted 2026-10-10: EXEC-NOTES.md, "The image of prepared namespaces"; C2G-SPEC §16.*
+  *Accepted 2026-10-10: EXEC-NOTES.md, "The image of prepared namespaces"; A2G-SPEC §16.*
 - **EC7 (test/arbace-go-results.edn) `transducers` no longer skipped**: it passes in 574 s,
   under the runner's 900 s, but would add about 10 minutes of one process to the suite on Go
   in `bin/gate --full` (it is the longest namespace); the user's choice.
@@ -242,7 +242,7 @@ taken.
 # Speed below the evaluator (B1a step 7a)
 
 B1a step 7, first part ([B1-PLAN.md](B1-PLAN.md), decision D7 of
-[C2G-NOTES.md](C2G-NOTES.md), phase 2D; branch `step7a`, 2026-10-09): the cost of the
+[A2G-NOTES.md](A2G-NOTES.md), phase 2D; branch `step7a`, 2026-10-09): the cost of the
 translated runtime and of jrt under the evaluator, measured with profiles and fixed where it
 paid. The evaluator itself (closure compilation, how `Expr`s call methods) is step 7b and is
 not changed here. Summary:
@@ -260,7 +260,7 @@ not changed here. Summary:
 - **Profile-guided builds** (`bin/arbace-go --build --pgo`): gc devirtualizes and inlines the
   hot interface calls a training run shows; 5-15% more, opt-in (it doubles the build).
 
-Overall, on linux/amd64: `bin/c2g-perf`'s workloads went from 3.7-49 times the JVM's time to
+Overall, on linux/amd64: `bin/a2g-perf`'s workloads went from 3.7-49 times the JVM's time to
 2.3-32 times (1.7 to 4.7 times faster); the executable's evaluator workloads run 1.4-1.65 times
 faster with a third of the CPU. Before main's namespace image it started (`-e nil`) in 3.0 s
 against 4.3 s (2.8 s with PGO); merged with main, 0.27 s against main's 0.35 s.
@@ -270,9 +270,9 @@ against 4.3 s (2.8 s with PGO); merged with main, 0.27 s against main's 0.35 s.
 The machine: AMD EPYC 7763, 64 processors, 60 GB, shared with three to five other agents
 (load averages from 3 to 120 during this work). Wall times are noisy (±20%), so:
 
-- **Micro workloads at fixed work.** `bin/c2g-perf` (the JVM against Go, time-budgeted runs,
+- **Micro workloads at fixed work.** `bin/a2g-perf` (the JVM against Go, time-budgeted runs,
   ns per element) for the before/after table; for single changes, a harness over the same
-  translated functions (`.tmp/c2g/perf/work/mod/cmd/xbench`, scratch: one workload, a fixed
+  translated functions (`.tmp/a2g/perf/work/mod/cmd/xbench`, scratch: one workload, a fixed
   number of repetitions per process) under `perf stat -e cycles:u,instructions:u,task-clock`
   with `GOMAXPROCS=8`, the minimum of three runs. User cycles and instructions do not count
   time spent waiting for the processor, so they are stable under load where wall time is not.
@@ -281,7 +281,7 @@ The machine: AMD EPYC 7763, 64 processors, 60 GB, shared with three to five othe
   CPU time by `perf stat -e task-clock`; `-e nil` for the start (loading `arbace.core`,
   `spec.alpha` and `arbace.main` through the evaluator).
 - **Profiles.** `ARBACE_CPUPROFILE=FILE` and `ARBACE_MEMPROFILE=FILE` (new, jrt's
-  `StartRuntime`) on any program run under `jrt.RunMain`, `C2G_PROF` on `bin/c2g-perf`'s,
+  `StartRuntime`) on any program run under `jrt.RunMain`, `A2G_PROF` on `bin/a2g-perf`'s,
   `perf record -g` on the executables; `go test -bench -cpu 1` over the translated packages for
   single operations.
 
@@ -314,7 +314,7 @@ collector's cost was CPU taken from the other processors and the mutator's assis
 showed 73 collections for `-e nil` (a 37 MB live heap), each using 150-180 ms of CPU over the
 64 processors.
 
-On `bin/c2g-perf`'s workloads the live heap is tiny: Go's 4 MiB minimum made
+On `bin/a2g-perf`'s workloads the live heap is tiny: Go's 4 MiB minimum made
 `arrayMapSmall` collect 743 times in 2 s, the collector running half of the time.
 
 The allocation profile of the executable's evaluator workloads (`alloc_space`): reference
@@ -341,7 +341,7 @@ Single operations (`go test -bench -cpu 1`, default `GOGC`, before):
 | `String.equals` (11 units) / `concat` | 8.5 / 84 |
 | `IFn` instanceof (assertion and the nominal check) / the assertion alone | 4.5 / 2.2 |
 
-The goroutine-local slot, monitors and `try` cost what C2G-SPEC §13 measured; the outliers
+The goroutine-local slot, monitors and `try` cost what A2G-SPEC §13 measured; the outliers
 were the thread-bound deref (a `MapEntry` allocated per lookup), equivalence of numbers
 (`getClass` through `Object_I` four times), and everything that allocates.
 
@@ -394,7 +394,7 @@ more cycles. `GOMAXPROCS` lower than the processor count: no gain in wall time.
 objects. Now an array of up to 32 slots is one object, `refArrayBuf[[N]any]`: the `RefArray`
 followed by its slots, its slice pointing into the same object (`unsafe.Slice`), N rounded up
 to Go's size classes (1-13, then odd sizes to 29, then 32); longer arrays keep two objects.
-`Copy` (clone) uses the same allocation. The 16-byte slots stay (C2G-SPEC §13.2's thin
+`Copy` (clone) uses the same allocation. The 16-byte slots stay (A2G-SPEC §13.2's thin
 pointers would halve them, a change of the whole object model, not taken).
 
 Fixed work, user Mcycles, `GOGC=100` (the default then): vecConj 10,680 → 10,005 (-6%),
@@ -407,12 +407,12 @@ through the interface. A type switch on `*Long`, `*Double` and `*String` first (
 the type word each) answers the classes `Numbers.ops`, `Numbers.category` and `Util.hasheq`
 ask for most: numbers 4,716 → 4,392 Mcycles (-7%), vecEquiv 956 → 846 (-11%), seqWalk -9%.
 
-### 4. `try` without live catch clauses — kept (c2g)
+### 4. `try` without live catch clauses — kept (a2g)
 
 A `try` whose catch clauses catch no class of the closed world (and that has no
 normal-completion code) needs no function literal of its own: its body is translated in place,
 inside the `finally`'s literal when there is one, else straight into the enclosing block
-(`arbace.c2g.code/translate-try`). Before, `try`/`finally` (locks, `binding`'s push and pop,
+(`arbace.a2g.code/translate-try`). Before, `try`/`finally` (locks, `binding`'s push and pop,
 `LazySeq.sval`) made two nested literals, each with a `defer` and a `recover`, about 7.5 ns
 each. Measured with item 5 (one build): `-e nil` 3.45 → 2.98 s, the `w.clj` workloads 8-15%
 faster (`loop` 5,442 → 4,809 ms, `map-inc` 5,227 → 4,750, `keyword-map` 1,694 → 1,499,
@@ -440,10 +440,10 @@ every call). jrt keeps Java's contract; step 7b's direct invocation removes thos
 
 ### 7. The dynamic flag — kept
 
-c2g's `instanceof` and checkcast of an interface follow a successful Go assertion with a
+a2g's `instanceof` and checkcast of an interface follow a successful Go assertion with a
 second one, to `jrt.Dynamic`, because an object of a class made at run time (`Dyn`, proxies)
 has every interface's methods and must be checked nominally. Bit 31 of the header's low word
-(the identity hash is 31 bits) now marks those objects (`MarkDynamic`, set by c2g's `Dyn`
+(the identity hash is 31 bits) now marks those objects (`MarkDynamic`, set by a2g's `Dyn`
 constructors), and `jrt.IsDynamic(x)` (inlined: a load through the interface's data word, every
 Java object's header being its first word) skips the second assertion for every other object:
 `IFn` instanceof 4.5 → about 2.5 ns. In the executable: `fib` 427 → 407 ms, `into-xf` 5,308 →
@@ -455,7 +455,7 @@ As for arrays: `jrt.allocString(n)` makes a `String` of up to 108 code units in 
 (`stringBuf[[N]uint16]`, N rounded to size classes); `NewStringUTF16` (`StringBuilder.toString`,
 `substring`), `Concat` (`str` of several values) and the Latin-1 strings of numbers use it.
 `new StringBuilder()` keeps its first 16 units in the object (`init`), and `append(int)` /
-`append(long)` write the digits without making a `String`. `bin/c2g-perf`'s `strings` is
+`append(long)` write the digits without making a `String`. `bin/a2g-perf`'s `strings` is
 in the results table (178 → 93 ns per element with the other items). The evaluator's string workloads did not move (they are dominated by the
 evaluator).
 
@@ -472,13 +472,13 @@ sets `runtime.MemProfileRate` to 0 unless `ARBACE_MEMPROFILE` is set.
 common libraries, collections, seqs and transducers, numbers, strings, regexes, printing,
 protocols, dynamic vars, exceptions, futures and agents; about 15 s) with a CPU profile, and
 builds every executable again in its work module with `go build -pgo` (as the image's link
-does; `bin/g2c build --pgo FILE` is new too, for other programs). gc then
+does; `bin/g2a build --pgo FILE` is new too, for other programs). gc then
 devirtualizes the hot interface calls (a type test and a direct, inlinable call) and inlines
 more on hot paths. Micro workloads (fixed work, user Mcycles, a profile of the same
 workloads): hashing -37%, numbers -15%, vecEquiv -20%, hashMapAssoc -10%, the others -1 to
 -5%. The executable (an earlier build, its profile from `-e nil`, `ev.clj` and `w.clj`): the
 `w.clj` total 46.3 → 43.2 s (-7%), `hashmap` -18%, `fib` -9%. Opt-in because the second build
-is a full one (about 11 minutes of CPU for the c2g step, both builds and the training run, against
+is a full one (about 11 minutes of CPU for the a2g step, both builds and the training run, against
 about 8 without) and the training run needs the amd64 executable; the freeze's builds use it
 (amendment O5, accepted).
 
@@ -496,7 +496,7 @@ about 8 without) and the training run needs the amd64 executable; the freeze's b
 
 ## Results
 
-### `bin/c2g-perf` (ns per element; the JVM's column from the same run)
+### `bin/a2g-perf` (ns per element; the JVM's column from the same run)
 
 | workload | JVM | Go before | Go after | Go/JVM before | Go/JVM after | Go speedup |
 |---|---:|---:|---:|---:|---:|---:|
@@ -509,7 +509,7 @@ about 8 without) and the training run needs the amd64 executable; the freeze's b
 | vecEquiv | 16,000-26,900 | 100,000 | 51,898 | 3.7 | 3.2 | 1.9 |
 | strings | 40-62 | 178.4 | 92.9 | 2.9 | 2.3 | 1.9 |
 
-Before: main at `42552a0`; after: this branch, without PGO (`bin/c2g-perf` builds without a
+Before: main at `42552a0`; after: this branch, without PGO (`bin/a2g-perf` builds without a
 profile). The JVM's time varies between runs (it is time-budgeted and shares the machine);
 the ratios are each run's own.
 
@@ -623,16 +623,16 @@ Before merging main (the branch at `14a9553`, linux/amd64 unless said):
 | check | result |
 |---|---|
 | `bin/jrt test` amd64, arm64 (qemu), `--race` | pass (arm64 after the test's fix above) |
-| `bin/c2g-check -- --program` | 9,010 of 9,010 steps on each architecture |
-| `bin/c2g-regex` | 1,204 of 1,233 cases, 11,365 of 11,682 inputs, as on main |
-| `bin/c2g-evalproof` | as expected on amd64 and arm64 |
+| `bin/a2g-check -- --program` | 9,010 of 9,010 steps on each architecture |
+| `bin/a2g-regex` | 1,204 of 1,233 cases, 11,365 of 11,682 inputs, as on main |
+| `bin/a2g-evalproof` | as expected on amd64 and arm64 |
 | the oracle on the Go build | 20,221 of 20,253, as on main (the same 32 mismatches) |
 | Clojure's suite on the Go build | no regressions against `test/arbace-go-results.edn` (18,781 of 18,806) |
 | `bin/arbace-go --smoke` | pass (the `--pgo` build) |
 
 After merging main (`ad06cda`): `bin/jrt test` amd64 passes; the oracle 20,243 of 20,276
 against `test/oracle/known-go-amd64.edn`: 33 known, 0 new, 0 now passing; `bin/arbace-go --smoke` passes.
-`bin/gate` was not run: no source the bootstrap compiles changed (`arbace/c2g`, `arbace/g2c`
+`bin/gate` was not run: no source the bootstrap compiles changed (`arbace/a2g`, `arbace/g2a`
 and `arbace/lang/go` are read by the tools, not compiled into the stages).
 
 Found on the way: gc for linux/arm64 (go1.27.1) reports a *constant* negative index into a
@@ -642,21 +642,21 @@ indexed a `new Object[0]` with a constant -5 and passed only because the array's
 known at compile time; with the arrays of item 2 it is not, so the test now computes the index.
 A Java program indexing with a negative constant would show `Index 0` in the message on arm64.
 
-## Amendments to C2G-SPEC (decided by the user 2026-10-10)
+## Amendments to A2G-SPEC (decided by the user 2026-10-10)
 
-Letter O: every letter appears somewhere in doc/; O only as C2G-SPEC §4.4's `O1` (the Go name of an `Object[]` parameter), never for amendments.
+Letter O: every letter appears somewhere in doc/; O only as A2G-SPEC §4.4's `O1` (the Go name of an `Object[]` parameter), never for amendments.
 
 - **O1 (§13.4, D7) The collector's settings.** jrt's package initialization sets `GOGC=200`
   unless `GOGC` is set, and a 64 MiB minimum heap (a ballast without pointers, never written)
   unless `ARBACE_MIN_HEAP_MB` sets another (0: none); the main package's start-up setting
   (U4: `GOGC=400` until `arbace.main` is loaded) then raises it and restores jrt's. D7's
-  "planned" paragraph becomes this rule, with the measurements above. *Accepted 2026-10-10, folded into C2G-SPEC §13.4 (closing D7, B1-PLAN.md).*
+  "planned" paragraph becomes this rule, with the measurements above. *Accepted 2026-10-10, folded into A2G-SPEC §13.4 (closing D7, B1-PLAN.md).*
 
 - **O2 (§5.9, §13.2, D7) Reference arrays and strings in one allocation.** A reference array of
   up to 32 slots and a `String` of up to 108 code units are one Go object, the slots or units
   after the header (`unsafe.Slice` over a trailing array, the length rounded to Go's size
   classes); `new StringBuilder()` holds its first 16 units in itself. The Go types stay
-  (`*jrt.RefArray`, `*jrt.String`, a slice `A`/`value`); c2g's output does not change. *Accepted 2026-10-10, folded into C2G-SPEC §5.9 and §7.5.*
+  (`*jrt.RefArray`, `*jrt.String`, a slice `A`/`value`); a2g's output does not change. *Accepted 2026-10-10, folded into A2G-SPEC §5.9 and §7.5.*
 
 - **O3 (§3.2, §5.11) Shared parameter classes (new deviation V14).**
   `Method.getParameterTypes()` and `Constructor.getParameterTypes()` return the same array on
@@ -665,24 +665,24 @@ Letter O: every letter appears somewhere in doc/; O only as C2G-SPEC §4.4's `O1
   step 7b's evaluator stop asking for the array on every call (then this deviation can go). *Not taken (the user, 2026-10-10): `getParameterTypes()` keeps Java's contract, a fresh copy; reverted.*
 
 - **O4 (§5.5, §5.7, §5.8, §5.12) The dynamic flag.** Bit 31 of the header's low word marks
-  objects of classes made at run time (set by `MarkDynamic` when c2g's `Dyn` and `DynSub_C`
+  objects of classes made at run time (set by `MarkDynamic` when a2g's `Dyn` and `DynSub_C`
   objects are made; the identity hash keeps its 31 bits); interface `instanceof` and checkcast
   ask `jrt.Dynamic` only for flagged objects (`jrt.IsDynamic`, which reads the header through
   the interface's data word: every Java object is a pointer to a struct whose first field is
-  the header, §5.2). *Accepted 2026-10-10, folded into C2G-SPEC §5.7 and §5.8.*
+  the header, §5.2). *Accepted 2026-10-10, folded into A2G-SPEC §5.7 and §5.8.*
 
-- **O5 (§13.4, §13.6, BUILD.md) Profile-guided builds.** `bin/g2c build --pgo FILE` and
+- **O5 (§13.4, §13.6, BUILD.md) Profile-guided builds.** `bin/g2a build --pgo FILE` and
   `bin/arbace-go --build --pgo` (a training run of `test/arbace-go-pgo.ae` with
   `ARBACE_CPUPROFILE`, then `go build -pgo`). Proposed: the freeze's executables are built so;
-  the default build stays without, for build time. *Accepted 2026-10-10 (the freeze's executables are built with `--pgo`; ordinary builds stay without), folded into C2G-SPEC §13.4.*
+  the default build stays without, for build time. *Accepted 2026-10-10 (the freeze's executables are built with `--pgo`; ordinary builds stay without), folded into A2G-SPEC §13.4.*
 
 - **O6 (§7.9.2, §7.9.4) A `try` with nothing to catch** (no catch clause naming a class of the
   world, no normal-completion code) has no function literal of its own: its body is in place,
-  inside the `finally`'s literal when there is one. *Accepted 2026-10-10, folded into C2G-SPEC §7.9.2.*
+  inside the `finally`'s literal when there is one. *Accepted 2026-10-10, folded into A2G-SPEC §7.9.2.*
 
 - **O7 (§9.4) Profiles.** `ARBACE_CPUPROFILE=FILE` and `ARBACE_MEMPROFILE=FILE` write Go's CPU
   and heap profiles of any program run under `jrt.RunMain`; allocation sampling is off
-  otherwise. *Accepted 2026-10-10, folded into C2G-SPEC §13.4.*
+  otherwise. *Accepted 2026-10-10, folded into A2G-SPEC §13.4.*
 
 ## For step 7b (the evaluator)
 
@@ -700,7 +700,7 @@ without `Method.invoke`) and frames sized at analysis would remove most of it.
   pool's 60 s keep-alive, with Go's `fatal error: all goroutines are asleep - deadlock!` (the
   JVM exits once its pool threads time out): `jrt.WaitNonDaemon` waits for the pool's
   non-daemon workers, which block on their queue forever (step 6's executable).
-  *Resolved by amendment JC9 (accepted 2026-10-10; C2G-SPEC §8.4, JRT-NOTES.md "Concurrency"):
+  *Resolved by amendment JC9 (accepted 2026-10-10; A2G-SPEC §8.4, JRT-NOTES.md "Concurrency"):
   `RunMain` keeps a ticker pending, so the program ends as on the JVM: a `send` without
   `shutdown-agents` keeps it running, as the JVM's agent pool does; a `future`-only one exits
   after 60 s.*
