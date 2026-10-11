@@ -1634,3 +1634,19 @@ decision (2026-10-08).
   `bin/g2c-convert-tests` pass; the printer drops `;;` lines, so `s14_3_sort` differs from its
   original only in the notice). EVAL-NOTES' FX1-FX7 and JRT-NOTES' FX7, JC4, JC8 point to where
   they are folded.
+
+## 2026-10-11: the freeze's full gate
+
+- Step 8 (the user's go-ahead for its preparatory steps): `bin/gate --full` on `e09139d` failed
+  once: the kernel's OOM killer took four namespaces' JVMs (api, array-symbols, clearing, edn)
+  of the suites on stages 1 and 2 at their start, with j2c's suite running beside them (24 test
+  JVMs each); every namespace that ran passed. Rerun with `GATE_TEST_JOBS=12`: passed in 19m34s
+  (stage 2 = stage 3, 5,772 classes; Clojure's suite on stages 1 and 2 20,750 of 20,750; j2c's
+  suite and the g2c round trips (tamago, linux) without regressions; jrt-convert; the Go build
+  (66,355,360 bytes) and its smoke test; the test build and Clojure's suite on it 20,506 of
+  20,520, no regressions; the Go oracle 22,232 of 22,278, the 46 recorded mismatches). The
+  gate's default is now 12 test JVMs per suite.
+- The user's decisions for the freeze: arm64 is checked by build, smoke and jrt's tests under
+  emulation (no arm64 suite or oracle run); the executables are not published now (branch and
+  tag only); `doc/go/FREEZE.md` lives on the branch only, as the JVM's FREEZE.md, main linking to
+  it.
