@@ -94,3 +94,30 @@ the first. The history before it is on the frozen branches and in git history:
   print and convert tests and `bin/g2a roundtrip amd64` without regressions; jrt-convert; the
   Go build, smoke, test build; the Go oracle as recorded (46); Clojure's suite on Go 20,506 of
   20,520; `bin/oracle check jvm` (the two known cases); `bin/jrt test`.
+
+## 2026-10-11: Arbace's own version; data_readers.ae
+
+- Agent, branch `version` (to `c853641`, with main merged), fast-forwarded into main.
+  `*arbace-version*` `{:describe :commit :dirty}` and `(arbace-version)` (the describe), both
+  `{:added "arbace"}`; the REPL's banner `Arbace <describe> (<7 hex>)` on both builds;
+  `*clojure-version*` unchanged. The value: `bin/lib/version.bash` asks git when ROOT is a
+  checkout's top level (so a tarball unpacked in another repository, as abuild's `src/`, does
+  not take that repository's version), else reads `/VERSION`, filled by `git archive` through
+  `export-subst` (`$Format:%H$`, `$Format:%(describe:tags)$`), else "unknown". `arbace.core`
+  reads it at load (the system property `arbace.version`, then the resource
+  `arbace/version.edn`), so no compiled class, image or AOT cache holds it. The JVM build writes
+  `arbace/version.edn` into every stage and the jar (stage 2 = stage 3; reproducible per commit
+  and dirty flag); the Go build sets `main.arbaceVersion` with `-ldflags -X` at its final links
+  (a2g's output stays a function of the sources), and the main package sets the property. The
+  gate's cached executable keeps the commit it was built at (its key hashes inputs, not the
+  commit); its smoke test checks the banner against the executable's own `*arbace-version*`.
+  Describe uses every tag: main reads `arbace-for-go1.27.1-v1-N-gHASH` until it has a tag of its
+  own. VENDOR-NOTES hand changes 20 (the version) and 21 (`data_readers.ae` read before `.clj`
+  and `.cljc`), both dialect divergences.
+- Checks (the agent's, on the merged code): `bin/gate` passed (native tests 54, the suite on
+  stage 2 20,750 of 20,750); `bin/c2a-check`; `bin/oracle check jvm` (the two known cases); the
+  Go build, smoke, test build and suite, the Go oracle as recorded; `git archive`'s `VERSION`
+  read correctly inside another repository.
+- The user's decisions on c2a's open points: living documents keep the new tool names, dated
+  passages included; c2a translates a library's `data_readers.clj`/`.cljc` into
+  `data_readers.ae` (now that Arbace reads it).
