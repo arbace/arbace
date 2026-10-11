@@ -1650,3 +1650,17 @@ decision (2026-10-08).
   emulation (no arm64 suite or oracle run); the executables are not published now (branch and
   tag only); `doc/go/FREEZE.md` lives on the branch only, as the JVM's FREEZE.md, main linking to
   it.
+
+## 2026-10-11: the freeze commit of arbace-for-golang
+
+- The release executables: `bin/arbace-go --build --pgo` (amd64 66,371,744 bytes, sha256
+  `a67d23e7235a7447d977cdd0854ad793a89f274e59032ca909ca1dd3e0ab2f4d`; arm64 64,225,440 bytes,
+  sha256 `e9d00bbcd8112b9774c2d15694f28b701a3c02b89818b1230b2d90c39b139639`), `--smoke` on both
+  (arm64 under qemu-aarch64), `bin/jrt test` on amd64 and `--arch arm64` under qemu; start to
+  `-e nil` 0.19-0.20 s. Not published (the user's decision).
+- `doc/go/FREEZE.md` (drafted by an agent on branch `gofreeze`, `1841e92`, after the JVM line's
+  FREEZE.md: what the branch holds, build/run/verify, known limits, making the freeze, what
+  comes next), with the freeze's checks; the README's Go section becomes "Arbace for Golang",
+  describing the frozen executables and linking FREEZE.md; the agenda records step 8. This
+  commit is the one the branch `arbace-for-golang` and the tag `arbace-for-go1.27.1-v1` are to
+  point at, on the user's confirmation.

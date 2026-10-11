@@ -160,17 +160,20 @@ gate: CLAUDE.md.)
     basics, java.text with more CLDR locales: all done but java.text. After it: AOT of
     namespaces to Go (not scheduled); XML (SAX), `gen-class` and Java serialization out for
     good (D6), as Swing/AWT and loading classes from jars.
-  - Numbers (2026-10-10, after java.security): the executable 65.1 MB on amd64, start about
-    0.2 s; Clojure's suite on the test build 76 namespaces, 777 tests, 20,506 of 20,520
-    assertions (11 failures and 3 errors recorded), 9 skipped, test.generative 27 of 27 (the
-    JVM: 20,750 of 20,750); the Go oracle 22,111 of 22,118, the 7 recorded mismatches;
-    java.base 52.0% of members (`bin/jrt-coverage`).
-  - In progress: java.text (branch `gotext`; TL1-TL8 accepted, the default locale set none),
-    merging. Then the documents' review fixed (`.tmp/docreview/`).
-  - Then: step 8, the freeze (`bin/gate --full`, PGO executables (O5), the coverage
-    regenerated, the branch `arbace-for-golang`, the tag `arbace-for-go1.27.1-v1`, the READMEs'
-    "Arbace for Golang" sections: main's pointing to the branch, the branch's own; main's
-    journal starts over, as at the JVM freeze).
+  - Numbers at the freeze (2026-10-11, java.text in, the default locale set none): the
+    executable 66.4 MB on amd64 (PGO: 66.4 MB amd64, 64.2 MB arm64), start 0.19-0.21 s;
+    Clojure's suite on the test build 76 namespaces, 777 tests, 20,506 of 20,520 assertions (11
+    failures and 3 errors recorded), 9 skipped, test.generative 27 of 27 (the JVM: 20,750 of
+    20,750); the Go oracle 22,232 of 22,278, the 46 recorded mismatches (42 locale data); java.base
+    55.9% of members, Arbace's own use 93.0%. The documents reviewed and fixed (about 330
+    findings, 2026-10-10/11), the licensing records completed (LICENSE.md's entry for the Go
+    executables; the overlay files keeping jdk26u code).
+  - Step 8, the freeze (2026-10-11): `bin/gate --full` passed (19m34s, `e09139d`); the PGO
+    executables built and checked (smoke on both architectures, arm64 under qemu; jrt's tests on
+    both); the coverage is this code's; [go/FREEZE.md](go/FREEZE.md); the README's "Arbace for
+    Golang". The branch `arbace-for-golang` and the tag `arbace-for-go1.27.1-v1` on the freeze
+    commit, on the user's confirmation; then main's journal starts over and FREEZE.md moves to
+    the branch only.
 
 - After the freeze (the user, 2026-10-10), in order:
   1. The `.ae` file extension (the user's decision, 2026-10-09; first after the freeze by the

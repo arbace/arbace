@@ -15,6 +15,20 @@ on. The branch takes fixes only; new work lands on main.
 **Releases on this branch:** `arbace-for-go1.27.1-v1` (the freeze, 2026-10-11). Use the newest
 tag.
 
+**The freeze's checks** (2026-10-11): `bin/gate --full` passed in 19m34s on `e09139d` (the
+freeze commit adds only documents and `bin/gate`'s default of 12 test JVMs per suite, since 24
+ran out of memory beside j2c's suite): stage 2 = stage 3 (5,772 classes); Clojure's suite on
+stages 1 and 2, 20,750 of 20,750; j2c's suite and the g2c round trips (tamago, linux) without
+regressions; jrt-convert (835 files); the Go build and its smoke test; the test build and
+Clojure's suite on it, 20,506 of 20,520, no regressions; the oracle, 22,232 of 22,278, the 46
+recorded mismatches. The release executables, `bin/arbace-go --build --pgo`: amd64 66,371,744
+bytes (sha256 `a67d23e7…3e0ab2f4d`), arm64 64,225,440 bytes (sha256 `e9d00bbc…0b139639`), start
+to `-e nil` 0.19-0.20 s on amd64; `--smoke` on both (arm64 under qemu-aarch64); jrt's tests on
+amd64 and on arm64 under qemu. arm64 is checked by build, smoke and jrt's tests under emulation
+only (the user's decision): no arm64 suite or oracle run. The executables are not published
+(the user's decision, 2026-10-11): build them from the tag. `doc/go/java-base-coverage.edn` is
+the measurement of this code (55.9% of java.base's members).
+
 ## What the branch holds
 
 - **The Go executables**, `target/arbace-go/amd64/arbace` and `target/arbace-go/arm64/arbace`,

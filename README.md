@@ -44,28 +44,32 @@ bin/arbace-j             # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)'
 bin/arbace-image         # target/arbace-image: a self-contained jlink image (java.base, jdk.unsupported)
 ```
 
-## The Go executable
+## Arbace for Golang
 
-Arbace as one static executable for Linux, amd64 and arm64, with no JVM
-([doc/go/B1-PLAN.md](doc/go/B1-PLAN.md)): c2g translates Arbace's runtime and the part of
-jdk26u it needs (`java.base`'s collections, concurrency, time, regex, files, sockets,
-processes and security basics, among others) into Go, built with go1.27.1; the evaluator analyses forms and runs them as
-compiled closures; the core namespaces are prepared at build time, so it starts in about 0.2 s.
-On amd64 it is about 65 MB, passes Clojure's test suite as far as it runs (on its test build,
+The branch `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`, 2026-10-11) holds Arbace as one
+static executable for Linux, amd64 and arm64, with no JVM ([doc/go/B1-PLAN.md](doc/go/B1-PLAN.md),
+milestone B1a): c2g translates Arbace's runtime and the part of jdk26u it needs (`java.base`'s
+collections, concurrency, time, text, regex, files, sockets, processes and security basics,
+among others) into Go, built with TamaGo's go1.27.1; the evaluator analyses forms and runs them
+as compiled closures; the core namespaces are prepared at build time, so it starts in about 0.2
+s. On amd64 it is about 66 MB, passes Clojure's test suite as far as it runs (on its test build,
 with the suite's Java fixtures: 76 namespaces, 20,506 of 20,520 assertions) and matches the JVM
-on all but 7 of the oracle's about 22,100 cases; it leaves out
-`gen-class`, XML, Java serialization and Swing. It is to be frozen as the branch
-`arbace-for-golang` (tag `arbace-for-go1.27.1-v1`).
+on 22,232 of the oracle's 22,278 cases (42 of the rest need locale data beyond root and English,
+which the default build leaves out); it leaves out `gen-class`, XML, Java serialization and
+Swing. [doc/go/FREEZE.md](doc/go/FREEZE.md) describes what it holds, how to build, run and
+verify it, and its known limits.
 
 ```sh
-bin/jrt-convert          # the JDK sources jrt needs, converted to class forms (after bin/build-arbace)
-bin/arbace-go --build    # target/arbace-go/{amd64,arm64}/arbace
-bin/arbace-go            # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)', a script
+bin/build-arbace               # the JVM Arbace first: the bootstrap and the tools run on it
+bin/jrt-convert                # the JDK sources jrt needs, converted to class forms
+bin/arbace-go --build --pgo    # target/arbace-go/{amd64,arm64}/arbace, profile-guided
+bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)', a script
 ```
 
 ## Documentation
 
 - [doc/AGENDA.md](doc/AGENDA.md): where the work stands and what comes next
+- [doc/go/FREEZE.md](doc/go/FREEZE.md): Arbace for Golang: build, run, verify, the frozen branch
 - [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the class forms
 - [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/C2G-SPEC.md](doc/go/C2G-SPEC.md),
