@@ -125,3 +125,9 @@ the first. The history before it is on the frozen branches and in git history:
   the next milestone); the `arbace.version` property overrides on both builds; a tarball's
   `:dirty false` is acceptable (patches are the packager's record); the gate's cache keyed on
   inputs, not the commit; the old banner in dated transcripts stays.
+- c2a translates a library's `data_readers.clj`/`.cljc` into `data_readers.ae` (agent, branch
+  `c2a-readers` `bb34f8f`, fast-forwarded): the usual rules, a `.cljc`'s conditionals resolved
+  for `:clj`; a file that would collide with an existing data_readers file keeps its name (Arbace
+  reads and merges all three); `--keep-ext` and `project.clj` unchanged. The suite has no
+  data_readers files (its digest unchanged); `bin/c2a-check --libs` adds a small library with a
+  `data_readers.cljc` and a tag, 15 of 15 on both builds.
