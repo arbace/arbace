@@ -25,8 +25,8 @@
     "test_fixtures"})
 
 ;; Forms mentioning any of these symbols are left out: time, randomness, threads, the host,
-;; identity, exiting, the class forms (D6). Proxies are in (the Go build has them over Dyn:
-;; C2G-SPEC §10.4, amendment X4).
+;; identity, exiting, defining classes (gen-class, gen-interface, definterface, defclass).
+;; Proxies are in (the Go build has them over Dyn: C2G-SPEC §10.4, amendment X4).
 (def unsafe
   '#{System/exit System/currentTimeMillis System/nanoTime System/getProperty System/getenv
      System/identityHashCode System/gc Runtime/getRuntime Thread/sleep Thread. Thread
