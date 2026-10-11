@@ -105,6 +105,24 @@
         (java.io.FileInputStream. file)
         (catch FileNotFoundException e nil))))
 
+  ;; the embedded sources loaded (by scriptbase): each is loaded once, as the JVM initializes the
+  ;; class of an AOT-compiled namespace (its __init) once, however often RT.load is asked for it
+  ;; (a require of arbace.core, which is not in *loaded-libs*, or a :reload): loading one again
+  ;; would define its protocols' interfaces and its types anew, and the instances of the old ones
+  ;; would no longer satisfy them (doc/go/BOX-NOTES.md, S2: the reducers' tests)
+  ;; (made when first needed: RT's static initializer loads arbace.core through RT.load, which
+  ;; may run before a static field's initializer; that first load is on one thread)
+  (a2g/add
+    (field ^:static ^java.util.concurrent.ConcurrentHashMap LOADED_EMBEDDED))
+
+  (a2g/add
+    (method ^:static loadedEmbedded ^java.util.concurrent.ConcurrentHashMap []
+      (let [^:mutable m LOADED_EMBEDDED]
+        (when (nil? m)
+          (set! m (java.util.concurrent.ConcurrentHashMap.))
+          (set! LOADED_EMBEDDED m))
+        m)))
+
   (method ^:public ^:static load :throws [IOException ClassNotFoundException] ^void [^String scriptbase
                                                                                      ^boolean failIfNotFound]
     ;; a namespace's .ae, else its .clj, else its .cljc, as the JVM's (VENDOR-NOTES.md, hand
@@ -122,6 +140,8 @@
         (set! scriptfile cljcfile)
         (set! ins (RT/resourceAsStream nil cljcfile)))
       (cond
+        (and (instance? java.io.ByteArrayInputStream ins) (.containsKey (RT/loadedEmbedded) scriptbase))
+          (.close ins)
         (some? ins)
           (let [slash (.lastIndexOf scriptfile \/)
                 file (if (>= slash 0) (.substring scriptfile (unchecked-add-int slash 1)) scriptfile)]
@@ -135,7 +155,9 @@
                 ;; namespaces when it holds it, recorded when the program prepares them
                 ;; (Compiler$Image, doc/go/EXEC-NOTES.md)
                 (if (instance? java.io.ByteArrayInputStream ins)
-                    (Compiler$Image/load (InputStreamReader. ins UTF8) scriptfile file)
+                    (do
+                      (Compiler$Image/load (InputStreamReader. ins UTF8) scriptfile file)
+                      (.put (RT/loadedEmbedded) scriptbase Boolean/TRUE))
                     (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file))
                 (finally
                   (Var/popThreadBindings)

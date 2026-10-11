@@ -50,13 +50,15 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   `arbace-box`; REPL, `-e`, `-m`, scripts, four or one vCPUs; amendments BX1-BX10 accepted). Box
   oracle 21,695 of 21,742 (`test/oracle/known-go-box-amd64.edn`), `bin/box-suite` 19,625 of
   19,627 (`test/arbace-box-results.edn`).
-- S2 in progress, hardening: the rest (the start, the collector, the watchdog, the file tests
-  and `ARBACE_PATH` in the box, reducers' `fold` on 4 vCPUs). The box's smoke test, oracle and
-  suite in `bin/gate --full`: deferred (the user, 2026-10-11).
-- R1 done: the launcher maps the guest image (BX11, accepted; mapped by default), 258 MB
-  resident.
-- In progress beside S2: a2g's overload order (possibly unstable in `a2g_classes.ae`) and
-  jrt-convert's headers (a numbered temporary directory), for reproducible builds.
+- S2 done (2026-10-11): the launcher maps the guest image (BX11, mapped by default; its start
+  under nested KVM to be measured on a host without nesting); the symbol table cut, the
+  collector's limit in the box, the watchdog off, the file tests and `ARBACE_PATH` in the box,
+  reducers' 4.9 GB (a tail call clears the method's object) and `fold` scaling 3.2-3.4x on 4
+  vCPUs (BX12-BX17, accepted). Box oracle 21,696 of 21,742 (the native's 46), `bin/box-suite`
+  19,645 of 19,646. The box's checks in `bin/gate --full`: deferred.
+- Reproducible builds (RP1, accepted): two builds of a clean commit are byte-identical.
+- S6 in progress (amd64): TamaGo's runtime, std and `goos` module as Go forms, the guest built
+  from them byte-identical to one from the originals.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 

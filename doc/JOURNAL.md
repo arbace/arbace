@@ -315,3 +315,63 @@ the first. The history before it is on the frozen branches and in git history:
   covers S5's netstack if packets are chosen. With TamaGo's Go as forms first, S3's and S5's
   runtime changes are made on forms, as `box/` is. The order: S2, S6 (amd64), S3, S5, each later
   stage re-running S6's proof.
+
+## 2026-10-11: Reproducible builds: a2g's overload order, jrt-convert's headers
+
+- Agent, branch `determinism` (`fe7e878`, `b4af020`), merged into main; the essential `bin/gate`
+  passed on its tree (6m33s).
+- a2g's member tables: two `bin/a2g --program` runs in separate JVMs from one clean tree gave
+  different `a2g_classes.ae` (jrt and `lang`). HotSpot orders a class's methods by the addresses
+  of their names, which for classes outside the JDK's CDS archive change from process to
+  process, and with them the order of same-name overloads in `getDeclaredMethods`; a2g copied
+  that order (M4, so that the Reflector picks the JVM's overload). Now (`arbace/a2g/out.ae`,
+  amendment RP1, A2G-SPEC §5.11, proposed): the JVM's order only for classes in the archive's
+  list (`$java.home/lib/classlist`) when the JVM runs with sharing, every other class's overloads
+  by descriptor; the cut classes' tables also by return type. One oracle form changed its pick
+  (`concurrency.ae:286`, `.schedule` on an unhinted `ScheduledThreadPoolExecutor` with a fn:
+  Callable before, Runnable now): hinted in the form, its expected output re-recorded.
+- `bin/jrt-convert`'s headers named the scratch copy (`.tmp/j2a-patch/java.base-N`): j2a's `jdk`
+  command takes `--origins FILE` and names each file's source (`jdk26u src/java.base/...`,
+  `overlay/jdk/...`, the generated ones); `--twice` reports the conversion deterministic.
+- Two builds of a clean commit (`fe7e878`, the second with an empty `GOCACHE`) gave identical
+  `amd64/arbace`, `box-amd64/arbace.elf`, `arbace-box` and `image.bin` (hashes in BUILD.md); a
+  dirty tree differs by its version string. Checks: `--smoke`, the oracle (the 46 known),
+  `bin/a2g-check -- --program` 9,022 of 9,022 on amd64 and arm64.
+- Open: RP1 for the user; `test/jrt/tables.ae` (jrt's tracked `reflect_tables.ae`) still takes
+  the JVM's order (given to S6's agent); Clojure's suite on the Go test build after the merge: 20,506 of 20,520, no regressions.
+- S6 started (agent, branch `box-s6`): TamaGo's runtime, std and `goos` module as Go forms, the
+  guest image built from them byte-identical to one from the originals.
+
+## 2026-10-11: B1b S2 done: the box measured and hardened
+
+- Agent, branch `box-s2` (`3410525`, `ef5bc28`), merged into main (BOX-NOTES' two S2 sections
+  kept, R1's and the rest's). Details: BOX-NOTES.md, S2; amendments BX12-BX17.
+- Reducers' 4.9 GB, natively too: the evaluator kept the reducer's `reify` in the method's frame
+  through the tail call into `coll-reduce`, and with it the head of the `Range`; a call in tail
+  position now clears the method's object, as the JVM's `emitClearThis` (CLJ-1250) (BX14): 4.9 →
+  0.30 GB natively, and it runs in the box. The reducers tests failing when their namespace is
+  loaded alone: the Go build's `RT.load` re-evaluated `arbace.core` when
+  `clojure.data.generators` required it, and `defprotocol` made a new `CollReduce`; an embedded
+  namespace now loads once (BX15), sources on `ARBACE_PATH` still reload.
+- `fold` on 4 vCPUs: the evaluator's yield counted calls in one global written by every vCPU;
+  per thread now (BX16): 3.2x (allocating) and 3.4x (computing) on 4 vCPUs, native 3.5x and
+  3.2x.
+- The collector: `GOMEMLIMIT` was read by TamaGo's runtime before jrt set the environment; now
+  applied, default the guest's RAM less 1 GiB (BX13): live data before running out 1,152 →
+  2,432 MiB; GOGC stays 200 (100 was 5% slower, 400 400 MB more). The watchdog stays off: an
+  evaluation makes no hypercall while it computes. The suite's file tests: `bin/box-suite`
+  writes the suite directory's files into the guest's working directory (BX17); `ARBACE_PATH`
+  checked by the smoke test. The guest's symbol table cut to the monitor's three symbols by
+  `tools/elfsyms` (BX12): guest 76.8 → 65.9 MB.
+- Numbers (nested KVM): start 330 ms on 4 vCPUs (copied; native 200-210), evaluation within noise
+  of native; the box's suite in 222 s at 12 at a time (native test build 214 s).
+- Checks on the branch: `--smoke` 42, `--smoke --box` 70, the native oracle (the 46 known), the
+  box oracle 21,696 of 21,742 (the reducers case matches: its `:incomplete` removed),
+  `bin/box-suite` 19,645 of 19,646 (the socket test), the suite on the native test build without
+  regressions, `bin/jrt test` on both architectures, `bin/box-vendor roundtrip` and `kvm-tests`.
+- The user's decisions: BX12-BX17 accepted (`tools/elfsyms` kept); the watchdog off by default;
+  the mapped start measured on a host without nested KVM before changing the monitor; RP1
+  accepted, with the hint on the oracle's ambiguous `.schedule` form.
+- On merged main (with RP1): `--build`, `--build --box`, `--smoke`, `--smoke --box` pass; the
+  native oracle and the box oracle as recorded (46 each, 0 new); `bin/box-suite` 19,645 of
+  19,646.

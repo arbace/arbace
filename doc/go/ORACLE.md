@@ -138,8 +138,10 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
   sockets and processes, which the box has not: `bin/oracle check
   'target/arbace-go/box-amd64/arbace-box -' --timeout 900 --exclude forms/files. --exclude
   forms/net. --exclude forms/processes. --expected test/oracle/known-go-box-amd64.edn`
-  (21,742 of the 22,278 cases; the native build's 46 known mismatches, and one more: the
-  reducers case whose 4.9 GB heap does not fit the guest's 3 GiB, its run incomplete).
+  (21,742 of the 22,278 cases; the native build's 46 known mismatches; until S2 one more, the
+  reducers case whose 4.9 GB heap did not fit the guest's 3 GiB, its run incomplete: since S2
+  the evaluator's tail calls clear the method's object and the case runs in constant memory,
+  BOX-NOTES.md, S2).
 - `harvest` regenerates `forms/harvest/` (below).
 
 Times on this machine (64 cores; 2026-10-09, before the files, time, processes, concurrency and

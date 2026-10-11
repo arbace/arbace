@@ -155,7 +155,9 @@ pins), linked with `-ldflags "-T 0x201000 -R 0x1000 -w"` (go-whim's addresses; t
 kept, which the monitor reads; DWARF dropped). `--root ROOT` (repeated) adds another source root
 of forms: its packages but a main one join the program (`box/`, whose board and `abi` the guest
 imports, and whose launcher is a program of its own: `bin/g2a build --module arbace box`).
-`--print-only` takes `--root` too. No form changes, so SPEC is not amended.
+`--print-only` takes `--root` too. No form changes, so SPEC is not amended. `bin/arbace-go
+--build --box` then cuts the guest's symbol table to the three symbols the monitor reads
+(`tools/elfsyms`; amendment BX12, BOX-NOTES.md, S2): 11 MB less, the rest of the file as gc wrote it.
 
 ## The standard library and the goos module from forms (amendment BX21, proposed 2026-10-11)
 

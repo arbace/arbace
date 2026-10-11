@@ -1152,7 +1152,7 @@ The tables' entry types (jrt's `class.ae`):
   the JDK's outside the archive: `NormalizerImpl`, `CompactByteArray`) changes from one JVM
   process to the next, so a2g's output did (as the JVM's own choice among such overloads does).
   a2g follows the JVM's order for the archive's classes, and orders every other class's
-  overloads, and those the JVM does not list, by descriptor (amendment RP1, proposed
+  overloads, and those the JVM does not list, by descriptor (amendment RP1, accepted
   2026-10-11). Interfaces list their abstract, default and static methods
   and their constants; an enum's `values`, `valueOf` and constants are ordinary members.
 - A `volatile` field that is not final has a `Set`, a volatile write (§8.2), as its `Get` is a
@@ -4275,7 +4275,7 @@ evaluator's yield: `Compiler$CodeRun.tick`, a native counted at every method run
 `runtime.Gosched` every 65,536 on TamaGo, which does not preempt (BOX-SURVEY R2), an empty
 function on Linux (`boxYield`): SPEED-NOTES.md's closure compiler, jrt's `natives.ae`.
 
-**Reproducibility** (byte-identical builds, B1b S6; proposed 2026-10-11): RP1 a name's
+**Reproducibility** (byte-identical builds, B1b S6; accepted 2026-10-11): RP1 a name's
 overloads in a member table in the JVM's order only for the classes of the JDK's CDS archive,
 by descriptor otherwise (the JVM's order of the others varies run to run): §5.11; the cut
 classes' tables ordered by return type too after name and parameters (a bridge's pair): §4.1.
