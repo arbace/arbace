@@ -9,7 +9,18 @@ Sources: go-whim at `80c49bf` (2026-10-06, `/root/go-whim`, `github.com/arbace/g
 TamaGo's Go distribution `/root/tamago-go` (`VERSION` go1.27.1, 2026-08-28), its `goos` module
 `github.com/usbarmory/tamago` v1.27.1 (module cache); purego v0.11.1. Arbace at main `105db68`,
 with the work-in-progress branches `goproc` (`HostProc`), `gosec`, `gotext` noted where they
-change the surface.
+change the surface (all three merged since: `goproc` and `gosec` 2026-10-10, `gotext`
+2026-10-11).
+
+**Since the survey** (main, 2026-10-11), what changes its findings: `gofix` added a fifth
+optional host interface, `HostExecutable` (`resources.clj`: the executable's path, which the
+embedded resources' `jar:` URLs name; a host without it, the box's, names `/arbace`); `gosec`
+moved `OSHost.RandomBytes` into the Linux-tagged `hostrand_linux.clj`, so on `GOOS=tamago`
+`OSHost` alone no longer satisfies `Host` and a box host supplies `RandomBytes` itself (§9.4's
+scratch host already does: over `Random`), and `host.clj`'s default `theHost` (`OSHost`, in an
+untagged file) would then not compile for `GOOS=tamago`: by reading, not built, a second file
+besides `net.clj` that the box's build must tag or give a stub (§7, §9.2); the native executable is 66.4 MB on amd64 (the
+default locale data, stripped since amendment SZ1), against the 58 MB the survey names.
 
 ## Executive summary
 
@@ -30,14 +41,14 @@ change the surface.
   suites) stay behind.
 - **The surfaces differ radically, as the user expected**, but the overlap is exactly what
   a REPL needs: jrt's `Host` has 20 methods plus 4 optional interfaces (files beyond `Host`,
-  network, links, processes: about 40 methods more); the doorbell offers a console (merged
+  network, links, processes: about 40 methods more; a fifth since, `HostExecutable`); the doorbell offers a console (merged
   wait-and-read, write, message), exit, random bytes, two clocks, SMP, and a content-addressed
   store. **A boxed REPL needs no new hypercall** (Joker's did not; neither did §9's): the
   wall clock is the one gap (`Time` says seconds), best closed by an offset at entry rather
   than a call. Files, sockets, processes have no host surface at all, by design.
 - **Most of arbace-go needs nothing from the host**: the language, collections, numbers,
   strings, regex, the image, class forms at the REPL, time zones (tzdb is embedded), text
-  once `gotext` lands. Files can be TamaGo's in-memory file system with no host surface
+  once `gotext` lands (merged 2026-10-11). Files can be TamaGo's in-memory file system with no host surface
   (Go's `os` works on it), later backed by the store. Sockets and the socket REPL need a
   network design (go-whim sketched netstack in the guest over a datagram call); processes do
   not make sense in a box and stay cut; rlwrap moves to the host side (rlwrap runs the
@@ -100,7 +111,7 @@ B1b (B1-PLAN.md, "Decisions").
 
 No firmware, no devices, no interrupts, no timer: the guest runs until it stores to the
 doorbell (an unmapped guest-physical page, `0xf0000000`), which exits on all three targets
-(KVM's `KVM_EXIT_MMIO`, HVF's data abort with a valid syndrome). doc/GUEST.md, "The shape",
+(KVM's `KVM_EXIT_MMIO`, HVF's data abort with a valid syndrome). go-whim's doc/GUEST.md, "The shape",
 "The hypercall ABI".
 
 ### 2.2 `hv/`: one API, two hypervisors, two ISAs
@@ -109,7 +120,7 @@ doorbell (an unmapped guest-physical page, `0xf0000000`), which exits on all thr
   `VMMap(mem, ipa, flags)`, `VCPUCreate` returning the vCPU and its exit record, `VCPURun`,
   `VCPUsExit`, `VCPUGetReg`/`SetReg`, `GetSysReg`/`SetSysReg`), Apple's register names; the
   exit is `hv_vcpu_exit_t`'s shape with an ESR syndrome decoder (`Syndrome.EC/ISV/SRT/WnR`).
-  Decided 2026-10-04 (`5b6f8bf`, doc/GUEST.md "Decided"): KVM follows HVF's concepts so the
+  Decided 2026-10-04 (`5b6f8bf`, go-whim's doc/GUEST.md "Decided"): KVM follows HVF's concepts so the
   Mac port is "almost trivial".
 - `kvm_linux.go` (438), `kvm_linux_amd64.go`, `kvm_linux_arm64.go`, `tsc_linux_amd64.go`:
   `/dev/kvm` by raw `syscall.Syscall` ioctls, no cgo; an MMIO store is reported as HVF's data
@@ -197,7 +208,7 @@ terminal host. That import (`vmm.go`: `github.com/arbace/go-whim/editor`) and th
 - **The Joker guest** (`guest/joker/main.go`): a REPL whose input is an `io.Reader` over
   `WaitRead(-1)` and whose output is `os.Stdout` (TamaGo's `write1` → `Printk` → `Message`).
   Namespaces `box` (the store), `ed`, `term`, `rt` (the collector's metrics). Fork of Joker
-  (EPL-1.0) at `guest/joker/joker` with two fixes. doc/LISP-SANDBOX.md.
+  (EPL-1.0) at `guest/joker/joker` with two fixes. go-whim's doc/LISP-SANDBOX.md.
 - **TamaGo's own std on `GOOS=tamago`** (`/root/tamago-go/src`): `os` over an in-memory file
   system (`syscall/fs_tamago.go`, NaCl's), fds 0-2 reserved, writes to 1 and 2 going to
   `Printk`, reads of 0 failing; `net` needs `net.SocketFunc` set by the program
@@ -222,11 +233,11 @@ Linux user process (raw `write`, `clock_gettime`, `getrandom`, `exit`). §9 uses
 ### 2.7 Measured (go-whim's numbers)
 
 - Exit cost 16-18 µs here (nested SVM), about 1 µs on bare metal; the Mac's guest runs at
-  1.2-1.4x the native C (doc/GUEST.md, "Expected performance", "Running on the Mac").
+  1.2-1.4x the native C (go-whim's doc/GUEST.md, "Expected performance", "Running on the Mac").
 - Go editor guest: start and `:q!` 20-40 ms, 35 MB; heavy case 1.3-1.4x the C here.
 - Joker in the box: start 0.06 s; `fib 27` 0.44 s (host 0.26); the views' index of a 9.66 MB
   EDN graph 7.08 s (host `GOMAXPROCS=1` 5.28); collector pauses p50 3.6-5.1 µs on one vCPU,
-  82-131 µs on four (LISP-SANDBOX.md, "The collector in the box").
+  82-131 µs on four (go-whim's LISP-SANDBOX.md, "The collector in the box").
 - **The one-vCPU stall** (`798200a`): with no `sysmon` nothing preempts a running goroutine; a
   collection that starts during a long computation waits for it to block, the computation
   assisting with the write barrier on: `fib 27` 1,280 ms instead of 321. Joker's two
@@ -290,6 +301,7 @@ to add.
 | `NumCPU()` | `availableProcessors`, fork-join | the vCPU count (`runtime.NumCPU()` = GOMAXPROCS the board set) | boot |
 | `RandomBytes(b)` | `SecureRandom` seeds, `UUID` | `Random` | existing call |
 | `Resource(name)` | `RT.load`, `getResourceAsStream`, tzdb, ICU data | `go:embed` in the image, as now | guest |
+| `HostExecutable.Executable` (since `gofix`) | the embedded resources' `jar:` URLs | absent: the URLs name `/arbace` | none |
 | `Exit(code)` | `System.exit`, the end | `Exit` (after flushing Printk) | existing call |
 | `HostFS`: `Access`, `Chmod`, `Chtimes`, `Realpath`, `Statfs` | `File`'s queries | absent (the JDK's failure answers), or over the in-memory fs | none |
 | `HostLinks.Readlink` | default zone from `/etc/localtime` | absent: `TZ` from the environment, else UTC/`GMT+hh:mm` | none |
@@ -308,7 +320,7 @@ under the JVM), `WaitForInput`/`ReadInput` alone (superseded by `WaitRead`), `No
 plus one new clock call.
 
 So the box's surface for Arbace is about 6 host functions (console in, console out, error
-out, exit, entropy, wall clock) against jrt's 20 + about 40 optional; what is between is
+out, exit, entropy, wall clock) against jrt's 20 + about 40 optional (and `HostExecutable`'s one since); what is between is
 answered in the guest or absent.
 
 ## 5. arbace-go's features in the box
@@ -354,8 +366,8 @@ Each stage a gate, as B1a's steps.
 | stage | content | gate |
 |---|---|---|
 | **S0 vendor** (after the freeze) | `hv/`, `vmm/` (dispatch made a call table), `guest/abi`, the board, `internal/libsys` into Arbace as Go forms (g2c convert, round trip), or as a pinned checkout (D3, §10); `LICENSE.md`, `doc/ARBACE.md`, journal | go-whim's `hv` and `vmm` tests pass from Arbace's copy; a hello TamaGo image on the vendored board and monitor runs on /dev/kvm |
-| **S1 the boxed REPL, amd64** | jrt's `BoxHost` (console via `WaitRead`/`Write`/`Message`, `Exit`, `Random`, the wall clock, args, env, resources; no `NetHost`, `HostProc`, `HostFS`, `HostLinks`); the main package's box variant (no rlwrap, the board imported); the launcher `bin/arbace-box` (image appended, rlwrap around it on a tty, an env allow-list); the evaluator's periodic yield (R2); files in TamaGo's in-memory fs (OSHost's file calls, unchanged); four vCPUs, the console read bounded (R3) | `-e`, `-m`, the REPL on stdin answer as the native executable on the smoke test's forms; the oracle's box subset; Clojure's suite in the box, its known exclusions recorded (`test/arbace-box-results.edn`) |
-| **S2 measured and hardened** | the start (63 `Random` exits batched, the 85 MB image's DWARF), the collector's setting in the box, the watchdog's setting for long evaluations, the suite's file tests over the in-memory fs, `ARBACE_PATH` inside it | the suite's file tests pass; reducers' `fold` scales on 4 vCPUs; start and suite times recorded against native |
+| **S1 the boxed REPL, amd64** | jrt's `BoxHost` (console via `WaitRead`/`Write`/`Message`, `Exit`, `Random`, the wall clock, args, env, resources; no `NetHost`, `HostProc`, `HostFS`, `HostLinks`); the main package's box variant (no rlwrap, the board imported); the launcher `bin/arbace-box` (image appended, rlwrap around it on a tty, an env allow-list); the evaluator's periodic yield (R2); files in TamaGo's in-memory fs (OSHost's file calls, unchanged; its `RandomBytes` is Linux-only since `gosec`, the box host's own); four vCPUs, the console read bounded (R3) | `-e`, `-m`, the REPL on stdin answer as the native executable on the smoke test's forms; the oracle's box subset; Clojure's suite in the box, its known exclusions recorded (`test/arbace-box-results.edn`) |
+| **S2 measured and hardened** | the start (63 `Random` exits batched, the 85 MB image's DWARF: the box image keeps its symbol table, which the monitor reads, §9.4, while the native executables are stripped since SZ1; `-w` alone could drop the DWARF), the collector's setting in the box, the watchdog's setting for long evaluations, the suite's file tests over the in-memory fs, `ARBACE_PATH` inside it | the suite's file tests pass; reducers' `fold` scales on 4 vCPUs; start and suite times recorded against native |
 | **S3 the store** | an `arbace.box` namespace (`put`, `get`, `ref`, `ref!` as Joker's `box`); scripts and namespaces loaded from refs; optionally the in-memory fs seeded from / saved to a ref (a tar or EDN snapshot) | a script run from a ref; `load` from the store; the store's refusals |
 | **S4 arm64** | the same image for arm64; KVM/arm64 in the emulated aarch64 VM here; Hypervisor.framework on the Mac (the user's run, go-whim's `mac.sh` as the model) | the S1 gate in the aarch64 VM and on the Mac |
 | **S5 the network** | the design first (R5): a stream proxy (`NetHost` over calls: `Dial`/`Listen` under the launcher's policy) or packets (a datagram call, netstack and TLS in the guest, go-whim's sketch); the socket REPL from the host | `java.net`'s oracle forms; a socket REPL session from the host |
@@ -379,7 +391,7 @@ Not staged: processes (cut for good in the box), the terminal's raw mode.
   so the image prepared by the linux/amd64 executable is valid in the box, as it is for
   arm64 today (EXEC-NOTES.md, "Determinism"). A slimmer closure (no `java.net`, no processes:
   a smaller image) is a second c2g program with its own image, prepared by its own linux
-  build: later, and only if the size matters (58 MB executable; go-whim's slot is 3 GiB).
+  build: later, and only if the size matters (58 MB executable at the survey, 66.4 MB on 2026-10-11; go-whim's slot is 3 GiB).
 - **The tools.** `bin/g2c build` takes `--goos tamago` (it fixes `GOOS=linux` today:
   `arbace.g2c.build/go-env`, `bin/arbace-go`'s `go_env`) and the go.mod's `require
   github.com/usbarmory/tamago v1.27.1` with `GOOSPKG` (from the module cache, `GOPROXY=off`);
@@ -446,7 +458,8 @@ module (`target/arbace-go/work-amd64/mod`, main `105db68`'s build) copied to
    exhausted its fixed 512 MiB). A box host over raw `read(0)` and the argv would be needed.
 4. **Arbace in the box on KVM.** A scratch main (`.tmp/boxsurvey/mod-box/cmd/arbace/main_box.go`,
    about 80 lines) sets `jrt.SetHost` to a host embedding `jrt.OSHost` (files: TamaGo's
-   in-memory fs) with `Stdin` over `WaitRead(-1)`, `Stdout` over `Write`, `Stderr` over
+   in-memory fs; since `gosec` `OSHost`'s `RandomBytes` is in a Linux-tagged file, so a box host
+   must define it, as this one does) with `Stdin` over `WaitRead(-1)`, `Stdout` over `Write`, `Stderr` over
    `Message(err)`, `Args` from `board.Args()`, `RandomBytes` over `Random`, `Exit` over
    `board.Exit`, `Now` as `Time` (seconds) at entry plus Go's clock, an empty environment;
    imports go-whim's board; built with TamaGo (`GOOSPKG=github.com/usbarmory/tamago`,
@@ -521,7 +534,7 @@ Decisions for the user (after the freeze):
 
 Risks:
 
-- **R1 Size and memory.** The executable is 58-62 MB; the slot 3 GiB (`GoRAMBytes`, under the
+- **R1 Size and memory.** The executable is 58-62 MB (66.4 MB on 2026-10-11, stripped, the default locale data); the slot 3 GiB (`GoRAMBytes`, under the
   doorbell at 3.75 GiB, a 32-bit space on arm64). The suite's peak heap in the box is
   unmeasured; the minimum heap (64 MiB) and `GOGC=200` stay. Raising the slot means moving
   the doorbell (an ABI change).
