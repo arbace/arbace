@@ -68,7 +68,10 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host) and
   Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler,
   GC), with proper tail calls possible.
-- After the box on amd64, the rest of B1b (BOX-SURVEY.md, S2-S6): arm64, the content-addressed
-  store, the network (D12), the Mac's Hypervisor.framework.
+- The milestone now (the user, 2026-10-11): the box on amd64, S2, S3 (the store), S5 (the
+  network, D12) and S6 (the image's Go as forms, byte-identical) on amd64; its freeze runs
+  `bin/gate --full`.
+- The next milestone: S4, arm64 (KVM/arm64, then Hypervisor.framework on the Mac; purego,
+  `board.NilPanics` for arm64, S6's arm64 identity).
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
   directory tests.

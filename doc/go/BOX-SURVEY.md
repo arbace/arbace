@@ -363,7 +363,8 @@ Classes:
 
 ## 6. Staging
 
-Each stage a gate, as B1a's steps.
+Each stage a gate, as B1a's steps. The order (the user, 2026-10-11): amd64 first, S2, S3, S5
+and S6's amd64 half as this milestone; S4 (arm64, the Mac) and S6's arm64 half the next.
 
 | stage | content | gate |
 |---|---|---|

@@ -301,3 +301,11 @@ the first. The history before it is on the frozen branches and in git history:
 - The user's decisions: BX11 accepted; the default stays mapped. And the two nondeterminisms
   noted with the surface's regeneration (a2g's overload order, jrt-convert's headers) are to be
   fixed now, beside S2, rather than at S6.
+
+## 2026-10-11: B1b's order: amd64 first, S4 the next milestone
+
+- The user: S4 (arm64: KVM/arm64, Hypervisor.framework on the Mac; with it the purego decision,
+  `board.NilPanics` for arm64 and S6's arm64 identity) is deferred to the next milestone. This
+  milestone is the box on amd64: S2, S3 (the store), S5 (the network, D12: a stream proxy or
+  packets with netstack in the guest, decided at S5) and S6 on amd64; its freeze runs
+  `bin/gate --full`. AGENDA.md and BOX-SURVEY.md §6 follow.
