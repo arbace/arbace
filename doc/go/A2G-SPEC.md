@@ -2389,7 +2389,7 @@ Linux-tagged `hostrand_linux.ae` (`//go:build linux`). jrt's own Java
 `NativePRNG`'s and `SeedGenerator`'s variants read where the JDK reads `/dev/random` and
 `/dev/urandom`.
 
-**The program's host; the box's** (amendments BX1-BX3, proposed 2026-10-11 for the user;
+**The program's host; the box's** (amendments BX1-BX3, accepted 2026-10-11;
 BOX-NOTES.md, S1). The host a program starts with is `jrt.ProgramHost(resources)`, which the
 main package's `main` sets (§10.6) and which is `theHost`'s default (with no resources): on an
 operating system (`programhost.ae`, `//go:build !tamago`) `OSHost`, as before; built with
@@ -2819,7 +2819,7 @@ neither `off` (the user's switch) nor `wrapped` (the marker for the child), it r
 arguments, `ARBACE_RLWRAP=wrapped` added; otherwise, or when the exec fails, it runs on,
 silently. The JVM launcher `bin/arbace-j` follows the same convention. `Host` is unchanged.
 
-**The box's program** (amendment BX4, proposed 2026-10-11; BOX-NOTES.md, S1). `main` sets the
+**The box's program** (amendment BX4, accepted 2026-10-11; BOX-NOTES.md, S1). `main` sets the
 host with `jrt.ProgramHost` (§9.4) rather than `OSHost`, so the same main package serves both
 systems: `bin/arbace-go --build --box` builds the program a2g wrote, unchanged, with
 `GOOS=tamago` (`bin/g2a build --goos tamago --root box`: the board's package and `abi` join the
@@ -4259,7 +4259,7 @@ jrt's locale properties, the Turkish and Azerbaijani i, `SoftReference`'s subcla
 constructors: §12 (R17), JRT-NOTES.md. TL8 the shape check's known difference in
 `Locale.ae`: JRT-SOURCES.md. TL5 revises TM4.
 
-**The box** (BOX-NOTES.md, S1; proposed 2026-10-11, for the user): BX1 the program's host
+**The box** (BOX-NOTES.md, S1; accepted 2026-10-11): BX1 the program's host
 `jrt.ProgramHost` and the box's host: §9.4. BX2 `OSHost`'s network Linux's (`net_linux.ae`):
 §9.4. BX3 a2g's view of jrt without other systems' files: §9.4. BX4 the main package's host by
 `ProgramHost`, the box's program built from a2g's with `GOOS=tamago`: §10.6. BX5 the

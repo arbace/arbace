@@ -205,3 +205,46 @@ the first. The history before it is on the frozen branches and in git history:
   done and B1b started.
 - Open: `doc/go/java-surface.edn` lags stage 2 (for instance class-forms 1,449 → 1,454 classes);
   it is a build input, so regenerating it is a step of its own.
+
+## 2026-10-11: B1b S1: the boxed REPL on amd64
+
+- Agent, branch `box-s1` (6 commits on `41f31be`), merged into main after the tidy-up (one
+  conflict, B1-PLAN's status line). Details and the amendments BX1-BX10 (proposed): BOX-NOTES.md,
+  S1; A2G-SPEC §9.4, §10.6, §16.
+- `bin/arbace-go --build --box` (after `--build`) builds the guest (`GOOS=tamago`, reusing a2g's
+  output and the image of prepared namespaces from the Linux build; `image.key`) and the
+  launcher `arbace-box` into `target/arbace-go/box-amd64/`. The REPL, `-e`, `-m`, `-`, scripts in
+  TamaGo's in-memory file system, futures, exit codes, the host's wall clock, rlwrap and Ctrl-C
+  work in the box on four vCPUs and on one.
+- The seam (BX7): `vmm` has a `Host` of its own (console, exit), an optional `TermHost`, and
+  `vmm.Exit`; it no longer imports go-whim's editor, so S0's byte-identity proof no longer holds,
+  by design. The ABI (BX8): the environment after argv; the host's wall clock at entry (R11 on
+  amd64, X6 on arm64; D10); an idle guest on one vCPU parks in the monitor; `board.NilPanics()`
+  (amd64) turns a fault below the first page into a run-time panic, so nil dereferences are
+  NullPointerExceptions. The launcher (BX9): a Linux Go program with the guest appended, four
+  vCPUs by default, `ARBACE_BOX_*` settings, an allow-list for the guest's environment. jrt's box
+  host (BX1-BX5): the console polled without blocking the guest, entropy, exit, files in memory,
+  args and env from the boot data; `jrt.ProgramHost` picks the host. The evaluator yields with
+  `runtime.Gosched` every 65,536 ticks on TamaGo (R2), an empty inlined call on Linux (within
+  noise). `bin/g2a build --goos tamago --root DIR` (BX6; TamaGo's `goos` v1.27.1, go.sum checked
+  against pinned hashes); its BSD-3 licence in LICENSE.md. `box/` changed by editing Go in a clone
+  and converting back (`bin/box-vendor --from CLONE convert`).
+- Numbers (nested KVM): start 367 ms in the box against 207 ms native; resident 448 MB against
+  163 MB; guest 76.8 MB, launcher 3.7 MB. Output during a wait reaches the host in 3-6 ms (the
+  survey measured 2.6 s late).
+- Checks: `bin/arbace-go --smoke --box` 64 checks on four and one vCPUs; the box oracle (all but
+  `forms/files`, `forms/net`, `forms/processes`; the runner's new `--exclude`) 21,695 of 21,742,
+  the 46 known native mismatches plus the reducers case, which runs the 3 GiB guest out of memory
+  (recorded with a new `:incomplete` key, `test/oracle/known-go-box-amd64.edn`); `bin/box-suite`
+  19,625 of 19,627 (`test/arbace-box-results.edn`; the two errors need the network or a host
+  file; 10 namespaces excluded with reasons); `bin/box-vendor roundtrip` 16 of 16 and
+  `kvm-tests` pass, both now the `box` step of `bin/gate --full`. Linux unchanged: the
+  executable's smoke test, the oracle (46 known), `bin/jrt test`, the suite on the test build
+  (20,506 of 20,520). Not run: arm64.
+- Open for the user: accepting BX1-BX10; the box's smoke test, oracle and suite in `--full`
+  (about 10 minutes more); the launcher's memory (the image read and copied whole; mapping it
+  would save most of 2 × 77 MB) for S2; `NilPanics` on arm64 for S4. Noted: natively, the
+  reducers tests fail when their namespace alone is loaded first.
+- The user's decisions the same day: BX1-BX10 accepted; the box's checks in `--full` deferred;
+  the launcher's memory to be done now (S2's first item); `doc/go/java-surface.edn` to be
+  regenerated (the tidy-up's open point).

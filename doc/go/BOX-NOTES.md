@@ -429,7 +429,7 @@ image is read into the launcher and loaded into the slot, beside the heap the st
 
 ### Amendments (BX)
 
-Numbered BX (a prefix not used in `doc/`); proposed 2026-10-11, for the user.
+Numbered BX (a prefix not used in `doc/`); proposed 2026-10-11, accepted by the user the same day.
 
 - **BX1 (A2G-SPEC §9.4) The program's host and the box's**: `jrt.ProgramHost(resources)`,
   `OSHost` or (TamaGo) the box's host as tabled above; `theHost`'s default
@@ -454,14 +454,12 @@ Numbered BX (a prefix not used in `doc/`); proposed 2026-10-11, for the user.
   `test/oracle/known-go-box-amd64.edn`, `bin/box-vendor roundtrip` and `kvm-tests` in `bin/gate
   --full`, and the pty test's Ctrl-C checks** (which the executable's smoke test runs too).
 
-### Decisions for the user
+### The user's decisions (2026-10-11)
 
-- Accept BX1-BX10.
-- The box's smoke test, suite subset and oracle subset in `bin/gate --full` (as the survey's §8
-  proposed for S1/S2)? Only the round trip and the KVM tests were added, as decided; the box's
-  build adds about 2 minutes, its smoke test 2.5 minutes, the oracle subset 1 and the suite
-  4.5.
-- R1 / S2: the launcher's 445 MB resident (the image read whole, then copied into the slot);
-  mapping the appended image instead of reading it would save most of the 77 MB twice.
-- arm64 (S4): `board.NilPanics` and the vectors' return to `sigpanic` need their arm64 form
+- BX1-BX10 accepted.
+- The box's smoke test, suite subset and oracle subset in `bin/gate --full` (the survey's §8;
+  about 10 minutes more): deferred. Only the round trip and the KVM tests are in it.
+- R1 / S2: the launcher maps the appended image instead of reading it whole and copying it into
+  the slot (it was 445 MB resident): to do, first in S2.
+- Open for S4: `board.NilPanics` and the vectors' return to `sigpanic` need their arm64 form
   (ELR_EL1, the link register) before the box's arm64 oracle can pass.

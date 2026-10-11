@@ -121,7 +121,7 @@ proved by the round trip's oracle, byte-identical builds of go-whim's monitor an
 go-whim's tests on /dev/kvm ([BOX-NOTES.md](BOX-NOTES.md)). S1 done 2026-10-11: the same
 program built with `GOOS=tamago` runs its REPL, `-e`, `-m` and scripts in the box on /dev/kvm,
 on one and four vCPUs, under Arbace's own launcher `arbace-box` (`bin/arbace-go --build --box`,
-`--smoke --box`; BOX-NOTES.md, S1; amendments BX1-BX10 proposed).
+`--smoke --box`; BOX-NOTES.md, S1; amendments BX1-BX10 accepted).
 
 ## Decisions (the user's, 2026-10-08)
 
