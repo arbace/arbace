@@ -165,6 +165,21 @@ ARGS...`, which runs a static Linux arm64 executable as a process here (Linux sy
 translated, no system image needed); `bin/g2a-build-tests` runs the arm64 executables that way
 and the amd64 ones natively, against the same expected files.
 
+## Reproducibility of Arbace's executables (2026-10-11)
+
+The whole chain from a clean checkout is deterministic: `bin/jrt-convert` (its `--twice`),
+`bin/a2g --program` (two runs, separate JVMs, give identical trees but `report.edn`'s timings),
+the image of prepared namespaces, and `go build -trimpath`. Two removed nondeterminisms: a2g's
+member tables followed the JVM's overload order for classes whose order changes from one JVM
+process to the next (A2G-SPEC §5.11, RP1), and j2a's headers named its numbered scratch copies
+(JRT-SOURCES.md, convert). Checked at commit `fe7e878` (branch `determinism`): `bin/arbace-go
+--build` twice from the same tree, the first moved aside, the second with an empty `GOCACHE`
+(`ARBACE_GO_ARCHES=amd64`), then `--build --box` after each: the same bytes for
+`amd64/arbace` (sha256 `b892e17f...`, also the gate's executable built a third time),
+`box-amd64/arbace.elf` (`f00e3921...`), `box-amd64/arbace-box` (`313f654f...`) and the image
+(`af936f3e...`). The version linked in (`bin/lib/version.bash`) names the commit, `-dirty` for a
+dirty tree, so builds compare only from the same clean commit.
+
 ## The test programs and the tests
 
 - `test/g2a/build/hello/`: one package, `main.go`: prints `hello, world`, then each argument
