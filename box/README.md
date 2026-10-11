@@ -37,7 +37,9 @@ Since S1 (doc/go/BOX-NOTES.md) the packages are Arbace's to change and changed: 
 interface of its own (`vmm.Host`, `vmm.TermHost`, `vmm.Exit`) and imports no part of go-whim's
 editor, the ABI carries the environment and the wall clock at entry, the board parks one idle
 vCPU and makes nil dereferences panics on request, and the launcher is new; since S2 the monitor
-maps a guest image's segments from its file (`vmm.ImageFile`). `bin/box-vendor check`'s byte
+maps a guest image's segments from its file (`vmm.ImageFile`); since S3 the store's refusals have
+answers of their own (`abi.Store*`), `DirStore` takes a limit and locks its refs between
+processes, and the launcher has `--store DIR` and the store's tool. `bin/box-vendor check`'s byte
 identity is S0's record; `bin/box-vendor roundtrip` and `kvm-tests` check `box/` as it is. On
 darwin, `hv` and `libsys` import purego (`github.com/ebitengine/purego` v0.11.1), not vendored.
 

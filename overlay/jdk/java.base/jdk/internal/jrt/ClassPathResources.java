@@ -57,13 +57,16 @@ public final class ClassPathResources {
         }
     }
 
-    /** The directories of ARBACE_PATH, in order. */
+    /**
+     * The directories of ARBACE_PATH, in order; not its store entries (HostStore.pathEntries),
+     * whose resources have no URL.
+     */
     private static List<String> path() {
         List<String> dirs = new ArrayList<>();
         String p = System.getenv("ARBACE_PATH");
         if (p != null) {
-            for (String d : p.split(":")) {
-                if (!d.isEmpty())
+            for (String d : HostStore.pathEntries(p)) {
+                if (!d.startsWith("store:"))
                     dirs.add(d);
             }
         }

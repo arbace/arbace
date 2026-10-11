@@ -1,0 +1,381 @@
+;; jrt: the store (doc/go/BOX-NOTES.md, S3): blobs named by their SHA-256 and refs, names pointing
+;; at blobs, changed by compare-and-set, as go-whim's monitor keeps them (arbace/box/vmm's Store
+;; and DirStore). A host that has one implements the optional StoreHost: the box's
+;; (hostbox_tamago.ae) over the monitor's calls, OSHost on Linux (store_linux.ae) over the
+;; directory ARBACE_BOX_STORE names, in the monitor's format. The natives of jrt's own Java
+;; jdk.internal.jrt.HostStore (overlay/jdk), which the namespace arbace.box and RT.load's store
+;; entries of ARBACE_PATH use, answer with the box's ABI's codes (arbace/box/abi: Store*); and
+;; its snapshots of a directory as a tar, through the host's file calls.
+(in-ns 'go.arbace.jrt)
+
+(go/file "store.go"
+  :imports [[tar "archive/tar"] [bytes "bytes"] [errors "errors"] [io "io"] [fs "io/fs"] [math "math"]
+            [os "os"] [path "path"] [strconv "strconv"] [strings "strings"] [time "time"]])
+
+(go/type Store
+  "Store is a store of blobs and refs (arbace/box/vmm's Store). Its methods are called from any
+goroutine.\n"
+  (interface
+    (^{:doc "Put stores data and answers its SHA-256; ErrStoreTooLarge beyond the store's limit.\n"}
+      Put [^{:tag (slice byte)} data] :results [(array 32 byte) error])
+    (^{:doc "Size is the size of blob h, false when the store has none.\n"}
+      Size [^{:tag (array 32 byte)} h] :results [int64 bool])
+    (^{:doc "Get reads blob h from off into p: the count (0 at or past its end), false when the
+store has none.\n"}
+      Get [^{:tag (array 32 byte)} h ^int64 off ^{:tag (slice byte)} p] :results [int bool])
+    (^{:doc "Ref is the hash ref name points at, false when there is none.\n"}
+      Ref [^string name] :results [(array 32 byte) bool])
+    (^{:doc "SetRef points name at blob h: when old is not nil, only if the ref is old now (all
+zero: if it does not exist), else ErrStoreConflict; ErrStoreName for a name the store does not
+take.\n"}
+      SetRef ^error [^string name ^{:tag (array 32 byte)} h ^{:tag (* (array 32 byte))} old])))
+
+(go/var ^{:tag error :doc "ErrStoreConflict is a ref's compare-and-set that failed.\n"}
+  ErrStoreConflict (errors/New "the ref is not what was said"))
+(go/var ^{:tag error :doc "ErrStoreTooLarge is a blob larger than the store takes.\n"}
+  ErrStoreTooLarge (errors/New "the blob is larger than the store takes"))
+(go/var ^{:tag error :doc "ErrStoreName is a ref's name the store does not take (StoreName).\n"}
+  ErrStoreName (errors/New "not a name the store takes"))
+
+(go/type StoreHost
+  "StoreHost is a host's store: a Host may implement it. Store is nil when the host has none (none
+was configured).\n"
+  (interface (Store ^Store [])))
+
+(go/func CurrentStore
+  "CurrentStore is the current host's store, or nil.\n"
+  ^Store []
+  (let [(values hs ok) (assert StoreHost (CurrentHost))]
+    (when (not ok)
+      (return nil))
+    (.Store hs)))
+
+(go/func StoreName
+  "StoreName says a ref's name is one the store takes: 1 to 64 of [A-Za-z0-9._-], not beginning
+with a dot (arbace/box/vmm's RefName).\n"
+  ^bool [^string name]
+  (when (or (< (len name) 1) (> (len name) 64) (== (aget name 0) \.))
+    (return false))
+  (for [i 0] (< i (len name)) (inc! i)
+    (let [c (aget name i)]
+      (when (not (or (and (>= c \a) (<= c \z)) (and (>= c \A) (<= c \Z)) (and (>= c \0) (<= c \9))
+                     (== c \.) (== c \_) (== c \-)))
+        (return false))))
+  true)
+
+(go/const ^{:tag int64 :val 268435456
+            :doc "DefaultStoreMax is the largest blob a store takes when ARBACE_BOX_STORE_MAX does not say:
+256 MiB, as the box's launcher's.\n"}
+  DefaultStoreMax (<< 256 20))
+
+(go/func StoreMax
+  "StoreMax reads ARBACE_BOX_STORE_MAX as the box's launcher does: a size (parseByteCount), off for
+no limit (0), empty for DefaultStoreMax; false when it is none of these.\n"
+  [^string s] :results [int64 bool]
+  (switch s
+    (case [""] (return DefaultStoreMax true))
+    (case ["off"] (return 0 true)))
+  (let [(values n ok) (parseByteCount s)]
+    (when (or (not ok) (<= n 0))
+      (return 0 false))
+    (return n true)))
+
+(go/func parseByteCount
+  "parseByteCount reads a GOMEMLIMIT as Go's runtime does: off, or a count of bytes with an
+optional unit B, KiB, MiB, GiB or TiB.\n"
+  [^string s] :results [int64 bool]
+  (when (== s "off")
+    (return math/MaxInt64 true))
+  (let [^int64 unit 1]
+    (range [i u (lit (slice string) "KiB" "MiB" "GiB" "TiB")]
+      (when (strings/HasSuffix s u)
+        (set! unit (<< 1 (* 10 (+ i 1))))
+        (set! s (strings/TrimSuffix s u))))
+    (when (== unit 1)
+      (set! s (strings/TrimSuffix s "B")))
+    (let [(values n err) (strconv/ParseInt s 10 64)]
+      (when (or (!= err nil) (< n 0) (> n (/ math/MaxInt64 unit)))
+        (return 0 false))
+      (return (* n unit) true))))
+
+;; ---------------------------------------------------------------------------------------
+;; ARBACE_PATH's store entries (HostStore.pathEntries, the same split)
+
+(go/func PathEntries
+  "PathEntries is a path such as ARBACE_PATH's entries, in order: directories separated by ':',
+and the store's entries, \"store:PREFIX\", each from \"store:\" to the next ':'. Empty entries
+are left out (jdk.internal.jrt.HostStore.pathEntries).\n"
+  ^{:tag (slice string)} [^string p]
+  (let [^{:tag (slice string)} out nil
+        i 0]
+    (while (<= i (len p))
+      (let [from i]
+        (when (strings/HasPrefix (subslice p i) "store:")
+          (set! from (+ i 6)))
+        (let [end (len p)]
+          (when [k (strings/IndexByte (subslice p from) \:)] (>= k 0)
+            (set! end (+ from k)))
+          (when (> end i)
+            (set! out (append out (subslice p i end))))
+          (set! i (+ end 1)))))
+    out))
+
+(go/func StoreResource
+  "StoreResource is resource name (\"a/b_c.ae\") as the path entry store:PREFIX finds it: the blob
+ref PREFIX + name, its '/'s made '.'s, points at; false when there is none or no store.\n"
+  [^string prefix ^string name] :results [(slice byte) bool]
+  (let [st (CurrentStore)]
+    (when (== st nil)
+      (return nil false))
+    (let [ref (+ prefix (strings/ReplaceAll name "/" "."))]
+      (when (not (StoreName ref))
+        (return nil false))
+      (let [(values h ok) (.Ref st ref)]
+        (when (not ok)
+          (return nil false))
+        (ReadBlob st h)))))
+
+(go/func ReadBlob
+  "ReadBlob is blob h whole, false when the store has none.\n"
+  [^Store st ^{:tag (array 32 byte)} h] :results [(slice byte) bool]
+  (let [(values n ok) (.Size st h)]
+    (when (or (not ok) (> n math/MaxInt32))
+      (return nil false))
+    (let [b (make (slice byte) n)
+          off 0]
+      (while (< off (len b))
+        (let [(values k ok) (.Get st h (conv int64 off) (subslice b off))]
+          (when (or (not ok) (<= k 0))
+            (return nil false))
+          (set! off + k)))
+      (return b true))))
+
+;; ---------------------------------------------------------------------------------------
+;; jdk.internal.jrt.HostStore (overlay; doc/go/BOX-NOTES.md, S3): the codes are the box's ABI's
+
+(go/const "The answers of HostStore's natives (arbace/box/abi: Store*).\n"
+  [^{:val 0} storeOK 0]
+  [^{:val -1} storeRefused -1]
+  [^{:val -2} storeConflict -2]
+  [^{:val -3} storeNone -3]
+  [^{:val -4} storeTooLarge -4]
+  [^{:val -5} storeBadName -5])
+
+(go/func hashOf "hashOf is the 32 bytes of b (the caller checked its length).\n"
+  ^{:tag (array 32 byte)} [^{:tag (* ByteArray)} b]
+  (let [^{:tag (array 32 byte)} h (zero (array 32 byte))]
+    (copy (subslice h) (byteView b 0 32))
+    h))
+
+(go/func HostStore_Status0__I_native
+  "HostStore_Status0__I_native is 0 when the host has a store, else storeNone.\n"
+  ^int32 []
+  (when (== (CurrentStore) nil)
+    (return storeNone))
+  storeOK)
+
+(go/func HostStore_Put0_B1_I_I_B1__I_native
+  "HostStore_Put0_B1_I_I_B1__I_native stores data[off, off+n) and writes its hash to hash (the
+caller checked both).\n"
+  ^int32 [^{:tag (* ByteArray)} data ^int32 off ^int32 n ^{:tag (* ByteArray)} hash]
+  (let [st (CurrentStore)]
+    (when (== st nil)
+      (return storeNone))
+    (let [(values h err) (.Put st (byteView data off n))]
+      (when (!= err nil)
+        (when (errors/Is err ErrStoreTooLarge)
+          (return storeTooLarge))
+        (return storeRefused))
+      (copy (byteView hash 0 32) (subslice h))
+      storeOK)))
+
+(go/func HostStore_Size0_B1__J_native
+  "HostStore_Size0_B1__J_native is the size of blob hash, or a negative answer.\n"
+  ^int64 [^{:tag (* ByteArray)} hash]
+  (let [st (CurrentStore)]
+    (when (== st nil)
+      (return storeNone))
+    (let [(values n ok) (.Size st (hashOf hash))]
+      (when (not ok)
+        (return storeRefused))
+      n)))
+
+(go/func HostStore_Get0_B1_J_B1_I_I__I_native
+  "HostStore_Get0_B1_J_B1_I_I__I_native reads blob hash from at into buf[off, off+n): the count,
+or a negative answer.\n"
+  ^int32 [^{:tag (* ByteArray)} hash ^int64 at ^{:tag (* ByteArray)} buf ^int32 off ^int32 n]
+  (let [st (CurrentStore)]
+    (when (== st nil)
+      (return storeNone))
+    (let [(values k ok) (.Get st (hashOf hash) at (byteView buf off n))]
+      (when (not ok)
+        (return storeRefused))
+      (conv int32 k))))
+
+(go/func HostStore_Ref0_String_B1__I_native
+  "HostStore_Ref0_String_B1__I_native writes the hash ref name points at to hash: 0, or a negative
+answer.\n"
+  ^int32 [^{:tag (* String)} name ^{:tag (* ByteArray)} hash]
+  (let [st (CurrentStore)]
+    (when (== st nil)
+      (return storeNone))
+    (let [n (.String (NN name))]
+      (when (not (StoreName n))
+        (return storeBadName))
+      (let [(values h ok) (.Ref st n)]
+        (when (not ok)
+          (return storeRefused))
+        (copy (byteView hash 0 32) (subslice h))
+        storeOK))))
+
+(go/func HostStore_SetRef0_String_B1_B1__I_native
+  "HostStore_SetRef0_String_B1_B1__I_native points ref name at blob hash, only if it points at old
+when old is not null: 0, or a negative answer.\n"
+  ^int32 [^{:tag (* String)} name ^{:tag (* ByteArray)} hash ^{:tag (* ByteArray)} old]
+  (let [st (CurrentStore)]
+    (when (== st nil)
+      (return storeNone))
+    (let [n (.String (NN name))]
+      (when (not (StoreName n))
+        (return storeBadName))
+      (let [^{:tag (* (array 32 byte))} o nil]
+        (when (!= old nil)
+          (let [h (hashOf old)]
+            (set! o (addr h))))
+        (let [err (.SetRef st n (hashOf hash) o)]
+          (cond
+            (== err nil) (return storeOK)
+            (errors/Is err ErrStoreConflict) (return storeConflict)
+            (errors/Is err ErrStoreName) (return storeBadName)
+            (errors/Is err ErrStoreTooLarge) (return storeTooLarge)
+            :else (return storeRefused)))))))
+
+(go/func HostStore_Tar0_String_String1__B1_native
+  "HostStore_Tar0_String_String1__B1_native is the snapshot of dir (SnapshotTar), or null with the
+reason in error[0].\n"
+  ^{:tag (* ByteArray)} [^{:tag (* String)} dir ^{:tag (* RefArray)} error]
+  (let [(values b err) (SnapshotTar (.String (NN dir)))]
+    (when (!= err nil)
+      (aset (.-A error) 0 (Str (.Error err)))
+      (return nil))
+    (let [a (NewByteArray (conv int32 (len b)))]
+      (copy (byteView a 0 (conv int32 (len b))) b)
+      a)))
+
+(go/func HostStore_Untar0_B1_String__String_native
+  "HostStore_Untar0_B1_String__String_native writes the tar under dir (RestoreTar): null, or the
+reason.\n"
+  ^{:tag (* String)} [^{:tag (* ByteArray)} data ^{:tag (* String)} dir]
+  (let [d (NN data)]
+    (when [err (RestoreTar (byteView d 0 (conv int32 (len (.-A d)))) (.String (NN dir)))] (!= err nil)
+      (return (Str (.Error err))))
+    nil))
+
+;; ---------------------------------------------------------------------------------------
+;; Snapshots: a directory as a tar, through the host's file calls (the box's in-memory file
+;; system, D11; a directory of the host's natively)
+
+(go/func SnapshotTar
+  "SnapshotTar is the files under dir as a tar: its directories and regular files (other kinds
+left out: the box's /dev), each directory's entries in order, names relative to dir, the
+permissions kept, the times the epoch and no owner, so that the same files make the same tar
+(the same blob).\n"
+  [^string dir] :results [(slice byte) error]
+  (let [h (CurrentHost)
+        (values fi err) (.Stat h dir)]
+    (when (!= err nil)
+      (return nil err))
+    (when (not (.-IsDir fi))
+      (return nil (errors/New (+ dir ": not a directory"))))
+    (let [^{:tag bytes/Buffer} buf (zero bytes/Buffer)
+          w (tar/NewWriter (addr buf))]
+      (when [err (tarDir h w dir "")] (!= err nil)
+        (return nil err))
+      (when [err (.Close w)] (!= err nil)
+        (return nil err))
+      (return (.Bytes buf) nil))))
+
+(go/func tarDir
+  "tarDir writes the entries of directory rel under dir, and theirs.\n"
+  ^error [^Host h ^{:tag (* tar/Writer)} w ^string dir ^string rel]
+  (let [(values names err) (.ReadDir h (path/Join dir rel))]
+    (when (!= err nil)
+      (return err))
+    (range [_ n names]
+      (let [r (path/Join rel n)
+            full (path/Join dir r)
+            (values fi err) (.Stat h full)]
+        (when (!= err nil)
+          (return err))
+        (let [mode (conv fs/FileMode (.-Mode fi))]
+          (cond
+            (.-IsDir fi)
+              (do
+                (when [err (.WriteHeader w (addr (lit tar/Header :Typeflag tar/TypeDir :Name (+ r "/")
+                                                   :Mode (conv int64 (.Perm mode)) :ModTime (time/Unix 0 0)
+                                                   :Format tar/FormatPAX)))] (!= err nil)
+                  (return err))
+                (when [err (tarDir h w dir r)] (!= err nil)
+                  (return err)))
+            (.IsRegular mode)
+              (let [(values f err) (.Open h full os/O_RDONLY 0)]
+                (when (!= err nil)
+                  (return err))
+                (let [(values data ^:assign err) (io/ReadAll f)]
+                  (.Close f)
+                  (when (!= err nil)
+                    (return err))
+                  (when [err (.WriteHeader w (addr (lit tar/Header :Typeflag tar/TypeReg :Name r
+                                                     :Mode (conv int64 (.Perm mode)) :Size (conv int64 (len data))
+                                                     :ModTime (time/Unix 0 0) :Format tar/FormatPAX)))] (!= err nil)
+                    (return err))
+                  (when [(values _ err) (.Write w data)] (!= err nil)
+                    (return err))))))))
+    nil))
+
+(go/func RestoreTar
+  "RestoreTar writes the tar's directories and regular files under dir (other kinds left out),
+making the directories missing on the way; a file there already is replaced. A name that is
+absolute or leaves dir (..) is refused.\n"
+  ^error [^{:tag (slice byte)} data ^string dir]
+  (let [h (CurrentHost)
+        r (tar/NewReader (bytes/NewReader data))]
+    (while true
+      (let [(values hdr err) (.Next r)]
+        (when (== err io/EOF)
+          (return nil))
+        (when (!= err nil)
+          (return err))
+        (let [name (path/Clean (.-Name hdr))]
+          (when (or (path/IsAbs (.-Name hdr)) (== name "..") (strings/HasPrefix name "../"))
+            (return (errors/New (+ "tar: " (.-Name hdr) ": a name outside the directory"))))
+          (let [full (path/Join dir name)
+                perm (conv uint32 (bit-and (.-Mode hdr) 0777))]
+            (switch (.-Typeflag hdr)
+              (case [tar/TypeDir]
+                (when (!= name ".")
+                  (when [err (mkdirAll h full perm)] (!= err nil)
+                    (return err))))
+              (case [tar/TypeReg]
+                (when [err (mkdirAll h (path/Dir full) 0755)] (!= err nil)
+                  (return err))
+                (let [(values f err) (.Open h full (bit-or os/O_WRONLY os/O_CREATE os/O_TRUNC) perm)]
+                  (when (!= err nil)
+                    (return err))
+                  (do (set! (values _ err) (io/Copy f r))
+                    (when [cerr (.Close f)] (== err nil)
+                      (set! err cerr))
+                    (when (!= err nil)
+                      (return err))))))))))))
+
+(go/func mkdirAll
+  "mkdirAll makes directory name and those missing above it, through the host.\n"
+  ^error [^Host h ^string name ^uint32 perm]
+  (when [(values fi err) (.Stat h name)] (== err nil)
+    (when (.-IsDir fi)
+      (return nil))
+    (return (errors/New (+ name ": not a directory"))))
+  (when [parent (path/Dir name)] (and (!= parent name) (!= parent "."))
+    (when [err (mkdirAll h parent 0755)] (!= err nil)
+      (return err)))
+  (.Mkdir h name perm))

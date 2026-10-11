@@ -5,13 +5,13 @@
 ;; D11), the wall clock the board's (offset by the host's at the entry, D10), the command line
 ;; and the environment what the monitor wrote at the entry. No optional interface: no HostFS,
 ;; HostLinks, NetHost, HostProc or HostExecutable, so those features fail as on a host without
-;; them.
+;; them. Its store (StoreHost, S3) is the monitor's: the calls BlobPut ... RefSet.
 (in-ns 'go.arbace.jrt)
 
 (go/file "hostbox_tamago.go"
   :build ["//go:build tamago"]
-  :imports [[io "io"] [fs "io/fs"] [math "math"] [os "os"] [runtime "runtime"] [debug "runtime/debug"]
-            [strconv "strconv"] [strings "strings"] [syscall "syscall"] [time "time"]
+  :imports [[errors "errors"] [io "io"] [fs "io/fs"] [os "os"] [runtime "runtime"] [debug "runtime/debug"]
+            [strconv "strconv"] [strings "strings"] [sync "sync"] [syscall "syscall"] [time "time"]
             [goos "runtime/goos"] [abi "arbace/box/abi"] [board "arbace/box/board"]])
 
 (go/const ^{:tag uint :val 1073741824
@@ -29,7 +29,7 @@ goal, which a large allocation may pass for a while (doc/go/BOX-NOTES.md, S2).
   "init makes the command line and the environment the monitor wrote at the entry the program's
 (os.Args, os.Getenv: TamaGo's runtime gives it neither), before jrt's other inits (tuning.go's
 reads the environment), and applies GOGC and GOMEMLIMIT, which TamaGo's runtime read before
-they were set; and makes a nil dereference the run-time panic it is on Linux (board.NilPanics:
+they were set; seeds the in-memory file system from the snapshot ARBACE_BOX_FS names (seedFS); and makes a nil dereference the run-time panic it is on Linux (board.NilPanics:
 jrt's implicit NullPointerException, A2G-SPEC §7.9.5). Without GOMEMLIMIT the memory limit is the
 guest's RAM less boxMemoryHeadroom: the RAM is fixed and the host has no swap for it, and with
 GOGC's goal alone (DefaultGOGC: three times the live heap) a guest holding a third of its RAM
@@ -51,25 +51,8 @@ would run out of memory (doc/go/BOX-NOTES.md, S2).\n"
     (cond
       ok (debug/SetMemoryLimit n)
       (> goos/RamSize boxMemoryHeadroom)
-        (debug/SetMemoryLimit (conv int64 (- goos/RamSize boxMemoryHeadroom))))))
-
-(go/func parseByteCount
-  "parseByteCount reads a GOMEMLIMIT as Go's runtime does: off, or a count of bytes with an
-optional unit B, KiB, MiB, GiB or TiB.\n"
-  [^string s] :results [int64 bool]
-  (when (== s "off")
-    (return math/MaxInt64 true))
-  (let [^int64 unit 1]
-    (range [i u (lit (slice string) "KiB" "MiB" "GiB" "TiB")]
-      (when (strings/HasSuffix s u)
-        (set! unit (<< 1 (* 10 (+ i 1))))
-        (set! s (strings/TrimSuffix s u))))
-    (when (== unit 1)
-      (set! s (strings/TrimSuffix s "B")))
-    (let [(values n err) (strconv/ParseInt s 10 64)]
-      (when (or (!= err nil) (< n 0) (> n (/ math/MaxInt64 unit)))
-        (return 0 false))
-      (return (* n unit) true))))
+        (debug/SetMemoryLimit (conv int64 (- goos/RamSize boxMemoryHeadroom))))
+    (seedFS)))
 
 (go/func ProgramHost
   "ProgramHost is the program's host (the main package's): the box's, with the program's embedded
@@ -162,3 +145,124 @@ in the monitor meanwhile (the board's Idle).\n"
   (let [k (copy p (subslice (.-buf c) (.-at c) (.-n c)))]
     (set! (.-at c) + k)
     (return k nil)))
+
+;; ---------------------------------------------------------------------------------------
+;; The store (doc/go/BOX-NOTES.md, S3): the monitor's (arbace/box/vmm's Store, in the directory
+;; the launcher was given), by its calls
+
+(go/var ^{:tag sync/Once} boxStoreOnce)
+(go/var ^bool boxHasStore)
+
+(go/method Store
+  "Store is the monitor's store, or nil when it has none (its calls answer abi.StoreNone; asked
+once).\n"
+  ^Store [^boxHost h]
+  (.Do boxStoreOnce
+    (fn []
+      (let [args (boxStoreArgs)]
+        (set! boxHasStore (!= (.-Ret (board/Call abi/BlobSize (board/Addr (subslice args 0 32)) 0 0 0 0)) abi/StoreNone)))))
+  (when (not boxHasStore)
+    (return nil))
+  (lit boxStore))
+
+(go/var ^{:tag int
+          :doc "boxStoreArgBytes is the size of a store call's argument buffer: two hashes and a name. A
+variable, so that make allocates the buffer on the heap: the monitor reads it by address, and a
+goroutine's stack moves.\n"}
+  boxStoreArgBytes 128)
+
+(go/func boxStoreArgs
+  "boxStoreArgs is a new argument buffer: the hash at 0, the old hash at 32, the name at 64.\n"
+  ^{:tag (slice byte)} []
+  (make (slice byte) boxStoreArgBytes))
+
+(go/type boxStore
+  "boxStore is the monitor's store through the board's calls (abi.BlobPut ... RefSet). The data a
+guest puts or gets is its caller's, read or written by the monitor in place.\n"
+  (struct))
+
+(go/method Put [^boxStore s ^{:tag (slice byte)} data] :results [(array 32 byte) error]
+  (let [args (boxStoreArgs)
+        ^{:tag (array 32 byte)} h (zero (array 32 byte))
+        r (.-Ret (board/Call abi/BlobPut (board/Addr data) (conv int64 (len data)) (board/Addr (subslice args 0 32)) 0 0))]
+    (switch r
+      (case [0]
+        (copy (subslice h) (subslice args 0 32))
+        (return h nil))
+      (case [abi/StoreTooLarge] (return h ErrStoreTooLarge)))
+    (return h (boxStoreError r))))
+
+(go/method Size [^boxStore s ^{:tag (array 32 byte)} h] :results [int64 bool]
+  (let [args (boxStoreArgs)]
+    (copy args (subslice h))
+    (let [n (.-Ret (board/Call abi/BlobSize (board/Addr (subslice args 0 32)) 0 0 0 0))]
+      (return n (>= n 0)))))
+
+(go/method Get [^boxStore s ^{:tag (array 32 byte)} h ^int64 off ^{:tag (slice byte)} p] :results [int bool]
+  (let [args (boxStoreArgs)]
+    (copy args (subslice h))
+    (let [n (.-Ret (board/Call abi/BlobGet (board/Addr (subslice args 0 32)) (board/Addr p) (conv int64 (len p)) off 0))]
+      (return (conv int n) (>= n 0)))))
+
+(go/method Ref [^boxStore s ^string name] :results [(array 32 byte) bool]
+  (let [^{:tag (array 32 byte)} h (zero (array 32 byte))]
+    (when (not (StoreName name))
+      (return h false))
+    (let [args (boxStoreArgs)
+          k (copy (subslice args 64) name)
+          r (.-Ret (board/Call abi/RefGet (board/Addr (subslice args 64)) (conv int64 k) (board/Addr (subslice args 0 32)) 0 0))]
+      (when (!= r 0)
+        (return h false))
+      (copy (subslice h) (subslice args 0 32))
+      (return h true))))
+
+(go/method SetRef ^error [^boxStore s ^string name ^{:tag (array 32 byte)} h ^{:tag (* (array 32 byte))} old]
+  (when (not (StoreName name))
+    (return ErrStoreName))
+  (let [args (boxStoreArgs)
+        ^int64 o 0]
+    (copy args (subslice h))
+    (when (!= old nil)
+      (copy (subslice args 32 64) (subslice @old))
+      (set! o (board/Addr (subslice args 32 64))))
+    (let [k (copy (subslice args 64) name)
+          r (.-Ret (board/Call abi/RefSet (board/Addr (subslice args 64)) (conv int64 k) (board/Addr (subslice args 0 32)) o 0))]
+      (when (== r 0)
+        (return nil))
+      (boxStoreError r))))
+
+(go/func boxStoreError
+  "boxStoreError is the error of a store call's negative answer r.\n"
+  ^error [^int64 r]
+  (switch r
+    (case [abi/StoreConflict] (return ErrStoreConflict))
+    (case [abi/StoreTooLarge] (return ErrStoreTooLarge))
+    (case [abi/StoreBadName] (return ErrStoreName))
+    (case [abi/StoreNone] (return (errors/New "no store"))))
+  (errors/New (+ "the store refused (" (strconv/FormatInt r 10) ")")))
+
+(go/func seedFS
+  "seedFS restores the snapshot ref ARBACE_BOX_FS names (a tar, arbace.box/save-fs!) into the
+in-memory file system at the guest's start (RestoreTar into /); when it cannot, the guest ends
+with status 1 and the reason on its error stream.\n"
+  []
+  (let [ref (os/Getenv "ARBACE_BOX_FS")]
+    (when (== ref "")
+      (return))
+    (when [err (seedFrom ref)] (!= err nil)
+      (.Write (lit boxOut :err true) (conv (slice byte) (+ "arbace: ARBACE_BOX_FS=" ref ": " (.Error err) "\n")))
+      (board/Exit 1))))
+
+(go/func seedFrom "seedFrom restores the snapshot ref names into /.\n" ^error [^string ref]
+  (let [st (CurrentStore)]
+    (when (== st nil)
+      (return (errors/New "no store (ARBACE_BOX_STORE, or the launcher's --store)")))
+    (when (not (StoreName ref))
+      (return (errors/New "not a name the store takes")))
+    (let [(values h ok) (.Ref st ref)]
+      (when (not ok)
+        (return (errors/New "no such ref")))
+      (let [(values b ^:assign ok) (ReadBlob st h)]
+        (when (not ok)
+          (return (errors/New "its blob cannot be read")))
+        (RestoreTar b "/")))))

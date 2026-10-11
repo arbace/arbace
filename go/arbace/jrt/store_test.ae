@@ -1,0 +1,104 @@
+;; jrt's tests: the store (store.ae, store_linux.ae; doc/go/BOX-NOTES.md, S3): ARBACE_PATH's
+;; entries, the directory store in the box monitor's format, the natives' answers, and a
+;; snapshot's tar written and restored, in temporary directories.
+(in-ns 'go.arbace.jrt)
+
+(go/file "store_test.go"
+  :build ["//go:build linux"]
+  :imports [[sha256 "crypto/sha256"] [os "os"] [filepath "path/filepath"] [strings "strings"] [testing "testing"]])
+
+(go/func TestPathEntries
+  "PathEntries splits at ':', a store entry running from \"store:\" to the next ':'.\n"
+  [^{:tag (* testing/T)} t]
+  (let [cases (lit (slice string)
+                "/a:/b" "/a|/b"
+                "store:" "store:"
+                "store::/a" "store:|/a"
+                "/a:store:lib.:/b" "/a|store:lib.|/b"
+                "::/a::" "/a"
+                "store" "store"
+                "" "")]
+    (for [i 0] (< i (len cases)) (set! i + 2)
+      (let [got (strings/Join (PathEntries (aget cases i)) "|")]
+        (when (!= got (aget cases (+ i 1)))
+          (.Errorf t "PathEntries(%q) = %q, want %q" (aget cases i) got (aget cases (+ i 1))))))))
+
+(go/func TestDirStore
+  "A directory store: blobs by their hash, read from any offset, the limit; refs set, read, compared
+and set from a second store on the directory; names refused; the format the monitor reads.\n"
+  [^{:tag (* testing/T)} t]
+  (let [dir (.TempDir t)
+        (values s err) (OpenDirStore dir)]
+    (when (!= err nil)
+      (.Fatal t err))
+    (let [data (conv (slice byte) "(defn f [x] x)")
+          (values h ^:assign err) (.Put s data)]
+      (when (or (!= err nil) (!= h (sha256/Sum256 data)))
+        (.Fatalf t "put: %x %v" h err))
+      (when [(values n ok) (.Size s h)] (or (not ok) (!= n (conv int64 (len data))))
+        (.Fatalf t "size: %d %v" n ok))
+      (let [buf (make (slice byte) 4)]
+        (when [(values n ok) (.Get s h 6 buf)] (or (not ok) (!= (conv string (subslice buf _ n)) "f [x"))
+          (.Fatalf t "get at 6: %q %v" (subslice buf _ n) ok)))
+      (set! (.-Max s) 4)
+      (when [(values _ err) (.Put s data)] (!= err ErrStoreTooLarge)
+        (.Fatalf t "a blob over Max: %v" err))
+      (when [(values _ ok) (.Ref s "r")] ok
+        (.Fatal t "a ref before any is set"))
+      (let [^{:tag (array 32 byte)} none (zero (array 32 byte))]
+        (when [err (.SetRef s "r" h (addr none))] (!= err nil)
+          (.Fatalf t "set, none before: %v" err))
+        (when [err (.SetRef s "r" h (addr none))] (!= err ErrStoreConflict)
+          (.Fatalf t "set over one, none expected: %v" err))
+        (when [err (.SetRef s ".r" h nil)] (!= err ErrStoreName)
+          (.Fatalf t "a dot name: %v" err))
+        (when [err (.SetRef s "x" (sha256/Sum256 (conv (slice byte) "absent")) nil)] (== err nil)
+          (.Fatal t "a ref to a blob the store has not"))
+        (let [(values b ^:assign err) (os/ReadFile (filepath/Join dir "refs" "r"))]
+          (when (or (!= err nil) (!= (conv string b) (+ (hexOf h) "\n")))
+            (.Fatalf t "the ref's file: %q %v" b err)))
+        (let [(values s2 ^:assign err) (OpenDirStore dir)]
+          (when (!= err nil)
+            (.Fatal t err))
+          (when [(values got ok) (.Ref s2 "r")] (or (not ok) (!= got h))
+            (.Fatal t "a ref read from a second store"))
+          (set! (.-Max s) 0)
+          (let [(values h2 ^:assign err) (.Put s2 (conv (slice byte) "other"))]
+            (when (!= err nil)
+              (.Fatal t err))
+            (when [err (.SetRef s2 "r" h2 (addr h))] (!= err nil)
+              (.Fatalf t "compare and set from a second store: %v" err))
+            (when [err (.SetRef s "r" h (addr h))] (!= err ErrStoreConflict)
+              (.Fatalf t "a stale compare and set: %v" err))))))))
+
+(go/func hexOf ^string [^{:tag (array 32 byte)} h]
+  (let [^string digits "0123456789abcdef"
+        b (make (slice byte) 64)]
+    (range [i c h]
+      (aset b (* 2 i) (aget digits (>> c 4)))
+      (aset b (+ (* 2 i) 1) (aget digits (bit-and c 15))))
+    (conv string b)))
+
+(go/func TestSnapshotTar
+  "A directory's snapshot as a tar, restored into another: the same files and directories, the
+same tar again (the same blob); a file is no directory to snapshot.\n"
+  [^{:tag (* testing/T)} t]
+  (let [src (.TempDir t)
+        dst (.TempDir t)]
+    (os/MkdirAll (filepath/Join src "a" "b") 0755)
+    (os/WriteFile (filepath/Join src "a" "b" "c.ae") (conv (slice byte) "(ns c)") 0644)
+    (os/WriteFile (filepath/Join src "top.txt") (conv (slice byte) "top") 0600)
+    (let [(values tb err) (SnapshotTar src)]
+      (when (!= err nil)
+        (.Fatal t err))
+      (when [err (RestoreTar tb dst)] (!= err nil)
+        (.Fatal t err))
+      (when [(values b err) (os/ReadFile (filepath/Join dst "a" "b" "c.ae"))] (or (!= err nil) (!= (conv string b) "(ns c)"))
+        (.Fatalf t "a restored file: %q %v" b err))
+      (when [(values fi err) (os/Stat (filepath/Join dst "top.txt"))] (or (!= err nil) (!= (.Perm (.Mode fi)) 0600))
+        (.Fatalf t "a restored file's mode: %v" err))
+      (let [(values tb2 ^:assign err) (SnapshotTar dst)]
+        (when (or (!= err nil) (!= (conv string tb2) (conv string tb)))
+          (.Fatalf t "the restored directory's snapshot differs: %v" err))))
+    (when [(values _ err) (SnapshotTar (filepath/Join src "top.txt"))] (== err nil)
+      (.Fatal t "a snapshot of a file"))))

@@ -932,3 +932,211 @@ so that the proof is about what ships.
 - `tamago/` kept as committed (all of std for tamago/amd64 and the goos module, 32 MB of forms).
 - `bin/tamago-vendor verify` joins `bin/gate --full`'s `box` step, and the box's build from the
   forms with `bin/tamago-vendor check` the go chain, as `box-forms`.
+
+## S3, amd64: the store (2026-10-11)
+
+Branch `box-s3`. BOX-SURVEY §6, S3; D11 (memory, then the store). go-whim's precedent: its
+monitor's store (`vmm/store.go`, the calls 25-29) and the Joker guest's namespace `box`
+(`guest/joker/box/box.go`, `guest/joker/store.go`; go-whim's doc/LISP-SANDBOX.md, "The store"),
+at `80c49bf`, read only. The monitor already had the store and the launcher `ARBACE_BOX_STORE`
+(S1, as go-whim's); what S3 adds is Arbace's side of it, in the box and natively.
+
+### The user's decisions (2026-10-11, all as recommended)
+
+- (a) **No store unless one is named**: `ARBACE_BOX_STORE=DIR`, or the launcher's `--store DIR`;
+  without it `arbace.box` refuses (`:no-store`), no default directory.
+- (b) **`arbace.box` on both builds**: in the box over the monitor's calls, in the native
+  executable over a host directory in the same format, so that the same programs run natively and
+  boxed and one store directory serves both.
+- (c) **Loading from the store**: a `store:` entry kind in `ARBACE_PATH` (require and load find
+  namespaces in refs), and scripts by ref: `arbace-box ref:NAME`, `-i ref:NAME`.
+- (d) **The in-memory file system's snapshot as a tar**, explicit: `(arbace.box/save-fs! ref)`,
+  and `ARBACE_BOX_FS=ref` to seed the file system at the start.
+- (e) **A host tool in the launcher**: `arbace-box --store DIR put|get|ref|ls`.
+
+### The design
+
+**Data.** A blob is an immutable byte string named by its SHA-256, written in Clojure as 64
+lowercase hexadecimal digits (Joker's); a ref is a name, 1 to 64 of `[A-Za-z0-9._-]` not
+beginning with a dot (vmm's `RefName`), pointing at a blob, the store's only mutable state,
+changed unconditionally or by compare-and-set. On the host the store is a directory
+(`vmm.DirStore`'s format, go-whim's): `blobs/HASH` (the bytes), `refs/NAME` (the hash in hex
+and a newline), and since S3 `refs/.lock`, the refs' lock (below). A blob is held to its hash
+when read: one a write left short is refused, not served.
+
+**Where it lives.** Nowhere by default (a). The launcher's store is `--store DIR` (before
+arbace.main's arguments; it wins over the environment) or `ARBACE_BOX_STORE=DIR`; the native
+executable's `ARBACE_BOX_STORE`. The guest does not see the variable (the launcher passes no
+`ARBACE_BOX_*` but `ARBACE_BOX_FS`, below): its store is the monitor's. `ARBACE_BOX_STORE_MAX` is
+the largest blob either takes (bytes, or with `B`, `KiB`, `MiB`, `GiB`, `TiB` as `GOMEMLIMIT`;
+`off`; by default 256 MiB).
+
+**Sharing a directory (b).** The monitor runs under its system-call filter, which allows no
+`rename`, `flock` or `mkdir` but allows `fcntl`: so the refs are read and written under a
+POSIX record lock of `refs/.lock` (`F_SETLKW`, shared to read, exclusive to write) besides the
+process's mutex, by the monitor and by jrt alike. A compare-and-set is then one at a time across
+processes, and no reader sees a ref half written (the monitor rewrites a ref in place, as
+go-whim's: under the exclusive lock). jrt's own store, outside any filter, also writes a blob to
+a temporary name and renames it to its hash, and a ref likewise, both `0644` as the monitor's.
+Run one after the other or at once, the native program and boxes see each other's blobs and
+refs (the smoke test checks the native executable's write read in a box).
+
+**The monitor's answers (BX30).** go-whim's store answered -1 for every failure, a missing store
+included, and -2 for a failed compare-and-set. S3 gives the refusals answers of their own, in
+`abi` as `StoreRefused` (-1: no such blob or ref, or the host's error), `StoreConflict` (-2),
+`StoreNone` (-3: no store), `StoreTooLarge` (-4: `BlobPut` beyond `DirStore.Max`, `vmm.ErrTooLarge`)
+and `StoreBadName` (-5: `RefGet` or `RefSet` with a name `RefName` refuses, checked by the
+monitor before the store). go-whim's guests take any negative answer as a failure, so they
+work as before (go-whim's `TestDirStore` and the KVM guest tests pass on the changed `vmm`).
+
+**jrt (BX32).** A host may implement a sixth optional interface, `jrt.StoreHost`
+(`Store() Store`, nil when it has none), `jrt.Store` being `vmm.Store`'s five methods with
+errors of jrt's (`ErrStoreConflict`, `ErrStoreTooLarge`, `ErrStoreName`): the box's host answers
+it over the calls (`hostbox_tamago.ae`: `boxStore`, whether there is a store asked once by a
+`BlobSize`; the calls' hash and name buffers on the heap, since the monitor reads them by
+address and a goroutine's stack moves), `OSHost` on Linux over `ARBACE_BOX_STORE`
+(`store_linux.ae`: `dirStore`, opened once). jrt's own Java `jdk.internal.jrt.HostStore`
+(`overlay/jdk`, rooted as jrt's own classes are, RD2) has static natives over it answering the
+codes above (`store.ae`), and `read`, `pathEntries` and `resource` in Java.
+
+**`arbace.box` (BX34).** A namespace of the Go build only (`arbace/lang/go/ns/box.ae`, embedded
+as `arbace/box.ae`; the JVM build has none), over `HostStore`: `put` (a string, as UTF-8, or a
+byte array: the hash), `get` (a string, or nil), `get-bytes`, `size`, `ref` (the hash, or nil),
+`ref!` (with an old hash, or nil for "no such ref", compare-and-set: true or false), `put!`,
+`load` (Joker's: the ref's blob as a string), `load-ref` (the ref's source evaluated, its source
+path `ref:NAME`), `save-fs!`, `load-fs!`, `store?`. A refusal throws an `ex-info` whose data's
+`:arbace.box/error` is `:no-store`, `:bad-name`, `:bad-hash`, `:too-large`, `:no-blob` (a ref to a
+blob the store has not), `:no-ref` (`load-ref`, `load-fs!`) or `:refused`; a failed
+compare-and-set is `false`, not an error, and a missing blob or ref `nil`, as Joker's.
+Required in 13-17 ms natively (it is not in the image of prepared namespaces).
+
+**Loading from refs (BX33, BX34).** An `ARBACE_PATH` entry `store:PREFIX` finds resource
+`a/b_c.ae` (namespace `a.b-c`) as the blob ref `PREFIXa.b_c.ae` points at (the path's `/`s made
+`.`s), in order with the directories: `RT.load` (`require`, `load`; its stream is not taken for
+an embedded source) and `getResourceAsStream`, not URLs (`io/resource` names directories'
+files only). Since `:` separates the entries, a store entry runs from `store:` to the next `:`:
+`store:` (or `store::` before another entry) has an empty prefix (`HostStore.pathEntries`, jrt's
+`PathEntries`). arbace.main's `load-script` (the Go build's variant, `main.subst.ae`) takes
+`ref:NAME` for a script or an `-i` file: `arbace-box ref:NAME ARGS...`, the same natively.
+
+**Snapshots (BX35).** `(save-fs! ref)` in the box, `(save-fs! ref dir)` anywhere, stores the
+files under the directory as a tar and points the ref at it; `load-fs!` writes one back. The
+tar (jrt's `SnapshotTar`, Go's `archive/tar`, PAX) holds the directories and regular files
+(other kinds left out: the box's `/dev` devices), each directory's entries in order, names
+relative to the directory, permissions kept, times the epoch and no owner: the same files are the
+same tar, so the same blob (checked: a snapshot restored and taken again is the same hash).
+`RestoreTar` makes missing directories, replaces files, and refuses absolute names and names
+leaving the directory. Both go through the host's file calls (`Host.Open`, `Stat`, `ReadDir`,
+`Mkdir`), so they work on TamaGo's in-memory file system and on a host directory. Natively a
+directory must be named (`IllegalArgumentException` otherwise: the host's `/` is no snapshot).
+`ARBACE_BOX_FS=REF` (passed to the guest) seeds the box's file system at the start, in jrt's
+`init` before the program runs: no store, no such ref or a bad tar end the guest with status 1
+and the reason (`arbace: ARBACE_BOX_FS=nofs: no such ref`). The host reads the snapshot with
+`arbace-box --store DIR get REF | tar tf -`.
+
+**The launcher (BX31).** `arbace-box --store DIR` then `put FILE|- [NAME]` (prints the hash;
+points NAME at it), `get HASH|NAME` (the blob on standard output), `ref NAME [HASH]` (prints, or
+points), `ls` (the refs, hash and name, by name) is the store's tool, without a guest; exit 1
+for a refusal or nothing found, 2 for a usage error. `--store DIR` followed by anything else
+runs the guest with that store. rlwrap's decision looks at the guest's arguments (after
+`--store DIR`).
+
+### What refuses (the gate's "refusals")
+
+| refusal | box | native | `arbace.box` |
+|---|---|---|---|
+| no store configured | every call `StoreNone` | `OSHost.Store` nil | `:no-store` |
+| a ref's name (empty, 65+, a leading dot, `/`) | `StoreBadName` (the monitor checks; jrt checks first) | `ErrStoreName` | `:bad-name` |
+| not a hash (64 lowercase hex digits) | (guest-side) | (guest-side) | `:bad-hash` |
+| a compare-and-set that failed | `StoreConflict` | `ErrStoreConflict` | `false` |
+| a ref to a blob the store has not | `StoreRefused` | an error | `:no-blob` |
+| a blob beyond `ARBACE_BOX_STORE_MAX` | `StoreTooLarge` | `ErrStoreTooLarge` | `:too-large` |
+| a blob longer than an array (2^31 - 9) | | | `IllegalStateException` (`HostStore.read`) |
+| a script or snapshot ref that is not | | | `:no-ref`; `ARBACE_BOX_FS`: status 1 |
+| a tar name outside the directory | | | `:refused` (`load-fs!`) |
+
+### Measured (amd64, nested KVM; two runs each)
+
+| | box, 4 vCPUs | native |
+|---|---:|---:|
+| 1,000 `put`s of small blobs | 88-136 ms | 51-94 ms |
+| 1,000 `ref!` (a `put` each) and `ref` | 353-429 ms | 273-311 ms |
+| `put` of 32 MiB | 129-132 ms | 117-126 ms |
+| `get-bytes` of 32 MiB | 4 ms | 85-87 ms |
+
+The box's `get` reads the monitor's cache (go-whim's: every blob read is kept, verified, for the
+run); jrt's store reads and hashes the file each time. A ref's write is a few hundred
+microseconds either way (the lock, a write; natively a rename).
+
+### Checks
+
+- `bin/arbace-go --build` (amd64; 66,801,824 bytes, 282 KB more than main's: `archive/tar`,
+  the store, `HostStore`, `arbace.box`'s source) and `--smoke`: 53 of 53, eleven new (the
+  store's checks below, natively, and a directory's snapshot saved and loaded, which names its
+  directory).
+- `bin/arbace-go --build --box` (the guest 66,126,158 bytes, the launcher with it 69,927,262)
+  and `--smoke --box`: 86 of 86 (70 before; the store's 16 on 4 vCPUs): none configured; put,
+  get, size, ref!, ref; compare-and-set; names, hashes and refs to no blob refused; a blob beyond
+  `ARBACE_BOX_STORE_MAX`; a script from a ref, an `-i` file from a ref, a missing one; namespaces
+  from `ARBACE_PATH`'s store entries (two, one requiring the other, with and without a prefix);
+  the launcher's tool (put then the guest's `load`, the guest's `put!` then get, ref, ls, a bad
+  name); `ARBACE_BOX_FS` (the file system seeded from a snapshot the guest saved; the tar read on
+  the host; a missing ref); a store directory written by the native executable and read in the box.
+- `bin/jrt test` (amd64; new `store_test.ae`: `PathEntries`, the directory store with a second
+  store on its directory, a snapshot restored and taken again), `bin/jrt build --arch arm64`.
+- The oracle, native, against `known-go-amd64.edn`: 22,232 of 22,278, the 46 recorded; the box's
+  subset against `known-go-box-amd64.edn`: 21,696 of 21,742, the 46 recorded.
+- `bin/box-suite` (`BOX_SUITE_RUN` main's renamed suite: c2a and the suite are unchanged): 67
+  namespaces, 19,645 of 19,646, as the reference.
+- `bin/box-vendor roundtrip`: 16 of 16 at all three levels; `kvm-tests`: hv, vmm (with the new
+  `TestDirStoreLimits`: the limit, the lock file not a ref, a second store on the directory) and
+  the guest tests pass.
+- S6's proof holds: `bin/tamago-vendor verify` (identical) and `check` (std 371 of 371, goos 69
+  of 69, the guest image from the originals and from the forms identical: 77,000,080 bytes as
+  linked, 66,126,122 cut).
+- The essential `bin/gate` was not run: no source the bootstrap compiles changed
+  (`arbace/lang/go` and `overlay/jdk` are read by a2g and `bin/jrt-convert` only).
+
+How the box's packages were changed: as S1 (BOX-NOTES, S1, "How the box's packages were
+changed"): `vmm/store.go` and its test, unchanged since S0, edited from go-whim's own text (its
+comments and literals kept) and converted (`bin/g2a convert`), their forms taken whole; `abi`,
+the launcher's `main.go` and `rlwrap_linux.go` edited in a printing of `box/`, converted, and the
+converted forms merged with `box/`'s comments and literals' spellings; the new `store.go` of the
+launcher converted from its Go. `box/` printed again and the edited Go compared: the same code
+(comments and literal spellings apart).
+
+### Amendments (proposed 2026-10-11)
+
+- **BX30 (box/: abi, vmm) The store's answers and the shared directory**: `abi.StoreRefused`,
+  `StoreConflict`, `StoreNone`, `StoreTooLarge`, `StoreBadName` (-1 to -5); the monitor answers
+  `StoreNone` without a store and checks refs' names; `DirStore.Max`, `vmm.ErrTooLarge`; the
+  refs under the `fcntl` lock of `refs/.lock`.
+- **BX31 (box/: the launcher) The store's settings and tool**: `--store DIR`,
+  `ARBACE_BOX_STORE_MAX` (default 256 MiB), `ARBACE_BOX_FS` passed to the guest, `--store DIR
+  put|get|ref|ls`.
+- **BX32 (A2G-SPEC §9.4) An optional `StoreHost`**: `jrt.Store`, `StoreHost`, `CurrentStore`; the
+  box's host over the calls, `OSHost` on Linux over `ARBACE_BOX_STORE` in the monitor's format
+  (the lock, renames); jrt's own Java `jdk.internal.jrt.HostStore` and its natives.
+- **BX33 (A2G-SPEC §10.3; RT's variant, `ClassPathResources`) `ARBACE_PATH`'s store entries**
+  `store:PREFIX`, for `RT.load` and `getResourceAsStream`, not URLs; the split rule.
+- **BX34 (EVAL-NOTES' namespace variants) `arbace.box`**, a namespace of the Go build, and
+  arbace.main's `ref:NAME` scripts and `-i` files.
+- **BX35 (A2G-SPEC §9.4: the box's host) Snapshots**: `SnapshotTar`, `RestoreTar` (a
+  deterministic tar through the host's file calls), `save-fs!`, `load-fs!`, `ARBACE_BOX_FS` at the
+  guest's start.
+- **BX36 (checks) The store's checks** in `--smoke` and `--smoke --box`, jrt's `store_test.ae`,
+  vmm's `TestDirStoreLimits`.
+
+### Open points for the user
+
+- The default limit, 256 MiB a blob (`ARBACE_BOX_STORE_MAX`): the guest's RAM is 3 GiB, and a
+  blob is read whole into it.
+- The monitor keeps every blob it reads for the run (go-whim's cache, which made the Joker
+  graph's many reads cheap): host memory grows with the distinct blobs a box reads. Keep, or
+  bound it (by size, or no cache above some size)?
+- `arbace.box` is the Go build's only; the JVM Arbace could have the same namespace over the
+  same directory format (jrt's `dirStore` is about 150 lines), for tools on the JVM.
+- Snapshot tars carry epoch times (the same files, the same blob); real times are the
+  alternative, at the price of a new blob for each save.
+- Joker's transactions (`box/txn`, `commit!`, `abort!`: a ref's write as a capability used
+  once) were not carried over; `ref!` with an old hash is the compare-and-set they wrap.

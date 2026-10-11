@@ -8,7 +8,8 @@
     ^{:line 8} [fmt "fmt"]
     ^{:line 9} [os "os"]
     ^{:line 10} [filepath "path/filepath"]
-    ^{:line 11} [sync "sync"]])
+    ^{:line 11} [sync "sync"]
+    ^{:line 12} [syscall "syscall"]])
 
 
 ;; THE STORE (doc/LISP-SANDBOX.md, *The store*): the box's data, kept on the
@@ -37,12 +38,33 @@
 
 (go/type conflict (struct))
 
-^{:go/end 40} (go/method Error ^string [conflict] "the ref is not what the guest said it was")
-^{:go/end 41} (go/method Conflict ^bool [conflict] true)
+^{:go/end 41} (go/method Error ^string [conflict] "the ref is not what the guest said it was")
+^{:go/end 42} (go/method Conflict ^bool [conflict] true)
 
 
 
-^{:go/breaks [6] :go/end 56} (go/func RefName "RefName says a ref's name is one the store takes: 1 to 64 of\n[A-Za-z0-9._-], not beginning with a dot.\n" ^bool [^string name]
+(go/var ^{:tag error :doc "ErrTooLarge is a blob larger than the store takes (DirStore.Max).  It\nsays TooLarge(), as ErrConflict says Conflict().\n"} ErrTooLarge (lit tooLarge))
+
+(go/type tooLarge (struct))
+
+^{:go/end 50} (go/method Error ^string [tooLarge] "the blob is larger than the store takes")
+^{:go/end 51} (go/method TooLarge ^bool [tooLarge] true)
+
+
+
+
+
+(go/const "The store's answers besides a count or 0 (guest/abi: Store*): -1 none\nor refused, -2 a compare-and-set that failed, -3 no store, -4 a blob\ntoo large, -5 a ref's name the store does not take (doc/go/BOX-NOTES.md,\nS3).  go-whim's guests take any negative answer as a failure.\n"
+  ^{:line 58} [^{:val -1} storeRefused -1]
+  ^{:line 59} [^{:val -2} storeConflict -2]
+  ^{:line 60} [^{:val -3} storeNone -3]
+  ^{:line 61} [^{:val -4} storeTooLarge -4]
+  ^{:line 62} [^{:val -5} storeBadName -5])
+
+
+
+
+^{:go/breaks [[6 77]] :go/end 78} (go/func RefName "RefName says a ref's name is one the store takes: 1 to 64 of\n[A-Za-z0-9._-], not beginning with a dot.\n" ^bool [^string name]
   (when (or (< (len name) 1) (> (len name) 64) (== (aget name 0) \.))
     (return false))
 
@@ -63,28 +85,56 @@
 
 
 
-(go/type DirStore "A DirStore keeps the store in a directory of the host's: blobs/HASH,\nrefs/NAME (the hash in hex).  It makes only the system calls the\nmonitor's filter allows a running guest (openat, read, write, fstat,\nclose): a blob is written to its own name, created exclusively, and\nheld to its hash when first read -- one a write left short (the guest\nended, the disk filled) is refused, not served; a ref, 65 bytes, is\nwritten in one write.  Blobs read are kept, verified, while the monitor\nruns: a graph's EDN is read in many BlobGets.\n" (struct
-    ^{:line 67 :tag string} dir
-    ^{:line 68 :tag sync/Mutex} mu
-    ^{:line 69 :tag (map (array 32 byte) (slice byte))} cache)) ; blobs read and found whole
 
 
 
 
-^{:go/end 81} (go/func OpenDirStore "OpenDirStore is the store in dir, its directories made when missing --\nbefore the monitor's system-call filter, which allows no mkdir.\n" [^string dir] :results [(* DirStore) error]
+
+
+(go/type DirStore "A DirStore keeps the store in a directory of the host's: blobs/HASH,\nrefs/NAME (the hash in hex).  It makes only the system calls the\nmonitor's filter allows a running guest (openat, read, write, fstat,\nclose): a blob is written to its own name, created exclusively, and\nheld to its hash when first read -- one a write left short (the guest\nended, the disk filled) is refused, not served; a ref, 65 bytes, is\nwritten in one write.  Blobs read are kept, verified, while the monitor\nruns: a graph's EDN is read in many BlobGets.\n\nThe refs are read and written under a lock of the file refs/.lock\n(fcntl's, which the filter allows) besides the process's mutex, so that\nprocesses sharing the directory -- boxes, Arbace's native executable,\nwhose jrt keeps the same format -- compare and set one at a time and\nnever read a ref half written (doc/go/BOX-NOTES.md, S3).\n" (struct
+    ^{:line 95 :tag string} dir
+
+    ^{:line 97 :tag int64 :doc "Max is the largest blob Put takes, ErrTooLarge beyond; 0 none.\n"} Max
+    ^{:line 98 :tag sync/Mutex} mu
+    ^{:line 99 :tag (map (array 32 byte) (slice byte))} cache ; blobs read and found whole
+    ^{:line 100 :tag (* os/File)} lock)) ; refs/.lock, open while the store is
+
+
+
+
+^{:go/end 116} (go/func OpenDirStore "OpenDirStore is the store in dir, its directories made when missing --\nbefore the monitor's system-call filter, which allows no mkdir.\n" [^string dir] :results [(* DirStore) error]
   (range [_ d (lit (slice string) "blobs" "refs")]
     (when [err (os/MkdirAll (filepath/Join dir d) 0755)] (!= err nil)
       (return nil (fmt/Errorf "the store: %w" err))))
 
 
-  (return (addr (lit DirStore :dir dir :cache (lit (map (array 32 byte) (slice byte))))) nil))
+  (let [(values lock err) (os/OpenFile (filepath/Join dir "refs" ".lock") (bit-or os/O_RDWR os/O_CREATE) 0644)]
+    (when (!= err nil)
+      (return nil (fmt/Errorf "the store: %w" err)))
+
+    (return (addr (lit DirStore :dir dir :cache (lit (map (array 32 byte) (slice byte))) :lock lock)) nil)))
 
 
-^{:go/end 85} (go/method blob ^string [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h]
+
+
+^{:go/end 128} (go/method lockRefs "lockRefs takes the refs' lock between processes (typ syscall.F_RDLCK or\nF_WRLCK; F_UNLCK releases it), waiting for it.\n" ^error [^{:tag (* DirStore)} s ^int16 typ]
+  (let [lk (lit syscall/Flock_t :Type typ :Whence 0)]
+    (while true
+      (let [err (syscall/FcntlFlock (.Fd (.-lock s)) syscall/F_SETLKW (addr lk))]
+        (when (!= err syscall/EINTR)
+          (return err))))))
+
+
+
+
+^{:go/end 132} (go/method blob ^string [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h]
   (filepath/Join (.-dir s) "blobs" (hex/EncodeToString (subslice h))))
 
 
-^{:go/end 101} (go/method Put [^{:tag (* DirStore)} s ^{:tag (slice byte)} data] :results [(array 32 byte) error]
+^{:go/end 151} (go/method Put [^{:tag (* DirStore)} s ^{:tag (slice byte)} data] :results [(array 32 byte) error]
+  (when (and (> (.-Max s) 0) (> (conv int64 (len data)) (.-Max s)))
+    (return (lit (array 32 byte)) ErrTooLarge))
+
   (let [h (sha256/Sum256 data)]
     (when [(values _ ok) (.load s h)] ok
       (return h nil)) ; content-addressed: there already, and whole
@@ -101,7 +151,7 @@
 
 
 
-^{:go/end 116} (go/method load "load is blob h, read once and held to its hash.\n" [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h] :results [(slice byte) bool]
+^{:go/end 166} (go/method load "load is blob h, read once and held to its hash.\n" [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h] :results [(slice byte) bool]
   (.Lock (.-mu s))
   (defer (.Unlock (.-mu s)))
   (when [(values b ok) (aget (.-cache s) h)] ok
@@ -115,12 +165,12 @@
     (return b true)))
 
 
-^{:go/end 121} (go/method Size [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h] :results [int64 bool]
+^{:go/end 171} (go/method Size [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h] :results [int64 bool]
   (let [(values b ok) (.load s h)]
     (return (conv int64 (len b)) ok)))
 
 
-^{:go/end 132} (go/method Get [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h ^int64 off ^{:tag (slice byte)} p] :results [int bool]
+^{:go/end 182} (go/method Get [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h ^int64 off ^{:tag (slice byte)} p] :results [int bool]
   (let [(values b ok) (.load s h)]
     (when (or (not ok) (< off 0))
       (return 0 false))
@@ -131,22 +181,33 @@
     (return (copy p (subslice b off)) true)))
 
 
-^{:go/end 145} (go/method Ref [^{:tag (* DirStore)} s ^string name] :results [(array 32 byte) bool]
-  (let [^{:tag (array 32 byte)} h (zero (array 32 byte))]
-    (when (not (RefName name))
+^{:go/end 195} (go/method Ref [^{:tag (* DirStore)} s ^string name] :results [(array 32 byte) bool]
+  (when (not (RefName name))
+    (return (lit (array 32 byte)) false))
+
+  (.Lock refMu)
+  (defer (.Unlock refMu))
+  (when (!= (.lockRefs s syscall/F_RDLCK) nil)
+    (return (lit (array 32 byte)) false))
+
+  (defer (.lockRefs s syscall/F_UNLCK))
+  (.ref s name))
+
+
+
+^{:go/end 206} (go/method ref "ref is ref name, read under the refs' locks.\n" [^{:tag (* DirStore)} s ^string name] :results [(array 32 byte) bool]
+  (let [^{:tag (array 32 byte)} h (zero (array 32 byte))
+      (values b err) (os/ReadFile (filepath/Join (.-dir s) "refs" name))]
+    (when (!= err nil)
       (return h false))
 
-    (let [(values b err) (os/ReadFile (filepath/Join (.-dir s) "refs" name))]
-      (when (!= err nil)
-        (return h false))
-
-      (let [(values n ^:assign err) (hex/Decode (subslice h) (bytes/TrimSpace b))]
-        (return h (and (== err nil) (== n 32)))))))
+    (let [(values n ^:assign err) (hex/Decode (subslice h) (bytes/TrimSpace b))]
+      (return h (and (== err nil) (== n 32))))))
 
 
 (go/var ^sync/Mutex refMu) ; refs' compare-and-set, across stores of one process
 
-^{:go/end 165} (go/method SetRef ^error [^{:tag (* DirStore)} s ^string name ^{:tag (array 32 byte)} h ^{:tag (* (array 32 byte))} old]
+^{:go/end 230} (go/method SetRef ^error [^{:tag (* DirStore)} s ^string name ^{:tag (array 32 byte)} h ^{:tag (* (array 32 byte))} old]
   (when (not (RefName name))
     (return (fmt/Errorf "ref %q: not a name the store takes" name)))
 
@@ -155,8 +216,12 @@
 
   (.Lock refMu)
   (defer (.Unlock refMu))
+  (when [err (.lockRefs s syscall/F_WRLCK)] (!= err nil)
+    (return (fmt/Errorf "ref %s: %w" name err)))
+
+  (defer (.lockRefs s syscall/F_UNLCK))
   (when (!= old nil)
-    (let [(values cur ok) (.Ref s name)]
+    (let [(values cur ok) (.ref s name)]
       (when (or (!= ok (!= @old (lit (array 32 byte)))) (and ok (!= cur @old)))
         (return ErrConflict))))
 
@@ -165,19 +230,20 @@
 
 
 
-^{:go/end 267} (go/method storeCall "storeCall answers a store's call; -1 when the machine has no store.\n" [^{:tag (* machine)} m ^uint64 nr ^{:tag (array 5 int64)} a] :results [int64 error]
+
+^{:go/end 342} (go/method storeCall "storeCall answers a store's call; storeNone when the machine has no\nstore.\n" [^{:tag (* machine)} m ^uint64 nr ^{:tag (array 5 int64)} a] :results [int64 error]
   (let [st (.-Store (.-cfg m))]
     (when (== st nil)
-      (return -1 nil))
+      (return storeNone nil))
 
-    (let [at ^{:go/end 179} (fn [^int64 addr ^int64 n ^string what] :results [(slice byte) error]
+    (let [at ^{:go/end 245} (fn [^int64 addr ^int64 n ^string what] :results [(slice byte) error]
           (let [(values p ok) (.guest m addr n)]
             (when (not ok)
               (return nil (.fault m (fmt/Sprintf "a store's %s at %#x+%d, outside the guest's memory" what addr n))))
 
             (return p nil)))
 
-        ^{:line 180} hashAt ^{:go/end 186} (fn [^int64 addr] :results [(array 32 byte) (slice byte) error]
+        ^{:line 246} hashAt ^{:go/end 252} (fn [^int64 addr] :results [(array 32 byte) (slice byte) error]
           (let [(values p err) (at addr 32 "hash")]
             (when (!= err nil)
               (return (lit (array 32 byte)) nil err))
@@ -196,7 +262,10 @@
 
               (let [(values h perr) (.Put st data)]
                 (when (!= perr nil)
-                  (return -1 nil))
+                  (when [(values t ok) (assert (interface (TooLarge ^bool [])) perr)] (and ok (.TooLarge t))
+                    (return storeTooLarge nil))
+
+                  (return storeRefused nil))
 
                 (copy out (subslice h))
                 (return 0 nil)))))
@@ -208,7 +277,7 @@
             (when [(values n ok) (.Size st h)] ok
               (return n nil))
 
-            (return -1 nil)))
+            (return storeRefused nil)))
         (case [callBlobGet]
           (let [(values h _ err) (hashAt (aget a 0))]
             (when (!= err nil)
@@ -221,7 +290,7 @@
               (when [(values n ok) (.Get st h (aget a 3) buf)] ok
                 (return (conv int64 n) nil))
 
-              (return -1 nil))))
+              (return storeRefused nil))))
         (case [callRefGet]
           (let [(values name err) (at (aget a 0) (aget a 1) "ref's name")]
             (when (!= err nil)
@@ -231,9 +300,12 @@
               (when (!= err nil)
                 (return 0 err))
 
+              (when (not (RefName (conv string name)))
+                (return storeBadName nil))
+
               (let [(values h ok) (.Ref st (conv string name))]
                 (when (not ok)
-                  (return -1 nil))
+                  (return storeRefused nil))
 
                 (copy out (subslice h))
                 (return 0 nil)))))
@@ -245,6 +317,9 @@
             (let [(values h _ ^:assign err) (hashAt (aget a 2))]
               (when (!= err nil)
                 (return 0 err))
+
+              (when (not (RefName (conv string name)))
+                (return storeBadName nil))
 
               (let [^{:tag (* (array 32 byte))} old (zero (* (array 32 byte)))]
                 (when (!= (aget a 3) 0)
@@ -258,9 +333,9 @@
                   (case [(== err nil)]
                     (return 0 nil))
                   (case [(errors/Is err ErrConflict)]
-                    (return -2 nil))
+                    (return storeConflict nil))
                   (default
-                    (return -1 nil))))))))
+                    (return storeRefused nil))))))))
 
 
-      (return -1 nil))))
+      (return storeRefused nil))))
