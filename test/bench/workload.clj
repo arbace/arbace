@@ -3,7 +3,7 @@
 ;; the frozen clojure/: it uses only the core names referred into `user`, and reaches other
 ;; namespaces through `lib` (clojure.string on Clojure, arbace.string on Arbace).
 ;;
-;; Usage (the driver, test/bench/driver.clj, runs it in a fresh JVM per benchmark and fork):
+;; Usage (the driver, test/bench/driver.ae, runs it in a fresh JVM per benchmark and fork):
 ;;   ... workload.clj list                          the steady-state benchmarks, one EDN map each
 ;;   ... workload.clj steady NAME WARMUP-MS MEASURE-MS
 ;;   ... workload.clj load LIB                      the time of (require LIB) in this fresh JVM

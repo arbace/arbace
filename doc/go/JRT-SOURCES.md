@@ -19,7 +19,7 @@ comparison of float constants).
 
 ## The tool
 
-`bin/jrt-convert [--twice]` (bash) with its Clojure in `test/g2c/jrt_sources.clj`
+`bin/jrt-convert [--twice]` (bash) with its Clojure in `test/g2c/jrt_sources.ae`
 (`g2c.jrt-sources`, next to `g2c.java-surface`, whose class reading and treatments it reuses).
 It runs on Arbace's `target/stage2` (`bin/build-arbace` first) and writes only under
 `.tmp/jrt/` (`JRT_WORK`), regenerated on every run and not tracked (the user's decision for
@@ -96,16 +96,16 @@ directories equal).
    doubles the work per level. The generated `CharacterData*` tables are string concatenations
    of hundreds of lines (nested `+`), and their conversion did not finish in 10 minutes. `pp`
    is now memoized per form (by identity) and column within `form-text`
-   (`arbace/j2c/print.clj`, `*pp-cache*`); the 8 generated files convert in 14 s, and the
+   (`arbace/j2c/print.ae`, `*pp-cache*`); the 8 generated files convert in 14 s, and the
    output is unchanged (the 176 other files converted with and without the change: identical
    trees; `bin/j2c-check` passes).
 2. **The class forms compiler wrote NaN constants with the sign bit set.** `Double.NaN` is
    `0.0d / 0.0`, which the analyzer folds; on x86 the division gives `0xfff8000000000000`, and
    ASM writes a constant's raw bits, where javac writes `doubleToLongBits` (the canonical
    `0x7ff8000000000000`). `Double.NaN` and `Float.NaN` came out with the wrong bits
-   (observable through `doubleToRawLongBits`). `arbace/classes/emit.clj` now writes float and
+   (observable through `doubleToRawLongBits`). `arbace/classes/emit.ae` now writes float and
    double constants (`ldc` and `ConstantValue`) with the canonical NaN, as javac does.
-3. **The shape comparison could not see it.** `arbace/classes/shape.clj` compared a field's
+3. **The shape comparison could not see it.** `arbace/classes/shape.ae` compared a field's
    constant with `=`, and NaN is not `=` to itself: javac's own two runs of `Double` and
    `Float` "differed", so both classes were set aside as javac's nondeterminism (these are
    likely the 2 classes that `bin/j2c-check --jdk` does not compare, CONVERTER-NOTES.md, "The
@@ -236,7 +236,7 @@ JDK's resource data merged, `bin/jrt-convert` translated **424 files** (`sources
 `MODULE KIND REL`): 383 of `src/java.base/share/classes` (KIND
 `share`), 3 of `src/java.base/unix/classes` (`unix`), 19 generated (`gensrc`), 2 of another
 module (`share:java.sql`) and 17 of jrt's own Java (`overlay`); 389 with the files (below), 35
-more with the JDK's resource data (below). Besides the measured closure (`test/g2c/jrt_sources.clj`):
+more with the JDK's resource data (below). Besides the measured closure (`test/g2c/jrt_sources.ae`):
 
 - `added-sources`: java.base files added, each with its reason there: phase 2C's 31 (the
   stand-ins jrt had without sources, the standard streams' `PrintStream` and interfaces,
@@ -307,7 +307,7 @@ more with the JDK's resource data (below). Besides the measured closure (`test/g
 Two options of the conversion (amendment S2):
 
 - **`J2C_PATCH_ALL`** (an environment variable of j2c's `jdk` conversion,
-  `arbace/j2c/main.clj`; `bin/jrt-convert` sets it): each chunk of packages has the other
+  `arbace/j2c/main.ae`; `bin/jrt-convert` sets it): each chunk of packages has the other
   chunks' sources on its patch path, its own first. jrt's own Java in `jdk.internal.jrt` is used
   across packages (`java.io`), and with more files the chunks split it apart (javac: "package
   jdk.internal.jrt does not exist"). Opt-in, so `bin/j2c-check --jdk` is unchanged.
@@ -365,7 +365,7 @@ jdk26u at `baf63fb`:
 ## Time (2026-10-10)
 
 java.time in the Go build (JRT-NOTES.md, "Time"; the user's decision of 2026-10-10), from jdk26u
-at `baf63fb`, `test/g2c/jrt_sources.clj`'s `time-sources` and `added-gensrc`. Amendments TM2,
+at `baf63fb`, `test/g2c/jrt_sources.ae`'s `time-sources` and `added-gensrc`. Amendments TM2,
 TM3 and TM9 (the time-zone database as an image file of the resource data, java.base's CLDR data
 as generated sources, the shape check's `FROM_SOURCE`) were accepted on 2026-10-10 and are folded
 here and in C2G-SPEC §4.1, §10.3:
@@ -423,7 +423,7 @@ here and in C2G-SPEC §4.1, §10.3:
   `bin/class-forms-check` one file at a time, and the other files of its chunk found the
   running JDK's class of that name, without the members. The checker takes the classes of
   `FROM_SOURCE` (internal names, their nested classes too) from the sources only
-  (`test/classes/check_converted.clj`, `env/*from-source*`), and `bin/jrt-convert` gives it the
+  (`test/classes/check_converted.ae`, `env/*from-source*`), and `bin/jrt-convert` gives it the
   overlay chunk's classes.
 - **Result**: 580 files (475 on main at `1addaf2`): 525 of `share` (432), 3 `unix`, 26
   generated (19), 24 of jrt's own (19: 8 added, `TimeZone`, `ZoneInfo` and `TimeText` gone), 2
@@ -434,7 +434,7 @@ here and in C2G-SPEC §4.1, §10.3:
 ## Processes (2026-10-10)
 
 Processes in the Go build (JRT-NOTES.md, "Processes"; the user's decision of 2026-10-10), from
-jdk26u at `baf63fb`, `test/g2c/jrt_sources.clj`'s `process-sources`. Amendments PR1-PR7 were
+jdk26u at `baf63fb`, `test/g2c/jrt_sources.ae`'s `process-sources`. Amendments PR1-PR7 were
 accepted on 2026-10-10 (C2G-SPEC §4.1, §7.11, §9.1, §9.4, §11; §16, "Processes"):
 
 - **Sources added**: `src/java.base/share/classes/java/lang/Process.java`, `ProcessBuilder.java`,
@@ -444,7 +444,7 @@ accepted on 2026-10-10 (C2G-SPEC §4.1, §7.11, §9.1, §9.4, §11; §16, "Proce
   and `jdk/internal/jrt/HostFiles.java` gain the descriptor access (`HostFiles.DescriptorAccess`,
   `setHandle`).
 - **Variants**: `ProcessImpl`, `Process`, `ProcessBuilder`, `ProcessHandleImpl` (JRT-NOTES.md).
-- **Natives** (jrt's Go, `process.clj`): `ProcessImpl.hostForkAndExec` (the variant's),
+- **Natives** (jrt's Go, `process.ae`): `ProcessImpl.hostForkAndExec` (the variant's),
   `ProcessEnvironment.environ`, `ProcessHandleImpl`'s `getCurrentPid0`, `isAlive0`,
   `waitForProcessExit0`, `destroy0`, `parent0`, `getProcessPids0`, and `ProcessHandleImpl.Info.hostInfo`
   (the variant's).
@@ -464,13 +464,13 @@ build (JRT-NOTES.md, "Resources by URL"; branch `gofix`; amendments FX6 and FX7,
   resources found as `URLClassPath.FileLoader` finds them), `jdk/internal/jrt/ClassPathResources.java`
   and `sun/nio/fs/GlobPatterns.java` (a public helper over `Globs`' package-private
   `toUnixRegexPattern`), new; `java/nio/file/Files.java` gains `newDirectoryStream`.
-- **Natives** (jrt's Go, `resources.clj`, `resources_linux.clj`): the embedded resources by name,
+- **Natives** (jrt's Go, `resources.ae`, `resources_linux.ae`): the embedded resources by name,
   the executable's path (the optional host interface `HostExecutable`), `VM.isSystemDomainLoader`.
 
 ## Security (2026-10-10)
 
 java.security's basics in the Go build (JRT-NOTES.md, "Security"; amendments SC4,
-SC5, accepted 2026-10-10; C2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`: `test/g2c/jrt_sources.clj`'s `security-sources`, 75 files (74 of
+SC5, accepted 2026-10-10; C2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`: `test/g2c/jrt_sources.ae`'s `security-sources`, 75 files (74 of
 `src/java.base/share/classes`, `NativePRNG` of `src/java.base/unix/classes`), and jrt's own
 `javax/crypto/JceSecurity.java`, `sun/security/provider/SeedGenerator.java`,
 `sun/security/provider/JrtServices.java`, `com/sun/crypto/provider/JceServices.java` and
@@ -486,7 +486,7 @@ converted and compiled to javac's class shapes, 713 identical and the 4 known di
 java.text and jdk.localedata's locales in the Go build (JRT-NOTES.md, "Text and locales"; the
 user's decision of 2026-10-10; amendments TL4, TL5 and TL8, accepted 2026-10-11 and folded
 here and in C2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`,
-`test/g2c/jrt_sources.clj`'s `text-sources`, `text-locales` and `added-gensrc`:
+`test/g2c/jrt_sources.ae`'s `text-sources`, `text-locales` and `added-gensrc`:
 
 - **Sources added** (`text-sources`, paths below `src/java.base/share/classes`): `java/text/` but
   the classes already in (`CharacterIterator`, `Normalizer`, `ParsePosition`): `Annotation`,
@@ -545,6 +545,6 @@ here and in C2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`,
   `--add-exports java.base/sun.text=ALL-UNNAMED` as `make/CompileToolsJdk.gmk` does); ICU's
   `jdk/internal/icu/impl/data/icudata/ubidi.icu` (copied). All equal to the build's image (9 of 9
   data files).
-- **The shape check**: `java/util/Locale.clj` is a known difference (one checkcast, TL8).
+- **The shape check**: `java/util/Locale.ae` is a known difference (one checkcast, TL8).
 - **Result**: 867 files with `JRT_LOCALES=common` (2,310 with `all`), all converted and compiled to
   javac's class shapes, 862 identical and the 5 known differences, 2,144 classes.

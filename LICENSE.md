@@ -18,25 +18,25 @@ covers what.
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
   with its Java converted to Clojure class forms (doc/VENDOR-NOTES.md). Each file stays under its
   source's license:
-  - `arbace/asm/` and `arbace/asm.clj`: ASM, under the BSD 3-Clause License (the package
+  - `arbace/asm/` and `arbace/asm.ae`: ASM, under the BSD 3-Clause License (the package
     renamed from `org.objectweb.asm`, by way of `clojure.asm`, to `arbace.asm`);
-  - `arbace/lang/Murmur3.clj`: from Guava (Copyright (C) 2011 The Guava Authors), as included in
+  - `arbace/lang/Murmur3.ae`: from Guava (Copyright (C) 2011 The Guava Authors), as included in
     Clojure, under the Apache License 2.0; the MurmurHash3 algorithm it implements was written
     by Austin Appleby and placed in the public domain;
-  - `arbace/repl.clj` (Copyright (c) Chris Houser): it still carries an older header naming the
+  - `arbace/repl.ae` (Copyright (c) Chris Houser): it still carries an older header naming the
     Common Public License 1.0, the EPL's predecessor; upstream Clojure distributes it as part of
     Clojure under the EPL and ships no CPL text;
   - the rest: Clojure, under the Eclipse Public License 1.0.
 
   Files there that are Arbace's own, not derived from Clojure (they say so in their header, such
-  as `arbace/lang/KeywordInvokeSite.clj`), are under the Eclipse Public License 1.0 as Arbace.
+  as `arbace/lang/KeywordInvokeSite.ae`), are under the Eclipse Public License 1.0 as Arbace.
   The Go-build variants of vendored files (`arbace/lang/go/`, read by c2g only) are derived
   from the files they vary, under their licenses.
-- `arbace/spec/` (`arbace/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj`): spec.alpha,
+- `arbace/spec/` (`arbace/spec/alpha.ae`, `gen/alpha.ae`, `test/alpha.ae`): spec.alpha,
   https://github.com/clojure/spec.alpha at `v0.6.249`
   (`3d1efb353b8a95c699b4051ba8273568c21f874e`), Copyright (c) Rich Hickey, under the Eclipse
   Public License 1.0. Renamed from `clojure.spec.*` to `arbace.spec.*` (doc/VENDOR-NOTES.md).
-- `arbace/core/specs/alpha.clj`: core.specs.alpha, https://github.com/clojure/core.specs.alpha
+- `arbace/core/specs/alpha.ae`: core.specs.alpha, https://github.com/clojure/core.specs.alpha
   at `v0.6.133-alpha10` (`75875946b7e827a1cec91ce645d5e1dcfc475e49`), under the Eclipse Public
   License 1.0 (the repository's `LICENSE`; the file itself carries no notice). Renamed from
   `clojure.core.specs.alpha` to `arbace.core.specs.alpha`.
@@ -45,26 +45,26 @@ covers what.
   assertions of Clojure's test suite, https://github.com/clojure/clojure at
   `98d735fab02f337cee654cb0629bddc09883a75a`, `test/clojure/test_clojure/`, renamed to
   `arbace.*`; under the Eclipse Public License 1.0, as Clojure.
-- `overlay/go/runtime/proc.clj` and `overlay/go/runtime/runtime2.clj`: Go's runtime, the files
+- `overlay/go/runtime/proc.ae` and `overlay/go/runtime/runtime2.ae`: Go's runtime, the files
   `src/runtime/proc.go` and `runtime2.go` of TamaGo's go1.27.1 tree
   (https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1", 2026-08-28; the Go
   distribution with TamaGo's changes), converted to Go forms by `bin/g2c convert` and patched
   (doc/go/JRT-NOTES.md, phase 2a): Copyright 2009 The Go Authors, under Go's BSD 3-Clause
-  License (text below). `overlay/go/runtime/arbace_local.clj` and `overlay/go/runtime.clj` are
+  License (text below). `overlay/go/runtime/arbace_local.ae` and `overlay/go/runtime.ae` are
   Arbace's own.
 - Excerpts of Go's standard library in g2c's cases, tests and spec: `test/g2c/cases/s14_2_utf8.go`
   (from `src/unicode/utf8/utf8.go`), `s14_3_sort.go` (from `src/sort/sort.go` and
   `zsortinterface.go`), `s02_search.go` (`sort.Search`, from `src/sort/search.go`), the Go forms
-  of the same names (`.clj`) that hold them converted, `test/g2c/convert/search.go`
-  (`sort.Search`) and the expected forms `test/g2c/convert/expected/s02_search.clj`,
-  `s14_2_utf8.clj` and `s14_3_sort.clj`, and their code and forms in doc/go/SPEC.md §2
+  of the same names (`.ae`) that hold them converted, `test/g2c/convert/search.go`
+  (`sort.Search`) and the expected forms `test/g2c/convert/expected/s02_search.ae`,
+  `s14_2_utf8.ae` and `s14_3_sort.ae`, and their code and forms in doc/go/SPEC.md §2
   (`sort.Search`), §14.2 and §14.3: from TamaGo's go1.27.1 tree, as above, Copyright 2009
   (`utf8.go`, `sort.go`), 2010 (`search.go`) and 2022 (`zsortinterface.go`) The Go Authors,
   under Go's BSD 3-Clause License (text below). Each of those files carries Go's notice
   ("Copyright 20XX The Go Authors. All rights reserved. Use of this source code is governed by
   a BSD-style license that can be found in the LICENSE file."), the forms as `;;` lines; SPEC.md's
   excerpts are covered by this entry.
-- `go/`: jrt's hand-written Go forms (`go/arbace/jrt.clj`, `go/arbace/jrt/`) and the Go
+- `go/`: jrt's hand-written Go forms (`go/arbace/jrt.ae`, `go/arbace/jrt/`) and the Go
   build's main package (`go/arbace/cmd/arbace/`): Arbace's own, under the Eclipse Public License
   1.0, except the parts of `go/arbace/jrt/` listed below.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
@@ -93,8 +93,8 @@ covers what.
   Also except (doc/go/JRT-NOTES.md, "Sockets"; amendment NT3): `overlay/jdk/java.base/jdk/internal/jrt/HostSocketImpl.java`
   follows `src/java.base/share/classes/sun/nio/ch/NioSocketImpl.java` of jdk26u at `baf63fb`
   (its state checks, messages, streams and option handling transcribed, the I/O replaced by
-  jrt's socket table), and the variants `overlay/jdk/variants/Socket.clj`, `ServerSocket.clj`, `InetAddress.clj`,
-  `Inet4AddressImpl.clj`, `Inet6AddressImpl.clj`, `Inet6Address.clj`, `IPAddressUtil.clj` and `Exceptions.clj` keep
+  jrt's socket table), and the variants `overlay/jdk/variants/Socket.ae`, `ServerSocket.ae`, `InetAddress.ae`,
+  `Inet4AddressImpl.ae`, `Inet6AddressImpl.ae`, `Inet6Address.ae`, `IPAddressUtil.ae` and `Exceptions.ae` keep
   the code of the jdk26u methods they replace (`java/net/Socket.java`, `ServerSocket.java`, `InetAddress.java`,
   `Inet6AddressImpl.java`, `Inet6Address.java`, `sun/net/util/IPAddressUtil.java`, `jdk/internal/util/Exceptions.java`) where they keep it: Copyright (c)
   Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
@@ -104,15 +104,15 @@ covers what.
   (`src/java.base/share/classes/javax/crypto/JceSecurity.java.template`),
   `overlay/jdk/java.base/sun/security/provider/SeedGenerator.java` its `getSystemEntropy` and
   `longToByteArray` (`sun/security/provider/SeedGenerator.java`), and the variants
-  `overlay/jdk/variants/Provider.clj`, `Security.clj`, `ProviderConfig.clj`, `SunEntries.clj`,
-  `SunJCE.clj`, `DigestBase.clj` and `NativePRNG.clj` keep the code of the jdk26u methods they
+  `overlay/jdk/variants/Provider.ae`, `Security.ae`, `ProviderConfig.ae`, `SunEntries.ae`,
+  `SunJCE.ae`, `DigestBase.ae` and `NativePRNG.ae` keep the code of the jdk26u methods they
   replace (`java/security/Provider.java`, `Security.java`, `sun/security/jca/ProviderConfig.java`,
   `sun/security/provider/SunEntries.java`, `com/sun/crypto/provider/SunJCE.java`,
   `sun/security/provider/DigestBase.java`,
   `src/java.base/unix/classes/sun/security/provider/NativePRNG.java`) where they keep it:
   Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
   with the Classpath Exception (text below); the rest of those files, the digests' variants
-  (`MD5.clj`, `SHA.clj`, `SHA2.clj`, `SHA5.clj`, `SHA3.clj`), `jdk/internal/jrt/HostRandom.java`,
+  (`MD5.ae`, `SHA.ae`, `SHA2.ae`, `SHA5.ae`, `SHA3.ae`), `jdk/internal/jrt/HostRandom.java`,
   `sun/security/provider/JrtServices.java` and `com/sun/crypto/provider/JceServices.java` are Arbace's
   own.
 - `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds code
@@ -121,7 +121,7 @@ covers what.
   them), `overlay/jdk/java.base/java/nio/file/Path.java` its default methods `resolve` (the two
   varargs overloads), `resolveSibling(Path)` and `iterator` (`java/nio/file/Path.java`),
   `overlay/jdk/java.base/java/nio/file/Files.java` its `readAllLines(Path, Charset)` and
-  `copy(Path, OutputStream)` (`java/nio/file/Files.java`), and `go/arbace/jrt/filesystem.clj` jrt's
+  `copy(Path, OutputStream)` (`java/nio/file/Files.java`), and `go/arbace/jrt/filesystem.ae` jrt's
   Go forms following `src/java.base/unix/native/libjava/canonicalize_md.c` (`JDK_Canonicalize`) and
   `path_util.c` (`collapse`) and the results of `UnixFileSystem_md.c`: Copyright (c) Oracle and/or
   its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
@@ -129,27 +129,27 @@ covers what.
   of the change are written from the documented APIs, as the overlay's other files (but for the
   variants keeping jdk26u's code, listed below).
 - Processes (doc/go/JRT-NOTES.md, "Processes"; recorded by the rule of B7): the variants
-  `overlay/jdk/variants/ProcessImpl.clj`, `Process.clj`, `ProcessBuilder.clj` and
-  `ProcessHandleImpl.clj` keep the code of the jdk26u methods they replace
+  `overlay/jdk/variants/ProcessImpl.ae`, `Process.ae`, `ProcessBuilder.ae` and
+  `ProcessHandleImpl.ae` keep the code of the jdk26u methods they replace
   (https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/unix/classes/java/lang/ProcessImpl.java`,
   `src/java.base/share/classes/java/lang/Process.java`, `ProcessBuilder.java`,
   `ProcessHandleImpl.java`) where they keep it; `overlay/jdk/java.base/jdk/internal/jrt/RuntimeExec.java`
   transcribes `Runtime.exec` (`src/java.base/share/classes/java/lang/Runtime.java`); and
-  `go/arbace/jrt/process.clj` and `hostproc_linux.clj`, jrt's Go forms, follow
+  `go/arbace/jrt/process.ae` and `hostproc_linux.ae`, jrt's Go forms, follow
   `src/java.base/unix/native/libjava/ProcessImpl_md.c` (the exception texts, `IOE_FORMAT`),
   `childproc.c` (`JDK_execvpe`'s search), `ProcessHandleImpl_unix.c` and
   `src/java.base/linux/native/libjava/ProcessHandleImpl_linux.c` (`/proc`'s fields, the status
   encoding, the start-time checks): Copyright (c) Oracle and/or its affiliates, under the GNU
   General Public License version 2 with the Classpath Exception (text below); the rest of those
-  files is Arbace's own. The errno texts of `process.clj` are musl's `strerror`'s (as this
+  files is Arbace's own. The errno texts of `process.ae` are musl's `strerror`'s (as this
   machine's JVM gives them), facts of its interface, not its code.
 - `overlay/jdk/java.base/jdk/internal/jrt/ThreadPerTaskExecutor.java` (doc/go/JRT-NOTES.md,
   "Concurrency": its states and their transitions, `ensureNotShutdown`, `tryTerminate`,
   `tryShutdownAndTerminate`, `shutdown`, `shutdownNow`), the methods `DefaultThreadFactory.newThread`
-  and `AutoShutdownDelegatedExecutorService`'s of `overlay/jdk/variants/Executors.clj`,
-  `arrangeTimeout` of `overlay/jdk/variants/CompletableFuture.clj`, `doInvokeAny` of
+  and `AutoShutdownDelegatedExecutorService`'s of `overlay/jdk/variants/Executors.ae`,
+  `arrangeTimeout` of `overlay/jdk/variants/CompletableFuture.ae`, `doInvokeAny` of
   `overlay/jdk/java.base/jdk/internal/jrt/ForkJoinPools.java`, and the default methods of
-  `Future` in `go/arbace/jrt/executor.clj` (`Future_ResultNow__O`, `Future_ExceptionNow__Throwable`,
+  `Future` in `go/arbace/jrt/executor.ae` (`Future_ResultNow__O`, `Future_ExceptionNow__Throwable`,
   `Future_State__Future_State`) follow the code of https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/share/classes/java/util/concurrent/ThreadPerTaskExecutor.java`,
   `Executors.java`, `CompletableFuture.java`, `AbstractExecutorService.java`, `Future.java`):
@@ -160,17 +160,17 @@ covers what.
   of their original version: "Written by Doug Lea with assistance from members of JCP JSR-166
   Expert Group and released to the public domain, as explained at
   http://creativecommons.org/publicdomain/zero/1.0/". The rest of the concurrency
-  work's files (the other variants and overlay classes, `varhandle.clj`) is Arbace's own.
-- `overlay/jdk/variants/TreeMap.clj` (doc/go/JAVA-BASE.md, amendment JB2): its two
+  work's files (the other variants and overlay classes, `varhandle.ae`) is Arbace's own.
+- `overlay/jdk/variants/TreeMap.ae` (doc/go/JAVA-BASE.md, amendment JB2): its two
   `buildFromIterator` methods are jdk26u's `buildFromSorted` (https://github.com/openjdk/jdk26u
   at `baf63fb`, `src/java.base/share/classes/java/util/TreeMap.java`) without the deserializing
   branch, and its other members keep the code of the members they replace: Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below), by the rule of B7; the rest of the file is Arbace's own.
 - Other Go-build variants (C2G-SPEC §4.6; recorded by the rule of B7):
-  `overlay/jdk/variants/AbstractChronology.clj`, `BitSet.clj`, `CRC32.clj`, `Collectors.clj`,
-  `File.clj`, `FileHandler.clj`, `ParseUtil.clj`, `TimeZone.clj`, `TzdbZoneRulesProvider.clj`,
-  `URI.clj`, `URL.clj`, `URLConnection.clj`, `ZoneInfoFile.clj` and `ZoneOffset.clj` keep the code
+  `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
+  `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,
+  `URI.ae`, `URL.ae`, `URLConnection.ae`, `ZoneInfoFile.ae` and `ZoneOffset.ae` keep the code
   of the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`:
   `src/java.base/share/classes/java/time/chrono/AbstractChronology.java`, `java/util/BitSet.java`,
   `java/util/zip/CRC32.java`, `java/util/stream/Collectors.java`, `java/io/File.java`,
@@ -182,13 +182,13 @@ covers what.
   (`java/lang/System.java`): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below); the rest of those files is
   Arbace's own.
-- `go/arbace/jrt/fdlibm.clj` and the `FdLibm` part of `go/arbace/jrt/math.clj` (`Log`, `Cbrt`,
+- `go/arbace/jrt/fdlibm.ae` and the `FdLibm` part of `go/arbace/jrt/math.ae` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
   and "Phase 2B (step 5)"): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below).
-- `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.clj`, and `indent`, `stripIndent` and
-  `translateEscapes` in `go/arbace/jrt/string.clj`: jrt's hand-written Go forms following the code
+- `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
+  `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/share/classes/sun/nio/cs/UnicodeDecoder.java`, `UnicodeEncoder.java`,
   `java/lang/String.java`): Copyright (c) Oracle and/or its affiliates, under the GNU General
@@ -234,7 +234,7 @@ covers what.
 
   Likewise jdk.localedata's CLDR locale data of the locales `bin/jrt-convert` selects
   (doc/go/JRT-NOTES.md, "Text and locales"; `JRT_LOCALES`: none by default, the
-  shipped executables' choice; `common`, the 27 locales of `test/g2c/jrt_sources.clj`'s
+  shipped executables' choice; `common`, the 27 locales of `test/g2c/jrt_sources.ae`'s
   `text-locales` with their parent locales; `all`), generated as
   `make/modules/jdk.localedata/Gensrc.gmk` generates it (the same `CLDRConverter`, on the same
   CLDR 48 data) into the bundles `sun.text.resources.cldr.ext.FormatData_*` and
@@ -267,9 +267,9 @@ covers what.
   `ResourceBundleBasedAdapter.java`, `sun/util/cldr/CLDRLocaleProviderAdapter.java`; each file's
   header names the parts): under the GNU General Public License version 2 with the Classpath
   Exception, by the rule of B7; the rest of those files is Arbace's own.
-  `test/g2c/jrt_sources.clj`'s `default-list` and `cldr-candidates` (the candidate locales of
+  `test/g2c/jrt_sources.ae`'s `default-list` and `cldr-candidates` (the candidate locales of
   the locale selection) follow `ResourceBundle.java`'s and `CLDRLocaleProviderAdapter.java`'s
-  candidate lists likewise. `overlay/jdk/variants/BreakIteratorResourceBundle.clj` keeps the
+  candidate lists likewise. `overlay/jdk/variants/BreakIteratorResourceBundle.ae` keeps the
   code of the method it replaces (`sun/util/resources/BreakIteratorResourceBundle.java`), likewise.
 
   The executables also hold translated jdk26u code derived from Unicode's and ICU's work (the
@@ -285,7 +285,7 @@ covers what.
     core.specs.alpha and Arbace's own, translated by c2g and embedded as sources with the image
     of their analyzed forms), jrt (`go/`, and `overlay/jdk/` translated with jdk26u's Java) and
     the main package (`go/arbace/cmd/arbace/` with what c2g writes): under the licenses given
-    above for their files, the Eclipse Public License 1.0 but for `arbace/lang/Murmur3.clj`
+    above for their files, the Eclipse Public License 1.0 but for `arbace/lang/Murmur3.ae`
     (the Apache License 2.0) and the parts derived from jdk26u (the GNU General Public License
     version 2 with the Classpath Exception). ASM (`arbace/asm/`) is not in them.
   - jdk26u: the classes of java.base that `bin/jrt-convert` converts to class forms from

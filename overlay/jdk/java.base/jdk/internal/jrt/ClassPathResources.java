@@ -3,10 +3,10 @@
  * the class loaders' getResource and getResources see it: the resources embedded in the
  * executable (the jar of the JVM build), then the directories of ARBACE_PATH, in RT.load's
  * order (jrt's ResourceOrPath). An embedded resource's URL is a jar: URL naming the executable,
- * "jar:file:/path/to/arbace!/arbace/core.clj", as the JVM's for a resource of arbace.jar,
+ * "jar:file:/path/to/arbace!/arbace/core.ae", as the JVM's for a resource of arbace.jar,
  * opened by this class's handler (the jar: connection of the JDK is outside the world); a
  * file of ARBACE_PATH has its file: URL, as the JVM's class path directories give it. The
- * natives are jrt's Go (go/arbace/jrt/resources.clj).
+ * natives are jrt's Go (go/arbace/jrt/resources.ae).
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;

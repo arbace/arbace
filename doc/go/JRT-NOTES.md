@@ -39,23 +39,23 @@ case alone does not tell them apart, the step does.
 Each part's amendments were accepted by the user (C2G-SPEC §16 names them by series); the
 measurements in each part are its branch's, before merging main unless it says otherwise.
 
-**jrt's files now** (`go/arbace/jrt/`; the tests are `*_test.clj`, the generated files say so):
+**jrt's files now** (`go/arbace/jrt/`; the tests are `*_test.ae`, the generated files say so):
 
 | files | what | described in |
 |---|---|---|
-| `object.clj`, `class.clj`, `array.clj`, `enum.clj`, `volatile.clj`, `throwable.clj`, `numconv.clj`, `math.clj`, `fdlibm.clj`, `string.clj`, `stringbuilder.clj`, `codec.clj` | the object model, classes, arrays, exceptions, numbers, strings | phase 1 |
-| `monitor.clj`, `threadid.clj`, `thread.clj`, `threadlocal.clj`, `atomic.clj`, `locks.clj`, `executor.clj`, `forkjoin.clj`, `reference.clj`, `unsafe.clj`, `varhandle.clj`, `standin_timeunit.clj`, `standin_executor.clj` | threads and concurrency | phase 2a; "Semaphore"; "Concurrency" |
-| `host.clj`, `system.clj`, `tooloptions.clj` | the host interface, `System`, `Runtime`, `JAVA_TOOL_OPTIONS` | phase 2a; "Sockets" |
-| `reflect.clj`, `reflect_array.clj`, `reflect_tables.clj`, `members.clj`, `classloader.clj`, `standin_reflect.clj` | reflection over the member tables, the class loaders | phase 2b; "Size" (SZ3) |
-| `charset.clj`, `locale.clj`, `date.clj`, `text.clj`, `standin_locale.clj` | charsets, `String`'s locale overloads, `Date`, `CDS`' natives | phase 2b; "Text and locales" |
-| `access.clj`, `vm.clj`, `natives.clj`, `dyn.clj`, `image.clj`, `tuning.clj` | `SharedSecrets`, `VM`, the translated classes' natives; the evaluator's `Dyn`, the image, the Go runtime's settings | C2G-NOTES.md; EVAL-PLAN.md, EVAL-NOTES.md; EXEC-NOTES.md; SPEED-NOTES.md |
-| `files.clj`, `filesystem.clj`, `hostfs.clj`, `hostfs_linux.clj` | the standard streams' and files' natives, `java.io.File` over the host | phase 2C; "Files" |
-| `net.clj` | sockets and the name service | "Sockets" |
-| `timezone.clj`, `constarray.clj` | `TimeZone`'s and `CRC32`'s natives; constant arrays as data | "Time"; "Text and locales" (TL1) |
-| `process.clj`, `hostproc.clj`, `hostproc_linux.clj` | processes | "Processes" |
-| `resources.clj`, `resources_linux.clj` | the class path's resources by URL, `HostExecutable` | "Resources by URL" |
-| `digests.clj`, `hostrand_linux.clj` | the digests' block functions over Go's crypto, the host's random source | "Security" |
-| `standin_lang.clj`, `standin_character.clj`, `manifest.edn`, `manifest_test.clj` | generated: stand-ins, the manifest | phase 1, "Stand-ins", "The manifest" |
+| `object.ae`, `class.ae`, `array.ae`, `enum.ae`, `volatile.ae`, `throwable.ae`, `numconv.ae`, `math.ae`, `fdlibm.ae`, `string.ae`, `stringbuilder.ae`, `codec.ae` | the object model, classes, arrays, exceptions, numbers, strings | phase 1 |
+| `monitor.ae`, `threadid.ae`, `thread.ae`, `threadlocal.ae`, `atomic.ae`, `locks.ae`, `executor.ae`, `forkjoin.ae`, `reference.ae`, `unsafe.ae`, `varhandle.ae`, `standin_timeunit.ae`, `standin_executor.ae` | threads and concurrency | phase 2a; "Semaphore"; "Concurrency" |
+| `host.ae`, `system.ae`, `tooloptions.ae` | the host interface, `System`, `Runtime`, `JAVA_TOOL_OPTIONS` | phase 2a; "Sockets" |
+| `reflect.ae`, `reflect_array.ae`, `reflect_tables.ae`, `members.ae`, `classloader.ae`, `standin_reflect.ae` | reflection over the member tables, the class loaders | phase 2b; "Size" (SZ3) |
+| `charset.ae`, `locale.ae`, `date.ae`, `text.ae`, `standin_locale.ae` | charsets, `String`'s locale overloads, `Date`, `CDS`' natives | phase 2b; "Text and locales" |
+| `access.ae`, `vm.ae`, `natives.ae`, `dyn.ae`, `image.ae`, `tuning.ae` | `SharedSecrets`, `VM`, the translated classes' natives; the evaluator's `Dyn`, the image, the Go runtime's settings | C2G-NOTES.md; EVAL-PLAN.md, EVAL-NOTES.md; EXEC-NOTES.md; SPEED-NOTES.md |
+| `files.ae`, `filesystem.ae`, `hostfs.ae`, `hostfs_linux.ae` | the standard streams' and files' natives, `java.io.File` over the host | phase 2C; "Files" |
+| `net.ae` | sockets and the name service | "Sockets" |
+| `timezone.ae`, `constarray.ae` | `TimeZone`'s and `CRC32`'s natives; constant arrays as data | "Time"; "Text and locales" (TL1) |
+| `process.ae`, `hostproc.ae`, `hostproc_linux.ae` | processes | "Processes" |
+| `resources.ae`, `resources_linux.ae` | the class path's resources by URL, `HostExecutable` | "Resources by URL" |
+| `digests.ae`, `hostrand_linux.ae` | the digests' block functions over Go's crypto, the host's random source | "Security" |
+| `standin_lang.ae`, `standin_character.ae`, `manifest.edn`, `manifest_test.ae` | generated: stand-ins, the manifest | phase 1, "Stand-ins", "The manifest" |
 
 `overlay/jdk/java.base/` holds jrt's own Java (40 files), `overlay/jdk/variants/` the Go-build
 variants of jdk26u's classes (69); each part names those it added.
@@ -78,20 +78,20 @@ implemented except 13, all of them phase 2's or waiting for translated classes (
 
 | path | what |
 |---|---|
-| `go/arbace/jrt.clj` | the package file: `ns go.arbace.jrt`, `go/package jrt :path "arbace/jrt"`, `:files`, `:test-files`, one `load` per file (SPEC §4.1) |
-| `go/arbace/jrt/object.clj` | the header `Object`, `Object_I`, the identity hash, `Equals`/`HashCode`/`ToString`/`GetClass`, `Object_toString`, `Object_New`, `NN`, `NPE`, `CloneNotSupported` |
-| `class.clj` | `Class`, `ClassInfo` and the member table types, `Define`, the registry and `ForName`, primitive and array classes, `ClassCast`, `ClassInit` |
-| `array.clj` | the nine array types, their constructors, `RefArray.Store`, `NewMultiArray`, `Array.newInstance`, `Arraycopy` |
-| `monitor.clj`, `threadid.clj` | monitors (thin lock, inflation, wait/notify); the current thread's number (phase 1's stopgap) |
-| `string.clj`, `stringbuilder.clj`, `codec.clj` | `String`, `StringBuilder`, `StringBuffer`; interning, `Concat`, the `StrOf...` conversions; UTF-8, Latin-1 and ASCII |
-| `numconv.clj`, `math.clj` | d2i and the other conversions, the float constants, `Double.toString`/`Float.toString`; `Math`, `StrictMath` (FdLibm's log, pow, cbrt ported) |
-| `throwable.clj` | `Throwable`, `Thrown`, `Catch`, the run-time error mapping, stack traces (`FrameInfo`), `StackTraceElement`, `printStackTrace`'s text |
-| `enum.clj`, `volatile.clj` | `Enum` and `Record`, the superclasses of c2g's enums and records; `Volatile[T]` |
-| `standin_lang.clj`, `standin_character.clj` | **generated** stand-ins for JDK classes c2g will translate (below) |
-| `manifest.edn`, `manifest_test.clj` | **generated**: the manifest (C2G-SPEC §9.1) and a test file naming every manifest member by its Go name |
-| `*_test.clj` | the tests, Go forms printed as `_test.go` files (SPEC §15 Q14) |
+| `go/arbace/jrt.ae` | the package file: `ns go.arbace.jrt`, `go/package jrt :path "arbace/jrt"`, `:files`, `:test-files`, one `load` per file (SPEC §4.1) |
+| `go/arbace/jrt/object.ae` | the header `Object`, `Object_I`, the identity hash, `Equals`/`HashCode`/`ToString`/`GetClass`, `Object_toString`, `Object_New`, `NN`, `NPE`, `CloneNotSupported` |
+| `class.ae` | `Class`, `ClassInfo` and the member table types, `Define`, the registry and `ForName`, primitive and array classes, `ClassCast`, `ClassInit` |
+| `array.ae` | the nine array types, their constructors, `RefArray.Store`, `NewMultiArray`, `Array.newInstance`, `Arraycopy` |
+| `monitor.ae`, `threadid.ae` | monitors (thin lock, inflation, wait/notify); the current thread's number (phase 1's stopgap) |
+| `string.ae`, `stringbuilder.ae`, `codec.ae` | `String`, `StringBuilder`, `StringBuffer`; interning, `Concat`, the `StrOf...` conversions; UTF-8, Latin-1 and ASCII |
+| `numconv.ae`, `math.ae` | d2i and the other conversions, the float constants, `Double.toString`/`Float.toString`; `Math`, `StrictMath` (FdLibm's log, pow, cbrt ported) |
+| `throwable.ae` | `Throwable`, `Thrown`, `Catch`, the run-time error mapping, stack traces (`FrameInfo`), `StackTraceElement`, `printStackTrace`'s text |
+| `enum.ae`, `volatile.ae` | `Enum` and `Record`, the superclasses of c2g's enums and records; `Volatile[T]` |
+| `standin_lang.ae`, `standin_character.ae` | **generated** stand-ins for JDK classes c2g will translate (below) |
+| `manifest.edn`, `manifest_test.ae` | **generated**: the manifest (C2G-SPEC §9.1) and a test file naming every manifest member by its Go name |
+| `*_test.ae` | the tests, Go forms printed as `_test.go` files (SPEC §15 Q14) |
 | `bin/jrt` | `build`, `test`, `testdata`, `standins`, `manifest`, `print` (below), and since phase 2a `overlay` |
-| `test/jrt/*.clj` | the generators, run on the JVM Arbace: `testdata.clj` (with `testdata_numbers.clj`, `testdata_util.clj`), `standins.clj`, `manifest.clj` |
+| `test/jrt/*.ae` | the generators, run on the JVM Arbace: `testdata.ae` (with `testdata_numbers.ae`, `testdata_util.ae`), `standins.ae`, `manifest.ae` |
 
 Hand-written forms are about 4,700 lines (the core) and 1,600 (the tests); with the generated
 files the package prints as 13,600 lines of Go.
@@ -157,7 +157,7 @@ the identity hash is kept throughout. `Wait` releases and restores the recursion
 wakes waiters first in, first out. `IllegalMonitorStateException` carries the JVM's message.
 
 - **Thread identity** is phase 2's. Phase 1 uses C2G-SPEC §8.4's stopgap, the goroutine id
-  from `runtime.Stack` (about 2.9 µs). Phase 2 replaces `currentThreadID` (`threadid.clj`) with
+  from `runtime.Stack` (about 2.9 µs). Phase 2 replaces `currentThreadID` (`threadid.ae`) with
   the current `Thread`'s number from the slot.
 - **Interruption**: `Wait` selects on `interruptChan()`, which is nil until phase 2's
   `Thread` sets it, and throws `InterruptedException` after reacquiring.
@@ -344,7 +344,7 @@ jrt's core throws, catches and implements JDK classes that c2g will translate fr
 exceptions (`NullPointerException` ... `UnsupportedEncodingException`, 32 classes) and the
 interfaces `Serializable`, `Cloneable`, `Comparable`, `CharSequence` and `Appendable`.
 
-**`standin_lang.clj`** is generated by `test/jrt/standins.clj` in the exact shapes C2G-SPEC
+**`standin_lang.ae`** is generated by `test/jrt/standins.ae` in the exact shapes C2G-SPEC
 gives translated classes:
 
 - §4.4 names;
@@ -360,7 +360,7 @@ build, **the stand-in files are deleted**, and the translated classes define the
 Their leafness may change in the bigger closed world; jrt's core uses only the constructors and
 the interfaces, so it is not affected.
 
-**`standin_character.clj`** gives `String` the parts of `Character` it needs, as unexported
+**`standin_character.ae`** gives `String` the parts of `Character` it needs, as unexported
 functions over Go's `unicode`: `charToUpper`, `charToLower`, `charToUpperEx`,
 `charToUpperArray`, `charIsWhitespace` and `isCased`. They are later rewritten to call the
 translated `Character_...`.
@@ -371,7 +371,7 @@ the forwarders will be stubs.
 
 ## The manifest
 
-`go/arbace/jrt/manifest.edn` (§9.1) is **derived**, not hand-kept. `test/jrt/manifest.clj`
+`go/arbace/jrt/manifest.edn` (§9.1) is **derived**, not hand-kept. `test/jrt/manifest.ae`
 reflects on each hand-written class of the running JDK 26 and computes every member's §4.4 Go
 name. A member is in the manifest when jrt's forms define that name, or `Impl_` of it, or the
 member is promotable. The manifest records:
@@ -384,7 +384,7 @@ member is promotable. The manifest records:
 - the promotable set.
 
 Public methods inherited from non-public superclasses (`AbstractStringBuilder`'s) are listed on
-the subclass, as jrt defines them there. The generated `manifest_test.clj` names every member by
+the subclass, as jrt defines them there. The generated `manifest_test.ae` names every member by
 its Go name, so the test build fails when forms and manifest drift. `Object`'s members are §5.8's
 and are not listed by name.
 
@@ -439,7 +439,7 @@ members are phase 2's.
 
 ## Tests
 
-Go tests written as Go forms (`*_test.clj`, printed as `_test.go`, in package `jrt`):
+Go tests written as Go forms (`*_test.ae`, printed as `_test.go`, in package `jrt`):
 
 | test | what |
 |---|---|
@@ -456,7 +456,7 @@ Go tests written as Go forms (`*_test.clj`, printed as `_test.go`, in package `j
 | `TestEnum`, `TestVolatile` | an enum written as c2g would write it, `Volatile` |
 | `TestToString`, `TestDoubles`, `TestFloats`, `TestInts`, `TestNoFusion`, `TestMathExceptions` | 60,228 + 110,312 + 65,072 + 47,754 cases of the numbers files; the FMA idiom |
 
-**Differential test data** comes from the JVM. `test/jrt/testdata.clj` (ns `jrt.testdata`) runs
+**Differential test data** comes from the JVM. `test/jrt/testdata.ae` (ns `jrt.testdata`) runs
 on `bin/arbace-j`, the JDK 26 Arbace runs on, and writes `strings.txt`, `chars.txt`,
 `exceptions.txt`, `tostring.txt`, `doubles.txt`, `floats.txt` and `ints.txt`.
 
@@ -482,7 +482,7 @@ Results (2026-10-08):
 
 ## Measurements
 
-`bin/jrt test --arch amd64 -run X -bench . -cpu 1 -benchmem` (`bench_test.clj`), AMD EPYC
+`bin/jrt test --arch amd64 -run X -bench . -cpu 1 -benchmem` (`bench_test.ae`), AMD EPYC
 7763, go1.27.1, `GOAMD64=v1`:
 
 | operation | ns/op | allocs |
@@ -516,7 +516,7 @@ when profiles show exceptions on hot paths.
 - **Threads.**
   - `Thread` and `CurrentThread` over the goroutine-local slot. The runtime patch is Go forms
     given to the build by `--overlay`.
-  - Replace `currentThreadID`'s body (`threadid.clj`) with the current `Thread`'s number,
+  - Replace `currentThreadID`'s body (`threadid.ae`) with the current `Thread`'s number,
     keeping it small, at most 2^22 for thin locks.
   - Set `interruptChan` so that `Wait` throws `InterruptedException`.
   - `ThreadLocal`, `ThreadLocalRandom`'s probes, the uncaught handler (with `Uncaught`), and
@@ -619,7 +619,7 @@ All accepted 2026-10-08; C2G-SPEC names them J1-J10 (§16).
   - `src/unicode/tables.go` (Unicode 17.0.0);
   - the overlay format of `go help build`.
 - The JVM oracle's notes ([ORACLE.md](ORACLE.md), "What the Go side should know"); the edge
-  ([JRT-SOURCES.md](JRT-SOURCES.md)); the prototype `.tmp/c2g-proto/` (its `jrt.clj`, whose
+  ([JRT-SOURCES.md](JRT-SOURCES.md)); the prototype `.tmp/c2g-proto/` (its `jrt.ae`, whose
   header, `Lit`, `Catch` and `ClassInit` this generalizes).
 
 # Phase 2b (step 3): reflection and the remaining shims
@@ -638,39 +638,39 @@ is implemented; what the edge still lacks is phase 2a's or c2g's (Coverage).
 
 | path | what |
 |---|---|
-| `reflect.clj` | the tables' value convention (`As`, `Box`, `Unbox`); `AccessibleObject`, `Executable`, `Method`, `Constructor`, `Field`, `Member`, `InvocationHandler`, `Proxy`; `Class`'s reflective methods (`getMethods` ... `forName(name, init, loader)`); `AdaptFn`; the `Class` objects of `Math`, `StrictMath`, `StringLatin1`, `StringUTF16`, `ThrowableTracer`, `foreign.Utils`; `Math.PI`, `E`, `TAU` |
-| `reflect_array.clj` | `java.lang.reflect.Array` (phase 1 had `newInstance(Class, int)`) |
-| `reflect_tables.clj` | **generated** (`test/jrt/tables.clj`): the member tables of jrt's hand-written classes, as c2g writes tables |
-| `classloader.clj` | `ClassLoader` (minimal), the application and platform loaders; `jdk.internal.foreign.Utils.checkNonNegativeArgument` |
-| `charset.clj` | `Charset`, `sun.nio.cs.Unicode`, `UTF_8`, `ISO_8859_1`, `US_ASCII`, `StandardCharsets`, `String`'s `Charset` overloads |
-| `locale.clj` | `Locale`, `Locale.Category`, `DecimalFormatSymbols`, `LocaleProviderAdapter`, `LocaleResources`, `ResourceBundleBasedAdapter`, `String`'s `Locale` overloads |
-| `date.clj` | `java.util.Date` |
-| `standin_reflect.clj` | **generated** (`test/jrt/standins_reflect.clj`): stand-ins for the wrapper classes (`Number`, `Boolean`, `Character`, `Byte`, `Short`, `Integer`, `Long`, `Float`, `Double`, `Void`), `java.lang.reflect.Type` and `InvocationTargetException` |
-| `reflect_test.clj`, `shims_test.clj` | the tests |
-| `test/jrt/testdata_reflect.clj` | the differential data: `reflect.txt`, `charsets.txt`, `locales.txt`, `dates.txt` (made by `jrt.testdata` with the others) |
+| `reflect.ae` | the tables' value convention (`As`, `Box`, `Unbox`); `AccessibleObject`, `Executable`, `Method`, `Constructor`, `Field`, `Member`, `InvocationHandler`, `Proxy`; `Class`'s reflective methods (`getMethods` ... `forName(name, init, loader)`); `AdaptFn`; the `Class` objects of `Math`, `StrictMath`, `StringLatin1`, `StringUTF16`, `ThrowableTracer`, `foreign.Utils`; `Math.PI`, `E`, `TAU` |
+| `reflect_array.ae` | `java.lang.reflect.Array` (phase 1 had `newInstance(Class, int)`) |
+| `reflect_tables.ae` | **generated** (`test/jrt/tables.ae`): the member tables of jrt's hand-written classes, as c2g writes tables |
+| `classloader.ae` | `ClassLoader` (minimal), the application and platform loaders; `jdk.internal.foreign.Utils.checkNonNegativeArgument` |
+| `charset.ae` | `Charset`, `sun.nio.cs.Unicode`, `UTF_8`, `ISO_8859_1`, `US_ASCII`, `StandardCharsets`, `String`'s `Charset` overloads |
+| `locale.ae` | `Locale`, `Locale.Category`, `DecimalFormatSymbols`, `LocaleProviderAdapter`, `LocaleResources`, `ResourceBundleBasedAdapter`, `String`'s `Locale` overloads |
+| `date.ae` | `java.util.Date` |
+| `standin_reflect.ae` | **generated** (`test/jrt/standins_reflect.ae`): stand-ins for the wrapper classes (`Number`, `Boolean`, `Character`, `Byte`, `Short`, `Integer`, `Long`, `Float`, `Double`, `Void`), `java.lang.reflect.Type` and `InvocationTargetException` |
+| `reflect_test.ae`, `shims_test.ae` | the tests |
+| `test/jrt/testdata_reflect.ae` | the differential data: `reflect.txt`, `charsets.txt`, `locales.txt`, `dates.txt` (made by `jrt.testdata` with the others) |
 
 Hand-written forms: about 2,000 lines, tests 950; generated 1,700 (`reflect_tables.go` prints
 as 1,200 lines of Go: 487 methods, 38 constructors, 18 fields).
 
 Changes to phase 1's files, each small:
 
-- `codec.clj`: `charsetOf` looks names up through `lookupCharset` (JDK 26's names and aliases;
+- `codec.ae`: `charsetOf` looks names up through `lookupCharset` (JDK 26's names and aliases;
   phase 1's list had `DEFAULT`, `US_ASCII` and `ISO-LATIN-1`, which JDK 26 rejects, and lacked
   some aliases).
-- `test/jrt/standins.clj`: six more exceptions (`NoSuchMethodException`,
+- `test/jrt/standins.ae`: six more exceptions (`NoSuchMethodException`,
   `NoSuchFieldException`, `IllegalAccessException`, `InstantiationException`,
   `UnsupportedCharsetException`, `IllegalCharsetNameException`).
-- `test/jrt/manifest.clj`: the new classes; interfaces' methods count as defined; a method a
+- `test/jrt/manifest.ae`: the new classes; interfaces' methods count as defined; a method a
   hand-written class inherits from the hand-written superclass its struct embeds counts as
   defined (Go promotes it: `Method.getParameterTypes` is `Executable`'s); an interface's
   member is referred to as `(method-expr J M)`; `Class` implements `java.lang.reflect.Type`.
-- `test/jrt/testdata.clj` calls `jrt.testdata-reflect`; `bin/jrt standins` and `bin/jrt
-  manifest` run the two new generators; `jrt.clj` lists the new files.
+- `test/jrt/testdata.ae` calls `jrt.testdata-reflect`; `bin/jrt standins` and `bin/jrt
+  manifest` run the two new generators; `jrt.ae` lists the new files.
 
 ## The member tables (normative for c2g)
 
 Per class, c2g's `c2g_classes.go` sets `C_class.Info()`'s `Methods`, `Ctors` and `Fields` in an
-`init` function (A1), with the types of `class.clj`, unchanged from phase 1:
+`init` function (A1), with the types of `class.ae`, unchanged from phase 1:
 
 ```clojure
 (go/type MethodInfo (struct ^string Name ^{:tag (slice (* Class))} Params ^{:tag (* Class)} Return
@@ -747,8 +747,8 @@ caches). So an invoker is one call:
 - A static field's `Get`/`Set` read and write the package variable `C_f` (or the constant);
   jrt runs `C_Init` before a static field access and before `newInstance` (`ClassInfo.Init`).
 
-jrt's own tables (`reflect_tables.clj`) are generated exactly so by `test/jrt/tables.clj` from
-the manifest; `reflect_test.clj` writes a small hierarchy (an interface with a constant, a
+jrt's own tables (`reflect_tables.ae`) are generated exactly so by `test/jrt/tables.ae` from
+the manifest; `reflect_test.ae` writes a small hierarchy (an interface with a constant, a
 default and a static method, an abstract class with overloads and a protected method, a leaf
 with a covariant override and its bridge, a varargs static) as c2g would.
 
@@ -942,7 +942,7 @@ Results (2026-10-08), the whole package: linux/amd64 2.0 s, linux/arm64 under `q
 - **Boxing lives in jrt, not in the invokers** (A11): one `Unbox` and one `Box` instead of a
   conversion per parameter of every generated invoker, and the evaluator can call an invoker
   with Go values directly (no boxing on hinted interop).
-- **The wrappers are stand-ins** (`standin_reflect.clj`) until c2g translates jdk26u's
+- **The wrappers are stand-ins** (`standin_reflect.ae`) until c2g translates jdk26u's
   `Integer` and the others; jrt's `Box`/`Unbox` use their final names (`F_value`,
   `Integer_ValueOf_I__Integer`), and `valueOf` caches as jdk26u's do, so that
   `(identical? (Integer/valueOf 5) (Integer/valueOf 5))` holds through reflection too.
@@ -993,7 +993,7 @@ All accepted 2026-10-08; C2G-SPEC names them R11-R19 (§16), apart from phase 2a
 - **A18** (V9): jrt's charsets are UTF-8, ISO-8859-1 and US-ASCII; `Charset.forName` throws
   `UnsupportedCharsetException` for the others. *(R18; accepted 2026-10-08, folded into C2G-SPEC
   §12, with V9 widened.)*
-- **A19** (A9): `standin_reflect.clj` (the wrappers, `Type`, `InvocationTargetException`)
+- **A19** (A9): `standin_reflect.ae` (the wrappers, `Type`, `InvocationTargetException`)
   joins the stand-in files deleted when c2g's output joins the build. *(R19; accepted 2026-10-08,
   folded into C2G-SPEC §4.3.)*
 
@@ -1013,8 +1013,8 @@ All accepted 2026-10-08; C2G-SPEC names them R11-R19 (§16), apart from phase 2a
   `jdk/internal/foreign/Utils.java`.
 - The JVM (JDK 26 as Arbace runs on it) for the differential data: charset aliases, locale
   hash codes and tags, `DecimalFormatSymbols`, the reflection messages, the `#inst` texts.
-- Arbace: `arbace/lang/Reflector.clj`, `Compiler.clj` (`FISupport`, `QualifiedMethodExpr`,
-  `NewInstanceExpr.gatherMethods`, `subsumes`), `arbace/instant.clj`.
+- Arbace: `arbace/lang/Reflector.ae`, `Compiler.ae` (`FISupport`, `QualifiedMethodExpr`,
+  `NewInstanceExpr.gatherMethods`, `subsumes`), `arbace/instant.ae`.
 
 # Phase 2a (step 3): threads, concurrency, Unsafe, System and the host
 
@@ -1033,21 +1033,21 @@ implemented; the 6 others wait for classes that are cut or not written yet (Cove
 
 | path | what |
 |---|---|
-| `overlay/go/runtime.clj` | the patched runtime files as Go forms (not a package of the program): `ns go.runtime`, `go/package runtime :files [...]` naming the three |
-| `overlay/go/runtime/arbace_local.clj` | the new file `arbace_local.go`: `arbace_getLocal`, `arbace_setLocal` (one-argument `//go:linkname`, `//go:nosplit`) |
-| `overlay/go/runtime/proc.clj`, `runtime2.clj` | `proc.go` and `runtime2.go` of the toolchain's runtime, converted by `bin/g2c convert --goos linux runtime` (the same forms for amd64 and arm64), with the patch's two lines, each marked `; Arbace` |
-| `go/arbace/jrt/thread.clj` | the slot (linkname pulls), thread numbers, `Thread` (non-leaf), `CurrentThread`, start/join/sleep/yield/interrupt, handlers, `RunMain`, `Go`, `RunnableOf`, `Thread.ofVirtual()`, `header` |
-| `threadlocal.clj` | `ThreadLocal` (non-leaf), `ThreadLocal$SuppliedThreadLocal`, `InheritableThreadLocal`, `ThreadLocalRandom`'s probes |
-| `threadid.clj` | `currentThreadID`, now the current `Thread`'s number (phase 1's file, body replaced) |
-| `atomic.clj` | `Volatile.CompareAndSet`/`Swap`, `AtomicInteger`, `AtomicLong`, `AtomicBoolean`, `AtomicReference` |
-| `locks.clj` | `Lock`, `Condition`, `ReentrantLock` and its conditions, `ReentrantReadWriteLock` (+ `ReadLock`, `WriteLock`), `LockSupport` |
-| `executor.clj` | `ThreadFactory`, `Executor`, `ExecutorService`, `Future`, `Executors`, the pools, `FutureTask`, `CountDownLatch` |
-| `unsafe.clj` | `jdk.internal.misc.Unsafe`, `RegisterGoType` |
-| `reference.clj` | `Reference`, `WeakReference`, `SoftReference`, `ReferenceQueue` |
-| `host.clj` | `Host`, `HostFile`, `HostFileInfo`, `OSHost`, `SetHost`/`CurrentHost`, the standard streams `Stdin`/`Stdout`/`Stderr` |
-| `system.clj` | `System`'s clocks, properties, `getenv`, `exit`, `gc`, `lineSeparator`; `Runtime`; `StderrPrint` pointed at `Stderr` |
-| `standin_timeunit.clj` | a hand-written stand-in for `java.util.concurrent.TimeUnit` (deleted when c2g translates it) |
-| `thread_test.clj`, `concurrent_test.clj`, `system_test.clj` | the tests and benchmarks |
+| `overlay/go/runtime.ae` | the patched runtime files as Go forms (not a package of the program): `ns go.runtime`, `go/package runtime :files [...]` naming the three |
+| `overlay/go/runtime/arbace_local.ae` | the new file `arbace_local.go`: `arbace_getLocal`, `arbace_setLocal` (one-argument `//go:linkname`, `//go:nosplit`) |
+| `overlay/go/runtime/proc.ae`, `runtime2.ae` | `proc.go` and `runtime2.go` of the toolchain's runtime, converted by `bin/g2c convert --goos linux runtime` (the same forms for amd64 and arm64), with the patch's two lines, each marked `; Arbace` |
+| `go/arbace/jrt/thread.ae` | the slot (linkname pulls), thread numbers, `Thread` (non-leaf), `CurrentThread`, start/join/sleep/yield/interrupt, handlers, `RunMain`, `Go`, `RunnableOf`, `Thread.ofVirtual()`, `header` |
+| `threadlocal.ae` | `ThreadLocal` (non-leaf), `ThreadLocal$SuppliedThreadLocal`, `InheritableThreadLocal`, `ThreadLocalRandom`'s probes |
+| `threadid.ae` | `currentThreadID`, now the current `Thread`'s number (phase 1's file, body replaced) |
+| `atomic.ae` | `Volatile.CompareAndSet`/`Swap`, `AtomicInteger`, `AtomicLong`, `AtomicBoolean`, `AtomicReference` |
+| `locks.ae` | `Lock`, `Condition`, `ReentrantLock` and its conditions, `ReentrantReadWriteLock` (+ `ReadLock`, `WriteLock`), `LockSupport` |
+| `executor.ae` | `ThreadFactory`, `Executor`, `ExecutorService`, `Future`, `Executors`, the pools, `FutureTask`, `CountDownLatch` |
+| `unsafe.ae` | `jdk.internal.misc.Unsafe`, `RegisterGoType` |
+| `reference.ae` | `Reference`, `WeakReference`, `SoftReference`, `ReferenceQueue` |
+| `host.ae` | `Host`, `HostFile`, `HostFileInfo`, `OSHost`, `SetHost`/`CurrentHost`, the standard streams `Stdin`/`Stdout`/`Stderr` |
+| `system.ae` | `System`'s clocks, properties, `getenv`, `exit`, `gc`, `lineSeparator`; `Runtime`; `StderrPrint` pointed at `Stderr` |
+| `standin_timeunit.ae` | a hand-written stand-in for `java.util.concurrent.TimeUnit` (deleted when c2g translates it) |
+| `thread_test.ae`, `concurrent_test.ae`, `system_test.ae` | the tests and benchmarks |
 
 Hand-written: about 3,600 lines of jrt forms and 900 of tests; the overlay's converted files are
 5,800 lines of forms (370 KB).
@@ -1205,7 +1205,7 @@ symbols have pointers.
 **Monitors with the slot.** Phase 1's monitors are unchanged but for two things: the thread
 number comes from the slot, and `MonitorEnter`/`MonitorExit` take the header by address (the
 `any`'s data word: every Java object begins with its header) instead of asserting `Object_I`
-and calling `Self_Object` (a change to phase 1's `monitor.clj`, two lines). A non-Java Go value
+and calling `Self_Object` (a change to phase 1's `monitor.ae`, two lines). A non-Java Go value
 is no longer rejected there; c2g passes only Java objects.
 
 **Memory model.** Go's `sync/atomic` operations are sequentially consistent, as Java's volatile
@@ -1241,7 +1241,7 @@ outside `Unsafe` and `Volatile` is a bug the race detector finds.
 
 ## `System`, `Runtime` and the host (C2G-SPEC §9.4)
 
-**The host interface** is `jrt.Host`, one Go interface in `host.clj`: the standard streams,
+**The host interface** is `jrt.Host`, one Go interface in `host.ae`: the standard streams,
 files (`Open` with `os.O_*` flags, `Stat`, `ReadDir`, `Remove`, `Mkdir`, `Rename`, `Getwd`),
 the clocks (`Now`, `Nanotime`), the environment (`Getenv`, `Environ`), the command line
 (`Args`), `NumCPU`, `RandomBytes` (for `SecureRandom`), embedded resources (`Resource`), and
@@ -1295,12 +1295,12 @@ handler) is not in phase 2a.
 The manifest (`bin/jrt manifest`) now lists 29 more classes, among them the interfaces jrt
 writes (`Lock`, `Condition`, `Executor`, `ExecutorService`, `Future`, `ThreadFactory`,
 `Thread$UncaughtExceptionHandler`, `Thread$Builder$OfVirtual`), whose methods
-`test/jrt/manifest.clj` now reads from the Go interface types.
+`test/jrt/manifest.ae` now reads from the Go interface types.
 
-**Stand-ins added** (`test/jrt/standins.clj`): `IllegalThreadStateException`,
+**Stand-ins added** (`test/jrt/standins.ae`): `IllegalThreadStateException`,
 `ExecutionException`, `CancellationException` (which made `IllegalStateException` non-leaf),
 `TimeoutException`, `RejectedExecutionException`, and the interfaces `Runnable`, `Callable`,
-`Supplier`. `TimeUnit` is a hand-written stand-in (`standin_timeunit.clj`, an enum with
+`Supplier`. `TimeUnit` is a hand-written stand-in (`standin_timeunit.ae`, an enum with
 `toNanos` and `toMillis`), as the generator writes exceptions and interfaces only.
 
 ## Tests
@@ -1486,7 +1486,7 @@ None was cut.
 
 ## New in jrt
 
-- `files.clj`: `HostFiles`' natives (`open0` with the JVM's reasons in `FileNotFoundException`'s
+- `files.ae`: `HostFiles`' natives (`open0` with the JVM's reasons in `FileNotFoundException`'s
   message, `No such file or directory`, `Permission denied`, `Is a directory`; `read0`, `write0`,
   `available0` (a file's bytes after its position, 0 for the standard input), `skip0` (a file
   seeks, the standard input reads), `close0`; errors as `IOException`).
@@ -1497,7 +1497,7 @@ None was cut.
   `java.util.regex`.
 - `bin/jrt build|test --prog DIR` builds or tests a c2g program root (`bin/c2g --tests --out
   OUT` writes `OUT/prog`): jrt's tests with the stand-ins replaced.
-- `TestReflectAgainstJVM`'s expectations are generated twice (`test/jrt/testdata_reflect.clj`):
+- `TestReflectAgainstJVM`'s expectations are generated twice (`test/jrt/testdata_reflect.ae`):
   `methods` for jrt's own build (the hand-written tables), `methods-c2g` for a c2g program,
   where the translated supertypes' tables add their public methods whose types are in the world
   (the bridges `compareTo(Object)` through `Comparable`, `append(C)Appendable` through
@@ -1533,7 +1533,7 @@ functions (145 of the corpus's failing forms). jrt's `Math` and `StrictMath` now
 public member of JDK 26's classes** (109 each; `bin/jrt manifest`'s coverage lists none
 missing; the member tables follow from the manifest).
 
-- **`fdlibm.clj`** (new) ports the rest of `java.lang.FdLibm` (openjdk/jdk26u at `baf63fb`,
+- **`fdlibm.ae`** (new) ports the rest of `java.lang.FdLibm` (openjdk/jdk26u at `baf63fb`,
   `src/java.base/share/classes/java/lang/FdLibm.java`; phase 1 had `Log`, `Cbrt`, `Pow`):
   `Sin`, `Cos`, `Tan` with `__kernel_sin`, `__kernel_cos`, `__kernel_tan`, `RemPio2` and
   `KernelRemPio2` (only the precision `RemPio2` uses, `prec` 2), `Asin`, `Acos`, `Atan`,
@@ -1542,7 +1542,7 @@ missing; the member tables follow from the manifest).
   product through `fmul` (no fused multiply-add on arm64), the constants by their bits (Java
   writes them as hexadecimal floats), Java's `>>>` on an `int` as `fdUshr`, `(int)` of a
   double as `D2I`, unsigned comparisons through `uint32`.
-- `math.clj`: `Math`'s functions of FdLibm call the port (`Math.sin` is `StrictMath.sin`, as
+- `math.ae`: `Math`'s functions of FdLibm call the port (`Math.sin` is `StrictMath.sin`, as
   in Java's source), `toRadians` and `toDegrees` (one product with the JDK's constants),
   `clamp(double...)`, `divideExact`, `floorDivExact`, `ceilDivExact`, `multiplyFull`,
   `nextAfter(float, double)`, `nextDown(float)`, `powExact`, `unsignedMultiplyExact`,
@@ -1563,7 +1563,7 @@ intrinsics), and Java allows it (1 ulp of error, 2.5 for the hyperbolic function
 `StrictMath`'s results, the same on amd64 and arm64. Matching amd64 HotSpot bit for bit would
 mean porting its stubs (`macroAssembler_x86_*.cpp`, table-driven), not done.
 
-**Tests** (`test/jrt/testdata_numbers.clj`, `math_test.clj`): each of the 16 functions on about
+**Tests** (`test/jrt/testdata_numbers.ae`, `math_test.ae`): each of the 16 functions on about
 9,700 arguments (special values, arbitrary bits, and random values in the ranges the
 algorithms branch on: `[-2, 2]`, `[-800, 800]`, magnitudes 1e-310 to 1e300, near multiples
 of π/2 for `KernelRemPio2`), the two-argument ones on about 10,900 pairs; `StrictMath` must
@@ -1581,7 +1581,7 @@ cases. `bin/jrt test`: passes on amd64 and arm64.
 ## Dates: Calendar, Timestamp, Instant
 
 B1a step 5, phase 2, part B (branch `eval-2b-time`, 2026-10-09): the 37 forms of the oracle's
-`forms/inst.clj` that need `java.util.Calendar`, `java.sql.Timestamp` or `java.time.Instant`
+`forms/inst.ae` that need `java.util.Calendar`, `java.sql.Timestamp` or `java.time.Instant`
 (EVAL-NOTES.md, "Failure causes"). Decision 7 stands: `#inst` reads and prints over jrt's small
 hand-written `Date`; the other classes join the world around it.
 
@@ -1589,9 +1589,9 @@ hand-written `Date`; the other classes join the world around it.
 
 | class | how | why |
 |---|---|---|
-| `java.time.Instant` | translated from jdk26u (`added-sources`), with `DateTimeException`; a Go-build variant (`overlay/jdk/variants/Instant.clj`) for `toString` and `now()` | plain Java over two fields; what it needs of the rest of `java.time` (`DateTimeFormatter` for `toString` and `parse`, `Clock` for `now`, `ChronoField`/`ChronoUnit` for the temporal accessors) stays outside the world as operation-level stubs. `toString` calls jrt's own `jdk.internal.jrt.TimeText.instant`, `ISO_INSTANT`'s text (10,000-year periods, signed years beyond 9999, the fraction in groups of three); `now()` is `ofEpochMilli(currentTimeMillis)` (millisecond precision) |
-| `java.util.Date` | hand-written (decision 7), now **non-leaf** (`Date_I`, `Impl_` methods, `Ctor_...`; manifest) | `Timestamp` extends it. Its implementations call `getTime()` virtually where the JDK's do (`equals`, `hashCode`, `compareTo`, `before`, `after`); `clone` copies the whole object (a subclass's `CloneShallow`). `toInstant` and `from(Instant)` name the translated `Instant`, which jrt's own build cannot: c2g writes their table entries (`arbace/c2g/out.clj`, `support-table-forms`, as for `String.format`), so reflection (the REPL) finds them; translated code calling them would be a missing operation (none does) |
-| `java.sql.Timestamp` | translated from jdk26u (`src/java.sql/share/classes/java/sql/Timestamp.java`), with `java.sql.Date` (its `toString` uses `Date.formatDecimalInt`) | plain Java over `Date`'s deprecated fields. Both are another module's files: `bin/jrt-convert` copies them into the java.base tree (KIND `share:java.sql` in `sources.txt`, `added-module-sources` in `test/g2c/jrt_sources.clj`), and javac's `--patch-module java.base` takes them. `java.sql.Date`'s Go name would collide with jrt's `Date`: c2g's rename table names it `Sql_Date` |
+| `java.time.Instant` | translated from jdk26u (`added-sources`), with `DateTimeException`; a Go-build variant (`overlay/jdk/variants/Instant.ae`) for `toString` and `now()` | plain Java over two fields; what it needs of the rest of `java.time` (`DateTimeFormatter` for `toString` and `parse`, `Clock` for `now`, `ChronoField`/`ChronoUnit` for the temporal accessors) stays outside the world as operation-level stubs. `toString` calls jrt's own `jdk.internal.jrt.TimeText.instant`, `ISO_INSTANT`'s text (10,000-year periods, signed years beyond 9999, the fraction in groups of three); `now()` is `ofEpochMilli(currentTimeMillis)` (millisecond precision) |
+| `java.util.Date` | hand-written (decision 7), now **non-leaf** (`Date_I`, `Impl_` methods, `Ctor_...`; manifest) | `Timestamp` extends it. Its implementations call `getTime()` virtually where the JDK's do (`equals`, `hashCode`, `compareTo`, `before`, `after`); `clone` copies the whole object (a subclass's `CloneShallow`). `toInstant` and `from(Instant)` name the translated `Instant`, which jrt's own build cannot: c2g writes their table entries (`arbace/c2g/out.ae`, `support-table-forms`, as for `String.format`), so reflection (the REPL) finds them; translated code calling them would be a missing operation (none does) |
+| `java.sql.Timestamp` | translated from jdk26u (`src/java.sql/share/classes/java/sql/Timestamp.java`), with `java.sql.Date` (its `toString` uses `Date.formatDecimalInt`) | plain Java over `Date`'s deprecated fields. Both are another module's files: `bin/jrt-convert` copies them into the java.base tree (KIND `share:java.sql` in `sources.txt`, `added-module-sources` in `test/g2c/jrt_sources.ae`), and javac's `--patch-module java.base` takes them. `java.sql.Date`'s Go name would collide with jrt's `Date`: c2g's rename table names it `Sql_Date` |
 | `java.util.Calendar`, `GregorianCalendar`, `TimeZone`, `sun.util.calendar.ZoneInfo` | jrt's own Java (`overlay/jdk/java.base/`), behaving as the JDK's | jdk26u's `Calendar`, `GregorianCalendar`, `TimeZone` and `SimpleTimeZone` are 9,600 lines and need `sun.util.calendar` (12 files, 4,700 lines), the time zone database (`ZoneInfoFile` reads `tzdb.dat`) and the locale providers (`CalendarDataUtility` for the first day of the week): too much for fixed-offset zones. jrt's are 2,300 lines |
 
 **jrt's calendar** (`Calendar.java`, `GregorianCalendar.java`, `TimeZone.java`, `ZoneInfo.java`):
@@ -1619,12 +1619,12 @@ hand-written `Date`; the other classes join the world around it.
   `getTimeZone`), except those that need `DateFormatSymbols` (month and day names, AM/PM:
   `%tB`, `%tA`, `%tp`, `%tc` ...), which is outside the world.
 
-**The `arbace.instant` variant** (`arbace/lang/go/ns/instant.clj`): `read-instant-calendar`,
+**The `arbace.instant` variant** (`arbace/lang/go/ns/instant.ae`): `read-instant-calendar`,
 `read-instant-timestamp`, `construct-calendar` and `construct-timestamp`, and the `Calendar`
-printer are `arbace/instant.clj`'s again (the printer through `String.format`'s `%t`); the
+printer are `arbace/instant.ae`'s again (the printer through `String.format`'s `%t`); the
 `Timestamp` printer writes the date with the variant's `Date` arithmetic and the nanoseconds
-(`arbace/instant.clj` uses `SimpleDateFormat` in a proxy'd `ThreadLocal`). `read-instant-date`
-and the `Date` printer are unchanged. `arbace/c2g/embed.clj` no longer cuts `java.sql.Timestamp`
+(`arbace/instant.ae` uses `SimpleDateFormat` in a proxy'd `ThreadLocal`). `read-instant-date`
+and the `Date` printer are unchanged. `arbace/c2g/embed.ae` no longer cuts `java.sql.Timestamp`
 always: it is in the world, and core's `when-class` guard finds it.
 
 **Checks:**
@@ -1635,11 +1635,11 @@ always: it is in the world, and core's `when-class` guard finds it.
   and in BC years, times from fields, lenient overflow, `add` and `roll` of every field with
   random amounts, the actual maxima, week-based field resolution with random week parameters,
   `getWeekYear`, `%t` output, `ISO_INSTANT` against `Instant.toString`) are equal.
-- c2g's fixture `test/c2g/fixtures/FxDates.clj` (`bin/c2g-check fixtures`): the same ground in
+- c2g's fixture `test/c2g/fixtures/FxDates.ae` (`bin/c2g-check fixtures`): the same ground in
   the Go program, against the JVM's recording: 8 of 8 on amd64 and arm64.
 - `bin/jrt test` (amd64, arm64): a `Date` subclass in Go (`shims_test`: virtual `getTime`,
   clone of the whole object).
-- The oracle's `forms/inst.clj`: 190 of 231 before, **227 of 231** after, on amd64 and arm64
+- The oracle's `forms/inst.ae`: 190 of 231 before, **227 of 231** after, on amd64 and arm64
   (`qemu-aarch64`); the four left are not dates (two helpful `NullPointerException` messages,
   a `ClassCastException` message, `UUID/nameUUIDFromBytes`). The whole forms corpus on amd64:
   9,364 to 9,401 of 9,652, no regression.
@@ -1679,7 +1679,7 @@ The other causes of EVAL-NOTES.md's "Failure causes" that are jrt's, and the blo
 Clojure's test suite on the Go build (EVAL-NOTES.md, "Phase 2C") that are jrt's surface. Per
 item, what was done; the oracle and suite results are in EVAL-NOTES.md, "Phase 2B".
 
-### The closure, grown again (`test/g2c/jrt_sources.clj`, `added-sources`)
+### The closure, grown again (`test/g2c/jrt_sources.ae`, `added-sources`)
 
 `bin/jrt-convert` now translates 340 files (was 223), all converted and compiled to javac's
 shapes but four of known kinds (below):
@@ -1713,7 +1713,7 @@ over the array, `List.copyOf`); `GathererOp`, `Gatherers` (above); `UUID.nameUUI
 (MD5 from the host: Go's `crypto/md5`, a native `UUID.md5`; that variant is gone with "Security",
 SC4: jdk26u's `MessageDigest`).
 
-**`bin/jrt-convert`**: `J2C_PATCH_ALL` (j2c's `jdk` conversion, `arbace/j2c/main.clj`): each
+**`bin/jrt-convert`**: `J2C_PATCH_ALL` (j2c's `jdk` conversion, `arbace/j2c/main.ae`): each
 chunk of packages sees the other chunks' sources on its patch path, its own first. jrt's own
 Java in `jdk.internal.jrt` is used across packages (`java.io`), and with more files the chunks
 split them apart (javac: "package jdk.internal.jrt does not exist"). Opt-in, so
@@ -1725,7 +1725,7 @@ class passes the class's captured variables in capture order, javac in reverse
 
 ### jrt (hand-written)
 
-- **Charsets** (`charset.clj`, `codec.clj`): `UTF-16`, `UTF-16BE`, `UTF-16LE` (classes
+- **Charsets** (`charset.ae`, `codec.ae`): `UTF-16`, `UTF-16BE`, `UTF-16LE` (classes
   `sun.nio.cs.UTF_16`, `UTF_16BE`, `UTF_16LE`, extending `Unicode`; JDK 26's names and aliases),
   `StandardCharsets.UTF_16*`; coding as jdk26u's `sun.nio.cs.UnicodeDecoder`/`UnicodeEncoder`
   with `String`'s REPLACE (a byte-order mark read by `UTF-16` at the start, big-endian
@@ -1736,7 +1736,7 @@ class passes the class's captured variables in capture order, javac in reverse
   ISO-8859-1 and US-ASCII only and now refuse the others (`UnsupportedOperationException`)
   instead of decoding them as UTF-8. (V9: jrt has six charsets; amendment B6 of EVAL-NOTES.md,
   accepted and folded into C2G-SPEC §12 and V9 as S6.)
-- **`ForkJoinTask`, `ForkJoinPool`** (`forkjoin.clj`, rewritten; both now in the manifest, so
+- **`ForkJoinTask`, `ForkJoinPool`** (`forkjoin.ae`, rewritten; both now in the manifest, so
   in the REPL's tables): a pool of parallelism P runs a task given from outside (`invoke`,
   `execute`, `submit`) in a worker thread of its own, and a task forked in a worker in a new
   worker thread (a jrt thread: a goroutine with its `Thread`, which knows its pool:
@@ -1755,7 +1755,7 @@ class passes the class's captured variables in capture order, javac in reverse
   split as `lines()` splits them; tested against the JVM on 17 multi-line strings),
   `contentEquals(StringBuffer)`, `String(byte[], int)`, and the interfaces `Constable`,
   `ConstantDesc` (stand-ins, markers only, in jrt's own build). c2g writes the members that
-  name translated classes (`out.clj`, `support-forms`, as for `format`): `join(CharSequence,
+  name translated classes (`out.ae`, `support-forms`, as for `format`): `join(CharSequence,
   Iterable)`, `formatted`, `lines` (over an `ArrayList`'s stream: sequential, not jdk26u's lazy
   spliterator), `describeConstable`, and, for every hand-written leaf class implementing a
   translated interface, forwarders to the default methods it does not define (`chars`,
@@ -1780,10 +1780,10 @@ class passes the class's captured variables in capture order, javac in reverse
 - **c2g-written table entries** (`support-table-forms`): `Throwable.printStackTrace(PrintStream)`
   and `(PrintWriter)` (the trace's text printed), `System.getenv()` (the host's environment,
   unmodifiable).
-- `JavaLangAccess.getEnumConstantsShared` and `join` (`access.clj`; `EnumSet`, `StringJoiner`),
+- `JavaLangAccess.getEnumConstantsShared` and `join` (`access.ae`; `EnumSet`, `StringJoiner`),
   `Unsafe.weakCompareAndSetInt`.
 - `ClassLoader.getResourceAsStream` (c2g's entry) finds a resource in the directories of
-  `ARBACE_PATH` after the embedded ones (`host.clj`, `ResourceOrPath`), as `RT.load` does:
+  `ARBACE_PATH` after the embedded ones (`host.ae`, `ResourceOrPath`), as `RT.load` does:
   `repl/source-fn` of a namespace loaded from there.
 
 **Coverage of the hand-written classes' public members** (the JDK's, by reflection, against the
@@ -1798,7 +1798,7 @@ record components, type parameters, signers, `getResource*`, `toGenericString`).
 
 ### c2g and the class forms compiler (found on the way)
 
-- **Bridges with a source supertype** (`arbace/classes/analyze.clj`, `erased-params`): a
+- **Bridges with a source supertype** (`arbace/classes/analyze.ae`, `erased-params`): a
   supertype method's class type variables are substituted by the subclass's view, so they are
   bounded as the subclass bounds them. With `Map` from source (c2g's world), `Map.put(K, V)`'s
   own scope bounded `K` by `Object` over `EnumMap`'s `K extends Enum<K>`, and `EnumMap` got no
@@ -1806,7 +1806,7 @@ record components, type parameters, signers, `getResource*`, `toGenericString`).
   The class forms check compiles against the JDK's classes by reflection, which carry no such
   scope, so the bug did not show there. `bin/gate` passes (the stages are unchanged).
   (classes/SPEC.md §6, COMPILER-NOTES.md amendment 15; S8.)
-- **A bridge narrowing a generic return** casts (`decls.clj`, `derived-body`):
+- **A bridge narrowing a generic return** casts (`decls.ae`, `derived-body`):
   `Spliterators$EmptySpliterator$OfDouble.trySplit()` returns the `Spliterator` of its
   superclass's erased `T_SPLITR` as a `Spliterator.OfDouble`.
 - `java.util.stream.Tripwire` is `Stream_Tripwire` in Go (the rename table; `java.util.Tripwire`
@@ -1822,7 +1822,7 @@ the suite's `pprint` namespace did not load. Phase 2B had tried translating
 `AbstractQueuedSynchronizer` (EVAL-NOTES.md, "Phase 2B").
 
 **Why c2g left `AbstractQueuedSynchronizer$ConditionObject` untranslated.** jrt's
-`ReentrantLock_ConditionObject` (`locks.clj`) registers the JDK's name for a `ReentrantLock`'s
+`ReentrantLock_ConditionObject` (`locks.ae`) registers the JDK's name for a `ReentrantLock`'s
 conditions, `java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject`, so that
 `(class (.newCondition (ReentrantLock.)))` answers what the JVM answers. c2g's world therefore
 counted that class as jrt's (its scan of jrt's `ClassInfo` names) and did not translate it, but
@@ -1848,7 +1848,7 @@ condition methods would also take jrt's `ReentrantLock` condition, a different c
 same name. jrt's locks are hand-written for these reasons (JAVA-SURFACE.md decision 4, phase
 2a's "Decisions"), and `Semaphore` joins them, as `CountDownLatch` did:
 
-- `executor.clj`: `Semaphore` (leaf; `Serializable`) as the locks are: the permits (an `int`,
+- `executor.ae`: `Semaphore` (leaf; `Serializable`) as the locks are: the permits (an `int`,
   possibly negative, as Java's) under a `sync.Mutex`; a thread that must wait takes the gate,
   which every release opens, and tries again; `waiting` counts the waiters. `acquire(int)`,
   `acquireUninterruptibly` (an interrupt leaves the status set), `tryAcquire` (now, or timed and
@@ -1857,10 +1857,10 @@ same name. jrt's locks are hand-written for these reasons (JAVA-SURFACE.md decis
   overflow), `availablePermits`, `drainPermits` (also of negative permits, as Java's),
   `isFair`, `hasQueuedThreads`, `getQueueLength`, `toString` (`...[Permits = n]`); a negative
   count throws `IllegalArgumentException`. Fairness is not kept (a fair semaphore behaves as a
-  non-fair one), as for `ReentrantLock`. In the manifest (`test/jrt/manifest.clj`; `bin/jrt
+  non-fair one), as for `ReentrantLock`. In the manifest (`test/jrt/manifest.ae`; `bin/jrt
   manifest` counts 18 of 21 JDK members): every public member; not the protected
   `reducePermits` and `getQueuedThreads`.
-- Tests (`concurrent_test.clj`, `TestSemaphore`): the counts and messages, a negative start,
+- Tests (`concurrent_test.ae`, `TestSemaphore`): the counts and messages, a negative start,
   mutual exclusion of 8 threads over one permit (a plain counter, clean under `--race`), an
   interrupted `acquire`, an `acquireUninterruptibly` that keeps the interrupt. `bin/jrt test`
   passes on amd64 (and `--race`) and arm64.
@@ -1918,8 +1918,8 @@ as grown".
   `HostNet.exception` makes the JVM's exception of it: `BindException`, `ConnectException`,
   `NoRouteToHostException`, `SocketTimeoutException`, `UnknownHostException`, `Socket closed`,
   `Connection reset`, else `SocketException`.
-- **`go/arbace/jrt/net.clj`**: the natives and **`NetHost`**, the network as a host gives it: an
-  interface of its own, beside `Host` (`host.clj` is unchanged), that a `Host` may implement
+- **`go/arbace/jrt/net.ae`**: the natives and **`NetHost`**, the network as a host gives it: an
+  interface of its own, beside `Host` (`host.ae` is unchanged), that a `Host` may implement
   (jrt asks `CurrentHost()` at each use); a host without it has no network and every native
   fails (`Network not available`), which is what B1b's box has until its monitor gives one.
   `OSHost` implements it over Go's `net` (the pure Go resolver: `/etc/hosts`, then DNS) and
@@ -1929,7 +1929,7 @@ as grown".
   thread closes the socket (Go's `net.ErrClosed`), with the JVM's `Socket closed`.
 - **The JVM's texts.** An `errno`'s text is the C library's `strerror`, and this machine's JVM
   is built on musl: `Address in use`, `Connection refused`, `Connection reset by peer`,
-  `Broken pipe`, `Host is unreachable` ... (net.clj's table; glibc's JVMs say `Address already in
+  `Broken pipe`, `Host is unreachable` ... (net.ae's table; glibc's JVMs say `Address already in
   use`). An unknown host is `host: Name does not resolve` (musl's `gai_strerror`).
 
 **Variants** (`overlay/jdk/variants/`):
@@ -1944,7 +1944,7 @@ as grown".
 | `Inet4AddressImpl`, `Inet6AddressImpl` | the natives over `HostNet`; `isReachable` throws `UnsupportedOperationException`; the loopback address without asking `NetworkInterface` whether it is bound |
 | `jdk.internal.util.Exceptions` | `jdk.includeInExceptions` from the system property, defaulting to JDK 26's `java.security` value `hostInfoExclSocket` (security properties are not in the Go build); merged with go-file's variant of the same class, which took the default alone |
 | `IPAddressUtil` | `parseBsdLiteralV4` walks the text by an index instead of a `java.nio.CharBuffer` (outside the world): IPv4 literal checks, `ofPosixLiteral` |
-| `URLStreamHandler` (go-file's `URL.clj`) | its `hashCode` and `hostsEqual` variants, which compared host names while `InetAddress` was outside the world, are removed: the JDK's code, resolving the host, as on the JVM |
+| `URLStreamHandler` (go-file's `URL.ae`) | its `hashCode` and `hostsEqual` variants, which compared host names while `InetAddress` was outside the world, are removed: the JDK's code, resolving the host, as on the JVM |
 
 `java.net.Proxy` stays outside the world, a cut class named `Net_Proxy` in Go (c2g's rename
 table: jrt's `java.lang.reflect.Proxy` is `Proxy`). `NetworkInterface`, `URL`, `Proxy`, the
@@ -1954,18 +1954,18 @@ SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
 
 - **`System.getProperties()`**: a `Properties` holding a copy of the properties (jrt keeps them in
   its own table, where `setProperty` writes; a change to the copy does not reach
-  `System.getProperty`). c2g writes it (`C2g_SystemGetProperties`, out.clj) and its member
+  `System.getProperty`). c2g writes it (`C2g_SystemGetProperties`, out.ae) and its member
   table entry when `Properties` is translated; `Properties` came with `Hashtable` and
   `Dictionary` (its superclasses, added).
 - **The servers' start.** The JVM's `RT.doInit` requires `arbace.core.server` and calls
   `start-servers` with `System.getProperties()`; so does the Go build's
-  (`arbace/lang/go/RT.clj`), through the reflection tables for `getProperties`. With step 6's
+  (`arbace/lang/go/RT.ae`), through the reflection tables for `getProperties`. With step 6's
   image of prepared namespaces the load costs about 20 ms (0.36 s against 0.38 s for `-e` with
   and without a `require` of it; from the sources it took 0.5 s of 4.7 s, and a first version
   loaded it only when a server was asked for).
 - **Where the properties come from.** The Go executable has no `java` launcher to take `-D`
   options. jrt reads **`JAVA_TOOL_OPTIONS`**, as the JVM does at its start: its `-Dname=value`
-  options become system properties (`tooloptions.clj`, split as HotSpot's
+  options become system properties (`tooloptions.ae`, split as HotSpot's
   `Arguments::parse_options_buffer` splits: white space outside quotes, `'` and `"` grouping,
   quotes removed; other options ignored). So one setting starts a server on both builds:
 
@@ -1977,9 +1977,9 @@ SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
 
 ## `arbace.core.server`
 
-Embedded in the executable (embed.clj no longer leaves it out), with one namespace variant,
-`arbace/lang/go/ns/core/server.subst.clj`: `prepl` sets no `DynamicClassLoader` as the thread's
-context loader (one loader in the Go build, as the REPL's `main.subst.clj`). Nothing else
+Embedded in the executable (embed.ae no longer leaves it out), with one namespace variant,
+`arbace/lang/go/ns/core/server.subst.ae`: `prepl` sets no `DynamicClassLoader` as the thread's
+context loader (one loader in the Go build, as the REPL's `main.subst.ae`). Nothing else
 changes: `start-server`, `stop-server`, `stop-servers`, `repl`, `prepl`, `io-prepl`,
 `remote-prepl`, `parse-props` and `start-servers` are the JVM's code.
 
@@ -1987,9 +1987,9 @@ changes: `start-server`, `stop-server`, `stop-servers`, `repl`, `prepl`, `io-pre
 
 | what | result |
 |---|---|
-| `bin/jrt test` (`net_test.clj`: `TestSockets`, `TestSocketErrors`, `TestSocketOptions`, `TestLookup`, `TestNoNetwork`, `TestToolOptions`) | all pass: amd64 (with the rest of jrt's tests) and arm64 under `qemu-aarch64` |
-| `bin/net-check` (new; `test/net/client.clj`, a client on the JVM Arbace): a socket REPL session (forms, output, `*err*`, errors, a reader error, namespaces, `*session*`) and an `io-prepl` session, each against a JVM server and a Go server started from `JAVA_TOOL_OPTIONS`; 8 concurrent sessions; `remote-prepl` run by the Go executable against the JVM's `io-prepl`; `start-server`/`stop-server` at the Go REPL | 5 of 5 on amd64, 5 of 5 on arm64 under `qemu-aarch64`: the transcripts equal the JVM's (the evaluated fns' class names `user/evalN` aside), prepl's messages equal (`:ms` and frames aside) |
-| the oracle's new forms file `test/oracle/forms/net.clj` (83 cases: literals, bytes, printing, equality, kinds, socket addresses, a loopback connection and its exceptions; recorded twice, identical) | 83 of 83 on amd64 (and go-file's `files.clj`, 324 of 324, after the merge) |
+| `bin/jrt test` (`net_test.ae`: `TestSockets`, `TestSocketErrors`, `TestSocketOptions`, `TestLookup`, `TestNoNetwork`, `TestToolOptions`) | all pass: amd64 (with the rest of jrt's tests) and arm64 under `qemu-aarch64` |
+| `bin/net-check` (new; `test/net/client.ae`, a client on the JVM Arbace): a socket REPL session (forms, output, `*err*`, errors, a reader error, namespaces, `*session*`) and an `io-prepl` session, each against a JVM server and a Go server started from `JAVA_TOOL_OPTIONS`; 8 concurrent sessions; `remote-prepl` run by the Go executable against the JVM's `io-prepl`; `start-server`/`stop-server` at the Go REPL | 5 of 5 on amd64, 5 of 5 on arm64 under `qemu-aarch64`: the transcripts equal the JVM's (the evaluated fns' class names `user/evalN` aside), prepl's messages equal (`:ms` and frames aside) |
+| the oracle's new forms file `test/oracle/forms/net.ae` (83 cases: literals, bytes, printing, equality, kinds, socket addresses, a loopback connection and its exceptions; recorded twice, identical) | 83 of 83 on amd64 (and go-file's `files.ae`, 324 of 324, after the merge) |
 | Clojure's suite on Go: `clojure.test-clojure.server`, `clojure.test-clojure.java.io` | `server` 2 tests, 13 of 13 assertions, as on the JVM; `java.io` loads now (it imports `Socket` and `ServerSocket`): 15 tests, 109 of 113, its socket test passing, the 4 errors `URLClassLoader` and the class loader's `getResource` ("Files"). The full suite on Go, under the lock, after merging main (suite-last): 66 namespaces, all load, 681 tests, 19,632 assertions, 19,628 pass, 0 fail, 4 errors (java.io's), test.generative 26 of 26, no regression against `test/arbace-go-results.edn` (updated) |
 
 Known differences: the buffer sizes the kernel reports (`getReceiveBufferSize`,
@@ -2003,7 +2003,7 @@ Measured against main at `b20b577` (go-file merged), both built by `bin/arbace-g
 the image of prepared namespaces: amd64 66,931,956 to 68,856,988 bytes (+1.93 MB, +2.9%), arm64
 64,071,080 to 65,932,776 (+1.86 MB); the image 3,834,917 to 3,893,244 bytes (+58 KB:
 `arbace.core.server`). The translated java.net classes, `HostNet`, `HostSocketImpl` and jrt's
-`net.clj` are about 176 KB of symbols (`go tool nm -size`), the rest their type and member
+`net.ae` are about 176 KB of symbols (`go tool nm -size`), the rest their type and member
 tables. Start (`-e nil`, amd64, 5 runs): 0.38-0.41 s against 0.34-0.44 s.
 
 ## Amendments (accepted by the user 2026-10-10)
@@ -2027,7 +2027,7 @@ tables. Start (`-e nil`, amd64, 5 runs): 0.38-0.41 s against 0.34-0.44 s.
   *Accepted 2026-10-10: C2G-SPEC §9.4.*
 
 With them the sockets in the closed world and `NetHost` are in C2G-SPEC §4.1, §9.1 and §9.4, D6's
-reversal for sockets in B1-PLAN.md, and the oracle's `net.clj` in ORACLE.md.
+reversal for sockets in B1-PLAN.md, and the oracle's `net.ae` in ORACLE.md.
 
 # Files: java.io.File and the file system in the Go build
 
@@ -2043,9 +2043,9 @@ system, `arbace.java.io` on files and `file:` URLs, `slurp`/`spit` on paths, `lo
 (`src/java.base/unix/classes/java/io`, KIND `unix`, amendment FS1) are translated as they are.
 UnixFileSystem's 15 natives read the `File`'s path field through JNI, which a jrt native cannot
 (jrt builds without the translated classes, C2G-SPEC §9.1): the variant
-`overlay/jdk/variants/UnixFileSystem.clj` replaces each by a method passing the path string to a
+`overlay/jdk/variants/UnixFileSystem.ae` replaces each by a method passing the path string to a
 static native added to the class (`hostCanonicalize`, `hostBooleanAttributes` ...), and those
-natives are jrt's Go (`filesystem.clj`), with the results of jdk26u's C
+natives are jrt's Go (`filesystem.ae`), with the results of jdk26u's C
 (`UnixFileSystem_md.c`: stat-based attributes, `access(2)`, `chmod`, `utimes` keeping the access
 time, `O_CREAT|O_EXCL` creation, `remove`, `mkdir 0777`, `rename`, `statvfs`, `pathconf`;
 `canonicalize_md.c`'s `JDK_Canonicalize` and `path_util.c`'s `collapse`, transcribed: LICENSE.md).
@@ -2056,11 +2056,11 @@ draws its names from `java.util.Random` (`SecureRandom` is outside the world; th
 `O_EXCL`, so the names need not be unpredictable); `File.toPath` makes jrt's `HostPath`;
 `DeleteOnExitHook` registers with `Runtime.addShutdownHook`.
 
-**The host: an optional `HostFS`** (`hostfs.clj`). `Host` (host.clj) is unchanged: what `File`
+**The host: an optional `HostFS`** (`hostfs.ae`). `Host` (host.ae) is unchanged: what `File`
 needs beyond its `Open`, `Stat`, `ReadDir`, `Remove`, `Mkdir`, `Rename` is a second interface,
 `HostFS` (`Access`, `Chmod`, `Chtimes`, `Realpath`, `Statfs`), which a host implements when it
 can; `CurrentHostFS()` is the current host as one, or nil. B1a's `OSHost` implements it on Linux
-(`hostfs_linux.clj`, `//go:build linux`: `syscall.Access`, `syscall.Chmod`, `os.Chtimes` with a
+(`hostfs_linux.ae`, `//go:build linux`: `syscall.Access`, `syscall.Chmod`, `os.Chtimes` with a
 zero access time, `filepath.EvalSymlinks`, `syscall.Statfs`). Without it (B1b's host until it has
 one) the natives answer as the JDK does when the system call fails (no permission changes or
 times, canonical paths only collapsed, no space). Kept in files of their own, apart from the
@@ -2108,10 +2108,10 @@ the image); `Exceptions.setup` with the JDK's default `jdk.includeInExceptions`
 gains `Www_URLConnection`, `File_Handler`, `Http_Handler`, `Https_Handler`, `Jar_Handler` and
 `Net_Proxy` (jrt's `Proxy` is `java.lang.reflect`'s).
 
-**The namespaces.** `arbace/lang/go/ns/java/io.subst.clj`: `copy` between two files through
+**The namespaces.** `arbace/lang/go/ns/java/io.subst.ae`: `copy` between two files through
 their streams (Clojure's goes through their channels, outside the world), and the escape of `+`
 written out (`"%2B"`; Clojure computes it with `URLEncoder`, whose encoders are outside the
-world). `main.subst.clj` no longer replaces the error report's `Files/createTempFile`: the
+world). `main.subst.ae` no longer replaces the error report's `Files/createTempFile`: the
 report goes to a temporary file as on the JVM. `Compiler.loadFile`'s Go-build variant is gone:
 `load-file` is the JVM's, with `File`'s absolute path and name.
 
@@ -2151,8 +2151,8 @@ sockets ("Sockets (go-net)"), `URLClassLoader` ("Resources by URL"), `Files.newD
 |---|---|
 | `bin/jrt-convert` | 389 files (340 before), all compiled to javac's class shapes |
 | `bin/c2g --program` | 2,021 classes (1,961 with `File` alone), no errors |
-| `bin/jrt test -run 'TestCollapsePath\|TestFileSystemNatives'` (`filesystem_test.clj`: the natives on a temporary directory, `collapse`) | pass on amd64 and on arm64 under `qemu-aarch64` |
-| the oracle's new `forms/files.clj`, 324 cases | the JVM 324 of 324; Go 323 of 324 (the hash of a `localhost` URL, in `known-go-amd64.edn`) |
+| `bin/jrt test -run 'TestCollapsePath\|TestFileSystemNatives'` (`filesystem_test.ae`: the natives on a temporary directory, `collapse`) | pass on amd64 and on arm64 under `qemu-aarch64` |
+| the oracle's new `forms/files.ae`, 324 cases | the JVM 324 of 324; Go 323 of 324 (the hash of a `localhost` URL, in `known-go-amd64.edn`) |
 | `bin/oracle check jvm` | 20,587 of 20,587 |
 | `bin/oracle check 'target/arbace-go/amd64/arbace -' --expected test/oracle/known-go-amd64.edn` | 20,553 of 20,587; the mismatches exactly the 34 known |
 | Clojure's suite on Go (amd64) | 19,398 assertions, 19,375 pass, 19 fail, 4 errors (was 19,280, 19,251, 19, 10): `method-thunks` (20 of 20), `reader` (7,796 of 7,796, `load-file` of temporary files) and `sequences` (1,148 of 1,148) now pass as on the JVM; `java.io` still fails to load on `java.net.ServerSocket` (the sockets branch); without its socket test and imports, 14 tests and 107 of 111 assertions pass, the 4 errors `URLClassLoader` and the class loader's `getResource` |
@@ -2185,12 +2185,12 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
   description in "`System`, `Runtime` and the host" above holds as amended).*
 - **FS6 (C2G-SPEC §4.1 and §10.3, the world and the namespace variants) `java.io.File`,
   `java.net.URL` with the `file:` connection, and the `java.nio.file` subset in the closed
-  world**, with the variants listed above; `java/io.subst.clj` (copy between files by streams,
-  `"%2B"`) and `main.subst.clj` (the error report's temporary file as on the JVM) changed, and
+  world**, with the variants listed above; `java/io.subst.ae` (copy between files by streams,
+  `"%2B"`) and `main.subst.ae` (the error report's temporary file as on the JVM) changed, and
   `Compiler.loadFile`'s variant removed. *Accepted 2026-10-10, folded into C2G-SPEC §4.1 and
   §10.3.*
 - **FS7 (LICENSE.md) Transcribed code**: `HostPath.java` (UnixPath's path operations) and
-  `filesystem.clj` (`JDK_Canonicalize`, `collapse`) hold jdk26u code under the GPL version 2 with
+  `filesystem.ae` (`JDK_Canonicalize`, `collapse`) hold jdk26u code under the GPL version 2 with
   the Classpath Exception, recorded by the rule of B7; the alternative is rewriting those parts
   from the documented behaviour. *Accepted 2026-10-10 (kept, as LICENSE.md records it).* (Since
   2026-10-11 LICENSE.md also records, by the same rule, `Path.java`'s default methods and
@@ -2244,7 +2244,7 @@ natives over Go's `compress/flate` (its streaming protocol, `inflateBytesBytes` 
 input, does not map onto Go's pull reader). Chosen: **jrt's own `InflaterInputStream`**
 (`overlay/jdk/java.base/java/util/zip/InflaterInputStream.java`, the `InputStream` constructor
 only, as `FileInputStream`'s overlay is jrt's), which reads its input whole at the first read and
-inflates it with a native over Go's `compress/zlib` (`natives.clj`,
+inflates it with a native over Go's `compress/zlib` (`natives.ae`,
 `InflaterInputStream_Inflate0_B1_String1__B1_native`); a truncated stream throws
 `EOFException("Unexpected end of ZLIB input stream")`, bad data `ZipException` (jdk26u's
 `ZipException.java`, added). So `CharacterName` and `Character.getName`/`codePointOf` are
@@ -2289,7 +2289,7 @@ public member (P2), which led to amendment RD2.
 
 ## Found on the way
 
-- **A missing class initialization** (c2g, `decls.clj`, `touches-statics?`): a static method of
+- **A missing class initialization** (c2g, `decls.ae`, `touches-statics?`): a static method of
   a class with benign initialization goes without an entry guard when its body reads none of
   the class's statics (W3); the walk looking for static reads skipped maps that are not nodes,
   and a `switch`'s arms are such maps (`{:labels :body}`). `NormalizerBase.toMode` returns the
@@ -2363,7 +2363,7 @@ code and most of the reflection tables' growth.
   translated sources; LICENSE.md records what the executables carry (ICU4J's and the Unicode
   Character Database's Unicode License V3, as jdk26u's `legal/icu.md` and `unicode.md`).
 - The regex check program (`bin/c2g-regex`, which embeds nothing) finds the data through
-  `ARBACE_PATH`, set to `.tmp/jrt/data` by `test/c2g/regex_check.clj`.
+  `ARBACE_PATH`, set to `.tmp/jrt/data` by `test/c2g/regex_check.ae`.
 
 ## Amendments (accepted by the user 2026-10-10)
 
@@ -2425,7 +2425,7 @@ blocked on `monMu` in `lookupMonitor`, from the `locking` in `Compiler$ObjExpr.g
 `monMu`. Step 7b made that `locking` hot from many threads at once; before it, the monitor never
 saw that much contention.
 
-**Cause** (`monitor.clj`). `monitorExit` frees an inflated monitor `m` (owner 0, no refs), drops
+**Cause** (`monitor.ae`). `monitorExit` frees an inflated monitor `m` (owner 0, no refs), drops
 `m.mu`, then calls `tryDeflate(o, m)`, which takes `monMu`. In between another thread could
 enter `m`, exit and deflate it itself, and `o` be locked again: thin by a third thread, or
 inflated anew, possibly at `m`'s recycled index. The late `tryDeflate` found `m` free (it was
@@ -2446,7 +2446,7 @@ reads through the new `monitorAt`), so a panic there can no longer wedge every m
 missing monitor in `lookupMonitor` is a Go string panic (a bug, which `Catch` re-panics), not a
 nil dereference a Java `catch` would swallow.
 
-**Tests** (`monitor_test.clj`): `TestMonitorStaleDeflate` replays the interleaving
+**Tests** (`monitor_test.ae`): `TestMonitorStaleDeflate` replays the interleaving
 deterministically (a late `tryDeflate` over a thin lock, then over a new monitor at the
 recycled index, and no index freed twice); `TestMonitorContention` has 24 goroutines contend
 for 3 monitors with yields, so that inflation and deflation churn. On the old code the first
@@ -2520,7 +2520,7 @@ java.util reaches. A member entry of the rename table (§4.4's cure) was not nee
 **The default zone and the clock come from the host.** `TimeZone.getDefault()` is jdk26u's
 `setDefaultZone`: `user.timezone` (settable with `JAVA_TOOL_OPTIONS=-Duser.timezone=...`, as on
 the JVM), else the natives `getSystemTimeZoneID` and `getSystemGMTOffsetID`, jrt's
-(`timezone.clj`), which follow jdk26u's `TimeZone_md.c` on Linux: `TZ` (without a leading `:` or
+(`timezone.ae`), which follow jdk26u's `TimeZone_md.c` on Linux: `TZ` (without a leading `:` or
 `posix/`), else `/etc/localtime`'s symbolic link target after `zoneinfo/`, else the file of
 `/usr/share/zoneinfo` with the same contents (`UTC` and `GMT` first, then the directory in
 sorted order where the C code takes `readdir`'s, skipping hidden names, `ROC`, `posixrules`,
@@ -2564,7 +2564,7 @@ data, the root locale's and English's; the JDK's others are `jdk.localedata`'s.
 
 The providers are jrt's own Java (`overlay/jdk/java.base/sun/util/locale/provider/`), in place
 of jrt's hand-written Go `LocaleProviderAdapter`, `LocaleResources` and
-`ResourceBundleBasedAdapter` (which Formatter's number patterns used; gone from `locale.clj`
+`ResourceBundleBasedAdapter` (which Formatter's number patterns used; gone from `locale.ae`
 and the manifest): `LocaleProviderAdapter` (one adapter, of type CLDR, every provider class and
 locale), `LocaleResources` (a locale's bundles: `FormatData_en` then `FormatData` for the
 English language, `FormatData` alone for the others; their lookups transcribed from jdk26u's),
@@ -2608,7 +2608,7 @@ The week parameters are by region for every locale, as the JDK's.
   public member of every class the REPL can name (RD2 leaves out `sun.*` and `jdk.internal.*`),
   as direct entries: a REPL call of `TimeZone.observesDaylightTime` on a `ZoneInfo` found
   `ZoneInfo`'s override a stub ("c2g: not translated"), nothing in Java having called it
-  virtually. A root instance method is now also a virtual call (`arbace/c2g/reach.clj`), so its
+  virtually. A root instance method is now also a virtual call (`arbace/c2g/reach.ae`), so its
   overrides in every instantiated class are translated: on main's world 19 methods more
   (19,574 to 19,593).
 - **Reachability indexed.** With about 20,000 roots as virtual calls the reachability pass,
@@ -2633,16 +2633,16 @@ The week parameters are by region for every locale, as the JDK's.
   are serialization's (`writeExternal`, `writeReplace`, `readObject`), `DateTimeFormatter.toFormat`
   (`java.text.Format`), `CalendarSystem.forName("japanese")`, and `DateTimeTextProvider`'s
   comparisons with `JapaneseChronology.INSTANCE`, which only a non-ISO chronology reaches.
-- **The oracle**: the new forms `test/oracle/forms/time.clj` (273: local and zoned types, instants,
+- **The oracle**: the new forms `test/oracle/forms/time.ae` (273: local and zoned types, instants,
   durations, periods, zones and rules across DST, gaps and overlaps, offsets in 1890, 1950,
   2025 and 2040, formatters ISO, pattern letters, localized styles and skeletons, parsing with
   resolver styles and zone names, temporal fields, the ISO chronology, `TimeZone`, `Calendar`,
-  `Date`, `Timestamp`, `TimeUnit`, `%t`) and `time_zones.clj` (57: every zone's 4 or 6 names in
+  `Date`, `Timestamp`, `TimeUnit`, `%t`) and `time_zones.ae` (57: every zone's 4 or 6 names in
   the US English and root locales, 632 zones), recorded on the JVM: **327 of 330** on Go, the 3
   others the locale deviation (TM4: `Locale.FRANCE` and `UK`), added to
   `test/oracle/known-go-amd64.edn`. The whole oracle on Go: 21,265 of 21,518 cases; the 253
-  mismatches are the 11 known ones (8 before, these 3) and 242 cases of `defclass.clj` and
-  `defclass_corpus.clj` that fail on main too (go-juc's build at main `70e6701` fails them
+  mismatches are the 11 known ones (8 before, these 3) and 242 cases of `defclass.ae` and
+  `defclass_corpus.ae` that fail on main too (go-juc's build at main `70e6701` fails them
   alike: "proxy of arbace.asm.ClassVisitor is not in the Go build" loading
   `arbace.classes.native`; cf-repl's build passes them), not this branch's. Four forms printed
   a `Parsed` (`{InstantSeconds=..., OffsetSeconds=0}`): its fields are a `HashMap` keyed by
@@ -2788,7 +2788,7 @@ latches, semaphores, locks and four atomics.
 
 ## What was done
 
-**c2g compiles `VarHandle`s statically** (C2G-SPEC §8.5, amendment JC1; `arbace/c2g/vh.clj`).
+**c2g compiles `VarHandle`s statically** (C2G-SPEC §8.5, amendment JC1; `arbace/c2g/vh.ae`).
 JDK 26's concurrent classes make their handles once, in static initializers, into `static final`
 fields (`MethodHandles.lookup().findVarHandle(C.class, "f", T.class)`,
 `MhUtil.findVarHandle`, `MethodHandles.arrayElementVarHandle(T[].class)`), and only call access
@@ -2798,13 +2798,13 @@ world), and translates each access-mode call on a constant handle into the atomi
 the field or array element; the fields a handle names get the volatile representation (§8.2)
 whether Java declares them volatile or not, so plain accesses to them are atomic too
 (`ConcurrentSkipListMap`'s `Node.next` and `val` are plain fields written by handles). The
-operations c2g cannot write as the atomic types' own methods are jrt's (`varhandle.clj`:
+operations c2g cannot write as the atomic types' own methods are jrt's (`varhandle.ae`:
 `VhCmpXchg*`, `VhGetAndAdd*`, `VhGetAndXor*`, the boolean bitwise modes, and the `int[]`,
 `long[]` and reference array elements, the last under `Unsafe`'s striped locks). The generated
 code is what one would write by hand: `NEXT.compareAndSet(p, null, newNode)` is
 `(.CompareAndSwap (.-F_next p) nil newNode)` on an `atomic.Pointer[ConcurrentLinkedQueue_Node]`.
 
-**Translated from jdk26u** (JRT-SOURCES.md, `concurrent-sources` in `test/g2c/jrt_sources.clj`):
+**Translated from jdk26u** (JRT-SOURCES.md, `concurrent-sources` in `test/g2c/jrt_sources.ae`):
 `ConcurrentLinkedQueue`, `ConcurrentLinkedDeque`, `ConcurrentSkipListMap`,
 `ConcurrentSkipListSet`, `CopyOnWriteArrayList`, `CopyOnWriteArraySet`, `LinkedBlockingDeque`,
 `PriorityBlockingQueue`, `DelayQueue`, `SynchronousQueue`, `LinkedTransferQueue`, `Exchanger`,
@@ -2826,7 +2826,7 @@ code is what one would write by hand: `NEXT.compareAndSet(p, null, newNode)` is
 `shutdownNow`, `invokeAll`, `invokeAny`, the pool's sizes and counters, rejection policies and
 scheduled tasks behave as on the JVM, and Arbace's agents run on the JDK's pools.
 `ExecutorService` is translated too, all its methods with it: jrt keeps a stand-in of it
-(`standin_executor.clj`) for its own build, and its `ForkJoinPool` implements the translated
+(`standin_executor.ae`) for its own build, and its `ForkJoinPool` implements the translated
 interface, the methods jrt cannot name (`shutdownNow`, `invokeAll`, `invokeAny`: their types are
 `List` and `Collection`) given by c2g as Go methods calling jrt's own Java
 `jdk.internal.jrt.ForkJoinPools` (`c2g_support`, `out/fjp-support-forms`). jrt keeps the other
@@ -2932,7 +2932,7 @@ On the branch `go-juc` after merging main (2026-10-10), amd64:
 | `bin/c2g --program` | 2,479 classes, 21,973 methods reached; 45 constant `VarHandle`s on 40 fields |
 | `bin/c2g-check -- --program` (amd64) | 9,022 of 9,022 steps; the new fixture `FxVarHandles` (every access mode on fields and array elements, fences, the arrays' exceptions, contention) 12 of 12 |
 | `bin/jrt test` (amd64, `--race`, arm64 under `qemu-aarch64`) | pass; new: `TestVarHandles`, `TestForkJoinExecutorService`, `TestLockSupportBlocker` |
-| the oracle's new `forms/concurrency.clj`, 247 cases | the JVM 247 of 247 (recorded twice, identical); Go 247 of 247 |
+| the oracle's new `forms/concurrency.ae`, 247 cases | the JVM 247 of 247 (recorded twice, identical); Go 247 of 247 |
 | `bin/oracle check ... --expected test/oracle/known-go-amd64.edn` | 21,430 of 21,435; the 3 `nextProbablePrime` cases now pass (`ThreadLocalRandom`) and leave the reference, the 5 others as known |
 | Clojure's suite on Go | 19,628 of 19,632 assertions, 0 failures, 4 errors, as main; test.generative 26 specs, 0 failures; no regressions |
 | `bin/arbace-go --smoke` | pass, with the three new checks of main's end |
@@ -2959,11 +2959,11 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
 - **JC1 (C2G-SPEC §8.5, new) VarHandles compiled statically**: constant handles read from
   static initializers, access modes as atomic operations on the field or element, fields named
   by a handle volatile in Go, fences, `MethodHandles.lookup()` a `nil`; `arbace.c2g.vh`, jrt's
-  `varhandle.clj`. *Accepted 2026-10-10, folded into C2G-SPEC §8.5.*
+  `varhandle.ae`. *Accepted 2026-10-10, folded into C2G-SPEC §8.5.*
 - **JC2 (C2G-SPEC §7.8) A `switch` over an enum outside the closed world** switches on an
   operation-level stub (above). *Accepted 2026-10-10, folded into C2G-SPEC §7.8.*
 - **JC3 (JRT-SOURCES.md, the closure) The concurrent classes**: `concurrent-sources` in
-  `test/g2c/jrt_sources.clj` (the list above, with `PriorityQueue`, `SortedSet` and
+  `test/g2c/jrt_sources.ae` (the list above, with `PriorityQueue`, `SortedSet` and
   `RandomSupport`), jrt's own Java `ThreadPerTaskExecutor`, `Delays`, `ForkJoinPools`,
   `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer`, and the variants above. *Accepted 2026-10-10, folded into JRT-SOURCES.md ("The closure as grown").*
 - **JC4 (C2G-SPEC §8.4, §9.2) `ThreadLocalRandom` translated**: jrt's `Thread` has the JDK's
@@ -2992,7 +2992,7 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
   ticker pending for the program's life, so a program whose threads all wait forever waits, as
   on the JVM; `bin/arbace-go --smoke` checks main's end (a non-daemon thread outliving main,
   agents without and with `shutdown-agents`). *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (`RunMain`).*
-- **JC10 (`bin/arbace-go`) The gate's key** includes `test/g2c/jrt_sources.clj`, which says
+- **JC10 (`bin/arbace-go`) The gate's key** includes `test/g2c/jrt_sources.ae`, which says
   what the executable is built from (it changes the conversion, but the key did not see it). *Accepted 2026-10-10, it stays here, `bin/arbace-go` holds it.*
 
 # Size: trimming the executable
@@ -3045,7 +3045,7 @@ per promoted method (23,400, 0.6 MB).
 **SZ3: member tables as data.** c2g wrote each class's public members as a `MethodInfo`,
 `CtorInfo` and `FieldInfo` literal with a closure, built by the class's `init` at the program's
 start: 22,600 closures and 5 MB of initialization code. Now each class has a `MemberTable`
-(`jrt/members.clj`): its members as lines of text ("M1 getHours ()I", the descriptors with
+(`jrt/members.ae`): its members as lines of text ("M1 getHours ()I", the descriptors with
 binary names), and per kind one dispatch function, a switch over the member's index
 (`C_invoke`, `C_new`, `C_get`, `C_set`); jrt decodes the table into the `ClassInfo`'s `Methods`,
 `Ctors` and `Fields` the first time reflection reads them (`EnsureMembers`, once), resolving the
@@ -3089,8 +3089,8 @@ slightly lower (158 MB, 162 before), the member tables no longer built at the st
 - **CLDR's bundles as code** (`FormatData`, `TimeZoneNames`, `ZoneName`: 1.0 MB of code): arrays
   of string literals compile to one store per element; a c2g helper building such arrays from
   one string would save perhaps half, at the cost of a special case in c2g. Not done.
-- **jrt's hand-written classes' tables** (`reflect_tables.clj`, 0.4 MB): could use the
-  `MemberTable` too (`test/jrt/tables.clj`); small.
+- **jrt's hand-written classes' tables** (`reflect_tables.ae`, 0.4 MB): could use the
+  `MemberTable` too (`test/jrt/tables.ae`); small.
 
 ## Amendments (SZ): accepted by the user 2026-10-10, folded into C2G-SPEC §16 ("Size")
 
@@ -3135,8 +3135,8 @@ exited`, `toString`), the pipe streams that drain what a child left when it ends
 `ProcessImpl.forkAndExec` (the JDK's `posix_spawn` of `jspawnhelper`), `ProcessHandleImpl`'s
 nine natives and `ProcessEnvironment.environ`.
 
-- **`go/arbace/jrt/hostproc.clj`: `HostProc`**, the processes as a host gives them: an
-  interface of its own beside `Host` (`host.clj` is unchanged), as `HostFS`, `NetHost` and
+- **`go/arbace/jrt/hostproc.ae`: `HostProc`**, the processes as a host gives them: an
+  interface of its own beside `Host` (`host.ae` is unchanged), as `HostFS`, `NetHost` and
   `HostLinks` are: `Start` (a path, the arguments, the environment or nil, the directory, each
   standard stream a pipe, the program's own or an open file of the host, and error output to
   standard output), `Pid`, `ProcStat` (parent, CPU time, start), `ProcInfo` (command, arguments,
@@ -3144,7 +3144,7 @@ nine natives and `ProcessEnvironment.environ`.
   without it starts nothing: `ProcessBuilder.start` throws the JVM's IOException with ENOSYS
   (`Cannot run program "sh": Exec failed, error: 38 (Function not implemented) `), and
   `ProcessHandle` knows no process (B1b's box until its monitor gives processes).
-- **`hostproc_linux.clj`: B1a's `OSHost` as a `HostProc`.** `os.StartProcess` forks and execs
+- **`hostproc_linux.ae`: B1a's `OSHost` as a `HostProc`.** `os.StartProcess` forks and execs
   from the multi-threaded Go program the way Go does it (clone with `CLONE_VFORK`, the exec's
   errno reported through a close-on-exec pipe, a failed child reaped by Go); the pipes are
   `os.Pipe`'s, close-on-exec, so a child gets its three streams only. **A goroutine waits for
@@ -3161,7 +3161,7 @@ nine natives and `ProcessEnvironment.environ`.
   `procPipe`s: reads and writes fail with the C library's texts (`Broken pipe`), a read on an
   end another thread closed ends the stream, and `Available` is `FIONREAD`'s count, so that
   `processExited` drains a child's last output as on the JVM.
-- **`process.clj`: the natives**, generic over `HostProc`. `ProcessImpl`'s variant passes
+- **`process.ae`: the natives**, generic over `HostProc`. `ProcessImpl`'s variant passes
   `forkAndExec`'s arguments to `hostForkAndExec`, which looks for the program as this machine's
   JVM does: a name with a slash is executed as it is, else it is looked for on the search path
   (with the environment inherited, musl's `execvp`: `PATH`, else `/usr/local/bin:/bin:/usr/bin`;
@@ -3175,12 +3175,12 @@ nine natives and `ProcessEnvironment.environ`.
   directory) `, `Failed to access working directory, error: 20 (Not a directory) `. (These are the
   texts this machine's JVM prints, checked by the oracle; older JDKs printed `error=2, No such file
   or directory`.) The children are kept in a table by pid until `waitForProcessExit0` reaps them;
-  the pipes are entries of jrt's file table (`files.clj`), so the process streams are the JDK's
+  the pipes are entries of jrt's file table (`files.ae`), so the process streams are the JDK's
   `FileInputStream` and `FileOutputStream` subclasses over `FileDescriptor`s naming them.
   `ProcessEnvironment.environ` is the host's environment as name and value bytes.
-- **The OS stays in `_linux` files.** `hostproc.clj` and `process.clj` name no `syscall` or
-  `os`: errors carry Linux's error numbers as `int`s (`process.clj`'s constants), and only
-  `hostproc_linux.clj` (`//go:build linux`, as `hostfs_linux.clj`) and the test file use
+- **The OS stays in `_linux` files.** `hostproc.ae` and `process.ae` name no `syscall` or
+  `os`: errors carry Linux's error numbers as `int`s (`process.ae`'s constants), and only
+  `hostproc_linux.ae` (`//go:build linux`, as `hostfs_linux.ae`) and the test file use
   `os` and `syscall`, so jrt compiles for `GOOS=tamago` without processes (BOX-SURVEY.md).
 
 **Variants** (`overlay/jdk/variants/`):
@@ -3198,13 +3198,13 @@ initializer (`HostFiles.DescriptorAccess`, as the JDK's gives `SharedSecrets` it
 overloads (jdk26u's code, through `ProcessBuilder`'s public API: the package-private
 `environment(String[])` is a clear and puts); jrt's `Runtime` is hand-written Go, which cannot
 name the translated `ProcessBuilder`, so c2g gives `Runtime`'s member table the six `exec`
-methods, each a call of `RuntimeExec`'s (`out.clj`, rooted in `main.clj`), as it gives `System`
+methods, each a call of `RuntimeExec`'s (`out.ae`, rooted in `main.ae`), as it gives `System`
 its `getenv` and `getProperties`.
 
 **Found on the way (c2g).** A bound method reference to a private method of a non-leaf class
 (`Process.onExit`'s `this::waitForInternal`) called the method on the interface, where a private
 method is not: it now calls its `Impl_` with the receiver's struct and the receiver, as an
-invocation does (`code.clj`, `method-ref-val`).
+invocation does (`code.ae`, `method-ref-val`).
 
 **What is out.** `ProcessHandle.Info` of other users' processes has what `/proc` lets one read
 (as on the JVM); `ProcessHandle.allProcesses`, `children` and `descendants` scan `/proc` as the
@@ -3232,9 +3232,9 @@ meaning in the Go build. No `/bin/sh` fallback for ENOEXEC (this machine's JVM h
 |---|---|
 | `bin/jrt-convert` | 644 files (637 on main), all converted and compiled to javac's class shapes (640 identical, the 4 known differences), 1,880 classes |
 | `bin/c2g --program` | 2,753 classes analyzed, 2,693 reached, 24,898 methods; the build succeeds |
-| `bin/jrt test` (`process_test.clj`: `TestProcessStreams`, `TestProcessReapedUnwaited`, `TestProcessAvailable`, `TestProcessOptions`, `TestProcessErrors`, `TestProcessDestroy`, `TestProcessHandles`, `TestNoProcesses`) | all of jrt's tests pass on amd64 and on arm64 under `qemu-aarch64` |
+| `bin/jrt test` (`process_test.ae`: `TestProcessStreams`, `TestProcessReapedUnwaited`, `TestProcessAvailable`, `TestProcessOptions`, `TestProcessErrors`, `TestProcessDestroy`, `TestProcessHandles`, `TestNoProcesses`) | all of jrt's tests pass on amd64 and on arm64 under `qemu-aarch64` |
 | `bin/arbace-go --smoke` (amd64) | passes |
-| the oracle's new `forms/processes.clj` (129 cases: programs, streams, readers and writers, errors and their texts, the builder and `Redirect`, environment and directory, redirections to and from temporary files, error output to standard output, `DISCARD`, `inheritIO`, `startPipeline`, timed waits, `destroy` and `destroyForcibly` (143, 137), `onExit`, `close`, handles and info, `Runtime.exec`, `arbace.java.shell`, `arbace.java.process`; recorded twice on the JVM, identical) | 129 of 129 on Go |
+| the oracle's new `forms/processes.ae` (129 cases: programs, streams, readers and writers, errors and their texts, the builder and `Redirect`, environment and directory, redirections to and from temporary files, error output to standard output, `DISCARD`, `inheritIO`, `startPipeline`, timed waits, `destroy` and `destroyForcibly` (143, 137), `onExit`, `close`, handles and info, `Runtime.exec`, `arbace.java.shell`, `arbace.java.process`; recorded twice on the JVM, identical) | 129 of 129 on Go |
 | the whole oracle on Go (`--expected test/oracle/known-go-amd64.edn`) | 21,921 of 21,929; the 8 mismatches exactly the known ones |
 | Clojure's suite on Go | 68 namespaces, all load, 687 tests, 19,651 assertions, 19,647 pass, 4 errors (java.io's, expected); `java.process` 2 tests, 6 of 6, `java.shell` 4 tests, 13 of 13, as on the JVM; no regressions (one namespace, `compilation.examples`, was killed once by the kernel's OOM killer while other agents' runs shared the machine, and passed when run again) |
 
@@ -3258,7 +3258,7 @@ Numbered PR (processes). All seven were accepted on 2026-10-10 and folded into C
 - **PR1 (B1-PLAN.md D6; C2G-SPEC §4.1, the closed world; §10.3, the embedded namespaces)**
   D6 is reversed for processes: `Process`, `ProcessBuilder` (with `Redirect`), `ProcessHandle`,
   `ProcessHandleImpl`, `ProcessImpl` and `ProcessEnvironment` are translated from jdk26u with
-  the variants above, and `arbace.java.shell` and `arbace.java.process` are embedded (embed.clj
+  the variants above, and `arbace.java.shell` and `arbace.java.process` are embedded (embed.ae
   no longer leaves them out); Clojure's suite on Go runs `java.shell` and `java.process`. *Accepted 2026-10-10: C2G-SPEC §4.1, §10.3; B1-PLAN.md D6; JAVA-BASE.md.*
 - **PR2 (C2G-SPEC §9.4, the host interface)** An optional `HostProc` beside `Host` (`Start`,
   `Pid`, `ProcStat`, `ProcInfo`, `Pids`, `Kill`, children as `HostChild`), as `HostFS`,
@@ -3281,7 +3281,7 @@ Numbered PR (processes). All seven were accepted on 2026-10-10 and folded into C
   looks for it (musl's `execvp` with the environment inherited, `JDK_execvpe` with it given; no
   `/bin/sh` fallback), and the exit status is the JDK's encoding (0x80 plus the signal). *Accepted 2026-10-10: C2G-SPEC §9.4.*
 - **PR6 (LICENSE.md, B7)** The variants keep jdk26u's code of the methods they replace,
-  `RuntimeExec.java` transcribes `Runtime.exec`, and `process.clj` and `hostproc_linux.clj`
+  `RuntimeExec.java` transcribes `Runtime.exec`, and `process.ae` and `hostproc_linux.ae`
   follow `ProcessImpl_md.c`, `childproc.c`, `ProcessHandleImpl_unix.c` and
   `ProcessHandleImpl_linux.c`: recorded as jdk26u-derived (GPL 2 with the Classpath Exception),
   as the B7 files are. *Accepted 2026-10-10: LICENSE.md; C2G-SPEC §4.1.*
@@ -3300,22 +3300,22 @@ loader's `getResource(s)` and `URLClassLoader`, keeping the JVM's semantics wher
 own Java, translated) finds a resource as the Go build's class path has it, in `RT.load`'s and
 `ResourceOrPath`'s order: the resources embedded in the executable, then the directories of
 `ARBACE_PATH`. An embedded resource's URL is a `jar:` URL naming the executable,
-`jar:file:/path/to/arbace!/arbace/core.clj`, as the JVM's names a resource of `arbace.jar`
-(`jar:file:/path/to/arbace.jar!/arbace/core.clj`); its handler is `ClassPathResources`' own
+`jar:file:/path/to/arbace!/arbace/core.ae`, as the JVM's names a resource of `arbace.jar`
+(`jar:file:/path/to/arbace.jar!/arbace/core.ae`); its handler is `ClassPathResources`' own
 (a subclass of the `jar:` handler, for its syntax and comparisons), whose connection reads the
 embedded resource (`openStream`, `slurp`), since the JDK's `jar:` connection is outside the
 world. A file of an `ARBACE_PATH` directory has its `file:` URL as the JVM's class path
 directories give it (`URLClassPath.FileLoader`: the directory's URL resolving the encoded name,
-a name with `..` only within the directory). Natives (jrt's Go, `resources.clj`): whether a
+a name with `..` only within the directory). Natives (jrt's Go, `resources.ae`): whether a
 resource is embedded and its bytes (`Host.Resource`), and the executable's path, from an
 optional host interface `HostExecutable` (as `HostFS`), which B1a's `OSHost` implements on Linux
-(`resources_linux.clj`, `//go:build linux`: `os.Executable`, links resolved); a host without it
+(`resources_linux.ae`, `//go:build linux`: `os.Executable`, links resolved); a host without it
 (B1b's box, `GOOS=tamago`) names `/arbace`.
 
 **`ClassLoader.getResource` and `getResources`** of the built-in loaders are c2g's member table
 entries (as `getResourceAsStream` was): the application loader's are `ClassPathResources`'
 (`getResources` was an empty enumeration); the platform loader and the bootstrap loader find
-none. `(io/resource "arbace/core.clj")` is a URL now, and `slurp` reads it.
+none. `(io/resource "arbace/core.ae")` is a URL now, and `slurp` reads it.
 
 **`java.net.URLClassLoader`** (overlay/jdk, jrt's own Java, translated): jdk26u's public API,
 finding resources as the JDK's does, the parent first, then its URLs in order, a `file:` URL
@@ -3331,7 +3331,7 @@ overloads, jdk26u's `DirectoryStream` and `NotDirectoryException`, a glob read a
 and filtered when the stream is opened (jdk26u's read them as the iteration goes), so a filter's
 `IOException` is thrown by `newDirectoryStream`, not wrapped in `DirectoryIteratorException`.
 
-**`VM.isSystemDomainLoader`** (jrt, `resources.clj`): `URL` asks it of a handler that is not one
+**`VM.isSystemDomainLoader`** (jrt, `resources.ae`): `URL` asks it of a handler that is not one
 of the JDK's (`isBuiltinStreamHandler`); the JDK's answer, the bootstrap or the platform loader.
 
 ## Deviations
@@ -3402,7 +3402,7 @@ override with a native running Go's `crypto/md5`, `sha1`, `sha256`, `sha512` or 
 function (assembly on amd64 and arm64) on the Java object's own chaining state: the state words
 are written into a fresh Go digest's marshaled state (`MarshalBinary`'s layout: a 4-byte magic,
 SHA-3's rate byte, the state, an empty buffer, a zero length), unmarshaled, the blocks written,
-and the new state read back (jrt's `digests.clj`). The Java object keeps the state, the buffer
+and the new state read back (jrt's `digests.ae`). The Java object keeps the state, the buffer
 of a partial block, the padding and the final blocks, so `clone`, `reset`, partial digests and
 every message stay the JDK's, and MD2 (and a SHA-3 rate Go has no digest of) keep jdk26u's loop.
 The JVM's intrinsics also cover a single block (`implCompress0`); here the round trip through the
@@ -3427,7 +3427,7 @@ at a time (single blocks), and short digests are unchanged, 3 to 8 times slower 
 
 ## What was done
 
-- **The closure** (`test/g2c/jrt_sources.clj`, `security-sources`; amendment SC4): 75 files of
+- **The closure** (`test/g2c/jrt_sources.ae`, `security-sources`; amendment SC4): 75 files of
   jdk26u at `baf63fb`: `java/security/`'s `MessageDigest`, `MessageDigestSpi`,
   `DigestInputStream`, `DigestOutputStream`, `SecureRandom`, `SecureRandomSpi`,
   `SecureRandomParameters`, `DrbgParameters`, `Provider`, `Security`, `Key`,
@@ -3472,7 +3472,7 @@ at a time (single blocks), and short digests are unchanged, 3 to 8 times slower 
   `ofEpochMillis` (partial before) are jdk26u's code.
 - **Entropy from the host** (Host unchanged): `HostRandom`'s native calls
   `CurrentHost().RandomBytes`, B1a's `OSHost`'s Go `crypto/rand` (getrandom(2)), now in the
-  Linux-tagged `hostrand_linux.clj` (`//go:build linux`), so that a TamaGo host supplies its
+  Linux-tagged `hostrand_linux.ae` (`//go:build linux`), so that a TamaGo host supplies its
   own; jrt's generic code reaches no OS for it.
 - **c2g**: byte-array view `VarHandle`s (SC1), the rename `Sun_SecureRandom` (SC2), `com.sun.*`
   in jrt's Go package (SC3).
@@ -3482,7 +3482,7 @@ at a time (single blocks), and short digests are unchanged, 3 to 8 times slower 
 On the branch `gosec` before merging main (processes and resources by URL came with main; the
 merged coverage is JAVA-BASE.md's, 9,124 members, 52.0%):
 
-- **The oracle**: `test/oracle/forms/security.clj`, 181 cases recorded on the JVM (digests of
+- **The oracle**: `test/oracle/forms/security.ae`, 181 cases recorded on the JVM (digests of
   fixed inputs for every algorithm, across block boundaries and of a million `a`s; names,
   aliases and OIDs; update, digest, reset, clone, partial digests and their exceptions;
   many blocks in one update and in chunks with a clone midway, for every algorithm; `isEqual`;
@@ -3539,7 +3539,7 @@ Numbered SC (security). SC1-SC6 were accepted on 2026-10-10 and folded into C2G-
   below the length less the element's size less one, else `ArrayIndexOutOfBoundsException` with
   that reduced length); its other access modes remain operation-level stubs.
   (`sun.security.provider.ByteArrayAccess`, `SHA3`; `jdk.internal.util.ByteArray`'s variant could
-  now go: not done, `overlay/jdk/variants/ByteArray.clj` and `ByteArrayLittleEndian.clj` stay, a
+  now go: not done, `overlay/jdk/variants/ByteArray.ae` and `ByteArrayLittleEndian.ae` stay, a
   cleanup for after the freeze.) *Accepted 2026-10-10: C2G-SPEC §8.5.*
 - **SC2 (C2G-SPEC §4.4, the rename table)** `sun/security/provider/SecureRandom` →
   `Sun_SecureRandom` (java.security's `SecureRandom` is `SecureRandom`). *Accepted 2026-10-10: C2G-SPEC §4.4.*
@@ -3554,8 +3554,8 @@ Numbered SC (security). SC1-SC6 were accepted on 2026-10-10 and folded into C2G-
   compared byte for byte with the image's `jdk/conf/security/java.security` (the same);
   `Security` reads it as the resource `/conf/security/java.security`. *Accepted 2026-10-10: C2G-SPEC §10.3; JRT-SOURCES.md "Security".*
 - **SC6 (C2G-SPEC §9.4, the host interface)** `OSHost.RandomBytes` (Go's `crypto/rand`) is in
-  the Linux-tagged `hostrand_linux.clj`; the `Host` interface is unchanged. *Accepted 2026-10-10: C2G-SPEC §9.4.*
-- **SC7 (C2G-SPEC §4.1, §4.6; jrt's `digests.clj`)** The translated digests' whole blocks run
+  the Linux-tagged `hostrand_linux.ae`; the `Host` interface is unchanged. *Accepted 2026-10-10: C2G-SPEC §9.4.*
+- **SC7 (C2G-SPEC §4.1, §4.6; jrt's `digests.ae`)** The translated digests' whole blocks run
   Go's `crypto` block functions on the Java object's chaining state, through Go's marshaled
   digest state, as the JVM's intrinsics replace `implCompressMultiBlock0`: variants of
   `DigestBase` (`compressBlocks`, false by default) and of `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3`
@@ -3621,7 +3621,7 @@ default locale from `user.language`, `user.country`, ...), the referenced-key ca
 `SoftReference` gains the constructors a translated subclass calls), `java.lang.LazyConstant`
 and `jdk.internal.lang.LazyConstantImpl` (over `Unsafe`), and `jdk.internal.misc.CDS` (its
 natives jrt's: no archive). jrt's `Locale` and `Locale.Category` remain as stand-ins for jrt's
-own build and tests (`standin_locale.clj`); a c2g program drops them. jrt's hand-written
+own build and tests (`standin_locale.ae`); a c2g program drops them. jrt's hand-written
 `DecimalFormatSymbols` is gone. The default locale is en_US: jrt's system properties gain
 `user.language=en`, `user.country=US` (and `stdin.encoding`), which `JAVA_TOOL_OPTIONS`' `-D`
 overrides as on the JVM.
@@ -3677,7 +3677,7 @@ is looked for right after the `I` (the JDK skips other combining marks between t
 `bin/jrt-convert`'s generate step runs `CLDRConverter` a second time as
 `make/modules/jdk.localedata/Gensrc.gmk` does (`-baselocales en-US`, without `-basemodule`: every
 locale's bundles, 1,531 files), and takes the selection: `JRT_LOCALES` (unset or `default`:
-`text-locales` of `test/g2c/jrt_sources.clj`; `all`; `none`; or comma-separated language tags; since the user's decision of 2026-10-11 the
+`text-locales` of `test/g2c/jrt_sources.ae`; `all`; `none`; or comma-separated language tags; since the user's decision of 2026-10-11 the
 default is `none`, and `text-locales` is the named set `common`).
 The selection is expanded in the generate step (`expand-locales`): each tag's candidate
 locales, with CLDR's parent locales read from the generated `CLDRBaseLocaleDataMetaInfo` (en-GB
@@ -3714,7 +3714,7 @@ bodies are array initializers of string literals, thousands of rows each; transl
 executable 136 MB: 22 MB of bundle code, 48 MB of Go's function tables for it, 3 MB of literal
 initialization). c2g now writes a reference array initializer whose elements are, to any
 depth, string literals, `null`, nested such initializers and immutable locals, with at least 4
-strings, as one call of jrt's `ConstRefArray` (`go/arbace/jrt/constarray.clj`): the tree
+strings, as one call of jrt's `ConstRefArray` (`go/arbace/jrt/constarray.ae`): the tree
 encoded in a Go string (arrays as `[class,count,`, strings length-prefixed, `n`ull, locals as
 `h`oles passed in order), decoded when the method runs, its strings interned as literals are
 (the same objects as the literals'). The default selection then costs 7.7 MB, `all` 67 MB.
@@ -3759,7 +3759,7 @@ encoded in a Go string (arrays as `[class,count,`, strings length-prefixed, `n`u
   "Time"), 410 with missing parts; the new ones are serialization's, `System.Logger` in the
   provider pool's error paths, `Bidi`'s java.desktop attributes, the Thai dictionary break
   iterator, `JapaneseChronology`.
-- **The oracle**: the new forms `test/oracle/forms/text.clj` (160 cases, recorded on the JVM,
+- **The oracle**: the new forms `test/oracle/forms/text.ae` (160 cases, recorded on the JVM,
   deterministic: two records equal): `Locale` (tags, extensions, the builder, display names,
   ISO data, filter and lookup), `DecimalFormatSymbols` and `NumberFormat` of 26 locales (the
   Arabic digits of ar-EG included), compact numbers, `DecimalFormat` patterns, rounding modes,
@@ -3770,9 +3770,9 @@ encoded in a Go string (arrays as `[class,count,`, strings length-prefixed, `n`u
   styles in 26 locales, `Currency`, `ListFormat`, `Collator` (5 locales, strengths,
   decomposition, keys, rules), `BreakIterator` (character, word, sentence, line), `Bidi`,
   `AttributedString`, Turkish case mapping: **160 of 160 on Go**. The whole oracle on Go:
-  **21,955 of 21,960**, the 5 known mismatches; the 3 locale cases of TM4 (`time.clj:377`,
+  **21,955 of 21,960**, the 5 known mismatches; the 3 locale cases of TM4 (`time.ae:377`,
   `382`, `383`) pass and are gone from `test/oracle/known-go-amd64.edn`. With `JRT_LOCALES=none`
-  42 of `text.clj` and `time.clj`'s 490 cases fail (the other locales), with `all` none.
+  42 of `text.ae` and `time.ae`'s 490 cases fail (the other locales), with `all` none.
 - **Clojure's suite on Go**: 19,628 of 19,632 (the 4 errors of `java.io`, expected), 66
   namespaces, test.generative 26 of 26, no regressions against `test/arbace-go-results.edn`.
 - **`bin/arbace-go --smoke`**, **`bin/jrt test`** (amd64, after `bin/jrt testdata`): pass.
@@ -3782,7 +3782,7 @@ encoded in a Go string (arrays as `[class,count,`, strings length-prefixed, `n`u
   2,089, 77.5%) with `Locale`, `Currency` and the SPIs.
 - **After merging main** (`6cbed45`: processes, resources by URL, java.security; the test
   build): `bin/jrt-convert` 961 files (956 identical, the 5 known differences), the executable
-  74,051,744 bytes; the whole oracle on Go 22,274 of 22,278, its 4 known mismatches; `text.clj`
+  74,051,744 bytes; the whole oracle on Go 22,274 of 22,278, its 4 known mismatches; `text.ae`
   160 of 160 on Go and on the JVM; Clojure's suite on the test build (`arbace-tests`) 20,506 of
   20,520 assertions, 76 namespaces, no regressions against `test/arbace-go-results.edn`,
   test.generative 27 of 27; the smoke test and `bin/jrt test` pass; coverage 9,807 of 17,546
@@ -3792,7 +3792,7 @@ encoded in a Go string (arrays as `[class,count,`, strings length-prefixed, `n`u
   same day 65,077,408: +1.28 MB for java.text, `Locale`, `Currency` and the providers; `common`
   74,051,744, +7.70 MB more); start (`-e nil`) 0.20-0.21 s, as main's; the smoke test passes; the
   whole oracle on Go 22,232 of 22,278 with `--expected`: the 4 known mismatches and one new group
-  of 42, the locale-dependent cases of `text.clj` and `time.clj` (the 3 of TM4 among them),
+  of 42, the locale-dependent cases of `text.ae` and `time.ae` (the 3 of TM4 among them),
   recorded with the decision as their reason in `test/oracle/known-go-amd64.edn`; Clojure's suite
   on the test build without regressions (it has no locale-dependent assertions).
 - **Start** (amd64, `-e nil`, the `common` build): 0.22-0.26 s (main 0.21-0.23 s). First uses: a French
@@ -3846,7 +3846,7 @@ Numbered TL (text and locales). All eight were accepted on 2026-10-11 and folded
   encoded in a Go string, decoded when the expression is evaluated; its strings are interned as
   literals, the locals are evaluated in order before the call. *Accepted 2026-10-11: C2G-SPEC §5.9.*
 - **TL2 (C2G-SPEC §4.3, stand-ins, C3)** `java.util.Locale` and `Locale.Category` are translated
-  from jdk26u; jrt's hand-written ones become stand-ins (`standin_locale.clj`, for jrt's own
+  from jdk26u; jrt's hand-written ones become stand-ins (`standin_locale.ae`, for jrt's own
   build), and jrt's `DecimalFormatSymbols` is removed. Replaced stand-ins whose statics jrt's
   hand-written code does not read (c2g's `lazy-standins`: `Locale`, `Locale.Category`) are not
   initialized eagerly. *Accepted 2026-10-11: C2G-SPEC §4.3, §12 (R17).*
@@ -3877,7 +3877,7 @@ Numbered TL (text and locales). All eight were accepted on 2026-10-11 and folded
   `user.language=en`, `user.country=US` and `stdin.encoding`; String's Locale overloads apply
   Turkish and Azerbaijani's i (not Lithuanian's rules); jrt's `SoftReference` has the
   constructors a translated subclass calls. *Accepted 2026-10-11: C2G-SPEC §12 (R17).*
-- **TL8 (`bin/jrt-convert`'s shape check)** `java/util/Locale.clj` is a known difference: one
+- **TL8 (`bin/jrt-convert`'s shape check)** `java/util/Locale.ae` is a known difference: one
   checkcast javac emits for a switch expression of strings and the class forms do not. *Accepted 2026-10-11: JRT-SOURCES.md "Text and locales".*
 
 ## Sources

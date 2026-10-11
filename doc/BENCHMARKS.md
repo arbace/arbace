@@ -13,7 +13,7 @@ profiles, is summarized there. All of it is the JVM Arbace; the Go executable's 
   core names referred into `user` and reaches other libraries through a helper that picks
   `clojure.string` or `arbace.string`, so the same source is read, compiled and run by each
   implementation as a script.
-- **A small own harness**, no external libraries. The driver `test/bench/driver.clj` (run by the
+- **A small own harness**, no external libraries. The driver `test/bench/driver.ae` (run by the
   frozen `clojure/` for the run below, by Arbace's `target/stage2` since the freeze; never
   measured itself) launches every measured JVM, one at a time:
   - *Startup*: the wall time of a whole launch (`-e 1`, and a 17-form REPL session on stdin,
@@ -60,7 +60,7 @@ in about 8; `--forks`, `--warmup`, `--measure`, `--sections`, `--only`), after
   | `org.clojure/core.specs.alpha 0.4.74` | `eb73ac08cf49ba840c88ba67beef11336ca554333d9408808d78946e0feb9ddb` |
 
   Also `clojure-aot`: the same jars with a JDK AOT cache trained like Arbace's (on
-  `test/aot-training.clj` renamed to `clojure.*`, without its `defclass`), to tell the JDK's
+  `test/aot-training.ae` renamed to `clojure.*`, without its `defclass`), to tell the JDK's
   share of Arbace's startup from Arbace's own.
 - **The frozen baseline** `clojure/` (upstream 1.13 master `98d735f`, spec stubbed out; since
   the freeze extracted from the tag `arbace-for-java-26-v1` into `.tmp/frozen/`): `baseline` has its 35 namespaces AOT-compiled with direct linking into

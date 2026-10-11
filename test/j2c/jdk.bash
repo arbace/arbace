@@ -9,7 +9,7 @@
 #             options the JDK build uses for the module (make/modules/*/Java.gmk)
 #   check     bin/class-forms-check on chunks of the converted files, in parallel, against
 #             $work/ref1/M (REF), results in $work/res/M.*.edn
-#   report    test/j2c/jdk_report.clj: $work/report.md and $work/report.edn
+#   report    test/j2c/jdk_report.ae: $work/report.md and $work/report.edn
 # Runs on Arbace (bin/lib/tools.bash).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -88,7 +88,7 @@ if has check; then
   for m in $modules; do rm -f "$work/res/$m".*.edn "$work/chunks/$m".*; done
   for m in $modules; do
     [ -d "$work/conv/$m" ] || continue
-    (cd "$work/conv/$m" && find . -mindepth 2 -name '*.clj' | sed 's|^\./||' | sort) \
+    (cd "$work/conv/$m" && find . -mindepth 2 -name '*.ae' | sed 's|^\./||' | sort) \
       | split -l 60 -d -a 4 - "$work/chunks/$m."
   done
   for m in $modules; do
@@ -103,5 +103,5 @@ if has check; then
 fi
 if has report; then
   echo "== report"
-  java -cp "$ARBACE_CP" arbace.lang.Main test/j2c/jdk_report.clj "$work" $modules
+  java -cp "$ARBACE_CP" arbace.lang.Main test/j2c/jdk_report.ae "$work" $modules
 fi

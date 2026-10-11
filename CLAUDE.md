@@ -47,7 +47,8 @@ Prior art:
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
   stated nowhere else, apart from the notices source files came with, which stay. Extend it when
   vendoring from a new source.
-- `arbace/` holds Arbace's own Clojure code, namespaces `arbace.*`, all `.clj`:
+- `arbace/` holds Arbace's own Clojure code, namespaces `arbace.*`, all `.ae` (Arbace's source
+  extension: Clojure plus forms Clojure cannot evaluate; the loaders take `.ae`, then `.clj`):
   - the vendored Clojure, renamed from `clojure.*` (`arbace.core`, `arbace.lang`, `arbace.asm`
     and the rest; the Java parts are class forms). It is hand-maintained source; its
     derivation is recorded in `doc/VENDOR-NOTES.md` (replayable on `arbace-for-java-26`).
@@ -56,7 +57,7 @@ Prior art:
     its own runtime. Every class of stages 1 and 2 must pass the JDK's class file verifier
     (`arbace.classes.verify`). The build then makes `target/arbace.jar` (stage 2,
     reproducible) and the JDK AOT cache `target/arbace.aot` (training workload
-    `test/aot-training.clj`). With `--suite` it also runs Clojure's test suite on stages 1
+    `test/aot-training.ae`). With `--suite` it also runs Clojure's test suite on stages 1
     and 2. Run Arbace with `bin/arbace-j` (the jar, with the cache when it applies), or a stage
     with `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
     --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
@@ -101,7 +102,7 @@ Prior art:
   freeze main's journal started over, by the user's decision: the history up to 2026-10-08 is
   on `arbace-for-java-26`, from then to 2026-10-11 on `arbace-for-golang`, and all of it in git.
 - When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
-  next to the vendored code (for `arbace/`, which holds only `.clj` files: `doc/ARBACE.md`), and
+  next to the vendored code (for `arbace/`, which holds only `.ae` files: `doc/ARBACE.md`), and
   its license in `LICENSE.md`.
 
 ## Working conventions

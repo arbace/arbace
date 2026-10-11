@@ -8,11 +8,11 @@ proven on hand-written forms (below) and on the converter's forms of all of std 
 
 ```sh
 bin/g2c-print [--layout lines|gofmt] [--no-line-directives] [--line-file] \
-              [--src DIR [--build]] [--gofmt] FORMS.clj OUTDIR
+              [--src DIR [--build]] [--gofmt] FORMS.ae OUTDIR
 bin/g2c-print-tests [REGEX]
 ```
 
-`FORMS.clj` is a package file (`ns`, `go/package`, `load`s, §4.1) or one file holding
+`FORMS.ae` is a package file (`ns`, `go/package`, `load`s, §4.1) or one file holding
 `go/package`, `go/file` and declaration forms. One `.go` file per `go/file` is written into
 `OUTDIR`. `--src DIR` (the original package directory) copies `:other-files` and
 `:embed-files` (SHA-256 checked) and writes `OUTDIR/overlay.json`; `--build` then runs
@@ -24,10 +24,10 @@ source.
 
 | namespace | file | role |
 |---|---|---|
-| `arbace.g2c.print` | `print.clj` | reading (`read-forms`, `collect` following `load`, `collect-forms` for forms in memory), files (§4.3: build lines, header directives, package doc, imports, declarations), the package build (§12.4), the CLI |
-| `arbace.g2c.print-code` | `print_code.clj` | forms → tokens: classification by head (§4.4, §13.5), types (§5), declarations (§6), statements and expressions (§7), literals (§8), directives and doc comments (§9, §10.4) |
-| `arbace.g2c.print-emit` | `print_emit.clj` | the emitter: tokens, Go's semicolon rule, token separation, indentation, the line of the cursor, placing forms on recorded lines (§10.1, §12.3), `//line` and `/*line*/` corrections |
-| `arbace.g2c.print-text` | `print_text.clj` | literal spellings (strings, byte strings, runes, exact floats, §8.1, §12.2) and a port of `text/tabwriter` (gofmt's alignment) |
+| `arbace.g2c.print` | `print.ae` | reading (`read-forms`, `collect` following `load`, `collect-forms` for forms in memory), files (§4.3: build lines, header directives, package doc, imports, declarations), the package build (§12.4), the CLI |
+| `arbace.g2c.print-code` | `print_code.ae` | forms → tokens: classification by head (§4.4, §13.5), types (§5), declarations (§6), statements and expressions (§7), literals (§8), directives and doc comments (§9, §10.4) |
+| `arbace.g2c.print-emit` | `print_emit.ae` | the emitter: tokens, Go's semicolon rule, token separation, indentation, the line of the cursor, placing forms on recorded lines (§10.1, §12.3), `//line` and `/*line*/` corrections |
+| `arbace.g2c.print-text` | `print_text.ae` | literal spellings (strings, byte strings, runes, exact floats, §8.1, §12.2) and a port of `text/tabwriter` (gofmt's alignment) |
 
 The printer resolves no names and needs no types: every form is classified by its head and
 position, and the metadata for consumers (`:val`, `:inst`, `:go/via`, `:tag` on expressions)
@@ -87,7 +87,7 @@ from text) and `gofmt` otherwise (forms built by a program):
   - The label of a labeled declaration (`:go/label`), the keyword of a local `const ( ... )`
     group, and a label before a label, go on the line before their statement when it is
     free.
-  - `--line-file` starts the file with `//line FORMS.clj:1`, so that gc's positions name the
+  - `--line-file` starts the file with `//line FORMS.ae:1`, so that gc's positions name the
     forms file with the forms' lines (§12.3's printer option for hand-written forms).
     The build (`bin/g2c build`, [BUILD.md](BUILD.md)) names the forms file relative to the
     package's forms directory, which keeps
@@ -135,8 +135,8 @@ forms (A6 as accepted), covered by `s09_directives`.
 ## Tests
 
 `bin/g2c-print-tests` builds `tools/gocmp` and `test/g2c/golines` for the host into
-`.tmp/g2c-print-tests/bin/` and runs `test/g2c/print_test.clj` on Arbace. Each case
-`test/g2c/cases/NAME.clj` is printed in both layouts into `.tmp/g2c-print-tests/NAME/` and:
+`.tmp/g2c-print-tests/bin/` and runs `test/g2c/print_test.ae` on Arbace. Each case
+`test/g2c/cases/NAME.ae` is printed in both layouts into `.tmp/g2c-print-tests/NAME/` and:
 
 - `gofmt -l`: both outputs parse; the gofmt layout is gofmt's fixed point (`;; g2c-test:
   nogofmt` waives it, for `s12_printer` only, A10);

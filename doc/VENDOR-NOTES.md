@@ -3,6 +3,10 @@
 > Since the freeze (2026-10-08) main no longer holds `clojure/`, `bin/vendor-arbace`,
 > `bin/vendor-spec`, `doc/MODERN-COMPILER.md` or `doc/FREEZE.md`; where this file names them,
 > they are on the branch [`arbace-for-java-26`](https://github.com/arbace/arbace/tree/arbace-for-java-26).
+>
+> Since 2026-10-11 Arbace's sources are `.ae` files (hand change 19). The layout, the bootstrap
+> and spec's sections below name the current files; the derivation and the records of hand
+> changes 1 to 18 name them as they were then, `.clj`.
 
 The frozen baseline `clojure/` is vendored under `arbace/`, renamed `clojure.*` → `arbace.*`, all
 of it `.clj`: the Java files as class forms (doc/classes/SPEC.md), Clojure's own `.clj` renamed.
@@ -17,15 +21,15 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 
 | path | what |
 |---|---|
-| `arbace/*.clj`, `arbace/{core,java,pprint,reflect,repl,test,tools}/**.clj` | Clojure's namespaces, renamed: `arbace.core` (with `core_print.clj` and the other files it loads), `arbace.main`, `arbace.pprint`, `arbace.java.io`, ... |
-| `arbace/lang.clj`, `arbace/lang/*.clj` | namespace `arbace.lang` (Java package `clojure.lang`), one file per Java file: `RT.clj`, `Compiler.clj`, ... |
-| `arbace/asm.clj`, `arbace/asm/**.clj` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause) |
-| `arbace/java/api.clj`, `arbace/java/api/Clojure.clj` | `arbace.java.api` |
-| `arbace/lang/Main.clj` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
+| `arbace/*.ae`, `arbace/{core,java,pprint,reflect,repl,test,tools}/**.ae` | Clojure's namespaces, renamed: `arbace.core` (with `core_print.ae` and the other files it loads), `arbace.main`, `arbace.pprint`, `arbace.java.io`, ... |
+| `arbace/lang.ae`, `arbace/lang/*.ae` | namespace `arbace.lang` (Java package `clojure.lang`), one file per Java file: `RT.ae`, `Compiler.ae`, ... |
+| `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause) |
+| `arbace/java/api.ae`, `arbace/java/api/Clojure.ae` | `arbace.java.api` |
+| `arbace/lang/Main.ae` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
 | `arbace/classes/`, `arbace/j2c/` | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them |
 | `doc/ARBACE.md` (was `arbace/README.md`) | what `arbace/` holds and its origin (licenses: `LICENSE.md`) |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it; on the branch `arbace-for-java-26` only |
-| `arbace/spec/**.clj`, `arbace/core/specs/alpha.clj` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
+| `arbace/spec/**.ae`, `arbace/core/specs/alpha.ae` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
 | `bin/vendor-spec` | replays the vendoring of spec into `.tmp/vendor-spec/`; on the branch `arbace-for-java-26` only |
 | `test/arbace-results.edn` | the suite's reference for Arbace's stages (`test/baseline-results.edn` is the frozen baseline's) |
 | `seed/arbace-seed.jar`, `seed/arbace-seed.jar.sha256`, `bin/seed` | the binary seed, stage 0 of the bootstrap since 2026-10-08, and its pinned SHA-256 (below, "The binary seed") |
@@ -34,8 +38,8 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 
 `clojure/version.properties` is not vendored (below). Nothing under `clojure/` changed.
 
-The class-form files of a package are ordinary `.clj` files on the class path; the Clojure
-runtime never loads them (it loads `arbace/core.clj` and the other namespaces), only the class
+The class-form files of a package are ordinary `.ae` files on the class path; the Clojure
+runtime never loads them (it loads `arbace/core.ae` and the other namespaces), only the class
 forms compiler reads them, as sources (SPEC §9.2).
 
 ## How it was produced
@@ -157,9 +161,9 @@ Left alone (with the reason):
   `arbace/asm/signature`, `arbace/java/api`: 183 files → 812 classes in `target/stage1` (20 s).
   Every class those files declare is entered from its source (SPEC §9.2): none exists at
   stage 0.
-- **Stage 1** is `target/stage1` plus the `.clj` sources: `java -cp target/stage1:. arbace.lang.Main`
+- **Stage 1** is `target/stage1` plus the `.ae` sources: `java -cp target/stage1:. arbace.lang.Main`
   starts a REPL (`Clojure 1.13.0-master-SNAPSHOT`, `(class [])` is
-  `arbace.lang.PersistentVector`, `#'arbace.core/map`); `arbace.lang.RT` loads `arbace/core.clj`
+  `arbace.lang.PersistentVector`, `#'arbace.core/map`); `arbace.lang.RT` loads `arbace/core.ae`
   with `arbace.lang.Compiler`. With `-verbose:class` no `clojure.*` class is loaded.
 - **Stage 1 → stage 2.** `java -cp target/stage1:. arbace.lang.Main -e "(require 'arbace.classes.boot)
   (arbace.classes.build/-main ...)"`: the compiler, plain Clojure, is compiled by
@@ -173,7 +177,7 @@ environment (below), so the runtime it runs on does not show in its output. Ther
 nondeterminism to fix.
 
 Running a stage: `java -cp target/stageN:. arbace.lang.Main` (any `arbace.main` option, e.g. `-e`,
-`-m`, a script). The class path needs the repository root for the `.clj` sources.
+`-m`, a script). The class path needs the repository root for the `.ae` sources.
 
 ### Compiled namespaces, the jar and the AOT cache (2026-10-07)
 
@@ -188,7 +192,7 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   4,276 classes per stage (2,941 of them the 35 namespaces, 1,335 `arbace.classes`), in about
   6 s. `arbace.j2c` stays source (a stage-0 tool, run by the frozen `clojure/`; since 2026-10-08
   on `target/stage2`); the package
-  files `arbace/lang.clj`, `arbace/asm.clj`, `arbace/java/api.clj` are not namespaces to compile
+  files `arbace/lang.ae`, `arbace/asm.ae`, `arbace/java/api.ae` are not namespaces to compile
   (they load the class forms). The next stage is built by these classes.
 - **The fixpoint covers them**: stages 1, 2 and 3 are byte-identical, 5,091 classes each (815
   class-form classes, 4,276 namespace classes). No further nondeterminism had to be fixed:
@@ -197,7 +201,7 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   directories gave identical bytes. Gensym and fn-class numbers (`RT.nextID`) depend only on
   the load order, which is the same in every stage: each compile starts from a stage without
   namespace classes, so `arbace.core` loads from source first in all of them.
-- **`target/arbace.jar`**: stage 2's classes plus every `arbace/**/*.clj` (what
+- **`target/arbace.jar`**: stage 2's classes plus every `arbace/**/*.ae` (what
   `-cp target/stage2:.` gives), manifest `Main-Class: arbace.lang.Main`. It is reproducible: the
   build makes the jar of stage 3 too and requires the two to be equal byte for byte. Entries in
   byte order, no directory entries, a fixed manifest written as a file (`jar --no-manifest`),
@@ -206,7 +210,7 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   namespace's `__init` class only when it is strictly newer than its source, and `jar --date`
   gives every entry the same time (with it all namespaces loaded from source).
 - **`target/arbace.aot`**: a JDK AOT cache (JEP 483, 514; 36 MB at first, 39.4 MB on
-  2026-10-08), made by a training run `bin/arbace-j --aot-train < test/aot-training.clj`
+  2026-10-08), made by a training run `bin/arbace-j --aot-train < test/aot-training.ae`
   (`-XX:AOTCacheOutput`, one step): a REPL session requiring the common libraries, a
   `defclass`, deftype/defrecord/protocols, `arbace.test`, futures, `pmap`, agents, `doc` and
   `source`. The cache refuses directories on the
@@ -229,7 +233,7 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
 - **The verifier** (added later the same day): `bin/build-arbace` runs
   `arbace.classes.verify` (the JDK's `ClassFile/verify`, see `doc/classes/COMPILER-NOTES.md`)
   on stages 1 and 2 with the stage's own runtime, and fails on any verify error or a class
-  whose major version is not the running JDK's. `test/native/verify_test.clj` verifies the
+  whose major version is not the running JDK's. `test/native/verify_test.ae` verifies the
   classes of a sample namespace compiled at run time (fns, `case`, `letfn`, `try`, deftype,
   defrecord, protocols, `reify`, `proxy`, `gen-class`, `gen-interface`, a multimethod, a
   `defclass`: 50 classes) and checks that a broken class is rejected.
@@ -280,7 +284,7 @@ module): `bin/arbace-image`, also run by `bin/build-arbace --image`, makes
   launcher, which, when it finds `bin/java` and `lib/arbace/arbace.jar` beside it, runs that
   `java` and that jar (and `lib/arbace/arbace.aot`). The jar is copied unchanged.
 - **The AOT cache** is trained by the image's own `java` (`bin/arbace-j --aot-train` inside the
-  image, the same `test/aot-training.clj`), then the image is launched once with it. A JDK
+  image, the same `test/aot-training.ae`), then the image is launched once with it. A JDK
   26.0.2 problem showed up here: with AOT class linking (the default of `-XX:AOTCacheOutput`),
   the cache of a `jlink` image of some module sets stops the JVM at startup ("Unexpected
   exception when loading aot-linked classes", `InternalError` from
@@ -327,7 +331,7 @@ REPL's interrupt handler), plus `ARBACE_IMAGE_MODULES`. Hand changes 15 to 17 ma
 optional (`bean` without `java.beans`, `#inst` without `java.sql`, clear errors for
 `arbace.xml`, `arbace.inspector` and `arbace.java.browse-ui`). With the new jar, jdeps finds
 `java.desktop` only in `arbace.inspector` and `arbace.java.browse-ui`, `java.sql` only in
-`resultset-seq` and the fns of `arbace/instant_timestamp.clj`, `java.xml` only in `arbace.xml`
+`resultset-seq` and the fns of `arbace/instant_timestamp.ae`, `java.xml` only in `arbace.xml`
 and `arbace.lang.XMLHandler`. The AOT class-linking problem above does not occur with this set (the
 cache keeps class linking, no extra module); it does with `java.base,java.sql,jdk.unsupported`,
 where adding `jdk.attach` avoids it and the script's fallback still applies. Measured on main
@@ -828,6 +832,29 @@ step 4 (2026-10-07); the others came with later work, as each says:
     works on Arbace and not reliably on Clojure (the reverse direction is unaffected: code that
     passes an init behaves the same). Listed under "Dialect divergences" below.
 
+19. **Arbace's sources are `.ae` files** (2026-10-11, the user's decision of 2026-10-09; doc/
+    AGENDA.md, "After the freeze", item 1): they hold forms Clojure cannot evaluate (the class
+    forms, the Go build's Go forms), so the `.clj` extension misled. Every source of Arbace's
+    own moved with `git mv` (688 files: `arbace/`, `go/`, `overlay/`, and Arbace's tests and
+    test data under `test/`); kept `.clj`: what upstream Clojure runs as well (Clojure's suite
+    and its libraries, copied and renamed by `bin/clojure-tests`; its runner
+    `test/run_clojure_tests.clj`; the benchmarks' `test/bench/workload.clj` and
+    `repl-session.clj`) and the frozen seed. The loaders: `RT.load` (and the Go build's
+    variant, `arbace/lang/go/RT.ae`) looks for a namespace's `.ae`, then its `.clj` (so
+    Clojure libraries still load), then its `.cljc`, beside its `__init` class as before; the
+    `FileNotFoundException` names the four (`Could not locate x/y__init.class, x/y.ae, x/y.clj
+    or x/y.cljc on classpath.`). `RT.doInit` loads `user.ae`, else `user.clj`. A stack frame
+    counts as Clojure code (demunged by `arbace.main`'s and `arbace.repl`'s
+    `stack-element-str`) for a file ending `.ae`, `.clj` or `.cljc`. `require`, `load`,
+    `load-file`, `compile`, `*file*`, `:file` metadata and `arbace.repl/source-fn` follow from
+    the loader (the namespaces' classes name `core.ae` in `SourceFile` and their vars
+    `arbace/core.ae` in `:file`). Scripts run by path, whatever their extension. Not changed:
+    `data_readers.clj`/`.cljc` (data, Clojure's convention), the reader's `:clj` feature.
+    The class forms tools (`arbace.classes.build`, the source path lookup `p/C.ae`, j2c's
+    output, c2g, g2c) read and write `.ae` only; j2c's `_class` rule (SPEC §9.1) looks for a
+    sibling `.clj` or `.ae`. The bootstrap's stage 0, the seed, reads `.clj` only: it compiles
+    from `target/seed-view` ("The binary seed", above).
+
 ## Dialect divergences
 
 Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
@@ -850,6 +877,9 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
   `java.util.Date`; upstream then has no `#inst`); without `java.xml` or
   `java.desktop`, `arbace.xml`, `arbace.inspector` and `arbace.java.browse-ui` throw an
   `UnsupportedOperationException` naming the module when loaded.
+- **Source files** (hand change 19): Arbace's own sources are `.ae`; a namespace loads from
+  its `.ae` before its `.clj` (a library may ship both: Arbace takes the `.ae`), and the
+  not-found message names four files.
 - **Runtime-visible names** (hand change 2, step 4's cleanups): agent, socket server and process
   thread names, the error report files' prefix and the proxy methods (`__initArbaceFnMappings`
   and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.
@@ -869,8 +899,8 @@ tags (the `.clj` sources equal those in the Maven jars, checked with `cmp`):
 
 | library | tag (commit) | files | vendored as |
 |---|---|---|---|
-| https://github.com/clojure/spec.alpha | `v0.6.249` (`3d1efb353b8a95c699b4051ba8273568c21f874e`) | `src/main/clojure/clojure/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj` | `arbace/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj`: `arbace.spec.alpha`, `arbace.spec.gen.alpha`, `arbace.spec.test.alpha` |
-| https://github.com/clojure/core.specs.alpha | `v0.6.133-alpha10` (`75875946b7e827a1cec91ce645d5e1dcfc475e49`) | `src/main/clojure/clojure/core/specs/alpha.clj` | `arbace/core/specs/alpha.clj`: `arbace.core.specs.alpha` |
+| https://github.com/clojure/spec.alpha | `v0.6.249` (`3d1efb353b8a95c699b4051ba8273568c21f874e`) | `src/main/clojure/clojure/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj` | `arbace/spec/alpha.ae`, `gen/alpha.clj`, `test/alpha.clj`: `arbace.spec.alpha`, `arbace.spec.gen.alpha`, `arbace.spec.test.alpha` |
+| https://github.com/clojure/core.specs.alpha | `v0.6.133-alpha10` (`75875946b7e827a1cec91ce645d5e1dcfc475e49`) | `src/main/clojure/clojure/core/specs/alpha.clj` | `arbace/core/specs/alpha.ae`: `arbace.core.specs.alpha` |
 
 Both are EPL-1.0 (`LICENSE.md` says which files). `arbace.j2c.rename/vendor-lib!` renames path
 and text and adds an origin comment after each file's notice. The renaming rules gained
@@ -882,26 +912,26 @@ expects `arbace.spec.alpha`'s keywords and `arbace.core/let`'s spec errors. `clo
 (spec's optional generator library, loaded lazily by `arbace.spec.gen.alpha` as upstream) keeps
 its name.
 
-**One hand edit** in the vendored files: `arbace/spec/gen/alpha.clj` excludes `return` from
+**One hand edit** in the vendored files: `arbace/spec/gen/alpha.ae` excludes `return` from
 `arbace.core` (`:refer-clojure :exclude`), since `arbace.core` has the class form `return` and
 `gen/return` would replace it with a warning on every load. (test.check's
 `clojure.test.check.generators` gives the same warning; it is not vendored and stays as it is.)
 
 **Un-stubbed** (upstream's code, renamed; compare upstream `98d735fab02f` with `clojure/`):
 
-- `arbace/main.clj`: `(:require [arbace.spec.alpha :as spec])`; the REPL binds
+- `arbace/main.ae`: `(:require [arbace.spec.alpha :as spec])`; the REPL binds
   `arbace.spec.alpha/*explain-out*`; `ex-str` prints the explanation of a spec error
   (`with-out-str` of `spec/explain-out`) for macro syntax errors and instrumented calls; the
   core namespace list names `arbace.spec.*`.
-- `arbace/repl.clj`: `(:require [arbace.spec.alpha :as spec])`; `doc` prints a fn's spec
+- `arbace/repl.ae`: `(:require [arbace.spec.alpha :as spec])`; `doc` prints a fn's spec
   (`spec/get-spec`) and documents a spec given a keyword (`spec/describe`).
-- `arbace/lang/RT.clj`: `instrumentMacros` is `(not (Boolean/getBoolean
+- `arbace/lang/RT.ae`: `instrumentMacros` is `(not (Boolean/getBoolean
   "arbace.spec.skip-macros"))`, not `false`; `checkSpecAsserts` reads
   `arbace.spec.check-asserts`.
-- `arbace/lang/Compiler.clj`: `ensureMacroCheck` loads `arbace/spec/alpha` and
+- `arbace/lang/Compiler.ae`: `ensureMacroCheck` loads `arbace/spec/alpha` and
   `arbace/core/specs/alpha` and finds `arbace.spec.alpha/macroexpand-check`; `SPEC_PROBLEMS` is
   `:arbace.spec.alpha/problems` (these strings had been left unrenamed).
-- `arbace/lang/Compile.clj`: `(RT/load "arbace/core/specs/alpha")` before compiling, as upstream
+- `arbace/lang/Compile.ae`: `(RT/load "arbace/core/specs/alpha")` before compiling, as upstream
   `Compile.java` ("force load to avoid transitive compilation during lazy load"; one of the two
   seed fixes had dropped it from `clojure/`).
 
@@ -919,7 +949,7 @@ byte-identical, all verified; the jar has 5,890 entries, the AOT cache is 39 MB.
 loads `arbace.spec.alpha`, as upstream's does); `-e "(let [a 1] a)"`, the first macro, takes
 about 40 ms more (core.specs and the check).
 
-Running a stage after editing `arbace/spec/**` or `arbace/core/specs/alpha.clj` without
+Running a stage after editing `arbace/spec/**` or `arbace/core/specs/alpha.ae` without
 rebuilding loads the edited namespace from source with macro checking on, which can trip
 `Cyclic load dependency` (spec's `ns` form triggers the check, which loads core.specs, which
 requires spec): rebuild, or run with `-Darbace.spec.skip-macros=true`. Upstream has the same
@@ -971,6 +1001,14 @@ The seed's own `arbace.classes` (the compiler as it was at the freeze, AOT-compi
 compiles the checkout's class forms into `target/stage1`, reading them as files under ROOT;
 then, as at every stage, stage 1's runtime AOT-compiles the checkout's namespaces into
 `target/stage1`. Stage 1 builds stage 2 and stage 2 builds stage 3 as before.
+
+Since the `.ae` rename (hand change 19) ROOT is `target/seed-view`: the seed's compiler lists a
+package's class forms as its `*.clj` files, and the checkout's are `*.ae`, so `bin/build-arbace`
+makes a mirror of the five package directories whose `.clj` files are symbolic links to the
+`.ae` sources (the seed stays as it is). The class forms compiler writes no `SourceFile`
+attribute, so the view's names leave no trace in stage 1's classes. Stage 1's namespaces are
+compiled by stage 1's own runtime, which reads the `.ae` sources directly, as stages 2 and 3
+do.
 
 Nothing of the checkout is on the seed's class path. That matters because of `RT.load`: it takes
 a namespace's `__init` class only when the class is strictly newer than the source found on the

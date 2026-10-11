@@ -5,7 +5,7 @@
  * DelayScheduler.ScheduledForkJoinTask), which jrt's hand-written ForkJoinPool has not; here a
  * delayed task is a FutureTask run by a daemon thread (a goroutine) once the delay has passed,
  * unless it was cancelled first, which wakes the thread. The variant of CompletableFuture
- * (overlay/jdk/variants/CompletableFuture.clj) calls schedule.
+ * (overlay/jdk/variants/CompletableFuture.ae) calls schedule.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;

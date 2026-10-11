@@ -4,7 +4,7 @@
  * reaches ThreadLocalRandom's package-private getProbe and advanceProbe through
  * SharedSecrets.getJavaUtilConcurrentTLRAccess(), whose holder ThreadLocalRandom$Access
  * registers itself with SharedSecrets, jrt's hand-written shim; Striped64's variant
- * (overlay/jdk/variants/Striped64.clj) calls these instead.
+ * (overlay/jdk/variants/Striped64.ae) calls these instead.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package java.util.concurrent;

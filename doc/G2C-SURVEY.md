@@ -169,7 +169,7 @@ toolchain is also a ready "Go forms → native" back end (§5.2).
 | dependency | the Go toolchain at conversion time only, as javac is for j2c | none |
 | later self-hosting | g2c of `go/types` itself gives a Clojure checker, *if* ever wanted | — |
 
-The helper is the counterpart of `arbace/j2c/javac.clj`, which drives javac in-process. Go has
+The helper is the counterpart of `arbace/j2c/javac.ae`, which drives javac in-process. Go has
 no JVM API, so the helper is a separate Go program. It writes one forms file per package (or a
 stream), and `arbace.g2c` reads it with Arbace's reader. go-lisp cannot serve as the front end:
 its parser lives in `cmd/compile/internal/syntax`, which Go's `internal` rule keeps from being
@@ -297,7 +297,7 @@ declarations are written with the alias `go` (for `arbace.go`): `go/type`, `go/f
 - A Go package is a namespace: `net/http` becomes `go.net.http`, with the package name kept
   as metadata. An import path with dots or dashes (`golang.org/x/sys/unix`) is munged by one
   fixed rule: `go.golang_org.x.sys.unix`, with the path kept as `:go/path` metadata.
-- Layout follows SPEC §9.1: `go/strconv.clj` holds `(ns go.strconv ...)` and one
+- Layout follows SPEC §9.1: `go/strconv.ae` holds `(ns go.strconv ...)` and one
   `(load "strconv/atoi")` per Go file. Each file holds `(in-ns 'go.strconv)` and its forms.
 - Imports become `(:require [go.unicode.utf8 :as utf8])`. A use is `utf8/RuneLen`, like a
   static member in the class forms. Dot imports and blank imports (`_`) are `(:refer :all)`

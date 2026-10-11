@@ -88,8 +88,8 @@ Beyond what the spec fixes:
   gc (`cmd/compile/doc.go`) and is kept as an ordinary comment. Two `/*line*/` directives
   inside expressions (`issue29504.go`, `issue38698.go` of `$GOROOT/test`) cannot be placed
   (§10.3; the helper warns): they are reported, not written.
-- **Files.** `x.go` is `<pkg-dir>/x.clj`, except when the package's source directory has a
-  subdirectory `x` (a package whose own file would be `x.clj`): then `x.go.clj` (proposal
+- **Files.** `x.go` is `<pkg-dir>/x.ae`, except when the package's source directory has a
+  subdirectory `x` (a package whose own file would be `x.ae`): then `x.go.ae` (proposal
   C7; 9 files in std, e.g. `runtime/debug.go`).
 - **Single-file programs** (`$GOROOT/test`) keep their import path
   `command-line-arguments` in `:path`; their namespace is `go.test.` plus the file's path
@@ -181,7 +181,7 @@ names (§4.2), blank variables in `:init-order` (§6.3), doc text (§6.5), negat
 - **C6. Local generic types** (`$GOROOT/test`, and std's tests): a `let-type` name carries
   `:type-params [...]` as metadata, keeping the vector's pairs. *Accepted 2026-10-08,
   folded into SPEC §7.3 (and §13.1).*
-- **C7. File-name collisions**: `x.go.clj` when the package directory has a subdirectory
+- **C7. File-name collisions**: `x.go.ae` when the package directory has a subdirectory
   `x` (above). *Accepted 2026-10-08, folded into SPEC §4.1.*
 - **C8. `(binary-float M E)`** for constant values beyond a rational's range (above).
   *Accepted 2026-10-08, folded into SPEC §8.2 (and §13.4, §13.5).*

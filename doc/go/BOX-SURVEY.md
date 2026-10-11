@@ -13,13 +13,13 @@ change the surface (all three merged since: `goproc` and `gosec` 2026-10-10, `go
 2026-10-11).
 
 **Since the survey** (main, 2026-10-11), what changes its findings: `gofix` added a fifth
-optional host interface, `HostExecutable` (`resources.clj`: the executable's path, which the
+optional host interface, `HostExecutable` (`resources.ae`: the executable's path, which the
 embedded resources' `jar:` URLs name; a host without it, the box's, names `/arbace`); `gosec`
-moved `OSHost.RandomBytes` into the Linux-tagged `hostrand_linux.clj`, so on `GOOS=tamago`
+moved `OSHost.RandomBytes` into the Linux-tagged `hostrand_linux.ae`, so on `GOOS=tamago`
 `OSHost` alone no longer satisfies `Host` and a box host supplies `RandomBytes` itself (§9.4's
-scratch host already does: over `Random`), and `host.clj`'s default `theHost` (`OSHost`, in an
+scratch host already does: over `Random`), and `host.ae`'s default `theHost` (`OSHost`, in an
 untagged file) would then not compile for `GOOS=tamago`: by reading, not built, a second file
-besides `net.clj` that the box's build must tag or give a stub (§7, §9.2); the native executable is 66.4 MB on amd64 (the
+besides `net.ae` that the box's build must tag or give a stub (§7, §9.2); the native executable is 66.4 MB on amd64 (the
 default locale data, stripped since amendment SZ1), against the 58 MB the survey names.
 
 ## Executive summary
@@ -86,7 +86,7 @@ Go forms), printed and built by gc as a static `linux/amd64` and `linux/arm64` p
 (EXEC-NOTES.md). Its build already uses TamaGo's distribution as `GOROOT` (`bin/arbace-go`,
 `go_env`: `G2C_GOROOT=/root/tamago-go`, `GOOS=linux`), and g2c's round trip covers std for
 `tamago` and `linux` (AGENDA.md). jrt reaches the operating system only through `jrt.Host`
-(C2G-SPEC §9.4), so that "B1b swaps one value" (`go/arbace/jrt/host.clj`).
+(C2G-SPEC §9.4), so that "B1b swaps one value" (`go/arbace/jrt/host.ae`).
 
 B1b: the same program built with `GOOS=tamago`, its host answered by go-whim's doorbell
 through a TamaGo board, run by go-whim's monitor; amd64 on /dev/kvm here, arm64 under QEMU
@@ -283,8 +283,8 @@ The box's files last changed at `815e11a`; head `80c49bf`.
 
 ## 4. The surfaces mapped
 
-jrt's host today (`go/arbace/jrt/host.clj`, `hostfs.clj`, `net.clj`, `timezone.clj`; `goproc`'s
-`hostproc.clj`) against what the box offers. "Boot" means data the monitor writes at entry
+jrt's host today (`go/arbace/jrt/host.ae`, `hostfs.ae`, `net.ae`, `timezone.ae`; `goproc`'s
+`hostproc.ae`) against what the box offers. "Boot" means data the monitor writes at entry
 (argv today; the environment would be new), "guest" answered inside the image, "new" a call
 to add.
 
@@ -307,10 +307,10 @@ to add.
 | `HostLinks.Readlink` | default zone from `/etc/localtime` | absent: `TZ` from the environment, else UTC/`GMT+hh:mm` | none |
 | `NetHost`: `Listen`, `Dial`, `LookupIP`, `LookupAddr`, `Hostname`, `HasFamily`, `Set/GetOption`, `Available` | sockets, the socket REPL, `URL` | absent ("Network not available"); later §6 S5 | none, then new |
 | `HostProc` (`goproc`): `Start`, `Pid`, `ProcStat`, `ProcInfo`, `Pids`, `Kill`; `HostChild` | `ProcessBuilder`, `ProcessHandle`, `sh` | absent: `start` throws the JVM's `IOException`; `Pid` 1 | none (cut) |
-| terminal (`cmd/arbace/rlwrap_linux.clj`: `isatty`, `TIOCGWINSZ`, `execve` rlwrap) | line editing | the launcher's, on the host: rlwrap runs the monitor; the guest's `rlwrap_other.clj` is already empty | host side |
+| terminal (`cmd/arbace/rlwrap_linux.ae`: `isatty`, `TIOCGWINSZ`, `execve` rlwrap) | line editing | the launcher's, on the host: rlwrap runs the monitor; the guest's `rlwrap_other.ae` is already empty | host side |
 | signals | none in jrt (no `os/signal`); Ctrl-C ends the JVM | the monitor dies of it (`die_*.go`), the tty stays cooked | host side |
 | threads | goroutines, `sync`, timers | TamaGo's scheduler, 1..32 vCPUs | guest |
-| `tuning.clj` (`GOGC`, the 64 MiB minimum heap, `ARBACE_CPUPROFILE` via `os.Create`) | the collector, profiles | works; a profile lands in the in-memory fs (or `box/put`) | guest |
+| `tuning.ae` (`GOGC`, the 64 MiB minimum heap, `ARBACE_CPUPROFILE` via `os.Create`) | the collector, profiles | works; a profile lands in the in-memory fs (or `box/put`) | guest |
 
 The doorbell's calls Arbace would not use: `HostInit`, `GetWinsize`, `TermStart`/`Stop`,
 `TTYKeys`, `Suspend`, `Raise` (the editor's terminal; Arbace's REPL reads cooked lines, as
@@ -328,27 +328,27 @@ answered in the guest or absent.
 | area | namespaces / JDK | in the box | needs |
 |---|---|---|---|
 | reader, evaluator, core, collections, seqs, transients, protocols, multimethods, `deftype`/`reify`/`proxy` over `Dyn` | `arbace.core`, `arbace.lang` | works | nothing |
-| numbers (`BigInteger`, `BigDecimal`, `Math`, fdlibm) | `java.math`, jrt `math.clj` | works | nothing |
+| numbers (`BigInteger`, `BigDecimal`, `Math`, fdlibm) | `java.math`, jrt `math.ae` | works | nothing |
 | strings, `StringBuilder`, `Character`, `Formatter`, charsets | `java.lang`, jrt | works | nothing |
 | regex (the `java.util.regex` port), its resources | `java.util.regex` | works (resources embedded) | nothing |
 | `java.util` (collections, `Random`, `UUID`, `BitSet`, `TreeMap`), `arbace.set`, `walk`, `zip`, `data`, `edn`, `pprint`, `spec`, `test`, `test.check` | | works | `UUID.randomUUID`: `Random` |
-| the image of prepared namespaces | `cmd/arbace/image.clj` | works (embedded; architecture-independent, as arm64 reuses amd64's) | nothing |
+| the image of prepared namespaces | `cmd/arbace/image.ae` | works (embedded; architecture-independent, as arm64 reuses amd64's) | nothing |
 | class forms at the REPL (`defclass`) | `arbace.classes` | works (interpreted, CLASSFORMS-REPL.md) | nothing |
-| concurrency: futures, agents, atoms, refs, `pmap`, fork-join | `java.util.concurrent`, jrt `thread.clj`, `executor.clj`, `forkjoin.clj` | works (§9: `@(future ...)`), but **cooperatively**: no preemption (§2.7); on 1 vCPU nothing else runs while the REPL waits for a line (§9.6), on several a background `println` waits for it | an evaluator yield (R2), a bounded console read (R3) |
+| concurrency: futures, agents, atoms, refs, `pmap`, fork-join | `java.util.concurrent`, jrt `thread.ae`, `executor.ae`, `forkjoin.ae` | works (§9: `@(future ...)`), but **cooperatively**: no preemption (§2.7); on 1 vCPU nothing else runs while the REPL waits for a line (§9.6), on several a background `println` waits for it | an evaluator yield (R2), a bounded console read (R3) |
 | timed waits, `Thread/sleep`, `deref` with timeout | Go timers | works (board idle spins or parks) | nothing |
 | `System/nanoTime` | | works | nothing |
-| `System/currentTimeMillis`, `Date`, `Instant/now`, `#inst` now | jrt `system.clj`, `date.clj` | `currentTimeMillis` through the host works (§9); `new Date()` reads `time.Now()` directly and says 1970 | the board's clock offset (D10) |
+| `System/currentTimeMillis`, `Date`, `Instant/now`, `#inst` now | jrt `system.ae`, `date.ae` | `currentTimeMillis` through the host works (§9); `new Date()` reads `time.Now()` directly and says 1970 | the board's clock offset (D10) |
 | time zones | `TimeZone`, tzdb (`lib/tzdb.dat.z` embedded) | rules work; default zone from `TZ` | boot env |
 | text, locales (`gotext`), security (`gosec`: digests, `SecureRandom`) | | works (data embedded; seeds from `Random`) | `Random` |
 | standard streams, `*in*`/`*out*`/`*err*`, `read-line`, the REPL | `arbace.main`, `arbace.repl` | works over the console | existing calls |
 | `-e`, `-m`, scripts by name | `arbace.main` | `-e`, `-m` work; a script by name needs a file: written into the in-memory fs first, or from the store (S3) | S3 |
-| files (`java.io.File`, streams, `slurp`/`spit`, `arbace.java.io`, `load-file`, `ARBACE_PATH`) | jrt `files.clj`, `filesystem.clj` | emulated: TamaGo's in-memory fs, empty at start, lost at exit (§9: `spit`/`slurp` work); persisted through the store later | none (S1), store (S3) |
-| sockets, `InetAddress`, the socket REPL (`arbace.core.server`, `prepl`), `URL` beyond `file:` | jrt `net.clj` | absent (no `NetHost`) | a network design (S5) |
+| files (`java.io.File`, streams, `slurp`/`spit`, `arbace.java.io`, `load-file`, `ARBACE_PATH`) | jrt `files.ae`, `filesystem.ae` | emulated: TamaGo's in-memory fs, empty at start, lost at exit (§9: `spit`/`slurp` work); persisted through the store later | none (S1), store (S3) |
+| sockets, `InetAddress`, the socket REPL (`arbace.core.server`, `prepl`), `URL` beyond `file:` | jrt `net.ae` | absent (no `NetHost`) | a network design (S5) |
 | processes (`ProcessBuilder`, `arbace.java.shell`, `ProcessHandle`) | `goproc` | does not make sense: no other programs in the box; cut (absent `HostProc`); later perhaps "a process is another box" | none |
 | rlwrap, terminal | `cmd/arbace` | host side: `rlwrap <launcher>` | launcher |
 | signals, shutdown hooks | `Runtime.addShutdownHook` | hooks run at `System/exit`; a host signal kills the monitor | none |
-| environment, system properties | jrt `system.clj`, `tooloptions.clj` | from the launcher's allow-list at entry | boot env |
-| profiles, `runtime/debug`, `runtime/metrics` | `tuning.clj` | work; output to the in-memory fs or the store | none |
+| environment, system properties | jrt `system.ae`, `tooloptions.ae` | from the launcher's allow-list at entry | boot env |
+| profiles, `runtime/debug`, `runtime/metrics` | `tuning.ae` | work; output to the in-memory fs or the store | none |
 
 Classes:
 - **No host surface (the large majority)**: everything above but the rows below.
@@ -378,13 +378,13 @@ Not staged: processes (cut for good in the box), the terminal's raw mode.
 ## 7. The build: one source, two programs
 
 - **What differs.** Only the host side: (a) jrt's host for the box, a new file
-  `go/arbace/jrt/hostbox.clj` with `//go:build tamago`, over the board's `Call` (or a small
+  `go/arbace/jrt/hostbox.ae` with `//go:build tamago`, over the board's `Call` (or a small
   interface the board package fills, to keep jrt free of go-whim's import path); (b) the main
   package's `SetHost` choice, behind build tags (`main_tamago.go` sets `BoxHost`, imports the
-  board); `rlwrap_other.clj` is already the non-Linux case; (c) `hostfs_linux.clj` is already
-  `//go:build linux`; (d) `net.clj` reaches `syscall` directly for socket options and
+  board); `rlwrap_other.ae` is already the non-Linux case; (c) `hostfs_linux.ae` is already
+  `//go:build linux`; (d) `net.ae` reaches `syscall` directly for socket options and
   `TIOCINQ`: the only part of the program that does not build for `tamago` (§9.2); it moves
-  to a `//go:build linux` file with a stub beside it (`goproc`'s `hostproc_linux.clj` is
+  to a `//go:build linux` file with a stub beside it (`goproc`'s `hostproc_linux.ae` is
   already tagged).
 - **The closure stays the same at first.** Cutting by build configuration (no `NetHost`, no
   `HostProc` on `tamago`) leaves c2g's program and its type table (`image_types.go`) identical,
@@ -444,13 +444,13 @@ module (`target/arbace-go/work-amd64/mod`, main `105db68`'s build) copied to
    `TestGoGuest`, `TestGoGuestFault`, the TamaGo guest): 9.1 s.
 2. **arbace-go compiles for `GOOS=tamago` but for one file.** `go build ./...` of the printed
    module with `GOOS=tamago`, amd64 and arm64, fails only in `jrt/net.go` (from
-   `go/arbace/jrt/net.clj`): `syscall.IP_TOS`, `SO_OOBINLINE`, `SYS_GETSOCKOPT`, `SYS_IOCTL`,
+   `go/arbace/jrt/net.ae`): `syscall.IP_TOS`, `SO_OOBINLINE`, `SYS_GETSOCKOPT`, `SYS_IOCTL`,
    `TIOCINQ` undefined; with those replaced by numbers, the link fails on `syscall.Syscall6`
    (and `Syscall`), declared but not defined on tamago. Stubbed in the copy (an `ENOSYS`
    function), everything compiles and links: the whole of `arbace.lang`, the JDK closure, jrt
    (its other host files are already fine: `hostfs_linux` and `rlwrap_linux` are tagged
    `linux`), the image, the patched runtime overlay. So the code change for the box's build is
-   moving `net.clj`'s socket options and `Available` behind `//go:build linux` (or `!tamago`).
+   moving `net.ae`'s socket options and `Available` behind `//go:build linux` (or `!tamago`).
 3. **The `linux_user` flavour** (`GOOS=tamago`, no `GOOSPKG`; 61.7 MB amd64, 59.6 MB arm64)
    starts as a Linux process: the image replayed, `arbace.main` loaded, the banner printed.
    It is no test vehicle as is: TamaGo's `linux_user` passes no argv (`-e` was not seen: the
@@ -479,7 +479,7 @@ module (`target/arbace-go/work-amd64/mod`, main `105db68`'s build) copied to
    ```
 
    No change to go-whim, no new call. Findings: `new Date()` reads Go's `time.Now()` directly
-   (`jrt/date.clj:66`), not the host, so it says 1970 (TamaGo's `walltime` is `nanotime`):
+   (`jrt/date.ae:66`), not the host, so it says 1970 (TamaGo's `walltime` is `nanotime`):
    the board's clock must carry the wall-clock offset (D10). The runtime's seeds cost 63
    `Random` exits at start (one per request: batch them).
 5. **Measured** (amd64, nested KVM, best of 3): start with `-e nil` 0.38-0.42 s in the box at
@@ -552,7 +552,7 @@ Risks:
 - **R4 TamaGo's std differs.** `time.Local` is UTC, `walltime` starts at 1970, `os` is in
   memory, `net` needs `SocketFunc`, stdin is closed, stdout/stderr go through `Printk` (the
   board's: to `Message`, stderr). jrt must not reach `os.Stdout`/`os.Stderr` or `time.Now()`
-  for the wall clock directly (`throwable.clj` uses `os/Stderr` once, `date.clj` `time/Now`):
+  for the wall clock directly (`throwable.ae` uses `os/Stderr` once, `date.ae` `time/Now`):
   through the host only, or the board's clock carries the offset.
 - **R5 Go-version coupling.** TamaGo is pinned at go1.27.1, as Arbace's toolchain is; a Go
   upgrade waits for TamaGo's release.
@@ -571,7 +571,7 @@ the main package or the build. What could be done without disturbing it:
 
 - this survey;
 - keep `go:build`-cleanliness in new jrt work: OS calls (`syscall`, `os.Stdout`) only in
-  files tagged `linux`, so that the `tamago` compile stays one file away (§9.2); `net.clj`'s
+  files tagged `linux`, so that the `tamago` compile stays one file away (§9.2); `net.ae`'s
   split itself is a small change, but in jrt: after the freeze;
 - a `LICENSE.md` paragraph and the journal entry for the vendored parts, written when D3
   and D8 are decided (after the freeze).
@@ -588,6 +588,6 @@ the main package or the build. What could be done without disturbing it:
   `src/net/net_tamago.go`, `src/time/zoneinfo_tamago.go`, `LICENSE`; module
   `github.com/usbarmory/tamago@v1.27.1` (`goos/goos.go`, `user/linux`, `LICENSE`).
 - purego `github.com/ebitengine/purego@v0.11.1` (`LICENSE`).
-- Arbace: `go/arbace/jrt/{host,hostfs,hostfs_linux,net,timezone,tuning,throwable}.clj`,
-  `go/arbace/cmd/arbace/{rlwrap_linux,rlwrap_other,image}.clj`, branch `goproc`'s
-  `go/arbace/jrt/hostproc.clj`; `bin/arbace-go`, `bin/jrt`; `doc/go/{B1-PLAN,C2G-SPEC,EXEC-NOTES,JAVA-BASE}.md`.
+- Arbace: `go/arbace/jrt/{host,hostfs,hostfs_linux,net,timezone,tuning,throwable}.ae`,
+  `go/arbace/cmd/arbace/{rlwrap_linux,rlwrap_other,image}.ae`, branch `goproc`'s
+  `go/arbace/jrt/hostproc.ae`; `bin/arbace-go`, `bin/jrt`; `doc/go/{B1-PLAN,C2G-SPEC,EXEC-NOTES,JAVA-BASE}.md`.

@@ -21,8 +21,8 @@ slowest namespaces run 4 to 5 times faster (reducers 345 → 67 s, parse 306 →
 
 ## The design
 
-`arbace/lang/go/CompilerCode.clj` (a second variant file of `Compiler`, read by c2g only) and
-`arbace/lang/go/CompilerOps.clj` (generated):
+`arbace/lang/go/CompilerCode.ae` (a second variant file of `Compiler`, read by c2g only) and
+`arbace/lang/go/CompilerOps.ae` (generated):
 
 - **`Code`**, an abstract class: `run(Frame)` is the node's value as an `Object`, boxed as the
   bytecode boxes it; a node whose analyzed type is primitive (`Compiler.maybePrimitiveType`:
@@ -36,7 +36,7 @@ slowest namespaces run 4 to 5 times faster (reducers 345 → 67 s, parse 306 →
   `double`, or its closed-over index (the fn's values, the deftype's fields); constants are made
   once (`CodeConst`, with their `long` and `double` values); a Var node holds its `Var`, a
   keyword call its `Keyword`.
-- **Direct static calls**: `test/c2g/eval_ops.clj` (run on the JVM's stage 2) lists the 578
+- **Direct static calls**: `test/c2g/eval_ops.ae` (run on the JVM's stage 2) lists the 578
   public static methods of `Numbers`, `RT`, `Util` and jrt's `Math` with at most three
   parameters of the kinds `long`, `int`, `double`, `boolean` or a reference, and writes
   `CodeOp0` .. `CodeOp3`: per arity one class whose `run`, `runLong`, `runDouble`, `runBool`
@@ -56,7 +56,7 @@ slowest namespaces run 4 to 5 times faster (reducers 345 → 67 s, parse 306 →
   fixed arity (`FnExpr.evalArities`) is called with the arguments bound in a frame, without a
   seq; other calls (variadic, `apply`) go through `RestFn` to `doInvoke` as before.
   `EvalMethod` (a deftype's method) answers `invoke` of 1 to 4 arguments, and c2g's `Dyn`
-  dispatch (`dynCallFast`, `arbace/c2g/dyn.clj`) calls `invoke` of the arity instead of
+  dispatch (`dynCallFast`, `arbace/c2g/dyn.ae`) calls `invoke` of the arity instead of
   `applyTo`.
 - **Frames are reused**: calls nest, and no frame outlives its call (a fn closes over values,
   copied when it is made), so each thread's `EvalState` keeps its frames by depth; a call takes
@@ -72,7 +72,7 @@ slowest namespaces run 4 to 5 times faster (reducers 345 → 67 s, parse 306 →
 Stack traces are unchanged: the try literal of `Evaluator.invokeFn` and `invokeMethod` is still
 the Go frame jrt replaces by the Clojure frame (`isEvalCall`); the `Compiler_Code*` frames are
 internal to jrt's mapping, and `CodeHost*` frames hide reflective frames above them, as the
-`EvalIn` frames of the host nodes did (`go/arbace/jrt/throwable.clj`).
+`EvalIn` frames of the host nodes did (`go/arbace/jrt/throwable.ae`).
 
 **With the suite's last fixes** (main at `5ced273`, EVAL-NOTES.md, SL1 and SL2): the compiled
 paths clear locals as `evalIn` does: a use the analyzer marks `shouldClear` (and the local
@@ -95,7 +95,7 @@ hints with its short name then failed ("Unable to resolve classname") when first
 `*ns*` was another. Now `ObjExpr.compile` (at analysis) records the namespace (`evalNs`), a
 method is compiled with `*ns*` bound to it, `CaseExpr` keeps its tested expression's primitive
 type from analysis (`evalPc`), and `Evaluator.result` takes the body's type found at
-compilation (`CMethod.bodyPrim`). Oracle forms: `test/oracle/forms/hint_namespaces.clj`.
+compilation (`CMethod.bodyPrim`). Oracle forms: `test/oracle/forms/hint_namespaces.ae`.
 
 **The image (step 6)** keeps storing the analyzed `Expr` trees; methods are compiled lazily, at
 their first call, not when the image is replayed: most of core's 1,262 fns are not called at
@@ -105,7 +105,7 @@ fields. Preparing the image takes 11 s (32 s before), the image is unchanged (3.
 
 ## Measurements
 
-Method: `test/bench/eval-bench.clj`, run unchanged by the JVM's `bin/arbace` (now `bin/arbace-j`; jar and AOT cache)
+Method: `test/bench/eval-bench.ae`, run unchanged by the JVM's `bin/arbace` (now `bin/arbace-j`; jar and AOT cache)
 and by the Go executable; each benchmark runs once, then repeatedly for at least a second and 3
 runs; the best run's time is reported (ms). Go: amd64, go1.27.1, `GOGC` default after the start
 (step 6); "before" is main's executable at `bc586b1`. The machine (64 cores) was shared with
@@ -173,7 +173,7 @@ settings are part a's (D7).
 - After merging step 7b (`bfedb18`, main at `48ba45c`): `bin/jrt test` amd64 and
   `bin/arbace-go --smoke` pass; Clojure's suite on Go has no regressions against
   `test/arbace-go-results.edn`; the oracle matches 20,780 of 21,027, with 242 new mismatches
-  against `test/oracle/known-go-amd64.edn`, all in `defclass.clj` and `defclass_corpus.clj`
+  against `test/oracle/known-go-amd64.edn`, all in `defclass.ae` and `defclass_corpus.ae`
   (`Unable to resolve classname: Compiler$CF$Node`): main's own executable of that commit fails
   the same way (class forms at the REPL after the merges), so they are not this branch's.
   `bin/gate` was not run: no source the bootstrap compiles changed (the variants and c2g are
@@ -214,12 +214,12 @@ Numbered EC. The user accepted EC1-EC6 on 2026-10-10 (folded where each says); E
 taken.
 
 - **EC1 (EVAL-PLAN §2, §6; C2G-SPEC §10.1) Closure compilation.** Each method of an evaluated
-  fn or deftype is compiled at its first call into `Code` nodes (`CompilerCode.clj`); `evalIn`
+  fn or deftype is compiled at its first call into `Code` nodes (`CompilerCode.ae`); `evalIn`
   stays the evaluation of top-level forms and of compat-mode nodes. `long` and `double` locals
   live unboxed in the frame's `prims`; `recur` sets the frame's flag.
   *Accepted 2026-10-10: EVAL-PLAN §2, §2.1, §6; C2G-SPEC §10.1, §16.*
-- **EC2 (C2G-SPEC §10.1) Direct static calls generated.** `arbace/lang/go/CompilerOps.clj` is
-  generated by `test/c2g/eval_ops.clj` from the JVM's classes and checked in (regenerated when
+- **EC2 (C2G-SPEC §10.1) Direct static calls generated.** `arbace/lang/go/CompilerOps.ae` is
+  generated by `test/c2g/eval_ops.ae` from the JVM's classes and checked in (regenerated when
   `Numbers`, `RT`, `Util` or jrt's `Math` change their public static methods).
   *Accepted 2026-10-10: C2G-SPEC §10.1, §16.*
 - **EC3 (EVAL-PLAN §2.2, Q3 as built) Calls of fixed arity without a seq**: `EvalFn.invoke` of
@@ -349,7 +349,7 @@ were the thread-bound deref (a `MapEntry` allocated per lookup), equivalence of 
 
 ### 1. The collector's settings (D7) — kept
 
-jrt's package initialization (`go/arbace/jrt/tuning.clj`, `init`, so before the main
+jrt's package initialization (`go/arbace/jrt/tuning.ae`, `init`, so before the main
 package's own start-up setting, amendment U4, which raises `GOGC` to 400 until `arbace.main` is
 loaded and then restores this one): `GOGC` is 200 unless the environment sets `GOGC`, and a
 64 MiB minimum heap unless `ARBACE_MIN_HEAP_MB` sets another (0: none). The minimum heap is a
@@ -422,7 +422,7 @@ faster (`loop` 5,442 → 4,809 ms, `map-inc` 5,227 → 4,750, `keyword-map` 1,69
 
 `Var.getThreadBinding` looked the var up with `entryAt`, which allocates a `MapEntry` (the
 JVM's escape analysis removes it, Go's cannot across the interface call): 89 ns per deref of a
-bound var, most of it the allocation. The Go build's variant `arbace/lang/go/Var.clj` uses
+bound var, most of it the allocation. The Go build's variant `arbace/lang/go/Var.ae` uses
 `valAt` (the bindings map vars to `TBox`es, never to nil, so the result is the same). `binding`
 in `w.clj`: 939 → 791 ms with items 4 and 6.
 
@@ -468,7 +468,7 @@ sets `runtime.MemProfileRate` to 0 unless `ARBACE_MEMPROFILE` is set.
 ### 10. Profile-guided optimization — kept, opt-in
 
 `bin/arbace-go --build --pgo` builds as before (with the namespaces' image), runs the host's executable on
-`test/arbace-go-pgo.clj` (a training workload in the spirit of `test/aot-training.clj`: the
+`test/arbace-go-pgo.ae` (a training workload in the spirit of `test/aot-training.ae`: the
 common libraries, collections, seqs and transducers, numbers, strings, regexes, printing,
 protocols, dynamic vars, exceptions, futures and agents; about 15 s) with a CPU profile, and
 builds every executable again in its work module with `go build -pgo` (as the image's link
@@ -672,7 +672,7 @@ Letter O: every letter appears somewhere in doc/; O only as C2G-SPEC §4.4's `O1
   the header, §5.2). *Accepted 2026-10-10, folded into C2G-SPEC §5.7 and §5.8.*
 
 - **O5 (§13.4, §13.6, BUILD.md) Profile-guided builds.** `bin/g2c build --pgo FILE` and
-  `bin/arbace-go --build --pgo` (a training run of `test/arbace-go-pgo.clj` with
+  `bin/arbace-go --build --pgo` (a training run of `test/arbace-go-pgo.ae` with
   `ARBACE_CPUPROFILE`, then `go build -pgo`). Proposed: the freeze's executables are built so;
   the default build stays without, for build time. *Accepted 2026-10-10 (the freeze's executables are built with `--pgo`; ordinary builds stay without), folded into C2G-SPEC §13.4.*
 

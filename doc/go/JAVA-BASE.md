@@ -37,7 +37,7 @@ java.security's basics (9,124 members, 52.0%, on `gosec`) and, on `gotext`
 
 ## Method
 
-`bin/jrt-coverage [OUT]` (bash) with its Clojure in `test/g2c/jrt_coverage.clj`
+`bin/jrt-coverage [OUT]` (bash) with its Clojure in `test/g2c/jrt_coverage.ae`
 (`g2c.jrt-coverage`, next to `g2c.java-surface`). It runs on Arbace's `target/stage2`
 (`bin/lib/tools.bash`), takes about 15 s, and writes:
 
@@ -390,7 +390,7 @@ The user's decision of 2026-10-10: close the gaps above and add the plain Java o
 before the freeze (java.time and java.util.concurrent are other branches'). Done, from main at
 `8ace8b1`:
 
-- **25 jdk26u files added to the closure** (`util-sources` in `test/g2c/jrt_sources.clj`,
+- **25 jdk26u files added to the closure** (`util-sources` in `test/g2c/jrt_sources.ae`,
   amendment JB1): `DualPivotQuicksort`, `ArraysParallelSortHelpers`, `ArrayPrefixHelpers`,
   `Comparators`, `SortedSet`, `jdk.internal.util.random.RandomSupport`, `java.math.BitSieve`,
   `BitSet`, `PriorityQueue`, `WeakHashMap`, `StringTokenizer`, `Base64`, `SplittableRandom`,
@@ -406,7 +406,7 @@ before the freeze (java.time and java.util.concurrent are other branches'). Done
   (`isDeprecated` is false: no annotations in the Go build, R16).
 - **c2g**: FromFn's array results (amendment JB3) and lambdas with marker interfaces
   (amendment JB5); **jrt**: forked tasks not yet done run again (amendment JB4).
-- **The oracle**: `test/oracle/forms/java_util.clj`, 161 cases recorded on the JVM: all pass on
+- **The oracle**: `test/oracle/forms/java_util.ae`, 161 cases recorded on the JVM: all pass on
   Go but the three `nextProbablePrime` cases (`ThreadLocalRandom.current`, listed in
   `known-go-amd64.edn` with that reason).
 
@@ -445,7 +445,7 @@ completed"):
   without completing and that is forked again (`ArrayPrefixHelpers`' cumulation reforks its
   parent) never ran again, and `parallelPrefix` deadlocked. Forking now runs `exec` whenever
   the task is not done, as the JDK's `doExec`; joining is unchanged. (A change to jrt's
-  `forkjoin.clj`, which the java.util.concurrent branch also owns.) *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
+  `forkjoin.ae`, which the java.util.concurrent branch also owns.) *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
 - **JB5 (C2G-SPEC §7.11, lambdas) A lambda whose target is an intersection with marker
   interfaces** (`(lambda (& Comparator Serializable) ...)`, javac's
   `(Comparator<T> & Serializable)`) gets an adapter that implements them, `F_Fn_M1_..._Mn`,

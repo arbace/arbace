@@ -3,7 +3,7 @@
  * FileDescriptor, FileInputStream and FileOutputStream written for jrt (overlay/jdk/java.base/
  * java/io). A handle is a number: 0, 1 and 2 the host's standard streams, the others the files
  * the host opened (Host.Open) and the program's ends of its children's pipes (go/arbace/jrt/
- * process.clj); the natives are jrt's Go (go/arbace/jrt/files.clj).
+ * process.ae); the natives are jrt's Go (go/arbace/jrt/files.ae).
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;

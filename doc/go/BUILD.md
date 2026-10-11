@@ -13,7 +13,7 @@ bin/g2c build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|
 bin/g2c-build-tests [--arch amd64|arm64]... [PROG...]
 ```
 
-The logic is `arbace/g2c/build.clj` (`arbace.g2c.build`), run on Arbace's `target/stage2`
+The logic is `arbace/g2c/build.ae` (`arbace.g2c.build`), run on Arbace's `target/stage2`
 through `bin/lib/tools.bash` like the rest of `bin/g2c` (so `bin/build-arbace` first).
 `bin/g2c build` without arguments still builds g2c's helper (`tools/godump`).
 
@@ -25,17 +25,17 @@ module file:
 ```
 DIR/
   program.edn                          optional: {:module "example.com/multi" :go "1.27"}
-  go/example_com/multi.clj             package file of example.com/multi (ns, go/package, load)
-  go/example_com/multi/main.clj        its main.go: in-ns, go/file, declarations
-  go/example_com/multi/greet.clj       package file of example.com/multi/greet
-  go/example_com/multi/greet/greet.clj
+  go/example_com/multi.ae             package file of example.com/multi (ns, go/package, load)
+  go/example_com/multi/main.ae        its main.go: in-ns, go/file, declarations
+  go/example_com/multi/greet.ae       package file of example.com/multi/greet
+  go/example_com/multi/greet/greet.ae
   go/example_com/multi/greet/banner.txt     a file greet embeds (:embed-files)
-  go/example_com/multi/internal/wc.clj
-  go/example_com/multi/internal/wc/wc.clj
+  go/example_com/multi/internal/wc.ae
+  go/example_com/multi/internal/wc/wc.ae
   runs/                                (the tests' expected runs; ignored by the build)
 ```
 
-- **Packages.** Every `.clj` file under `DIR/go` holding an `ns` form and a `go/package` form
+- **Packages.** Every `.ae` file under `DIR/go` holding an `ns` form and a `go/package` form
   is a package file; it is collected with the files it `load`s (SPEC §4.1, as the printer
   does). Each package's `:path` is its import path. Exactly one package is named `main`: the
   program.
@@ -50,11 +50,11 @@ DIR/
   and §4.2.)
 - **Other and embedded files** (`:other-files`, `:embed-files`, SPEC §9.5-9.6): with no
   original package directory, they live in the package's forms directory, the package file's
-  path without `.clj` (`go/example_com/multi/greet/banner.txt`); embedded files are checked
+  path without `.ae` (`go/example_com/multi/greet/banner.txt`); embedded files are checked
   against the SHA-256 the forms record. (Amendment B2, accepted 2026-10-08, folded into SPEC
   §9.5, §9.6 and §12.4.)
 - **Data directories** (amendment M5 of C2G-SPEC §16, accepted 2026-10-09). A directory under
-  `DIR/go` holding a file `.g2c-data` holds data, not forms: its `.clj` files (and those of its
+  `DIR/go` holding a file `.g2c-data` holds data, not forms: its `.ae` files (and those of its
   subdirectories) are not read as Go forms. `bin/c2g --program` marks so the main package's
   embedded namespace sources (`go/arbace/cmd/arbace/res/`, its `:embed-files`).
 - **Files.** One Go file per `go/file` form; when `go/package` has `:files`, the two must name
@@ -72,10 +72,10 @@ DIR/
    removed afterwards): `go.mod`, then per package its Go files and the files it names. The
    layout is gofmt's by default (readable Go whatever the forms' lines); `--layout lines`
    puts each form on its forms line (SPEC §12.3). `--line-file` prints in the lines layout
-   with a `//line FILE.clj:1` directive first in each file, `FILE.clj` relative to the
+   with a `//line FILE.ae:1` directive first in each file, `FILE.ae` relative to the
    package's forms directory, so that gc's positions, and panics' tracebacks, name the forms
-   file and its lines: `example.com/multi/greet/greet.clj:15` for
-   `DIR/go/example_com/multi/greet/greet.clj` line 15. (Amendment B3, accepted 2026-10-08,
+   file and its lines: `example.com/multi/greet/greet.ae:15` for
+   `DIR/go/example_com/multi/greet/greet.ae` line 15. (Amendment B3, accepted 2026-10-08,
    folded into SPEC §12.3.)
 2. In `WORK/mod`, with only this environment set by the build (the rest inherited, `GOCACHE`
    and `HOME` included):

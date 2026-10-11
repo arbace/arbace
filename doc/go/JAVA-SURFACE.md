@@ -20,7 +20,7 @@ in the last section.
 
 ## Method
 
-`bin/java-surface` (script) and `test/g2c/java_surface.clj` (the tool, on Arbace's stage 2)
+`bin/java-surface` (script) and `test/g2c/java_surface.ae` (the tool, on Arbace's stage 2)
 read every class file of `target/stage2` (5,740 classes, after `bin/build-arbace`) with the
 JDK's class file API (`java.lang.classfile`), and collect each reference to a class outside
 Arbace (`java.*`, `javax.*`, `jdk.*`, `sun.*`, `org.xml`, `org.w3c`):
@@ -66,7 +66,7 @@ evaluator does not emit them; jrt has each anyway, the runtime uses them all).
 their constant pools (573) are exactly those the tool collects with a JDK owner (573; none only
 on either side; recorded in the data as `:javap-check`). (2) The class forms compiler's own
 resolution: the runtime's classes are its output, so the bytecode records what its analyzer
-resolved for every member reference of `arbace/lang/*.clj` (owner, name, descriptor, as
+resolved for every member reference of `arbace/lang/*.ae` (owner, name, descriptor, as
 `arbace.classes.analyze` chose them); the javap check confirms the tool reads them back exactly.
 A separate hook in the analyzer would see the same references before emission and was not
 needed. (3) The REPL measurement and the output are deterministic: two runs give the same

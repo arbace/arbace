@@ -9,7 +9,7 @@ executable (`bin/arbace-go`, [C2G-SPEC.md](C2G-SPEC.md)). The decisions of 2026-
 bind it; the user accepted the recommendation of each of the 20 questions of §15 on 2026-10-08.
 
 This spec defines the **Go forms**: how every construct of a Go package, as `go/parser` and
-`go/types` see it, is written as Clojure data in ordinary `.clj` sources. It says what the forms
+`go/types` see it, is written as Clojure data in ordinary `.ae` sources. It says what the forms
 mean, what the converter writes out of the type checker's decisions, what a consumer derives by
 itself, and what the printer needs to give the Go toolchain a program that `gc` compiles to the
 same export data and object code. It is the counterpart of the class forms
@@ -215,11 +215,11 @@ replaced by `.` and, inside a path element, `.` and `-` replaced by `_`:
 
 | import path | namespace | files |
 |---|---|---|
-| `unicode/utf8` | `go.unicode.utf8` | `go/unicode/utf8.clj`, `go/unicode/utf8/utf8.clj` |
-| `math/rand/v2` | `go.math.rand.v2` | `go/math/rand/v2.clj`, `go/math/rand/v2/*.clj` |
+| `unicode/utf8` | `go.unicode.utf8` | `go/unicode/utf8.ae`, `go/unicode/utf8/utf8.ae` |
+| `math/rand/v2` | `go.math.rand.v2` | `go/math/rand/v2.ae`, `go/math/rand/v2/*.ae` |
 | `vendor/golang.org/x/net/dns/dnsmessage` | `go.vendor.golang_org.x.net.dns.dnsmessage` | |
 | `main` packages (`cmd/gofmt`) | `go.cmd.gofmt` | |
-| the external test package of `fmt` (`fmt_test`, §15 Q14) | `go.fmt_test` | `go/fmt_test.clj`, `go/fmt_test/*.clj` |
+| the external test package of `fmt` (`fmt_test`, §15 Q14) | `go.fmt_test` | `go/fmt_test.ae`, `go/fmt_test/*.ae` |
 | a single-file program `$GOROOT/test/fixedbugs/bug257.go` | `go.test.fixedbugs.bug257` | |
 
 The path is kept exactly in `go/package` (§4.2). An external test package `p_test` has the
@@ -230,12 +230,12 @@ path relative to `$GOROOT/test` without `.go`, mapped as above (amendment, accep
 2026-10-08). Two paths of one conversion that map to one namespace are a converter error (none
 exists in the standard library). Layout follows class forms §9.1: the package file holds the
 `ns` form, the `go/package` form and one `load` per Go file in the package's file order; each
-Go file `x.go` becomes `<pkg-dir>/x.clj`, or `<pkg-dir>/x.go.clj` when the package's source
-directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x.clj`
+Go file `x.go` becomes `<pkg-dir>/x.ae`, or `<pkg-dir>/x.go.ae` when the package's source
+directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x.ae`
 (amendment, accepted 2026-10-08; 9 files in std, such as `runtime/debug.go`):
 
 ```clojure
-;; go/unicode/utf8.clj
+;; go/unicode/utf8.ae
 (ns go.unicode.utf8
   (:require [arbace.go :as go]))
 
@@ -248,7 +248,7 @@ directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x
 ```
 
 ```clojure
-;; go/unicode/utf8/utf8.clj
+;; go/unicode/utf8/utf8.ae
 (in-ns 'go.unicode.utf8)
 
 (go/file "utf8.go"
@@ -1218,8 +1218,8 @@ The directive is kept on its variable (§9.1). The embedded files are not data i
 the printer copies them from the original package directory, checking the hashes.
 
 A package written by hand as Go forms has no original directory: its other and embedded files
-live in its **forms directory**, the package file's path without `.clj`
-(`go/example_com/multi/greet/banner.txt` beside `go/example_com/multi/greet/greet.clj`), at
+live in its **forms directory**, the package file's path without `.ae`
+(`go/example_com/multi/greet/banner.txt` beside `go/example_com/multi/greet/greet.ae`), at
 their paths in the package, and the printer copies them from there, checking the embedded
 files' hashes all the same (amendment, accepted 2026-10-08).
 
@@ -1234,12 +1234,12 @@ inlinable bodies in export data. The forms keep them in one of two modes, record
 Positions are lines, and they are carried by the layout of the forms text:
 
 - **The forms file has the Go file's lines.** The converter writes each form that begins a Go
-  line on that line number of the `.clj` file. Go's lines are never fewer than the forms need:
+  line on that line number of the `.ae` file. Go's lines are never fewer than the forms need:
   Go puts one statement per line, and a closing `}` line becomes a blank line or a comment line.
   The `in-ns` and `go/file` forms take the place of the package clause and the imports: both
   start on the package clause's line, and comments before it (a copyright) are `;;` lines
   above (amendment, accepted 2026-10-08).
-- The reader attaches `:line` (and the `.clj` column, `:column`) to every list it reads. In this
+- The reader attaches `:line` (and the `.ae` column, `:column`) to every list it reads. In this
   mode `:line` is the Go line; `:column` is meaningless and ignored.
 - **Symbols and vectors** that begin a Go line, and so carry no `:line` from the reader, get it
   written: `^{:line 87} rune2Max`; so do `@` forms. A **literal** or keyword that begins a Go
@@ -1267,7 +1267,7 @@ Positions are lines, and they are carried by the layout of the forms text:
 The converter keeps the forms in memory with the same metadata (`:line` on lists, symbols and
 vectors that begin lines, `:go/breaks`, `:go/end`); writing them out as text and reading them
 back gives them again. Forms written by hand have the lines of their own text, which is what
-source lines mean: printed Go then reports the `.clj` file's lines (§12.3).
+source lines mean: printed Go then reports the `.ae` file's lines (§12.3).
 
 What `:lines` does not keep: columns, and the lines of operators and brackets that gc uses as
 node positions when they are not on the line where the node begins (gc's syntax tree positions
@@ -1467,12 +1467,12 @@ expressions) is for consumers.
   column is left of the cursor). The output is not gofmt-formatted.
 - **No positions** (forms built by a program): the printer lays the code out as gofmt would.
 - Forms written by hand in an Arbace source: the printer may also emit
-  `//line file.clj:N` directives, so that gc's positions name the forms file (a printer
+  `//line file.ae:N` directives, so that gc's positions name the forms file (a printer
   option; not used by the round trip). The file name is the forms file's path relative to the
-  package's forms directory (§9.6): `//line greet.clj:1` for
-  `go/example_com/multi/greet/greet.clj` (amendment, accepted 2026-10-08). gc resolves a
+  package's forms directory (§9.6): `//line greet.ae:1` for
+  `go/example_com/multi/greet/greet.ae` (amendment, accepted 2026-10-08). gc resolves a
   relative name in the package's directory, so `-trimpath` rewrites it to
-  `example.com/multi/greet/greet.clj` and the build stays reproducible; a name reaching outside
+  `example.com/multi/greet/greet.ae` and the build stays reproducible; a name reaching outside
   that directory (`../go/...`) would keep the host's path.
 
 ### 12.4 Building the printed package
@@ -1735,7 +1735,7 @@ func Use() int32 {
 }
 ```
 
-`go/sample.clj`:
+`go/sample.ae`:
 
 ```clojure
 (ns go.sample
@@ -1752,7 +1752,7 @@ func Use() int32 {
 (load "sample/sample")
 ```
 
-`go/sample/sample.clj` (laid out for reading; the blank lines stand for Go's closing braces):
+`go/sample/sample.ae` (laid out for reading; the blank lines stand for Go's closing braces):
 
 ```clojure
 (in-ns 'go.sample)
@@ -2225,7 +2225,7 @@ build` (amendments B1-B4, [BUILD.md](BUILD.md), not the milestone B1); the user 
   (`^:go/grouped`, `^:go/implicit`): §3.2 (N6), §7.3, §12.2, §13.1, §14.5. C3 `^:go/paren` on
   operands of `and` and `or`: §3.2 (N1), §7.5, §11.1, §12.2, §13.1, §14.5. C4 directives among
   the imports: §4.3, §9.1, §12.2, §13.1. C5 a tagged `(go/id "x")` as a name: §4.4, §5.3,
-  §13.1. C6 local generic types: §7.3, §13.1. C7 `x.go.clj` on file-name collisions: §4.1. C8
+  §13.1. C6 local generic types: §7.3, §13.1. C7 `x.go.ae` on file-name collisions: §4.1. C8
   `(binary-float M E)`: §8.2, §13.4, §13.5. C9 `:go/label` on the first target: §7.1, §7.3,
   §12.2, §13.1, §14.5. C10 `^:var (values a b)`: §7.1, §7.3, §13.1. C11 `:full` positions of
   spliced nodes: §10.2.
@@ -2383,7 +2383,7 @@ printer's over the helper's):
   `sample-meta.edn`; `out/sort.edn` (`:inst` of `slices.Sort`); a probe package in
   `.tmp/g2c-spec/t/` (redeclared `err` in `Uses`; `1 << s` typed `uint8`; promoted literal key
   without path; `new(42)`; generic method `Apply` with inferred `F`; method path `[0 0]`).
-- Arbace's reader (`arbace/lang/LispReader.clj`, `MetaReader`): explicit `:line`/`:column`
+- Arbace's reader (`arbace/lang/LispReader.ae`, `MetaReader`): explicit `:line`/`:column`
   metadata is kept over the reader's; `~` is unquote, `^` metadata, `.5` a symbol, `1e400`
   `##Inf`, and `|`, `%`, `&`, `&&`, `||`, `!=`, `<<`, `>>`, `...`, `<!`, `>!`, `inc!` symbols
   (checked with the JVM REPL, then `bin/arbace`, now `bin/arbace-j`).

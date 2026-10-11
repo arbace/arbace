@@ -23,7 +23,7 @@ runs `arbace.main` (`-e`, scripts, `-` for stdin, the REPL) on linux/amd64 and, 
 ```
 $ bin/arbace-go -e '(+ 1 2)'
 3
-$ bin/arbace-go script.clj      # deftype, defrecord, protocols, reify, letfn, case, try ...
+$ bin/arbace-go script.ae      # deftype, defrecord, protocols, reify, letfn, case, try ...
 $ echo '(defn sq [x] (* x x)) (sq 7)' | bin/arbace-go
 Clojure 1.13.0-master-SNAPSHOT
 user=> #'user/sq
@@ -41,19 +41,19 @@ executable is about 37 MB.
 
 | where | what |
 |---|---|
-| `arbace/lang/go/Compiler.clj` | the evaluator (below): `Compiler$Frame`, `EvalFn`, `EvalMethod`, `EvalState`, `Dyn` (natives), `Evaluator`; an `evalIn(Frame)` method for every node kind that can hold locals, in the variants of the `Expr` classes; `ObjExpr.compile` defines the classes of `deftype`/`reify`; `NewInstanceExpr.compileStub`; `FnMethod.primInterface` (nil, Q1); `loadFile` without `java.io.File` |
-| `arbace/lang/go/RT.clj` | `RT.load` over `resourceAsStream`: the program's embedded sources (jrt's host `Resource`), then the directories of `ARBACE_PATH`; RT's initialization loads `arbace.core` when the program has its sources; `doInit` without the socket server (phase 1; since sockets it starts the `arbace.server.*` servers, JRT-NOTES.md "Sockets"); `ARBACE_LOAD_TIMES` |
-| `arbace/lang/go/ns/` (new) | the Go build's namespace variants (below): `genclass.clj` (`gen-interface` at run time), `core_proxy.clj` (`proxy` throws when evaluated), `instant.clj` (decision 7, over `java.util.Date`), `main.after.clj`, `main.subst.clj`, `java/io.subst.clj` |
-| `arbace/c2g/embed.clj` (new) | `bin/c2g --program`: the embedded sources, the namespace variants applied, and the classes the namespaces name outside the world |
-| `arbace/c2g/main.clj` | `--program`: the REPL's world (every public member of every class with class forms, Q2), the embedded sources (`go:embed` of `res/`, the host's `Resources`), the cut classes the namespaces name; registrations of both packages before the cut classes; the `:after` hook last |
-| `arbace/c2g/out.clj` | member tables: the public methods and constructors that do not exist in Go listed, throwing (`--program`); cut classes' tables from the JVM's reflection, throwing; overloads in the JVM's order; setters of volatile fields; out-of-world superinterfaces replaced by theirs; `reflect_tables_c2g.go` (jrt members c2g writes: `String.format`, the regex methods, `System.in/out/err`, `CASE_INSENSITIVE_ORDER`, the context class loader and resources) |
-| `arbace/c2g/dyn.clj` | `Dyn`'s natives `setStaticMethod`, `defineCtor`, `defineInterface`, `addInterfaceMethod`, `defineFnClass`, `hideField`; HotSpot's `AbstractMethodError` message |
-| `arbace/c2g/decls.clj`, `code.clj`, `world.clj` | `getClass` of a class with a field `c2g$class`; a `this(...)`/`super(...)` to a constructor outside the world is a missing operation; catch clauses of classes outside the world dropped; `identical?` of two interface types through `any`; variants' parameter keys skip `:throws` |
-| `arbace/g2c/build.clj` | a directory holding `.g2c-data` is data, not forms (the embedded sources) |
-| `go/arbace/jrt/` | the evaluator's natives (`natives.clj`: trace hook, monitors, checkcast, `RT.hostResource`, `UUID`'s random bytes); evaluated frames in stack traces (`throwable.clj`); `Box` maps a typed nil to null; `System`'s `Class` (`system.clj`) and member table; `WeakReference`'s constructors for subclasses; tables regenerated (`test/jrt/tables.clj`: overloads in the JVM's order) |
+| `arbace/lang/go/Compiler.ae` | the evaluator (below): `Compiler$Frame`, `EvalFn`, `EvalMethod`, `EvalState`, `Dyn` (natives), `Evaluator`; an `evalIn(Frame)` method for every node kind that can hold locals, in the variants of the `Expr` classes; `ObjExpr.compile` defines the classes of `deftype`/`reify`; `NewInstanceExpr.compileStub`; `FnMethod.primInterface` (nil, Q1); `loadFile` without `java.io.File` |
+| `arbace/lang/go/RT.ae` | `RT.load` over `resourceAsStream`: the program's embedded sources (jrt's host `Resource`), then the directories of `ARBACE_PATH`; RT's initialization loads `arbace.core` when the program has its sources; `doInit` without the socket server (phase 1; since sockets it starts the `arbace.server.*` servers, JRT-NOTES.md "Sockets"); `ARBACE_LOAD_TIMES` |
+| `arbace/lang/go/ns/` (new) | the Go build's namespace variants (below): `genclass.ae` (`gen-interface` at run time), `core_proxy.ae` (`proxy` throws when evaluated), `instant.ae` (decision 7, over `java.util.Date`), `main.after.ae`, `main.subst.ae`, `java/io.subst.ae` |
+| `arbace/c2g/embed.ae` (new) | `bin/c2g --program`: the embedded sources, the namespace variants applied, and the classes the namespaces name outside the world |
+| `arbace/c2g/main.ae` | `--program`: the REPL's world (every public member of every class with class forms, Q2), the embedded sources (`go:embed` of `res/`, the host's `Resources`), the cut classes the namespaces name; registrations of both packages before the cut classes; the `:after` hook last |
+| `arbace/c2g/out.ae` | member tables: the public methods and constructors that do not exist in Go listed, throwing (`--program`); cut classes' tables from the JVM's reflection, throwing; overloads in the JVM's order; setters of volatile fields; out-of-world superinterfaces replaced by theirs; `reflect_tables_c2g.go` (jrt members c2g writes: `String.format`, the regex methods, `System.in/out/err`, `CASE_INSENSITIVE_ORDER`, the context class loader and resources) |
+| `arbace/c2g/dyn.ae` | `Dyn`'s natives `setStaticMethod`, `defineCtor`, `defineInterface`, `addInterfaceMethod`, `defineFnClass`, `hideField`; HotSpot's `AbstractMethodError` message |
+| `arbace/c2g/decls.ae`, `code.ae`, `world.ae` | `getClass` of a class with a field `c2g$class`; a `this(...)`/`super(...)` to a constructor outside the world is a missing operation; catch clauses of classes outside the world dropped; `identical?` of two interface types through `any`; variants' parameter keys skip `:throws` |
+| `arbace/g2c/build.ae` | a directory holding `.g2c-data` is data, not forms (the embedded sources) |
+| `go/arbace/jrt/` | the evaluator's natives (`natives.ae`: trace hook, monitors, checkcast, `RT.hostResource`, `UUID`'s random bytes); evaluated frames in stack traces (`throwable.ae`); `Box` maps a typed nil to null; `System`'s `Class` (`system.ae`) and member table; `WeakReference`'s constructors for subclasses; tables regenerated (`test/jrt/tables.ae`: overloads in the JVM's order) |
 | `overlay/jdk/variants/` | `UUID.randomUUID` from the host's random bytes; `ByteArray` and `ByteArrayLittleEndian` without `VarHandle`s (`UUID.toString`) |
 | `bin/arbace-go` (new) | build, run, smoke-test the executable (below) |
-| `test/c2g/check.clj` | `bin/c2g-check -- --program`: the check programs load `arbace.core` |
+| `test/c2g/check.ae` | `bin/c2g-check -- --program`: the check programs load `arbace.core` |
 | `test/c2g/eval/` | the proof grows by the other node kinds |
 
 ## The evaluator
@@ -158,7 +158,7 @@ Enough of EVAL-PLAN §2.5 to load `arbace.core` (`gvec`'s `deftype`s, `definterf
 - In a method's frame slot 0 is the object; fields are read and set (`set!` of a mutable field)
   through `Dyn.getField`/`setField`. Code naming the stub (`(Foo. ...)`, `instance?`, a hinted
   field) is mapped to the class (`Evaluator.destub`).
-- `gen-interface` (the Go build's `genclass.clj`) makes an interface with `Dyn.defineInterface`
+- `gen-interface` (the Go build's `genclass.ae`) makes an interface with `Dyn.defineInterface`
   and `addInterfaceMethod` (Q5): its methods, called by reflection on an object of a run-time
   class, call that class's method of the same descriptor. `instance?` holds by `DynImplements`.
 
@@ -171,18 +171,18 @@ suite nor timed; `extend` on run-time classes works through `Class` objects as o
 **The sources** are embedded in the executable: `bin/c2g --program` writes them under the main
 package's forms (`go/arbace/cmd/arbace/res/arbace/...`, 41 files, 825 KB), lists them as the
 package's `:embed-files`, declares `//go:embed res`, and `main` sets the host's `Resources` to
-`fs.Sub(resources, "res")` before `Main.main`. The embedded tree (phase 1) is `arbace/**/*.clj` less
+`fs.Sub(resources, "res")` before `Main.main`. The embedded tree (phase 1) is `arbace/**/*.ae` less
 the tools (`classes`, `j2c`, `g2c`, `c2g`), the runtime's class forms (`arbace/lang`, compiled into
 the program), ASM, and the namespaces decision 6 leaves out (`core.server`, `repl.deps`,
 `java.basis`, `tools.deps.interop`, `java.process`, `java.shell`, `java.browse`, `java.javadoc`) and
 D6's Swing and SAX (`inspector`, `xml`). Since then (the list is `arbace.c2g.embed/excluded`):
 `arbace.core.server` is embedded (2026-10-09, sockets), `java.process` and `java.shell` (2026-10-10,
 processes), and the class forms' analysis (only the compiler's bytecode back end and its tools stay
-out; CLASSFORMS-REPL.md); `arbace/java/api` is translated instead (SL6) and `instant_timestamp.clj`
-left out (the Go `instant.clj` holds its part). Alternatives considered: reading the checkout at run
+out; CLASSFORMS-REPL.md); `arbace/java/api` is translated instead (SL6) and `instant_timestamp.ae`
+left out (the Go `instant.ae` holds its part). Alternatives considered: reading the checkout at run
 time (not standalone), pre-read forms (step 6's start-up work).
 
-`RT.load` (variant) finds `NAME.clj` or `.cljc` among the embedded sources, then in the
+`RT.load` (variant) finds `NAME.ae` or `.cljc` among the embedded sources, then in the
 directories of `ARBACE_PATH` (the JVM's class path; Clojure's test suite will need it), and
 evaluates it with `Compiler.load`; there are no class files. RT's initialization loads
 `arbace.core` when the program has its sources (the check programs without them, and the
@@ -191,23 +191,23 @@ loads `arbace.core.server` and starts the `arbace.server.*` servers). `Compiler.
 without `java.io.File`.
 
 **Namespace variants** (`arbace/lang/go/ns/`, amendment V1, M1 in C2G-SPEC §10.3): the Go
-build's differences in the namespaces, applied when the sources are embedded: `P.clj` replaces
-`arbace/P.clj`, `P.after.clj` is appended to it, `P.subst.clj` (a vector of strings, old and
+build's differences in the namespaces, applied when the sources are embedded: `P.ae` replaces
+`arbace/P.ae`, `P.after.ae` is appended to it, `P.subst.ae` (a vector of strings, old and
 new) replaces text found exactly once. Each file's header says why; as of 2026-10-11:
 
 | variant | why |
 |---|---|
-| `genclass.clj` | `gen-interface` at run time (Q5); `gen-class` throws (D6); ASM's imports out |
-| `core_proxy.clj` | `proxy` over `Dyn` (phase 2A; in phase 1 it expanded to a throw); a proxy of a class outside `proxy-supers` expands to a throw |
-| `core_bean.subst.clj` | `bean` (`arbace/core_bean.clj`, shared with the JVM since 2026-10-10, VENDOR-NOTES hand change 15): no modules, every package counts as exported |
-| `instant.clj` | decision 7: `#inst` read and printed over `java.util.Date`'s milliseconds, with GregorianCalendar's arithmetic (Julian before 1582-10-15, years of era); Calendar and Timestamp instants as `arbace/instant.clj` has them (phase 2B; they threw in phase 1) |
-| `main.after.clj` | the REPL's requires trimmed (decision 6: no javadoc, no repl.deps; no pprint, whose load took about 8 s on the evaluator, phase 2A) |
-| `main.subst.clj` | no `DynamicClassLoader` for the REPL's thread; the error report printed with `prn`, to a temporary file as on the JVM |
-| `java/io.subst.clj` | no reflection warnings at every start; the escape of `+` written out (`URLEncoder` is outside the world); `copy` between files through streams, not channels |
-| `core/server.subst.clj` | prepl makes no `DynamicClassLoader` for its thread (sockets, JRT-NOTES.md "Sockets") |
-| `reflect/java.subst.clj` | `arbace.reflect` without ASM: the names ASM's `Type` gives, computed (FX5, "The suite's Java fixtures") |
-| `classes/go.clj`, `classes/interp.clj` | the class forms at the REPL: ASM's `TypeReference` and the world's generic signatures; the interpreter's nodes (CLASSFORMS-REPL.md) |
-| `classes/{analyze,env,native,types}.subst.clj` | the class forms' analysis on the Go build: no weak references, no `Package` objects, classes interpreted, not compiled (CLASSFORMS-REPL.md) |
+| `genclass.ae` | `gen-interface` at run time (Q5); `gen-class` throws (D6); ASM's imports out |
+| `core_proxy.ae` | `proxy` over `Dyn` (phase 2A; in phase 1 it expanded to a throw); a proxy of a class outside `proxy-supers` expands to a throw |
+| `core_bean.subst.ae` | `bean` (`arbace/core_bean.ae`, shared with the JVM since 2026-10-10, VENDOR-NOTES hand change 15): no modules, every package counts as exported |
+| `instant.ae` | decision 7: `#inst` read and printed over `java.util.Date`'s milliseconds, with GregorianCalendar's arithmetic (Julian before 1582-10-15, years of era); Calendar and Timestamp instants as `arbace/instant.ae` has them (phase 2B; they threw in phase 1) |
+| `main.after.ae` | the REPL's requires trimmed (decision 6: no javadoc, no repl.deps; no pprint, whose load took about 8 s on the evaluator, phase 2A) |
+| `main.subst.ae` | no `DynamicClassLoader` for the REPL's thread; the error report printed with `prn`, to a temporary file as on the JVM |
+| `java/io.subst.ae` | no reflection warnings at every start; the escape of `+` written out (`URLEncoder` is outside the world); `copy` between files through streams, not channels |
+| `core/server.subst.ae` | prepl makes no `DynamicClassLoader` for its thread (sockets, JRT-NOTES.md "Sockets") |
+| `reflect/java.subst.ae` | `arbace.reflect` without ASM: the names ASM's `Type` gives, computed (FX5, "The suite's Java fixtures") |
+| `classes/go.ae`, `classes/interp.ae` | the class forms at the REPL: ASM's `TypeReference` and the world's generic signatures; the interpreter's nodes (CLASSFORMS-REPL.md) |
+| `classes/{analyze,env,native,types}.subst.ae` | the class forms' analysis on the Go build: no weak references, no `Package` objects, classes interpreted, not compiled (CLASSFORMS-REPL.md) |
 
 **Cut classes.** The namespaces name classes outside the world (`(:import (java.nio.file
 Files))`, `^java.util.stream.BaseStream`, `arbace.asm.Type/getDescriptor` in core's annotation
@@ -263,13 +263,13 @@ Load times per namespace on amd64 (`ARBACE_LOAD_TIMES=1`, nested loads included 
 
 | source | ms | source | ms |
 |---|---:|---|---:|
-| `core.clj` (all below to `core_classes`) | 1,929 | `main.clj` (with spec) | 2,297 |
-| `core_print.clj` | 113 | `spec/alpha.clj` | 658 |
-| `core_deftype.clj` | 144 | `core/specs/alpha.clj` | 213 |
-| `core/protocols.clj` | 102 | `spec/gen/alpha.clj` | 84 |
-| `gvec.clj` | 169 | `walk.clj` | 30 |
-| `instant.clj` | 108 | `java/io.clj` | 197 |
-| `string.clj` | 66 | `uuid.clj`, `genclass.clj`, `core_proxy.clj`, `core_classes.clj` | 22, 13, 6, 33 |
+| `core.ae` (all below to `core_classes`) | 1,929 | `main.ae` (with spec) | 2,297 |
+| `core_print.ae` | 113 | `spec/alpha.ae` | 658 |
+| `core_deftype.ae` | 144 | `core/specs/alpha.ae` | 213 |
+| `core/protocols.ae` | 102 | `spec/gen/alpha.ae` | 84 |
+| `gvec.ae` | 169 | `walk.ae` | 30 |
+| `instant.ae` | 108 | `java/io.ae` | 197 |
+| `string.ae` | 66 | `uuid.ae`, `genclass.ae`, `core_proxy.ae`, `core_classes.ae` | 22, 13, 6, 33 |
 
 
 The JVM's `bin/arbace-j` starts in 0.2 s (AOT-compiled namespaces in the JDK AOT cache). The
@@ -288,27 +288,27 @@ remedies (pre-read or pre-analyzed core, closure compilation, D7's `GOGC`).
 
 | file | pass | file | pass |
 |---|---:|---|---:|
-| `collections.clj` | 811 / 814 | `harvest/protocols.clj` | 7 / 7 |
-| `destructuring_macros.clj` | 453 / 453 | `harvest/reader.clj` | 136 / 136 |
-| `format.clj` | 324 / 326 | `harvest/reducers.clj` | 1 / 5 |
-| `harvest/array_symbols.clj` | 44 / 45 | `harvest/sequences.clj` | 891 / 891 |
-| `harvest/clojure_set.clj` | 108 / 108 | `harvest/special.clj` | 3 / 3 |
-| `harvest/clojure_walk.clj` | 8 / 8 | `harvest/string.clj` | 94 / 107 |
-| `harvest/control.clj` | 115 / 115 | `harvest/transducers.clj` | 102 / 102 |
-| `harvest/data_structures.clj` | 616 / 616 | `harvest/transients.clj` | 7 / 7 |
-| `harvest/def.clj` | 2 / 2 | `harvest/vars.clj` | 12 / 12 |
-| `harvest/evaluation.clj` | 14 / 14 | `harvest/vectors.clj` | 58 / 66 |
-| `harvest/for.clj` | 15 / 15 | `hashing.clj` | 266 / 268 |
-| `harvest/keywords.clj` | 7 / 7 | `inst.clj` | 190 / 231 |
-| `harvest/logic.clj` | 116 / 116 | `numbers.clj` | 814 / 822 |
-| `harvest/macros.clj` | 24 / 24 | `polymorphism.clj` | 528 / 533 |
-| `harvest/math.clj` | 4 / 149 | `printing.clj` | 366 / 396 |
-| `harvest/multimethods.clj` | 8 / 8 | `reader.clj` | 466 / 466 |
-| `harvest/numbers.clj` | 308 / 308 | `seqs.clj` | 554 / 555 |
-| `harvest/other_functions.clj` | 224 / 224 | `sorting.clj` | 343 / 343 |
-| `harvest/parse.clj` | 40 / 40 | `state_errors.clj` | 789 / 804 |
-| `harvest/predicates.clj` | 15 / 17 | `strings.clj` | 454 / 462 |
-| `harvest/printer.clj` | 27 / 27 |  | |
+| `collections.ae` | 811 / 814 | `harvest/protocols.ae` | 7 / 7 |
+| `destructuring_macros.ae` | 453 / 453 | `harvest/reader.ae` | 136 / 136 |
+| `format.ae` | 324 / 326 | `harvest/reducers.ae` | 1 / 5 |
+| `harvest/array_symbols.ae` | 44 / 45 | `harvest/sequences.ae` | 891 / 891 |
+| `harvest/clojure_set.ae` | 108 / 108 | `harvest/special.ae` | 3 / 3 |
+| `harvest/clojure_walk.ae` | 8 / 8 | `harvest/string.ae` | 94 / 107 |
+| `harvest/control.ae` | 115 / 115 | `harvest/transducers.ae` | 102 / 102 |
+| `harvest/data_structures.ae` | 616 / 616 | `harvest/transients.ae` | 7 / 7 |
+| `harvest/def.ae` | 2 / 2 | `harvest/vars.ae` | 12 / 12 |
+| `harvest/evaluation.ae` | 14 / 14 | `harvest/vectors.ae` | 58 / 66 |
+| `harvest/for.ae` | 15 / 15 | `hashing.ae` | 266 / 268 |
+| `harvest/keywords.ae` | 7 / 7 | `inst.ae` | 190 / 231 |
+| `harvest/logic.ae` | 116 / 116 | `numbers.ae` | 814 / 822 |
+| `harvest/macros.ae` | 24 / 24 | `polymorphism.ae` | 528 / 533 |
+| `harvest/math.ae` | 4 / 149 | `printing.ae` | 366 / 396 |
+| `harvest/multimethods.ae` | 8 / 8 | `reader.ae` | 466 / 466 |
+| `harvest/numbers.ae` | 308 / 308 | `seqs.ae` | 554 / 555 |
+| `harvest/other_functions.ae` | 224 / 224 | `sorting.ae` | 343 / 343 |
+| `harvest/parse.ae` | 40 / 40 | `state_errors.ae` | 789 / 804 |
+| `harvest/predicates.ae` | 15 / 17 | `strings.ae` | 454 / 462 |
+| `harvest/printer.ae` | 27 / 27 |  | |
 | **forms** | **9364 / 9652** | | |
 
 The whole oracle (`bin/oracle check` without a selection) passes 19,508 of 19,828 cases: the
@@ -357,14 +357,14 @@ lazy arguments, the bytecode's conversions, constants, error locations).
 ## A split for phase 2
 
 Parallel parts, each with its own check (the agents should work on separate files where they
-can; the shared files are `arbace/lang/go/Compiler.clj`, `arbace/c2g/out.clj` and jrt's tables):
+can; the shared files are `arbace/lang/go/Compiler.ae`, `arbace/c2g/out.ae` and jrt's tables):
 
 1. **Types made at run time** (EVAL-PLAN §2.5, Q5): `deftype`/`reify`/`defrecord`/protocols
    checked against the oracle's `polymorphism` and the suite's `protocols`, `data_structures`
    and `reflect` tests; `proxy` over `Dyn` for interfaces and abstract classes with a Go-side
    superclass (pprint's writers, `PrintWriter-on`; D6 left `proxy` out at first: the user's
-   call); `gen-class` stays out. Files: `Compiler.clj` (`NewInstanceExpr`, `Dyn`), `dyn.clj`,
-   `ns/core_proxy.clj`.
+   call); `gen-class` stays out. Files: `Compiler.ae` (`NewInstanceExpr`, `Dyn`), `dyn.ae`,
+   `ns/core_proxy.ae`.
 2. **jrt's surface for the REPL** (Q2 for the hand-written classes): the hand-written classes'
    tables list only what the manifest declared for the runtime: `Math`'s trigonometric and
    exponential functions (all of `arbace.math`, 145 cases), `String.join(CharSequence, Iterable)`,
@@ -388,8 +388,8 @@ All accepted 2026-10-09 and folded, renamed M1-M8 so as not to collide with C2G-
 deviations V1-V13 (C2G-SPEC §16 has the scheme: phase 1 M, phase 2A X, phase 2B S).
 
 - **V1 (C2G-SPEC §10.3) Namespace variants.** The Go build's differences in the namespaces live
-  in `arbace/lang/go/ns/`: `P.clj` replaces `arbace/P.clj` in the executable, `P.after.clj` is
-  appended, `P.subst.clj` replaces strings found exactly once; applied by `bin/c2g --program`
+  in `arbace/lang/go/ns/`: `P.ae` replaces `arbace/P.ae` in the executable, `P.after.ae` is
+  appended, `P.subst.ae` replaces strings found exactly once; applied by `bin/c2g --program`
   when it embeds the sources. *Accepted 2026-10-09, folded into C2G-SPEC §10.3 as M1.*
 - **V2 (§5.11, §10.2) A run-time class per fn.** A class with an instance field `c2g$class`
   answers `getClass` with it when set; the evaluator gives each `FnExpr` a class made at run
@@ -428,7 +428,7 @@ decision of 2026-10-09, reversing D6 for `proxy`; `gen-class` stays out), and `d
 
 ### proxy
 
-**The Go side** (`arbace/c2g/dyn.clj`). A proxy of `Object` is a `Dyn`. A proxy of a class `C`
+**The Go side** (`arbace/c2g/dyn.ae`). A proxy of `Object` is a `Dyn`. A proxy of a class `C`
 must be a Go value of `C_I` (translated code calls it as a `C`: `(PrintWriter. proxy-writer)`,
 `*out*` bound to a proxy), so for each class of `proxy-supers` c2g writes a Go type
 **`DynSub_C`** in `c2g_dyn.go`: a struct embedding `C`'s struct (so `Self_C`, `C`'s fields and its
@@ -470,7 +470,7 @@ list (the protected ones of jrt's classes: `ThreadLocal.initialValue`) the fn `(
 so a proxy can override them as on the JVM. jrt's
 stack traces leave out `DynSub_C` dispatch frames as they do `Dyn`'s.
 
-**The Clojure side** (`arbace/lang/go/ns/core_proxy.clj`, replacing the variant that expanded
+**The Clojure side** (`arbace/lang/go/ns/core_proxy.ae`, replacing the variant that expanded
 `proxy` to a throw): `proxy-name`, `get-proxy-class`, `construct-proxy`, `init-proxy`,
 `update-proxy`, `proxy-mappings`, `proxy`, `proxy-call-with-super`, `proxy-super` are upstream's;
 `generate-proxy` is replaced by `define-proxy`, which chooses the same methods as
@@ -490,14 +490,14 @@ proxies (`NotSerializableException`: `ObjectOutputStream` is not in the Go build
 more than 18 parameters (the JVM calls super for them; here the fn is called).
 
 **pprint at the REPL.** pprint loads now (`(require 'arbace.pprint)`, `cl-format`,
-`with-out-str` of `pprint`), but loading it takes about 7.9 s on the evaluator (`cl_format.clj`
+`with-out-str` of `pprint`), but loading it takes about 7.9 s on the evaluator (`cl_format.ae`
 4.1 s: its directive tables and the formatters compiled at load), so the REPL still does not
-require it at start and the error report stays `prn` (`main.after.clj`, `main.subst.clj`):
+require it at start and the error report stays `prn` (`main.after.ae`, `main.subst.ae`):
 both go back to the JVM's once start-up work (pre-analyzed namespaces, steps 6-7) makes the
 load cheap. Loading `core_proxy` itself takes about 0.1 s more than the throwing variant (the
 proxy classes of `bean` and, in `core_print`, `PrintWriter-on` are made at load, as the JVM
 loads them). (2026-10-11, after steps 6 and 7: `(require 'arbace.pprint)` takes about 60 ms on
-the shipped executable, but `main.after.clj` and `main.subst.clj` still leave pprint out:
+the shipped executable, but `main.after.ae` and `main.subst.ae` still leave pprint out:
 restoring the JVM's REPL requires and error report is open.)
 
 ### Fixes found by the checks
@@ -506,7 +506,7 @@ restoring the JVM's REPL requires and error report is open.)
   java.util.Collection (size [_] 20))`) is the JVM's `ClassFormatError` ("Duplicate method name
   "size" with signature "()I" in class file ..."), thrown by `Evaluator.defineType` when the
   class is made, so the analyzer wraps it in `CompilerException` as on the JVM; jrt gains the
-  stand-in `ClassFormatError` (`test/jrt/standins.clj`).
+  stand-in `ClassFormatError` (`test/jrt/standins.ae`).
 - `(set! (.x this) v)` and `(set! (.-x this) v)` in a deftype's method (the field resolved on the
   stub class) set the object's field, as `putfield` does, instead of going through reflection,
   which does not see mutable fields (the suite's `java_interop` `test-set!`).
@@ -516,7 +516,7 @@ restoring the JVM's REPL requires and error report is open.)
 
 ### The oracle's new file
 
-`test/oracle/forms/types.clj` (425 forms, recorded on the JVM): `definterface` (primitive and
+`test/oracle/forms/types.ae` (425 forms, recorded on the JVM): `definterface` (primitive and
 `String` hints, hinted and reflective calls, `AbstractMethodError` of an unimplemented method),
 protocols (inline, `extend-type` on `String`, `nil`, `Long`, `List`, `Object`, `long[]`,
 `extend-protocol`, `extend` on a record, `satisfies?`, `extends?`, `extenders`, docstrings and
@@ -551,8 +551,8 @@ the evaluator's meaning.
 | | phase 1 | phase 2C (main) | with 2A |
 |---|---:|---:|---:|
 | oracle forms (existing files) | 9,364 / 9,652 | 9,416 / 9,652 | 9,446 / 9,652 |
-| `printing.clj` | 366 / 396 | 366 / 396 | 396 / 396 |
-| `types.clj` (new) | | | 425 / 425 |
+| `printing.ae` | 366 / 396 | 366 / 396 | 396 / 396 |
+| `types.ae` (new) | | | 425 / 425 |
 | oracle forms, all | | | 9,871 / 10,077 |
 | whole oracle (forms, classes, regex), amd64 | 19,508 / 19,828 | 19,562 / 19,828 | 20,017 / 20,253 |
 
@@ -568,7 +568,7 @@ method-defined-twice failure before), `proxy.examples` loads; `data-structures-i
 `parse`, `sequences` and `transducers` get past `clojure.test.check.random`'s proxy of
 `ThreadLocal` and now stop at jrt's `Math/exp` (part B). The reference
 `test/arbace-go-results.edn` is updated accordingly. The one new
-mismatch in the existing files, `polymorphism.clj:176` (`class-ambig`), names the two ambiguous
+mismatch in the existing files, `polymorphism.ae:176` (`class-ambig`), names the two ambiguous
 interfaces in the other order: the order is that of a hash map keyed by `Class` objects, whose
 hashes are identity hashes, which the classes made while `core_proxy` loads shift (it passed by
 the same luck before). Fixed afterwards (2026-10-09, the user's decision): two classes are
@@ -598,14 +598,14 @@ All accepted 2026-10-09 and folded, renamed X1-X4 (C2G-SPEC §16).
   *Accepted 2026-10-09, folded into C2G-SPEC §5.12 and §5.3 (and V9) as X1. The list's classes
   may be hand-written too (jrt's `ThreadLocal`), as above, not only translated.*
 - **A2 (C2G-SPEC §10.4; B1-PLAN D6) `proxy` over `Dyn`**, the namespace variant
-  `core_proxy.clj` above; `bean` by reflection; `gen-class` stays out. *Accepted 2026-10-09,
+  `core_proxy.ae` above; `bean` by reflection; `gen-class` stays out. *Accepted 2026-10-09,
   folded into C2G-SPEC §10.4 and §12 as X2, B1-PLAN D6 (partly reversed) and EVAL-PLAN §2.5.*
 - **A3 (C2G-SPEC §5.12) A duplicate method is `ClassFormatError`** when a class is made at run
   time, with the JVM's message; jrt's stand-in `ClassFormatError`. *Accepted 2026-10-09,
   folded into C2G-SPEC §5.12 as X3.*
-- **A4 (ORACLE.md) The oracle covers proxy** (`types.clj`), no longer excluded. *Accepted
+- **A4 (ORACLE.md) The oracle covers proxy** (`types.ae`), no longer excluded. *Accepted
   2026-10-09, folded into ORACLE.md ("Exclusions") as X4; the harvest still leaves out the
-  suite's `proxy` namespace and forms naming `proxy` (`harvest.clj`).*
+  suite's `proxy` namespace and forms naming `proxy` (`harvest.ae`).*
 
 ## Phase 2C: Clojure's test suite on the Go build, and the oracle's NPE rule
 
@@ -615,7 +615,7 @@ Branch `eval-2c` (2026-10-09), part 3 of the split above plus V11's acceptance i
 
 By the user's decision (2026-10-09) a `NullPointerException` whose JVM message is one of
 HotSpot's helpful ones (`Cannot invoke "Object.getClass()" because "<parameter1>" is null`) is
-compared by class only. `test/oracle/runner.clj` marks such chain entries when it records (and
+compared by class only. `test/oracle/runner.ae` marks such chain entries when it records (and
 when it reads what the implementation printed): `[class message :helpful-npe]`, helpful meaning
 that the whole message matches the grammar of HotSpot's `print_NPE_failed_action` and
 `print_NPE_cause` (`helpful-npe-re`); `check` then compares a marked entry by class only, and
@@ -741,7 +741,7 @@ assertions; then `Collectors`, `URI`, `Math`, `File`, `IntSupplier`, `CyclicBarr
 assertions), pprint and two tests of `protocols`, and `reify`'s duplicate method check.
 **Part 4** (the evaluator's fns and locals clearing): `clearing`.
 
-**Fixed here, the evaluator's own** (`arbace/lang/go/Compiler.clj`, `arbace/lang/go/RT.clj`):
+**Fixed here, the evaluator's own** (`arbace/lang/go/Compiler.ae`, `arbace/lang/go/RT.ae`):
 
 1. *Method values in the namespace they were analyzed in.* A `Class/method` value is a fn that
    `QualifiedMethodExpr` builds and analyzes (`buildThunk`): the JVM does it when it emits the
@@ -826,7 +826,7 @@ Part B of the split (branch `eval-2b`, 2026-10-09; three branches in all: `eval-
 suite found. What jrt and the closure gained is in JRT-NOTES.md, "Phase 2B (step 5)" (Math and
 StrictMath; dates; the rest); here the evaluator's share, and the results.
 
-### The evaluator's share (`arbace/lang/go/Compiler.clj`, `RT.clj`)
+### The evaluator's share (`arbace/lang/go/Compiler.ae`, `RT.ae`)
 
 - **A primitive local is boxed anew at each use** (`LocalBindingExpr.evalIn`, its primitive type
   cached): the bytecode boxes a `long` or `double` local where an `Object` is wanted
@@ -949,7 +949,7 @@ Branch `smalls` (2026-10-09), three small items left by phase 2B.
 fixed in c2g, amendment Y1), and the decision for a hand-written `Semaphore` in jrt over the
 translated AQS (amendment Y3).
 
-**Dyn implements jrt's hand-written interfaces** (`arbace/c2g/dyn.clj`, `interfaces`). With
+**Dyn implements jrt's hand-written interfaces** (`arbace/c2g/dyn.ae`, `interfaces`). With
 `Semaphore` the pprint tests loaded but `(future-cancel f)` threw `ClassCastException`:
 `future-call` reifies `java.util.concurrent.Future`, an interface jrt hand-writes, and Dyn had
 the methods of the translated interfaces only, so a reify of `Future` was not a Go `jrt.Future`
@@ -965,7 +965,7 @@ must implement the interface). Amendment Y2.
 
 **The oracle's harvest takes the forms naming `proxy`** (ORACLE.md, "Exclusions"): the suite's
 proxy tests are in `java_interop.clj`, a namespace the harvest leaves out whole; it now keeps
-that namespace's assertions naming the proxy functions: `forms/harvest/java_interop.clj`, 3
+that namespace's assertions naming the proxy functions: `forms/harvest/java_interop.ae`, 3
 forms after its preamble (the rest use the tests' locals or `proxy.examples`). Recorded alone
 (`bin/oracle record harvest/java_interop`; the other harvest files unchanged: a full harvest
 only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendment Y4.
@@ -991,14 +991,14 @@ only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendm
 
 29 of the oracle's regex cases fail on the Go build for want of JDK resource data:
 
-- **5 cases, `\N{name}`** (`basics.clj` 45-47, `errors.clj` 108-109): `Character.codePointOf`
+- **5 cases, `\N{name}`** (`basics.ae` 45-47, `errors.ae` 108-109): `Character.codePointOf`
   reads `java/lang/uniName.dat` (177 KB, zlib-compressed) through
   `java.util.zip.InflaterInputStream`, which is not in the closed world (its `Inflater` is
   native zlib). Needed: the file embedded among the executable's resources (they hold text
   only: `embed/sources`), and a Go-build variant of `CharacterName`'s constructor reading it
   through a native inflate over Go's `compress/zlib` (as `UUID.md5` is native). About a day's
   small work; it also gives the REPL `Character/getName` and `Character/codePointOf`. Worth it.
-- **24 cases, `CANON_EQ`** (`unicode.clj` 161-195): `Pattern` normalizes with
+- **24 cases, `CANON_EQ`** (`unicode.ae` 161-195): `Pattern` normalizes with
   `java.text.Normalizer` (NFD), not in the world. Tried: with `java/text/Normalizer` and
   `jdk/internal/icu/text/NormalizerBase` in the closure, c2g finds the ICU loader
   (`ICUBinary`, `NormalizerImpl.load`, `CodePointTrie.fromBinary`) needing `java.nio.ByteBuffer`,
@@ -1049,7 +1049,7 @@ listed. (A hand-written class stays as jrt declares it: `ThreadLocal` is non-lea
 `BufferedWriter` the change touches its own file, `PrintStream` (which holds one) and the class
 table; `DynSub_BufferedWriter` has 1,039 methods, as the other `DynSub_C` now do.
 
-**Behaviour as on the JVM.** The oracle's `forms/types.clj` gains 13 forms (appended, so the
+**Behaviour as on the JVM.** The oracle's `forms/types.ae` gains 13 forms (appended, so the
 other cases keep their lines): a `BufferedWriter` proxy whose `flush` calls `proxy-super` and
 counts, buffering (nothing reaches the underlying writer before a flush), `newLine` and
 `write(String, int, int)`, `instance?` and the superclass, `prn` with `*flush-on-newline*` true
@@ -1089,7 +1089,7 @@ resources, class forms at the REPL and general speed are others').
 
 ### Locals clearing (`clearing`: 12 of 31 before, 31 of 31 now)
 
-What the tests check: `clearing.clj` reads a fn's closed-over values **by reflection**
+What the tests check: `clearing.ae` reads a fn's closed-over values **by reflection**
 (`getDeclaredFields` of the fn's class, less primitive fields and the compiler's `__meta`,
 `const__`, `__cached_class__`, `...__` fields), and requires them non-nil before a `^:once` fn is
 called and all nil after (8 cases: the fn below a conditional, a `case`, a loop; a `when` in the
@@ -1108,7 +1108,7 @@ also makes, after the fn's body is analyzed, a `LocalBindingExpr` for each close
 clearing analysis like any use (a closure's creation can be a local's last use, and makes an
 earlier use not the last).
 
-The evaluator now does the same (`arbace/lang/go/Compiler.clj`):
+The evaluator now does the same (`arbace/lang/go/Compiler.ae`):
 
 - `ObjExpr.compile`'s variant makes `closesExprs` as the JVM's does, so the analysis sees the
   same uses; `Evaluator.capture` clears the creating frame's local (or the creating `^:once`
@@ -1120,7 +1120,7 @@ The evaluator now does the same (`arbace/lang/go/Compiler.clj`):
 - An evaluated fn's class declares its closed-over locals as fields, named and typed as
   `ObjExpr.compile` declares them (not public; primitive ones with their primitive type), whose
   reflective `get` reads the `EvalFn`'s captured value (`Dyn.defineFnField`, a native c2g
-  writes, `arbace/c2g/dyn.clj`).
+  writes, `arbace/c2g/dyn.ae`).
 
 Effect beyond the tests: a lazy seq's head held in a local is no longer retained.
 `(defn f [n] (let [s (map inc (range n))] (count s)))` with `n` 5,000,000 runs in 121 MB
@@ -1131,9 +1131,9 @@ is still read and cleared: harmless, as nothing reads it after; seen by no test.
 ### The Java API (`api`: loads now)
 
 `clojure.test-clojure.api` imports `arbace.java.api.Clojure` (the Java API for calling Arbace,
-a class of the runtime on the JVM, class forms in `arbace/java/api/Clojure.clj`), which the Go
+a class of the runtime on the JVM, class forms in `arbace/java/api/Clojure.ae`), which the Go
 program did not have. `bin/c2g --program` now translates it with `arbace/lang`
-(`arbace/c2g/main.clj`): `Clojure/var`, `Clojure/read` work (its static initializer requires
+(`arbace/c2g/main.ae`): `Clojure/var`, `Clojure/read` work (its static initializer requires
 `arbace.edn` at first use, as on the JVM). The namespace has no `deftest`s, only three
 test.generative specs (`api-can-read`, `api-can-find-var`, `api-can-find-var-str`): see
 "test.generative" below.
@@ -1308,7 +1308,7 @@ fixtures", below; processes were done too: JRT-NOTES.md, "Processes".)
   calling them instead of a missing namespace. Half a day; it reverses part of D6. *Not taken
   (the user, 2026-10-10).*
 - **SL6 (C2G-SPEC §10.6) The Java API in the program.** `bin/c2g --program` translates
-  `arbace/java/api/Clojure.clj` with `arbace/lang`: `arbace.java.api.Clojure` exists in the Go
+  `arbace/java/api/Clojure.ae` with `arbace/lang`: `arbace.java.api.Clojure` exists in the Go
   build as on the JVM (it is not among the embedded namespaces' sources). *Accepted 2026-10-10,
   folded into C2G-SPEC §10.6.*
 - **SL7 (C2G-SPEC §4.1, M3; the runner) Library cuts and test.generative on Go.** Besides the
@@ -1356,7 +1356,7 @@ through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle diff
   now also wraps `deftest` while the namespaces load, so that a test listed under
   `:skipped-tests` defines its var without a body (in run and generative modes; the generative
   mode is given the reference too).
-- **A stand-in `arbace.inspector`** (`test/suite-go/arbace/inspector.clj`, on `ARBACE_PATH` for
+- **A stand-in `arbace.inspector`** (`test/suite-go/arbace/inspector.ae`, on `ARBACE_PATH` for
   the suite's Go runs only): `java-interop` requires it in its `ns` form; its one user,
   `test-proxy-non-serializable`, is skipped. The Go build itself still leaves `arbace.inspector`
   out (D6).
@@ -1367,8 +1367,8 @@ through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle diff
   (`Evaluator.fiTarget` and `fiAdapt`, the `LetExpr` variant's `evalIn`, `CodeFI` in the closure
   compiler).
 - **`arbace.reflect` without ASM** (`param-tags`: `arbace.asm.Type.getType is not in the Go
-  build`): a Go-build variant of `arbace/reflect/java.clj` (`arbace/lang/go/ns/reflect/
-  java.subst.clj`) computes the names ASM's `Type` gives classes, descriptors and internal
+  build`): a Go-build variant of `arbace/reflect/java.ae` (`arbace/lang/go/ns/reflect/
+  java.subst.ae`) computes the names ASM's `Type` gives classes, descriptors and internal
   names; `type-reflect` and `reflect` (the `JavaReflector`) work on Go now.
 - **`Files.newDirectoryStream`** (java-interop's `get-dir-stream`, a reflective call whose
   analysis needs the method): jrt's `Files` gains it (JRT-NOTES.md, "Resources by URL").
@@ -1380,14 +1380,14 @@ through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle diff
   throws `InstantiationError` naming the class, before evaluating the arguments, as the JVM's
   `new` instruction does; the reflective path keeps `Constructor.newInstance`'s
   `InstantiationException`, as the JVM's `Reflector.invokeConstructor` gives it. This needed
-  `java.lang.InstantiationError` in the closure (`test/g2c/jrt_sources.clj`).
+  `java.lang.InstantiationError` in the closure (`test/g2c/jrt_sources.ae`).
 - `(eval (quote (deftype Foo/2 [a])))`: the JVM's error comes from `deftype*`'s analysis, the
   stub's `defineClass`, whose `ClassLoader.preDefineClass` refuses a binary name with `/` (or a
   leading `[`): `NoClassDefFoundError: IllegalName: compile__stub.user.Foo/2`. The Go build's
   `compileStub` now refuses it the same way, so the error is the JVM's, from the same place.
 
 Both cases match now; `test/oracle/known-go-amd64.edn` holds 6 cases in 4 groups (was 8 in 6;
-7 in 5 since `gosec` added the providers case, `security.clj:172`).
+7 in 5 since `gosec` added the providers case, `security.ae:172`).
 
 ### Results
 
@@ -1465,7 +1465,7 @@ Java fixtures, resources by URL"); where each is folded is marked below.
   closure. *Accepted 2026-10-10, folded into EVAL-PLAN §2.5 and C2G-SPEC §10.2 ("The JVM's errors
   of `new` and of a stub's name"; §16, "The suite's Java fixtures").*
 - **FX5 (C2G-SPEC §10.3, namespace variants) `arbace.reflect` without ASM**: the variant
-  `arbace/lang/go/ns/reflect/java.subst.clj`. *Accepted 2026-10-10, listed in "Namespace
+  `arbace/lang/go/ns/reflect/java.subst.ae`. *Accepted 2026-10-10, listed in "Namespace
   variants", above, and folded into C2G-SPEC §10.3 (§16, "The suite's Java fixtures").*
 - **FX6 (C2G-SPEC §10.3, M5, RD1; §4.1, SL7) Resources by URL**: JRT-NOTES.md "Resources by URL"
   (`ClassPathResources`, the class loaders' `getResource` and `getResources`, `URLClassLoader`
@@ -1485,8 +1485,8 @@ casts (7 assertions); primitive fns (EVAL-PLAN Q1, 3 assertions).
 
 ## Sources
 
-Nothing vendored. Studied: upstream Clojure's `Compiler.java` as Arbace's `arbace/lang/Compiler.clj`
+Nothing vendored. Studied: upstream Clojure's `Compiler.java` as Arbace's `arbace/lang/Compiler.ae`
 holds it (the emit methods each evaluation mirrors), `clojure.main`'s error triage
-(`arbace/main.clj`); openjdk/jdk26u `src/java.base/share/classes/java/util/GregorianCalendar.java`
+(`arbace/main.ae`); openjdk/jdk26u `src/java.base/share/classes/java/util/GregorianCalendar.java`
 (the default cutover) and HotSpot's `AbstractMethodError` and checkcast messages (from the JVM);
 H. Hinnant, "chrono-Compatible Low-Level Date Algorithms" (civil-from-days, days-from-civil).

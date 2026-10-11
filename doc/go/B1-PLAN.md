@@ -35,7 +35,7 @@ accordingly:
   references), `java.util` (45), `java.io` (31), `java.util.concurrent` and atomics, regex,
   `java.math`, `java.lang.invoke` (the `invokedynamic` sites), `java.lang.ref`. Its compiler
   (`arbace.lang.Compiler`) analyses forms into `Expr` objects and emits JVM bytecode with ASM.
-  `arbace/core.clj` and the other namespaces are Clojure on top.
+  `arbace/core.ae` and the other namespaces are Clojure on top.
 
 So B1a is mostly not g2c work: it is getting Arbace's *runtime and evaluator* onto Go.
 
@@ -75,14 +75,15 @@ the pace of the class forms and g2c work, rough, growing with the step number.
 | **2 c2g spec** | `doc/go/C2G-SPEC.md`: class forms → Go forms (types, objects and dispatch, exceptions, statics, primitives and arithmetic, strings (D4), arrays, threads and locks, reflection's subset). *Done; amended since (C2G-SPEC §16)* | the user's review, as for the class forms and Go forms specs | 2 |
 | **3 jrt** | the Java runtime subset in Go forms: `Object` protocol, `String`/`StringBuilder`, boxed numbers, `Math`, per [JAVA-SURFACE.md](JAVA-SURFACE.md) and its decisions: the plain Java of the measured closure translated from jdk26u's source with j2c (collections, `BigInteger`/`BigDecimal`, `Character`, `Formatter`, `java.util.regex` (D5), `ConcurrentHashMap`), hand-written the VM's edge (UTF-16 `String`/`StringBuilder`, reflection over c2g's member tables, atomics, locks, executors and threads over Go's `sync` and goroutines, `ThreadLocal` over a goroutine-local slot in the Go runtime, a small `Date` on Go's `time`); the host interface. *Done* | its own tests (regex: Java's behaviour, checked against the JVM on a corpus of patterns); the round trip of its forms | 10-15 |
 | **4 c2g converter** | class forms → Go forms, in dependency order: `Util`, `Murmur3`, `Numbers`, the persistent collections, `Symbol`/`Keyword`/`Var`/`Namespace`, seqs, `LispReader`, printing, `RT`. *Done* | per class, differential tests against the JVM Arbace: the same operations, the same results | 6-10 |
-| **5 The evaluator** | `Compiler`'s analyser through c2g, with an `Expr` evaluator in place of bytecode emission (closures for `fn*`, `loop`/`recur`, `try`, `letfn`; `deftype`/`reify` through jrt's dispatch). *Done 2026-10-09 (phase 2B)* | `arbace/core.clj` loads from source; a growing part of Clojure's test suite passes, recorded per namespace | 6-10 |
+| **5 The evaluator** | `Compiler`'s analyser through c2g, with an `Expr` evaluator in place of bytecode emission (closures for `fn*`, `loop`/`recur`, `try`, `letfn`; `deftype`/`reify` through jrt's dispatch). *Done 2026-10-09 (phase 2B)* | `arbace/core.ae` loads from source; a growing part of Clojure's test suite passes, recorded per namespace | 6-10 |
 | **6 The executable** | `bin/arbace-go` (name to choose): static binaries for `linux/amd64` and `linux/arm64` with `arbace.main`'s REPL, `-e`, scripts; the core namespaces prepared at build time (pre-read or pre-analysed) to start fast. *Done 2026-10-09: pre-analysed, the image of prepared namespaces (EXEC-NOTES.md, amendment U1); start 4.2 s to 0.32 s on amd64* | a REPL as a user process: read, eval, print, `doc`, errors; start time and size measured against the JVM launcher (`bin/arbace`, now `bin/arbace-j`) and Joker; a smoke test in `bin/gate`; the arm64 binary passes the same under `qemu-aarch64` | 2-3 |
 | **7 Speed** | closure compilation of `Expr`s, then AOT of namespaces to Go forms built into the executable. *Done 2026-10-10: 7a the running program's speed (amendments O1, O2, O4, O5; O3 dropped), 7b the evaluator's closure compilation (EC1-EC6) ([SPEED-NOTES.md](SPEED-NOTES.md)); AOT of namespaces to Go not scheduled (the user, 2026-10-10)* | benchmarks (`bin/arbace-bench`'s workload) against the JVM Arbace; the suite still passes | open |
 | **8 The freeze** | the docs, the gate, and a branch and tag for the static executables, as for `arbace-for-java-26`; the READMEs diverge as at that freeze: main's gains a section "Arbace for Golang" after "Arbace for Java 26" (the branch `arbace-for-golang`, its tags, a link to the branch's freeze document), and the branch's README describes it locally (its own freeze document, how to build and run the executables, the releases); main's journal starts over, as at the JVM freeze: the history up to the freeze stays on `arbace-for-golang`, its tag and in git, and main's new journal opens with a pointer to them | the user's confirmation | 1 |
 
 The `.ae` rename (Arbace's sources from `.clj` to `.ae`, one self-contained change; the user's
 decision of 2026-10-09) was step 8, the last before the freeze; the user moved it on 2026-10-10 to
-right after the freeze, as the first task (AGENDA.md).
+right after the freeze, as the first task (AGENDA.md), and it was done then: VENDOR-NOTES.md,
+hand change 19, and C2G-SPEC.md §10.3.
 
 Rough total (as planned): 25-43 days.
 

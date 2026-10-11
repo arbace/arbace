@@ -12,20 +12,20 @@ SPEC.md, last section).
 
 | file | namespace | role |
 |---|---|---|
-| `arbace/classes/boot.clj` | `arbace.classes.boot` | driver: requires the others (until the freeze it also ran them at stage 0, the frozen Clojure, mapping `arbace.*` to `clojure.*` and loading `arbace/core_classes.clj` into `clojure.core`; that path is on the branch `arbace-for-java-26`) |
-| `arbace/classes/types.clj` | `arbace.classes.types` | type forms (§4.3), descriptors, erasure, `Signature` strings |
-| `arbace/classes/env.clj` | `arbace.classes.env` | class environment (§9.2): class infos from the compilation, from earlier definitions and by reflection (constants from class files); member lookup and access; package class loaders (§10) |
-| `arbace/classes/parse.clj` | `arbace.classes.parse` | syntax of class forms and members, class access flags |
-| `arbace/classes/analyze.clj` | `arbace.classes.analyze` | entering classes (headers, members, derived members), name resolution, code analysis into typed nodes |
-| `arbace/classes/emit.clj` | `arbace.classes.emit` | bytecode for nodes and classes, `InnerClasses` by a post-pass over the constant pool |
-| `arbace/classes/compiler.clj` | `arbace.classes.compiler` | one compilation: enter, analyze, emit; define and/or write the classes |
-| `arbace/classes/lower.clj` | `arbace.classes.lower` | Clojure's `fn*`, `reify*`, `deftype*`, `letfn*`, `case*` and `def` rewritten into class forms and other forms the compiler knows (section "Clojure in class bodies" below) |
-| `arbace/classes/build.clj` | `arbace.classes.build` | compiles trees of class forms files into class files at any stage, for `bin/build-arbace` (`doc/VENDOR-NOTES.md`) |
-| `arbace/classes/native.clj` | `arbace.classes.native` | the boundary with `arbace.lang.Compiler` (stage 1 on): what the compiler calls for the class forms' special forms (SPEC §9.5, section "Native class forms" below) |
-| `arbace/core_classes.clj` | `arbace.core` | the user-facing macros and operators, loaded by `arbace/core.clj` (formerly `arbace.classes.core`) |
-| `arbace/classes/verify.clj` | `arbace.classes.verify` | the JDK's class file verifier (`java.lang.classfile`, JEP 484) as a test oracle over a tree of class files; run on every stage by `bin/build-arbace` and on run-time compiled classes by `test/native/verify_test.clj` |
-| `arbace/classes/shape.clj` | `arbace.classes.shape` | class shapes (§3) as data, and their differences, for comparing with javac |
-| `test/classes/*_test.clj` | `classes.*-test` | the tests; `test/classes/helpers.clj` compiles Java with javac in-process and compares shapes |
+| `arbace/classes/boot.ae` | `arbace.classes.boot` | driver: requires the others (until the freeze it also ran them at stage 0, the frozen Clojure, mapping `arbace.*` to `clojure.*` and loading `arbace/core_classes.ae` into `clojure.core`; that path is on the branch `arbace-for-java-26`) |
+| `arbace/classes/types.ae` | `arbace.classes.types` | type forms (§4.3), descriptors, erasure, `Signature` strings |
+| `arbace/classes/env.ae` | `arbace.classes.env` | class environment (§9.2): class infos from the compilation, from earlier definitions and by reflection (constants from class files); member lookup and access; package class loaders (§10) |
+| `arbace/classes/parse.ae` | `arbace.classes.parse` | syntax of class forms and members, class access flags |
+| `arbace/classes/analyze.ae` | `arbace.classes.analyze` | entering classes (headers, members, derived members), name resolution, code analysis into typed nodes |
+| `arbace/classes/emit.ae` | `arbace.classes.emit` | bytecode for nodes and classes, `InnerClasses` by a post-pass over the constant pool |
+| `arbace/classes/compiler.ae` | `arbace.classes.compiler` | one compilation: enter, analyze, emit; define and/or write the classes |
+| `arbace/classes/lower.ae` | `arbace.classes.lower` | Clojure's `fn*`, `reify*`, `deftype*`, `letfn*`, `case*` and `def` rewritten into class forms and other forms the compiler knows (section "Clojure in class bodies" below) |
+| `arbace/classes/build.ae` | `arbace.classes.build` | compiles trees of class forms files into class files at any stage, for `bin/build-arbace` (`doc/VENDOR-NOTES.md`) |
+| `arbace/classes/native.ae` | `arbace.classes.native` | the boundary with `arbace.lang.Compiler` (stage 1 on): what the compiler calls for the class forms' special forms (SPEC §9.5, section "Native class forms" below) |
+| `arbace/core_classes.ae` | `arbace.core` | the user-facing macros and operators, loaded by `arbace/core.ae` (formerly `arbace.classes.core`) |
+| `arbace/classes/verify.ae` | `arbace.classes.verify` | the JDK's class file verifier (`java.lang.classfile`, JEP 484) as a test oracle over a tree of class files; run on every stage by `bin/build-arbace` and on run-time compiled classes by `test/native/verify_test.ae` |
+| `arbace/classes/shape.ae` | `arbace.classes.shape` | class shapes (§3) as data, and their differences, for comparing with javac |
+| `test/classes/*_test.ae` | `classes.*-test` | the tests; `test/classes/helpers.ae` compiles Java with javac in-process and compares shapes |
 | `bin/class-forms-tests` | | runs the tests, on Arbace (below) |
 
 The compiler's sources name ASM `arbace.asm` and the runtime `arbace.*`. Until the freeze, the
@@ -89,10 +89,10 @@ on 2026-10-07, 5,740 on 2026-10-08 (the journal), 5,771 in `target/stage2` on 20
 
 ## How it works
 
-1. **Parse** (`parse.clj`): a class form becomes a declaration map: kind, modifiers, options,
+1. **Parse** (`parse.ae`): a class form becomes a declaration map: kind, modifiers, options,
    members. Member macros are expanded and `do` spliced. Access flags (class file and
    `InnerClasses`) follow from the metadata and Java's implicit modifiers.
-2. **Enter** (`analyze.clj`): every class of the top-level form gets its binary name (member
+2. **Enter** (`analyze.ae`): every class of the top-level form gets its binary name (member
    classes `Outer$Inner`; local and anonymous ones are named when analysis meets them, javac's
    way: `Outer$1`, `Outer$1Local`, counted per enclosing class in textual order) and goes into
    the compilation set. Then headers (type parameters, supertypes, `Signature`), then members
@@ -104,7 +104,7 @@ on 2026-10-07, 5,740 on 2026-10-08 (the journal), 5,771 in `target/stage2` on 20
    calls `super.`. Clojure macros are expanded with the running core's macros (`arbace.core`);
    `and`, `or`, `locking`, comparisons, the operators and conversions are recognized by var (so
    shadowing works) and compiled to instructions.
-4. **Emit** (`emit.clj`): ASM with `COMPUTE_FRAMES`, `getCommonSuperClass` answered from the
+4. **Emit** (`emit.ae`): ASM with `COMPUTE_FRAMES`, `getCommonSuperClass` answered from the
    class environment (classes being compiled are not loadable yet). `InnerClasses` is added by
    rereading the class's constant pool, as javac lists every nested class the file refers to.
 
@@ -147,7 +147,7 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
   as Clojure converts it (`RT.intCast`), without reflection.
 - Any value can be called: locals, keywords, collections, fields, expressions (`IFn.invoke`).
 - `fn*`, `letfn*`, `case*`, `def` and `var` are compiled by rewriting them
-  (`arbace/classes/lower.clj`): a `fn` is an anonymous subclass of `AFunction` (`RestFn` when
+  (`arbace/classes/lower.ae`): a `fn` is an anonymous subclass of `AFunction` (`RestFn` when
   variadic) with an `invoke` (`doInvoke`, `getRequiredArity`) per arity, its parameters
   `Object` with their hints as local hints, `recur` to the top of the arity, the fn's name
   bound to the instance; with primitive signatures (`^long`, `^double`) it is a local class
@@ -175,7 +175,7 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
   over `gatherMethods`' covariants): for every method of the supertypes overridden by one with
   the same name and parameter types and a more specific return type, implemented or not, a
   public method with only `ACC_BRIDGE` and no exceptions that calls the most specific one
-  through its declaring interface (`test/native/bridge_test.clj` compares the methods with the
+  through its declaring interface (`test/native/bridge_test.ae` compares the methods with the
   same deftype and reify compiled by `arbace.lang.Compiler`).
 - `deftype*` (of `deftype` and `defrecord`) is compiled and defined while the code is analyzed
   by Clojure's compiler (`Compiler/analyze`, in a fresh `Compiler/LOADER` as `eval` binds one,
@@ -208,7 +208,7 @@ SPEC §9.5: the class forms' names are vars of `arbace.core` and their special f
 (§12 question 17), which the compiler loads on first use. Nothing needs `arbace.classes.boot`
 at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
 
-- **The names.** `arbace/core_classes.clj`, loaded at the end of `arbace/core.clj`, defines the
+- **The names.** `arbace/core_classes.ae`, loaded at the end of `arbace/core.ae`, defines the
   macros (`defclass` ... `when-instance`) and the operators of §5.4 in `arbace.core`. Until the
   freeze `arbace.classes.boot` also loaded the same file into the frozen `clojure.core` at stage
   0, where `defclass` and `defclasses` compiled at macroexpansion time; that path was removed on
@@ -229,7 +229,7 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
   `arbace.lang.Intrinsics` maps the primitive methods to their instructions, so in a primitive
   context (an operand of another operator, a `^long`/`^double` fn's result, a primitive local)
   the compiler emits `iand`, `fadd`, `ldiv` ... and no call; where the result is boxed it
-  calls the method, as for Clojure's own operators (`test/native/inline_test.clj` reads the
+  calls the method, as for Clojure's own operators (`test/native/inline_test.ae` reads the
   instructions of AOT-compiled fns).
 - **Loading `arbace.classes`.** `bin/build-arbace` AOT-compiles the `arbace.classes`
   namespaces (`compile 'arbace.classes.boot`, not `arbace.j2c`) into each stage with that
@@ -308,7 +308,7 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
     converted, and an `IFn` that is not an instance of a functional interface parameter
     adapted to it as `FISupport.maybeEmitFIAdapter` does: `invokedynamic` on
     `LambdaMetafactory` with a `FnInvokers` method). A method's value of another reference
-    type than its return type is checked (`checkcast`). `test/native/overload_test.clj`
+    type than its return type is checked (`checkcast`). `test/native/overload_test.ae`
     compares choices, errors and reflection with the compiler's.
   - `compile-deftype`: a `deftype*` one of whose method bodies throws the `Signal` (directly,
     or through the compiler's `(fn* ^:once [] ...)` wrappers and `letfn*`; a fn inside a method
@@ -330,14 +330,14 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
     constants, keyword and protocol call sites are the class forms compiler's (`const__N`
     fields), not the compiler's `__site__`/`__thunk__`/`__cached_class__` fields; Clojure's
     `deftype` stub class (`compile__stub`) was already defined when the method threw, and stays
-    unused. Tests in `test/native/deftype_test.clj` compare the members of such a deftype and
+    unused. Tests in `test/native/deftype_test.ae` compare the members of such a deftype and
     record with the same ones compiled by `arbace.lang.Compiler` (fields, constructors, methods
     with flags and exceptions, `getBasis`'s metadata).
 - **Limits.** `recur` out of tail position and across `try` stay errors in code the compiler
   compiles (Clojure's test suite holds it to them; `continue` has that meaning). A `deftype*`
   inside a handed-over fn or a class body is compiled by the compiler while that code is
   analyzed ("Clojure in class bodies" above).
-- **Tests**: `bin/native-tests [STAGE]` (`test/native/*_test.clj`, run by `bin/build-arbace` on
+- **Tests**: `bin/native-tests [STAGE]` (`test/native/*_test.ae`, run by `bin/build-arbace` on
   stage 2): `defclass` with no boot step, a REPL session (`arbace.main/repl` on a string),
   `defclasses`, a top-level `do`, the code forms in fns, Clojure in handed-over fns and in class
   bodies, extended special forms, primitive signatures, deftypes and records with the class
@@ -345,7 +345,7 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
   and Clojure's errors, protocols implemented and extended by such types, `deftype` and
   `defrecord` inside handed-over fns and class bodies (`nested_deftype_test`), and AOT
   compilation (a handed-over deftype and a deftype inside a handed-over fn included) loaded by a
-  fresh JVM from the class path. `test/classes/clojure_test.clj` covers Clojure in class bodies
+  fresh JVM from the class path. `test/classes/clojure_test.ae` covers Clojure in class bodies
   (`deftype` and `defrecord` in them included).
 
 ## Checking converted code
@@ -478,7 +478,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | part | status |
 |---|---|
 | §9.1 one namespace per package, files loaded into it | done (converted files compile; `bin/class-forms-check`) |
-| §9.2 class environment: current form, defined classes, class path, source path | done (a name that resolves to nothing is looked up as `p/C.clj` on the class path; its `in-ns`/`ns`/`import` forms are evaluated and its class forms entered as declarations only; tested with two files referring to each other) |
+| §9.2 class environment: current form, defined classes, class path, source path | done (a name that resolves to nothing is looked up as `p/C.ae` on the class path; its `in-ns`/`ns`/`import` forms are evaluated and its class forms entered as declarations only; tested with two files referring to each other) |
 | §9.3 AOT | done (tested: a baseline JVM without the compiler loads the compiled namespace) |
 | §10 REPL: package loaders, generations | done (tested) |
 | §5.13 Clojure in class bodies | done: vars (read, call, `set!`, `def`, `var`), keywords, quoted data and other constants, vector/map/set literals (constants in private static synthetic `const__N` fields set in `<clinit>`, collections built with `RT.vector`/`map`/`set`), core operations as instructions or their `:inline` expansions, any value called, `fn`, `letfn`, `case`, `reify`, `deftype` (section "Clojure in class bodies") |

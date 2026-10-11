@@ -25,7 +25,7 @@ The executable is 63.5 MB on amd64 (58.4 before; the image is 3.8 MB of it), 60.
 `bin/arbace-go --smoke` passes on both architectures, now with a REPL session compared with
 the JVM's transcript. Clojure's suite on the Go build: 18,781 of 18,806 assertions, no regression
 against `test/arbace-go-results.edn`; the oracle: 20,220 of 20,253, the one change being
-`polymorphism.clj:176`, whose order of two interfaces is now deterministic and not the JVM's
+`polymorphism.ae:176`, whose order of two interfaces is now deterministic and not the JVM's
 (amendment U2).
 
 ## Where the start went
@@ -38,7 +38,7 @@ namespaces `arbace.main` requires from their embedded sources at every start: 4.
 | | |
 |---|---|
 | reading (`LispReader`), all forms of the start | about 0.1 s |
-| macroexpansion and analysis, the macros being evaluated fns (and, once `spec.alpha` is loaded, `arbace.core.specs`' checks of every macro call: most of `main.clj`'s 1.4 s) | most of the rest |
+| macroexpansion and analysis, the macros being evaluated fns (and, once `spec.alpha` is loaded, `arbace.core.specs`' checks of every macro call: most of `main.ae`'s 1.4 s) | most of the rest |
 | evaluating the top-level forms (defs make fns; `ns` forms refer `arbace.core`) | small: about 20 ms for `spec.alpha`'s 227 forms against 0.7 s to analyze them |
 | the garbage collector | 60% of the CPU time (1.7 GB allocated during the start) |
 
@@ -57,9 +57,9 @@ analysis did besides building the tree, which must happen again before the tree 
 |---|---|---|
 | `stub` | `NewInstanceExpr.compileStub` (deftype's stub class) | the same call |
 | `type` | `ObjExpr.compile` (a deftype's, defrecord's or reify's class, with its methods) | `Evaluator.defineType`, the class stored in the `NewInstanceExpr` |
-| `iface`, `imethod` | `gen-interface` (`definterface`, `defprotocol`; `genclass.clj`) | `Dyn.defineInterface`, `addInterfaceMethod` |
-| `proxy` | `proxy`'s expansion makes the proxy class (`get-proxy-class`, `core_proxy.clj`) | `get-proxy-class` |
-| `ns` | `*ns*` set while the unit is analyzed: the boot `ns` macro (`RT.bootNamespace`, used by `core.clj`'s first form) sets it when it expands | `*ns*` set again |
+| `iface`, `imethod` | `gen-interface` (`definterface`, `defprotocol`; `genclass.ae`) | `Dyn.defineInterface`, `addInterfaceMethod` |
+| `proxy` | `proxy`'s expansion makes the proxy class (`get-proxy-class`, `core_proxy.ae`) | `get-proxy-class` |
+| `ns` | `*ns*` set while the unit is analyzed: the boot `ns` macro (`RT.bootNamespace`, used by `core.ae`'s first form) sets it when it expands | `*ns*` set again |
 
 Var interning at analysis (`def`, `declare`) happens again when the unit's `Var`s are decoded
 (found, else interned), and namespaces named by the tree are found or created.
@@ -81,7 +81,7 @@ the analysis only: what the evaluation does happens again when the unit is evalu
 program writes the image at exit; the build embeds it (the main package's `image.bin`,
 `//go:embed`) and links the executables again.
 
-**The encoding** (`go/arbace/cmd/arbace/image.clj`, the main package, which knows every type of
+**The encoding** (`go/arbace/cmd/arbace/image.ae`, the main package, which knows every type of
 the program: c2g generates its table, `image_types.go`). A source's units are one stream; its
 objects are numbered in order of first encounter, so the graph's sharing (a `LocalBinding` used
 by many nodes, a form's metadata) and cycles survive, also between units. Each object is:
@@ -131,7 +131,7 @@ the image's skipped fields. Start went from 0.33 s to 0.21 s, preparing the imag
 `bin/arbace-go --build` (amd64 and arm64 by default, `ARBACE_GO_ARCHES`):
 
 1. `bin/c2g --program` writes the program: the main package now has `image.go` (copied from
-   `go/arbace/cmd/arbace/image.clj`), `image_types.go` (generated) and an empty `image.bin`;
+   `go/arbace/cmd/arbace/image.ae`), `image_types.go` (generated) and an empty `image.bin`;
 2. `bin/g2c build` for each architecture, the host's first;
 3. the host's executable prepares the namespaces (`ARBACE_PREPARE`; about 35 s at step 6, 11 s since EC6; all 41
    embedded sources, 27 namespaces);
@@ -150,7 +150,7 @@ time, and the units whose evaluation takes more than 3 ms), and `ARBACE_LOAD_TIM
 
 The start allocates the decoded trees and what their evaluation makes, most of which stays.
 With Go's default (`GOGC=100`) the collector runs many cycles while the heap grows from nothing;
-until `Main.main` has loaded `arbace.main` (a variant of `Main`, `arbace/lang/go/Main.clj`,
+until `Main.main` has loaded `arbace.main` (a variant of `Main`, `arbace/lang/go/Main.ae`,
 calls `Compiler$Image.started`), the program runs it at `GOGC=400` unless `GOGC` is set, then
 sets it back. Measured: amd64, best of 10 runs, `-e nil`: 0.32 s with the start's `GOGC=400`, 0.41 s with
 `GOGC=100` throughout; with the collector off the start takes 0.28 s (and 280 MB). The setting of the running program was D7's
@@ -177,7 +177,7 @@ as on the JVM), both replayed from the image.
 
 Where the 0.32 s go now (amd64, `ARBACE_IMAGE_TIMES`, `GODEBUG=inittrace=1`): the Go packages'
 initialization 11 ms; decoding the 16 sources of the start (239,000 objects) about 125 ms
-(core.clj 82 ms); evaluating their units about 150 ms, most of it the `ns` forms (each `refer`
+(core.ae 82 ms); evaluating their units about 150 ms, most of it the `ns` forms (each `refer`
 of `arbace.core`'s 700 public vars, evaluated: 15 to 25 ms per namespace) and `arbace.main`'s
 and `spec.alpha`'s top-level defs; the rest the collector. Joker starts from Go-initialized
 data structures with nothing evaluated; the JVM from classes already loaded and linked (the AOT
@@ -206,8 +206,8 @@ characters are `\` and `"`). Branch `gorl`; amendments RL1-RL3
 below.
 
 **When.** The main package's `main` calls `execRlwrap` first, before jrt's host is set and the
-image is replayed (`rlwrap_linux.go`, hand-written forms `go/arbace/cmd/arbace/rlwrap_linux.clj`,
-copied by `bin/c2g --program` beside `image.clj`). It replaces the process with rlwrap only when
+image is replayed (`rlwrap_linux.go`, hand-written forms `go/arbace/cmd/arbace/rlwrap_linux.ae`,
+copied by `bin/c2g --program` beside `image.ae`). It replaces the process with rlwrap only when
 all of these hold, else it returns and the program runs as before, silently:
 
 1. `ARBACE_RLWRAP` is not `off` (the user's switch) and not `wrapped` (the marker the
@@ -285,7 +285,7 @@ every change that can change it, and costs nothing on the others.
 check `go` runs `bin/arbace-go --gate`, concurrently with the suite on stage 2 and the class
 forms tests (not with `--full`, whose Go chain builds and smoke-tests anew). It computes a key,
 the SHA-256 of the contents of `arbace/`, `go/`, `overlay/` and `bin/lib/`, of
-`doc/go/java-surface.edn` and `test/g2c/jrt_sources.clj` (JC10), the seed's hash and the
+`doc/go/java-surface.edn` and `test/g2c/jrt_sources.ae` (JC10), the seed's hash and the
 scripts of the build (`bin/arbace-go`, `c2g`, `g2c`, `j2c`, `jrt`, `jrt-convert`, `arbace-j`
 (then `arbace`), `build-arbace`), and of the toolchains (TamaGo's
 `VERSION`, `java -version`, jdk26u's commit): about 0.1 s. When `.tmp/arbace-go-gate/key` holds
@@ -308,7 +308,7 @@ with other agents' work beside, it reached 40 GB, 6 GB left available.
 
 - **Oracle on Go** (`bin/oracle check 'target/arbace-go/amd64/arbace -'`), on this branch before
   the merge: 20,220 of 20,253 (main then: 20,221). The forms corpus 10,074 of 10,077: besides main's two (`deftype Foo/2`'s error source,
-  the `StringBuilder`'s identity hash), `polymorphism.clj:176`: `class-ambig`'s message names
+  the `StringBuilder`'s identity hash), `polymorphism.ae:176`: `class-ambig`'s message names
   `java.io.Serializable` before `java.lang.Comparable`, where the JVM's names them in the other
   order. The order is that of a hash map keyed by the two classes (the multimethod's method
   table); main passed it by the luck of identity hashes (EVAL-NOTES.md, phase 2A), and with
@@ -319,7 +319,7 @@ with other agents' work beside, it reached 40 GB, 6 GB left available.
 - **Clojure's suite on Go** (`CLOJURE_TESTS_GO=... bin/clojure-tests -j 16`): 18,781 of 18,806
   assertions (588 tests; 19 failures, 6 errors), 61 of 64 namespaces load: no regression
   against `test/arbace-go-results.edn`. (A first run found one: a library requiring
-  `arbace.core` loads `core.clj` again from another namespace, and the boot `ns` macro sets
+  `arbace.core` loads `core.ae` again from another namespace, and the boot `ns` macro sets
   `*ns*` while it expands, which the image did not replay: the `ns` event.)
 - `bin/arbace-go --smoke`: amd64 and arm64 (`qemu-aarch64`) pass.
 - `bin/jrt test` (amd64) passes; `bin/c2g-evalproof` (amd64): as expected (31 forms).
@@ -360,8 +360,8 @@ into their home documents, as noted under each.
   `Expr` trees with the events of their analysis) instead of reading and analyzing it;
   `bin/arbace-go --build` records the image with the built executable (`ARBACE_PREPARE`) and
   links the executables again with it; `Compiler$Image` in the `Compiler` variant, the variants of
-  `RT` (`load`, the boot `ns` macro's event) and `Main` (`started`), `genclass.clj` and
-  `core_proxy.clj` recording their classes. A load from source is unchanged. (B1-PLAN's step 6
+  `RT` (`load`, the boot `ns` macro's event) and `Main` (`started`), `genclass.ae` and
+  `core_proxy.ae` recording their classes. A load from source is unchanged. (B1-PLAN's step 6
   said "pre-read or pre-analysed": pre-analysed, measured above.) *Accepted 2026-10-09, folded
   into C2G-SPEC §10.3 and §16, EVAL-PLAN §2.7, B1-PLAN's step 6.*
 - **U2 (C2G-SPEC §5.8; jrt) A class's identity hash is its name's** `String.hashCode` (31 bits,
@@ -369,12 +369,12 @@ into their home documents, as noted under each.
   primitive and array classes), instead of the next value of the global sequence. Hashed
   collections keyed by classes keep their layout in the image, and `(hash SomeClass)` and such
   orders are the same in every run (the AGENDA's "determinism issue"). Consequence on this
-  branch: the oracle's `polymorphism.clj:176` mismatched in every run. *Accepted 2026-10-09,
+  branch: the oracle's `polymorphism.ae:176` mismatched in every run. *Accepted 2026-10-09,
   folded into C2G-SPEC §5.8 and §16.* The case is moot since main's `ac8b971`: `MultiFn` names
   two ambiguous classes in the order of their names, on both builds, so the message no longer
-  depends on any hash and `polymorphism.clj:176` passes (re-recorded there).
+  depends on any hash and `polymorphism.ae:176` passes (re-recorded there).
 - **U3 (C2G-SPEC §10.6) The main package's files**: besides
-  `main.go` and `res/`, `image.go` (hand-written forms, `go/arbace/cmd/arbace/image.clj`, copied
+  `main.go` and `res/`, `image.go` (hand-written forms, `go/arbace/cmd/arbace/image.ae`, copied
   by `bin/c2g --program`), `image_types.go` (generated: every exported non-generic struct type of
   `arbace/lang` and `arbace/jrt`, by name) and the embedded `image.bin`; jrt's `ImageHooks`, set
   by the main package, through which `Compiler$Image`'s natives reach it. *Accepted 2026-10-09,
@@ -406,7 +406,7 @@ accepted by the user 2026-10-10**, folded into C2G-SPEC §10.6 and §16 and B1-P
 - **RL2 (C2G-SPEC §10.6, U3) The main package's files**: besides `main.go`, `image.go`,
   `image_types.go`, `image.bin` and `res/`, `rlwrap_linux.go` and `rlwrap_other.go`
   (`//go:build linux` and `!linux`), from the hand-written forms
-  `go/arbace/cmd/arbace/rlwrap_linux.clj` and `rlwrap_other.clj`, copied by
+  `go/arbace/cmd/arbace/rlwrap_linux.ae` and `rlwrap_other.ae`, copied by
   `bin/c2g --program` (`arbace.c2g.embed/rlwrap-forms`). The terminal checks are the main
   package's, over `syscall`: they are the launcher's decision, before jrt is set up, so jrt's
   `Host` and its optional interfaces (§9.4) are unchanged and gain none.
@@ -421,8 +421,8 @@ accepted by the user 2026-10-10**, folded into C2G-SPEC §10.6 and §16 and B1-P
 Nothing vendored. Studied: candid82/joker at `v1.10.0` (commit `eed70a3c`), `DEVELOPER.md`
 ("Compiling Core Namespace Structures to Native Go Code", "Packing Linter-specific Joker Files
 as Native Go Data Structures"), `core/gen_code/gen_code.go`, `core/pack.go`: Joker's two ways
-of preparing namespaces at build time; Arbace's `Compiler.clj` (`eval`, `load`, the boot `ns`
-macro of `RT.clj`). Joker's release binaries `joker-linux-amd64.zip` and
+of preparing namespaces at build time; Arbace's `Compiler.ae` (`eval`, `load`, the boot `ns`
+macro of `RT.ae`). Joker's release binaries `joker-linux-amd64.zip` and
 `joker-linux-arm64.zip` of v1.10.0 were run for the measurements (in `.tmp/`, not kept).
 
 The REPL under rlwrap: Alpine's `clojure` package's `clj` script (`/usr/bin/clj` on this host,

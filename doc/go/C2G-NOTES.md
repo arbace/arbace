@@ -22,8 +22,8 @@ exempt from tools.bash's staleness warning like g2c):
 | namespace | what |
 |---|---|
 | `names` | §4.2, §4.4: Go packages of classes, munging, locals, class names (with the rename table), descriptor codes, mangled member names |
-| `jrt` | a scan of jrt's hand-written forms (`go/arbace/jrt/*.clj`, tests excluded): types, methods per receiver (embedded ancestors included), functions, variables, constants, interfaces, and the classes jrt registers (`Define`), stand-ins marked |
-| `world` | §4.1: reads the inputs (Arbace's `arbace/lang/*.clj`, the JDK closure, `--input` trees), applies the Go-build variants (§4.6, `arbace/lang/go/*.clj`), enters everything into one class environment and runs the analyzer exactly as the class forms compiler does (`declare-class!`, `resolve-header!`, `resolve-members!`, `add-bridges!`, `analyze-class!`), with `env/*from-source*` so that no class with source is resolved by reflection; failures are recorded per class |
+| `jrt` | a scan of jrt's hand-written forms (`go/arbace/jrt/*.ae`, tests excluded): types, methods per receiver (embedded ancestors included), functions, variables, constants, interfaces, and the classes jrt registers (`Define`), stand-ins marked |
+| `world` | §4.1: reads the inputs (Arbace's `arbace/lang/*.ae`, the JDK closure, `--input` trees), applies the Go-build variants (§4.6, `arbace/lang/go/*.ae`), enters everything into one class environment and runs the analyzer exactly as the class forms compiler does (`declare-class!`, `resolve-header!`, `resolve-members!`, `add-bridges!`, `analyze-class!`), with `env/*from-source*` so that no class with source is resolved by reflection; failures are recorded per class |
 | `model` | the closed world as c2g sees it: translated / hand-written / stand-in / reflected classes, leaves, Go types (§5.1), virtual methods and their implementations, trivial class initialization |
 | `access` | javac-style `access$NNN` accessors decoded back into the member access they wrap |
 | `reach` | reachability (rapid type analysis): roots, instantiated classes, virtual calls resolved over the instantiated subtypes, lambdas' functional interfaces, static initializers, slices; the "missing parts" (operations naming what the world lacks) |
@@ -149,7 +149,7 @@ expected result is printed (`:pr`) needs `RT.printString` translated and reached
 counted apart. The JVM's helpful `NullPointerException` messages are accepted as a null
 message (V11). A Go panic that is no Java exception ends its step, not the program.
 
-`fixtures` (in the script list, and by default) loads `test/c2g/fixtures/*.clj` into this JVM
+`fixtures` (in the script list, and by default) loads `test/c2g/fixtures/*.ae` into this JVM
 (`load-file`), runs every public static method named `t[A-Z]...` without parameters, records
 the results the same way, adds the fixtures as an `--input` and compares likewise.
 
@@ -235,25 +235,25 @@ The translation is single-threaded; nothing has been tuned yet.
 
 ## Found on the way
 
-- **The JVM Arbace compares with NaN wrongly in some branches.** `arbace/classes/emit.clj`'s
+- **The JVM Arbace compares with NaN wrongly in some branches.** `arbace/classes/emit.ae`'s
   `emit-cond` picks `dcmpg`/`dcmpl` from the comparison before negating it for the jump:
   `(< 1.0 ##NaN)` is true on the JVM Arbace. The fix is to choose `g?` from the comparison as
   jumped on: `g? (case (if jump-if c (negate-cmp c)) (:< :<=) true (:> :>=) false (:== :!=)
   true)`. The oracle's `NumbersCompare` script recorded the wrong results (the 36 NaN steps
   c2g "fails"); after the fix they must be re-recorded (`bin/oracle record classes`). Not fixed
   here (outside c2g's scope). Fixed 2026-10-08 (`a6b2893`, regression test
-  `test/native/nan_test.clj`) and the oracle re-recorded (phase 2B, below: `NumbersCompare` 784
+  `test/native/nan_test.ae`) and the oracle re-recorded (phase 2B, below: `NumbersCompare` 784
   of 784); on `arbace-for-java-26` in release v2 (`398f01b`, tag `arbace-for-java-26-v2`). The
-  one NaN case still recorded as a Go mismatch, `(Util/equiv ##NaN ##NaN)` (`UtilRT.clj:345`),
+  one NaN case still recorded as a Go mismatch, `(Util/equiv ##NaN ##NaN)` (`UtilRT.ae:345`),
   is not this bug: the JVM's `false` is right (two distinct `Double` boxes), and Go answers
   `true` because its two boxed NaNs are one object (EVAL-NOTES.md, phase 2C).
 - **The JDK closure's ICU normalizer does not analyze**: `NormalizerImpl` cannot resolve
   `CodePointTrie$Fast16` (a nested class referred to across files), which fails
   `Norm2AllModes` and `CodePointTrie` too (8 classes). Nothing reached needs them yet.
 - **jrt gaps filled here** (`go/arbace/jrt/`): `VM.getSavedProperty`, `VM.isBooted`, `CDS`
-  (`vm.clj`); `NullPointerException.getExtendedNPEMessage` native (null, J6; `natives.clj`);
-  `ForkJoinTask` and `ForkJoinPool` (a task runs at `join`; `forkjoin.clj`);
-  `SharedSecrets.getJavaLangAccess` with a `JavaLangAccess` (`access.clj`).
+  (`vm.ae`); `NullPointerException.getExtendedNPEMessage` native (null, J6; `natives.ae`);
+  `ForkJoinTask` and `ForkJoinPool` (a task runs at `join`; `forkjoin.ae`);
+  `SharedSecrets.getJavaLangAccess` with a `JavaLangAccess` (`access.ae`).
 
 ## What phase 2 must do
 
@@ -340,13 +340,13 @@ scripts pass but for 46 steps that need `arbace.core` and the 10 unavailable one
 
 | where | what |
 |---|---|
-| `arbace/lang/go/Reflector.clj` (new variant) | `canAccess` calls `Method.canAccess` directly (no `MethodHandle`; the field `CAN_ACCESS_PRED`, the static initializer and `isJava8` are cut); `instanceMethods` collects with a loop (no `java.util.stream`); `boxArg` adapts a Clojure function to a functional interface with `Reflector.adaptFn`, a native calling `jrt.AdaptFn` (amendment R13), instead of `Proxy.newProxyInstance` |
-| `arbace/lang/go/RT.clj` | `*out*`, `*err*`, `*in*` bound to `RT$HostWriter` (fd 1), a `PrintWriter` (autoflush) over `RT$HostWriter` (fd 2) and a `LineNumberingPushbackReader` over `RT$HostReader`, two nested classes the variant adds (natives over jrt's host streams); `baseLoader` and `classForName(String, boolean, ClassLoader)` per C2G-SPEC §10.3: no `DynamicClassLoader`, no thread context loader, `Class.forName` over jrt's registry |
-| `go/arbace/jrt/natives.clj` | the variants' natives: `Reflector_AdaptFn_Class_O__O_native`; `RT_HostWriter_HostWrite_I_C1_I_I__V_native` and `..._HostFlush_I__V_native` (UTF-16 to UTF-8, an 8 KiB `bufio.Writer` per stream as `OutputStreamWriter`'s encoder buffers, a high surrogate held until its pair, a lone one written as `?` as Java's encoder does, write errors as `IOException`); `RT_HostReader_HostRead_C1_I_I__I_native` (UTF-8 to UTF-16, malformed bytes as U+FFFD, blocking for the first char and then taking only what is buffered, as `InputStreamReader` does; a supplementary character split across reads keeps its low surrogate) |
-| `arbace/c2g/world.clj` (shared, 3 lines) | `(c2g/cut ^:static name ^Ret [params])`, a method's head spliced into the cut as C2G-SPEC §4.6's example writes it, was rejected ("Don't know how to create ISeq from Symbol"); only `(c2g/cut (field ...))` and `(c2g/cut (static-initializer n))` worked |
-| `arbace/c2g/code.clj` (shared, small) | the store of the constant `null` into a field the world drops (its type is outside it) of `this`, or a static one, is dropped: the field can hold nothing else. `PrintWriter`'s field initializer `psOut = null` (a `PrintStream`) made every `PrintWriter` constructor throw `UnsupportedOperationException`, so `*err*` could not be made |
-| `test/c2g/check.clj`, `bin/c2g-check` | the oracle's context: the program first binds `*ns*` to `user` (as the driver runs, `arbace.main -` then `in-ns 'user`); `test/c2g/needs-core.edn`, the steps that need `arbace.core`, counted as "need core" when they fail (a listed step that passes is named, so the list cannot go stale); a total line per architecture; `C2G_SHOW=all` lists the need-core steps too; `bin/jrt overlay`'s path taken from its last line (a first run in a fresh worktree printed its progress before it, and every build failed) |
-| `test/c2g/fixtures/FxRuntime.clj` (new) | keyword interning across `System.gc()` (jrt's weak references: a held keyword stays the interned one, a dropped one is interned anew, equal); `Reflector` by name: static methods with run-time overload choice, static fields, instance methods (arity, a `Long` for an `int` parameter, `Boolean` results), public fields, constructors, and the error messages; the stream vars |
+| `arbace/lang/go/Reflector.ae` (new variant) | `canAccess` calls `Method.canAccess` directly (no `MethodHandle`; the field `CAN_ACCESS_PRED`, the static initializer and `isJava8` are cut); `instanceMethods` collects with a loop (no `java.util.stream`); `boxArg` adapts a Clojure function to a functional interface with `Reflector.adaptFn`, a native calling `jrt.AdaptFn` (amendment R13), instead of `Proxy.newProxyInstance` |
+| `arbace/lang/go/RT.ae` | `*out*`, `*err*`, `*in*` bound to `RT$HostWriter` (fd 1), a `PrintWriter` (autoflush) over `RT$HostWriter` (fd 2) and a `LineNumberingPushbackReader` over `RT$HostReader`, two nested classes the variant adds (natives over jrt's host streams); `baseLoader` and `classForName(String, boolean, ClassLoader)` per C2G-SPEC §10.3: no `DynamicClassLoader`, no thread context loader, `Class.forName` over jrt's registry |
+| `go/arbace/jrt/natives.ae` | the variants' natives: `Reflector_AdaptFn_Class_O__O_native`; `RT_HostWriter_HostWrite_I_C1_I_I__V_native` and `..._HostFlush_I__V_native` (UTF-16 to UTF-8, an 8 KiB `bufio.Writer` per stream as `OutputStreamWriter`'s encoder buffers, a high surrogate held until its pair, a lone one written as `?` as Java's encoder does, write errors as `IOException`); `RT_HostReader_HostRead_C1_I_I__I_native` (UTF-8 to UTF-16, malformed bytes as U+FFFD, blocking for the first char and then taking only what is buffered, as `InputStreamReader` does; a supplementary character split across reads keeps its low surrogate) |
+| `arbace/c2g/world.ae` (shared, 3 lines) | `(c2g/cut ^:static name ^Ret [params])`, a method's head spliced into the cut as C2G-SPEC §4.6's example writes it, was rejected ("Don't know how to create ISeq from Symbol"); only `(c2g/cut (field ...))` and `(c2g/cut (static-initializer n))` worked |
+| `arbace/c2g/code.ae` (shared, small) | the store of the constant `null` into a field the world drops (its type is outside it) of `this`, or a static one, is dropped: the field can hold nothing else. `PrintWriter`'s field initializer `psOut = null` (a `PrintStream`) made every `PrintWriter` constructor throw `UnsupportedOperationException`, so `*err*` could not be made |
+| `test/c2g/check.ae`, `bin/c2g-check` | the oracle's context: the program first binds `*ns*` to `user` (as the driver runs, `arbace.main -` then `in-ns 'user`); `test/c2g/needs-core.edn`, the steps that need `arbace.core`, counted as "need core" when they fail (a listed step that passes is named, so the list cannot go stale); a total line per architecture; `C2G_SHOW=all` lists the need-core steps too; `bin/jrt overlay`'s path taken from its last line (a first run in a fresh worktree printed its progress before it, and every build failed) |
+| `test/c2g/fixtures/FxRuntime.ae` (new) | keyword interning across `System.gc()` (jrt's weak references: a held keyword stays the interned one, a dropped one is interned anew, equal); `Reflector` by name: static methods with run-time overload choice, static fields, instance methods (arity, a `Long` for an `int` parameter, `Boolean` results), public fields, constructors, and the error messages; the stream vars |
 
 ## Results
 
@@ -435,7 +435,7 @@ All accepted 2026-10-09 and folded into C2G-SPEC, renamed P1-P4 there (C2G-SPEC 
 
 - **P2A-1 (§4.6) Variants' natives and member classes.** A variant may add `^:native` static
   methods, translated as calls of jrt's `C_M..._native` functions (hand-written in
-  `go/arbace/jrt/natives.clj`), and member classes (`c2g/add` of a `defclass`). *Accepted
+  `go/arbace/jrt/natives.ae`), and member classes (`c2g/add` of a `defclass`). *Accepted
   2026-10-09, folded into C2G-SPEC §4.6 and §9.1 (and §11) as P1; with B6 (E6): jrt's function
   when jrt defines it, else the class's own package's.*
 - **P2A-2 (§10.1, §5.11) Reflective roots.** A program that calls members by name roots the
@@ -460,8 +460,8 @@ name])` now works as the spec writes it (it was the implementation, not the spec
 Nothing vendored. Studied: openjdk/jdk26u `src/java.base/share/classes/sun/nio/cs/StreamEncoder.java`
 and `StreamDecoder.java` (the 8 KiB buffer, flushing only on `flush`, `?` for an unmappable
 lone surrogate in UTF-8, U+FFFD for malformed input, `InputStreamReader.read` returning what is
-available after the first char); Arbace's `arbace/main.clj` (`with-bindings`, the oracle
-driver's context) and `test/oracle/driver.clj`.
+available after the first char); Arbace's `arbace/main.ae` (`with-bindings`, the oracle
+driver's context) and `test/oracle/driver.ae`.
 
 # c2g, phase 2B: the evaluator boundary
 
@@ -525,7 +525,7 @@ EVAL-PLAN's Q1-Q7 where they touch §10.
   interface's `InstanceOf` and `Cast` (an interface assertion, not §5.12's type-word compare:
   jrt's functions cannot name a type of arbace/lang). jrt adds `Dynamic`, `DefineDynamic` (a
   registration a later deftype of the same name may replace) and `Class.Descriptor`
-  (`dyn.clj`). The Java API is `Compiler$Dyn`'s natives: `defineClass`, `setMethod`,
+  (`dyn.ae`). The Java API is `Compiler$Dyn`'s natives: `defineClass`, `setMethod`,
   `newInstance`, `getField`, `setField`. *Accepted 2026-10-09, folded into C2G-SPEC §5.12 (and
   §10.4, §11, V9) as E4.*
 - **B5 (§7.11, R13) `FromFn` from arbace/lang.** c2g writes `c2g_fromfn.go` in arbace/lang (it
@@ -560,17 +560,17 @@ and the `java.util.regex` port run on the oracle's regex corpus. jrt's side is J
 
 | where | what |
 |---|---|
-| `bin/jrt-convert`, `test/g2c/jrt_sources.clj` | 31 jdk26u files added to the closure (`added-sources`) and jrt's own Java (`overlay/jdk/java.base`, KIND `overlay`): 223 files, all shape-identical to javac's; jrt's own files checked in one chunk |
-| `overlay/jdk/` (new) | jrt's Java (`FileDescriptor`, `FileInputStream`, `FileOutputStream`, `OutputStreamWriter`, `InputStreamReader`, `jdk.internal.jrt.HostFiles`, `StandardStreams`, `CaseInsensitiveComparator`) and the JDK's Go-build variants (`variants/CaseFolding.clj`) |
-| `arbace/c2g/main.clj` (shared, small) | the JDK's variant files (`overlay/jdk/variants`) when the JDK is an input; jrt's statics c2g writes (below) declared to the scan, their classes' members rooted |
-| `arbace/c2g/out.clj` (shared, small) | c2g's support writes `System_in`/`out`/`err`, `System.setIn`/`setOut`/`setErr` and their initialization (by `StandardStreams`), `StderrPrint` through `System.err`, `String_CASE_INSENSITIVE_ORDER`, and `String`'s `split` (2), `replaceAll`, `replaceFirst`, `matches` over `Pattern` (`string-regex-methods`), each only when its classes are translated; `java-names`: a class of jrt's Java registered under the JDK's name it stands for |
-| `arbace/c2g/code.clj` (shared, one form) | **bug fix**: a private method of a non-leaf class called on a receiver that is not a local or `this` evaluated the receiver twice (`Impl_` takes the struct and the receiver): `MutableBigInteger` became non-leaf with `SignedMutableBigInteger`, and `this.divideLongMagnitude(...).toLong()` divided twice, corrupting the quotient (21 `BigDecimal` steps threw `ArrayIndexOutOfBoundsException`). The receiver now goes to a temporary before the arguments |
-| `arbace/classes/analyze.clj` (the class forms compiler, one form) | **bug fix**, the ICU failure: an import of a nested class by its binary name (`(import '(jdk.internal.icu.util CodePointTrie$Fast16))`, as j2c writes `import ...CodePointTrie.Fast16`) of a class compiled from source was entered in `env/source-imports`, which `resolve-class-sym`'s `$` branch did not consult ("Unknown type: CodePointTrie$Fast16" in `NormalizerImpl`, then 7 more classes). Regression test `classes.loader-test/source-import-of-member-class` (two packages built from source by `arbace.classes.build`, as the bootstrap does). The world now analyzes without failures; the bootstrap still reproduces itself |
-| `arbace/lang/go/RT.clj`, `go/arbace/jrt/natives.clj` | A's interim `RT$HostWriter`/`RT$HostReader` and their natives are gone: `*out*`, `*err*`, `*in*` are RT's own (an `OutputStreamWriter` over `System.out` ...), all translated (P2A-4's interim part is superseded) |
-| `test/oracle/classes/BigNumbers.clj` (new) | 3,974 steps (below) |
-| `test/c2g/fixtures/FxStreams.clj` (new) | the streams, files and the comparator against the JVM |
-| `bin/c2g-regex`, `test/c2g/regex_check.clj`, `test/c2g/regex/RegexCheck.clj` (new) | the regex corpus on the translated `java.util.regex` (below) |
-| `test/c2g/check.clj` | a `Float` result of infinity compared without `float`'s overflow check; `test/c2g/needs-core.edn`: BigNumbers 3974 |
+| `bin/jrt-convert`, `test/g2c/jrt_sources.ae` | 31 jdk26u files added to the closure (`added-sources`) and jrt's own Java (`overlay/jdk/java.base`, KIND `overlay`): 223 files, all shape-identical to javac's; jrt's own files checked in one chunk |
+| `overlay/jdk/` (new) | jrt's Java (`FileDescriptor`, `FileInputStream`, `FileOutputStream`, `OutputStreamWriter`, `InputStreamReader`, `jdk.internal.jrt.HostFiles`, `StandardStreams`, `CaseInsensitiveComparator`) and the JDK's Go-build variants (`variants/CaseFolding.ae`) |
+| `arbace/c2g/main.ae` (shared, small) | the JDK's variant files (`overlay/jdk/variants`) when the JDK is an input; jrt's statics c2g writes (below) declared to the scan, their classes' members rooted |
+| `arbace/c2g/out.ae` (shared, small) | c2g's support writes `System_in`/`out`/`err`, `System.setIn`/`setOut`/`setErr` and their initialization (by `StandardStreams`), `StderrPrint` through `System.err`, `String_CASE_INSENSITIVE_ORDER`, and `String`'s `split` (2), `replaceAll`, `replaceFirst`, `matches` over `Pattern` (`string-regex-methods`), each only when its classes are translated; `java-names`: a class of jrt's Java registered under the JDK's name it stands for |
+| `arbace/c2g/code.ae` (shared, one form) | **bug fix**: a private method of a non-leaf class called on a receiver that is not a local or `this` evaluated the receiver twice (`Impl_` takes the struct and the receiver): `MutableBigInteger` became non-leaf with `SignedMutableBigInteger`, and `this.divideLongMagnitude(...).toLong()` divided twice, corrupting the quotient (21 `BigDecimal` steps threw `ArrayIndexOutOfBoundsException`). The receiver now goes to a temporary before the arguments |
+| `arbace/classes/analyze.ae` (the class forms compiler, one form) | **bug fix**, the ICU failure: an import of a nested class by its binary name (`(import '(jdk.internal.icu.util CodePointTrie$Fast16))`, as j2c writes `import ...CodePointTrie.Fast16`) of a class compiled from source was entered in `env/source-imports`, which `resolve-class-sym`'s `$` branch did not consult ("Unknown type: CodePointTrie$Fast16" in `NormalizerImpl`, then 7 more classes). Regression test `classes.loader-test/source-import-of-member-class` (two packages built from source by `arbace.classes.build`, as the bootstrap does). The world now analyzes without failures; the bootstrap still reproduces itself |
+| `arbace/lang/go/RT.ae`, `go/arbace/jrt/natives.ae` | A's interim `RT$HostWriter`/`RT$HostReader` and their natives are gone: `*out*`, `*err*`, `*in*` are RT's own (an `OutputStreamWriter` over `System.out` ...), all translated (P2A-4's interim part is superseded) |
+| `test/oracle/classes/BigNumbers.ae` (new) | 3,974 steps (below) |
+| `test/c2g/fixtures/FxStreams.ae` (new) | the streams, files and the comparator against the JVM |
+| `bin/c2g-regex`, `test/c2g/regex_check.ae`, `test/c2g/regex/RegexCheck.ae` (new) | the regex corpus on the translated `java.util.regex` (below) |
+| `test/c2g/check.ae` | a `Float` result of infinity compared without `float`'s overflow check; `test/c2g/needs-core.edn`: BigNumbers 3974 |
 | `bin/jrt` | `build`/`test --prog DIR`; the runtime overlay's staleness looks at `overlay/go` only (`overlay/jdk` made every call rebuild it, and its progress lines broke the overlay path) |
 
 ## Results
@@ -620,7 +620,7 @@ The same on both architectures. All 29 failing cases need JDK resource data: 24 
   closure, translated by c2g like any JDK class, rather than Go in jrt: it extends translated
   classes (`Writer`, `OutputStream` ...), which hand-written Go cannot name in jrt's own build.
   What only Go can do is a `native` method (static, primitive and array parameters, so that jrt
-  builds without the translated types): `HostFiles`' natives in `go/arbace/jrt/files.clj`.
+  builds without the translated types): `HostFiles`' natives in `go/arbace/jrt/files.ae`.
 - **jrt's statics with translated values** (`System.out`, `String.CASE_INSENSITIVE_ORDER`) are
   written by c2g into jrt's `c2g_support`, as `String.format` is (A5), and initialized at package
   initialization by jrt's Java (`StandardStreams`); likewise `String`'s regex methods, Go methods
@@ -672,8 +672,8 @@ Branch `c2g-2d` (2026-10-09): items 6 and 7 of "What phase 2 must do", less `:fi
 checks), the new `arbace.c2g.checks`; outside c2g: `arbace.classes.analyze/analyze` (nodes
 keep their form's `:line`) and `arbace.classes.parse/parse-member` (members keep `:line`),
 neither changing any emitted byte (stages 2 and 3 identical, the gate passes); jrt:
-`asObject` (`object.clj`), `Arraycopy` (`array.clj`), `isLiteralOf` (`throwable.clj`), the
-stand-in `MatchException` (`test/jrt/standins.clj`, `standin_lang.clj` regenerated).
+`asObject` (`object.ae`), `Arraycopy` (`array.ae`), `isLiteralOf` (`throwable.ae`), the
+stand-in `MatchException` (`test/jrt/standins.ae`, `standin_lang.ae` regenerated).
 
 **1. Line positions.** The analyzer's nodes carry the line of their form, members the line of
 their member form. c2g binds the line of the node it translates and puts it, as
@@ -689,17 +689,17 @@ name the class forms file and line:
 
 ```
 Exception in thread "main" java.lang.MatchException: java.lang.IllegalStateException: negative
-	at c2g.fixtures.FxOuter.classify(FxClasses.clj:144)
+	at c2g.fixtures.FxOuter.classify(FxClasses.ae:144)
 	...
 Caused by: java.lang.IllegalStateException: negative
-	at c2g.fixtures.FxTouchy.v(FxClasses.clj:69)
+	at c2g.fixtures.FxTouchy.v(FxClasses.ae:69)
 ```
 
 `bin/c2g-check` now builds with `--line-file`. Costs: the forms grow 11% (8.1 to 9.0 MB),
 a check program's warm build 11.6 to 12.8 s on average, the executables shrink 4% (25.95 to
 24.87 MB). jrt's frames: a function literal nested in a literal (`f.func1.1`) now stands for
 its function as `f.func1` does. Left: jrt's classes are named by their Go file
-(`java_util_HashMap.clj`, not `HashMap.java`); a member a variant replaces shows the
+(`java_util_HashMap.ae`, not `HashMap.java`); a member a variant replaces shows the
 variant file's line in its class's file.
 
 **2. Pattern switches and `MatchException`.** A pattern `switch` is now an `if` chain in a
@@ -737,7 +737,7 @@ two-word field; the atom ends at 16,000 as expected. A `bin/c2g-check` program (
 clean under `-race` (`bin/c2g-race .tmp/c2g/check/prog-Seqs`), and so do jrt's own tests
 (`bin/jrt test --race`, with the changes here).
 
-**5. Performance.** `bin/c2g-perf` runs the workloads of `test/c2g/bench/BnWork.clj` (class
+**5. Performance.** `bin/c2g-perf` runs the workloads of `test/c2g/bench/BnWork.ae` (class
 forms over `arbace.lang` only) on the JVM Arbace and translated to Go (linux/amd64, `GOGC`
 default), and checks that both give the same checksums (they do). ns per element, this
 machine shared with three other agents (±20% between runs):
@@ -780,7 +780,7 @@ arrays without element checks first. The workloads move within the noise except 
 did not show in the profiles.
 
 **6. The whole program.** `bin/c2g --program` (no slice): `arbace.lang.Main#main` is a root
-and c2g writes the main package `arbace/cmd/arbace` (`DIR/prog/go/arbace/cmd/arbace.clj`),
+and c2g writes the main package `arbace/cmd/arbace` (`DIR/prog/go/arbace/cmd/arbace.ae`),
 whose `main` passes the command line as a `String[]` to `Main.main` inside `jrt.RunMain`:
 `RT`'s initialization runs, then `RT.doInit` stops at `arbace.core/refer`, unbound until the
 evaluator (phase 2B) loads `arbace.core`; the uncaught exception is printed as the JVM prints

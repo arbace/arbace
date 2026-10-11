@@ -83,7 +83,7 @@ questions · 17 Sources.
 
 ## 2. A first example
 
-`arbace/lang/Reduced.clj`:
+`arbace/lang/Reduced.ae`:
 
 ```clojure
 (defclass ^:public ^:final Reduced
@@ -93,7 +93,7 @@ questions · 17 Sources.
   (method ^:public deref [this] val))
 ```
 
-c2g writes, in `go/arbace/lang/Reduced.clj` (package `arbace/lang`, §4.2):
+c2g writes, in `go/arbace/lang/Reduced.ae` (package `arbace/lang`, §4.2):
 
 ```clojure
 (in-ns 'go.arbace.lang)
@@ -119,7 +119,7 @@ c2g writes, in `go/arbace/lang/Reduced.clj` (package `arbace/lang`, §4.2):
   (jrt/Object_toString t))
 ```
 
-and `IDeref` (an interface, in `IDeref.clj`) is
+and `IDeref` (an interface, in `IDeref.ae`) is
 
 ```clojure
 (go/type IDeref (interface jrt/Object_I (Is_IDeref []) (Deref__O ^any [])))
@@ -168,7 +168,7 @@ Arbace's tests or listed here with its reason; anything else is a bug.
 | V2 | `OutOfMemoryError` is not thrown: the program dies | Go's allocator |
 | V3 | identity hash codes differ (they differ between JVM runs too); so does the iteration order of identity-keyed hash maps | jrt assigns them (§5.8) |
 | V4 | a lambda's class is one class per functional interface (`Predicate$$Lambda`), not one per call site | §7.11 |
-| V5 | stack traces show translated frames (class, method, `.clj` file and line), and some jrt-internal frames are elided; no frames of hidden classes | §7.9.6 |
+| V5 | stack traces show translated frames (class, method, `.ae` file and line), and some jrt-internal frames are elided; no frames of hidden classes | §7.9.6 |
 | V6 | a thread that uses an instance of a class while another thread runs that class's static initializer does not wait for it | guards are elided in instance code (§6.2) |
 | V7 | a data race on a non-`volatile` field of interface type (two words in Go) can tear | §8.3; c2g lists such fields, the race detector finds the races |
 | V8 | `finalize` is never called | deprecated in Java; jrt has no finalization (references use `runtime.AddCleanup`) |
@@ -196,7 +196,7 @@ c2g runs on the JVM Arbace (`target/stage2`, as the other tools, `bin/lib/tools.
 `bin/c2g`, implemented in `arbace/c2g/` (namespaces `arbace.c2g.*`). Its input is a set of
 class forms files and a jrt manifest:
 
-1. **Arbace's runtime**, `arbace/lang/*.clj`, with the Go-build variants of §4.6.
+1. **Arbace's runtime**, `arbace/lang/*.ae`, with the Go-build variants of §4.6.
 2. **The translated JDK closure**: j2c's conversion of the jdk26u source files of the closure
    (JAVA-SURFACE.md, "The translation closure": 184 files, 422 classes; with D5's regex), with
    their own variants; since phase 2C, 223 files (below), and since step 5's phase 2B, 340
@@ -376,7 +376,7 @@ to load), `SunEntries` and `SunJCE` (the implemented services, with the JDK's al
 attributes), `NativePRNG` (its streams the host's random source, `jdk.internal.jrt.HostRandom`),
 `SecretKeySpec` (no `SharedSecrets`), and `DigestBase`, `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3`
 (amendment SC7: whole blocks compressed by Go's `crypto` on the digest's own chaining state, as
-the JVM's intrinsics replace `implCompressMultiBlock0`; jrt's `digests.clj`). jrt's own Java:
+the JVM's intrinsics replace `implCompressMultiBlock0`; jrt's `digests.ae`). jrt's own Java:
 `javax.crypto.JceSecurity` (every provider usable, the unlimited policy; the JDK generates it
 from a template), `sun.security.provider.SeedGenerator` (seeds from the host). **The providers
 are SUN and SunJCE alone** (a deviation: the JVM lists twelve); `getInstance` of anything
@@ -509,23 +509,23 @@ runtime's two functions (§9.3). The module is `arbace` (`program.edn`: `{:modul
   `c2g_support.go` (c2g's helpers `C2g_*` and what c2g generates into jrt's package, §11) and
   `c2g_init.go` (the eager initialization of replaced stand-ins, below) (amendments C2-C5, E4,
   E5, accepted 2026-10-09).
-- The forms tree follows Go forms SPEC §4.1: c2g writes `target/c2g/go/arbace/jrt.clj` (`ns`,
-  `go/package`, `load`s), `target/c2g/go/arbace/jrt/java_util_HashMap.clj` and so on. It is
+- The forms tree follows Go forms SPEC §4.1: c2g writes `target/c2g/go/arbace/jrt.ae` (`ns`,
+  `go/package`, `load`s), `target/c2g/go/arbace/jrt/java_util_HashMap.ae` and so on. It is
   regenerated, not tracked, as converted Go is (g2c decision 9).
 - **jrt's hand-written forms** are source, tracked, in a forms root of their own (§16 Q19),
-  `go/arbace/jrt/*.clj`; the build merges the two trees into one program root before
+  `go/arbace/jrt/*.ae`; the build merges the two trees into one program root before
   `bin/g2c build`. c2g's files and jrt's are told apart by name: hand-written files never begin
   with `java_`, `jdk_`, `sun_` or `c2g_`.
 - **Stand-ins** (amendment J9, accepted 2026-10-08). Until c2g's output joins the build, jrt's
   hand-written classes throw, catch and implement JDK classes c2g will translate (the
   exceptions, `Serializable`, `Comparable`, `CharSequence`, `Runnable` ...). The files
-  `go/arbace/jrt/standin_*.clj` hold stand-ins for them, tracked, in exactly the shapes this
+  `go/arbace/jrt/standin_*.ae` hold stand-ins for them, tracked, in exactly the shapes this
   spec gives translated classes (§4.4's names, `C_I` and `Self_C` for non-leaf classes,
   `C_New_...` and `Ctor_...`, forwarders, `Ref`, `GetClass__Class`, `Clone__O`, `C_InstanceOf`,
   `C_Cast`, `C_class`), so that jrt and translated code meet at the final names now. They are
-  generated (`test/jrt/standins.clj`), except `standin_timeunit.clj`, hand-written because the
-  generator writes only exceptions and interfaces. `standin_reflect.clj` (generated by
-  `test/jrt/standins_reflect.clj`: the wrappers `Number`, `Boolean`, `Character` ... `Void`,
+  generated (`test/jrt/standins.ae`), except `standin_timeunit.ae`, hand-written because the
+  generator writes only exceptions and interfaces. `standin_reflect.ae` (generated by
+  `test/jrt/standins_reflect.ae`: the wrappers `Number`, `Boolean`, `Character` ... `Void`,
   `java.lang.reflect.Type`, `InvocationTargetException`) is one of them (amendment R19, accepted
   2026-10-08). When c2g's output joins, the translated classes define the same names; jrt's
   core uses only their constructors and interfaces, so a change of leafness in the larger
@@ -550,7 +550,7 @@ runtime's two functions (§9.3). The module is `arbace` (`program.edn`: `{:modul
 - **Positions.** c2g writes no Go positions (Go forms SPEC §10, forms built by a program): the
   printer lays them out as gofmt would. For stack traces (§7.9.6) every function form carries
   the `:line` of its class forms member, and the build uses the printer's `--line-file` option,
-  so that gc's line tables name the class forms file (`arbace/lang/PersistentVector.clj:137`).
+  so that gc's line tables name the class forms file (`arbace/lang/PersistentVector.ae:137`).
   **As built** (amendment W1, accepted 2026-10-09): the analyzer keeps each form's line on its
   node and each member's line on the member (`arbace.classes.analyze/analyze`,
   `arbace.classes.parse/parse-member`; no emitted byte changes). c2g binds the line of the node
@@ -562,7 +562,7 @@ runtime's two functions (§9.3). The module is `arbace` (`program.edn`: `{:modul
   declarations are written sorted by line (Go does not care about their order), so explicit
   lines are rare. Every build of c2g's output (`bin/c2g-check` included) uses `--line-file`,
   so gc's line tables, Go's tracebacks, pprof and jrt's `StackTraceElement`s name the class
-  forms file and line (`at c2g.fixtures.FxOuter.classify(FxClasses.clj:144)`). Costs measured:
+  forms file and line (`at c2g.fixtures.FxOuter.classify(FxClasses.ae:144)`). Costs measured:
   the forms grow 11%, a warm build about 10%, the executables shrink 4%.
 
 ### 4.4 Names
@@ -685,8 +685,8 @@ an error (c2g exits 1) listed in `report.edn` `:errors` (amendment W4, accepted 
 
 JAVA-SURFACE.md's "rework" (about 300 lines of `RT`, `Compiler` and `Reflector`) and the cuts
 need the Go build's `arbace.lang` to differ in places from the JVM's. The source stays one: the
-differences are **variant files**, `arbace/lang/go/<Class>.clj` (and, for the translated JDK,
-whose class forms j2c regenerates, `overlay/jdk/variants/<Class>.clj`, in the class's package:
+differences are **variant files**, `arbace/lang/go/<Class>.ae` (and, for the translated JDK,
+whose class forms j2c regenerates, `overlay/jdk/variants/<Class>.ae`, in the class's package:
 amendment K1, accepted 2026-10-09), read by c2g only:
 
 ```clojure
@@ -748,7 +748,7 @@ amendment K1, accepted 2026-10-09), read by c2g only:
       (method ^:private ^:static ^:native hostFlush ^void [^int fd]))))
 ```
 - **The JDK's variants** (amendment K1, accepted 2026-10-09) are the same forms, `in-ns` the
-  class's package: `overlay/jdk/variants/CaseFolding.clj` replaces
+  class's package: `overlay/jdk/variants/CaseFolding.ae` replaces
   `jdk.internal.lang.CaseFolding`'s field `expanded_case_cps`, whose initializer collected a
   map's keys through a stream (`java.util.stream` was cut then; it is in the world since step
 5's phase 2B, §4.1), with a loop in an added method.
@@ -861,10 +861,10 @@ it exists. Until then it embeds `jrt.Object` and has the superclass's methods it
 until the translated `Number` joins the build, and then embed `Number` (non-leaf, so they
 become `Number_I` values where the static type is `Number`) (amendment T12, accepted
 2026-10-08). **Done** (amendment S3, accepted 2026-10-09): they embed `Number` and define its
-methods themselves (`atomic.clj`; `(pos? (AtomicInteger. 1))` casts to `Number`).
+methods themselves (`atomic.ae`; `(pos? (AtomicInteger. 1))` casts to `Number`).
 
 A hand-written class is non-leaf where the world extends it, as the manifest's generator
-declares (`test/jrt/manifest.clj`). Since amendment S3 (accepted 2026-10-09) these include
+declares (`test/jrt/manifest.ae`). Since amendment S3 (accepted 2026-10-09) these include
 `java.util.Date` (the translated `java.sql.Timestamp` extends it) and `ForkJoinTask` (the
 translated `RecursiveTask` and `CountedCompleter` extend it).
 
@@ -1109,7 +1109,7 @@ the same for its own classes and its stand-ins (§4.3).
 | `Enum` | the constants in order | `getEnumConstants`, `Enum.valueOf` |
 | `FromFn` | for a functional interface: wraps an `IFn` into its adapter (§7.11); set on every interface `Compiler.FISupport` may adapt, the `@FunctionalInterface` ones (amendment R13), by `arbace/lang`'s `c2g_fromfn.go` (§7.11, amendment E5) | `jrt.AdaptFn`, `Reflector`'s functional interface adaptation, `isAnnotationPresent(FunctionalInterface)` |
 
-The tables' entry types (jrt's `class.clj`):
+The tables' entry types (jrt's `class.ae`):
 
 ```clojure
 (go/type MethodInfo (struct ^string Name ^{:tag (slice (* Class))} Params ^{:tag (* Class)} Return
@@ -1137,7 +1137,7 @@ The tables' entry types (jrt's `class.clj`):
   (`getMethods` merges as `java.lang.PublicMethods` does). The order is the table's (the JVM's is
   unspecified), and a name's overloads are listed in the order the JVM's reflection gives them
   (c2g's tables by `getDeclaredMethods` of the class on the JVM running c2g, jrt's by
-  `getMethods`, `test/jrt/tables.clj`), since `Reflector`'s choice among applicable overloads
+  `getMethods`, `test/jrt/tables.ae`), since `Reflector`'s choice among applicable overloads
   follows the order (amendment M4, accepted 2026-10-09: `(Math/floorDiv c 1461)` with `c` an
   `Object` chose `(int, int)` before). Interfaces list their abstract, default and static methods
   and their constants; an enum's `values`, `valueOf` and constants are ordinary members.
@@ -1193,7 +1193,7 @@ So an invoker is one call (in package `jrt`; elsewhere the jrt names are qualifi
 
 **The tables as data** (amendment SZ3, accepted 2026-10-10; JRT-NOTES.md, "Size"). The literals
 above are the tables' meaning; c2g writes them as data: each class has a `MemberTable` (jrt's
-`members.clj`), its members as lines of text (kind, name, descriptor with binary names), and per
+`members.ae`), its members as lines of text (kind, name, descriptor with binary names), and per
 kind one dispatch function, a switch over the member's index (`C_invoke`, `C_new`, `C_get`,
 `C_set`), whose arms are the invokers' bodies above. jrt decodes the table into the
 `ClassInfo`'s `Methods`, `Ctors` and `Fields` the first time reflection reads them
@@ -1281,7 +1281,7 @@ replaces the type-word compare):
   functions cannot name a type of `arbace/lang`): after a successful assertion to `J`, every
   interface's `InstanceOf` and `Cast` assert the value to the jrt interface `jrt.Dynamic` and,
   when it is one, require `(.DynImplements x J_class)`.
-- **jrt's part** (`dyn.clj`): the interface `Dynamic` (`DynImplements`), `DefineDynamic` (the
+- **jrt's part** (`dyn.ae`): the interface `Dynamic` (`DynImplements`), `DefineDynamic` (the
   registration of a run-time class under its binary name, which a later `deftype` of the same
   name may replace; a class of the closed world cannot be replaced) and `Class.Descriptor` (the
   class's JVM descriptor, the evaluator's method keys).
@@ -1808,7 +1808,7 @@ each check; c2g may generate them later.
   tables (§4.3), so an element of translated code names its class forms file and line. A
   function literal nested in a function literal (`f.func1.1`) stands for its function as
   `f.func1` does. jrt's translated classes are named by their Go file
-  (`java_util_HashMap.clj`, not `HashMap.java`), and a member a variant replaces shows the
+  (`java_util_HashMap.ae`, not `HashMap.java`), and a member a variant replaces shows the
   variant file's line under its class's file.
 - An exception that leaves a thread's `run` (or `main`) is handed to the thread's uncaught
   exception handler, else the default one, else printed as the JVM prints it (`Exception in
@@ -2067,7 +2067,7 @@ this only matters for racy publication, which the race detector also finds.
   accepted 2026-10-10).
 - **The fork-join pool** (amendment S5, accepted 2026-10-09; it reverses the cut of
   `ForkJoinPool` under D6, JAVA-SURFACE.md "What the cut leaves out") is jrt's hand-written
-  `ForkJoinTask` (non-leaf, §5.3) and `ForkJoinPool` (`forkjoin.clj`), with the JDK's semantics
+  `ForkJoinTask` (non-leaf, §5.3) and `ForkJoinPool` (`forkjoin.ae`), with the JDK's semantics
   but not its work-stealing: a pool of parallelism P runs a task given from outside (`invoke`,
   `execute`, `submit`) in a worker of its own, and a task forked in a worker in a new worker
   while fewer than P − 1 forked tasks run, else in the forking thread at once. Workers are jrt
@@ -2209,24 +2209,24 @@ the translated code may use, as the analyzer needs it:
   `Float.intBitsToFloat` and `floatToRawIntBits`, `NullPointerException.getExtendedNPEMessage`
   (which returns null: §7.9.5, V11). jrt's own Java (§4.1, amendment K1, accepted 2026-10-09)
   adds `jdk.internal.jrt.HostFiles`' natives (`open0`, `read0`, `write0`, `available0`,
-  `skip0`, `close0`: the file table over the host, in `go/arbace/jrt/files.clj`), static and
+  `skip0`, `close0`: the file table over the host, in `go/arbace/jrt/files.ae`), static and
   with primitive and array parameters only, so that jrt builds without the translated types;
   and, with sockets (NT1-NT5, accepted 2026-10-10), `jdk.internal.jrt.HostNet`'s (`listen0`,
   `accept0`, `connect0`, `read0`, `write0`, `available0`, `close0`, `shutdown0`, `address0`,
   `port0`, `setOption0`, `getOption0`, `lookup0`, `reverse0`, `hostName0`, `hasFamily0`: the
-  socket table and the name service over §9.4's `NetHost`, in `go/arbace/jrt/net.clj`), the same
+  socket table and the name service over §9.4's `NetHost`, in `go/arbace/jrt/net.ae`), the same
   way (`String` parameters too).
   With processes (PR3, accepted 2026-10-10) jrt defines natives of translated classes directly:
   `ProcessEnvironment.environ`, `ProcessHandleImpl`'s `getCurrentPid0`, `isAlive0`,
   `waitForProcessExit0`, `destroy0`, `parent0` and `getProcessPids0`, and the static natives the
   variants add, `ProcessImpl.hostForkAndExec` and `ProcessHandleImpl.Info.hostInfo` (in
-  `go/arbace/jrt/process.clj`, over §9.4's `HostProc`), all static over primitives, arrays and
+  `go/arbace/jrt/process.ae`, over §9.4's `HostProc`), all static over primitives, arrays and
   `String`; the children's pipes are entries of `HostFiles`' table, whose `available` asks a
   file that can tell (a pipe: `FIONREAD`).
 - **Natives of `arbace.lang`** (amendments P1 and E6, accepted 2026-10-09). A `^:native` method
   a variant declares (§4.6) is translated the same way, a call of `C_M..._native` with the
   receiver first for an instance method. The function is **jrt's when jrt defines it**: the
-  hand-written natives in `go/arbace/jrt/natives.clj` (`Reflector.adaptFn`; `RT$HostWriter`'s
+  hand-written natives in `go/arbace/jrt/natives.ae` (`Reflector.adaptFn`; `RT$HostWriter`'s
   `hostWrite` and `hostFlush` and `RT$HostReader`'s `hostRead` until amendment K2 removed
   them, §9.4), called qualified, `(jrt/Reflector_AdaptFn_Class_O__O_native c f)`; such a
   native must be static and take and
@@ -2310,8 +2310,8 @@ amendment B5).
 
 **Where the patch lives** (amendment T15, accepted 2026-10-08). The patched runtime files are Go
 forms in a forms root of their own, `overlay/go/runtime/`, outside `go/` (whose package files
-`bin/g2c build` collects): `overlay/go/runtime.clj` is the package file naming the three files,
-`arbace_local.clj` is hand-written, and `proc.clj` and `runtime2.clj` are the toolchain's
+`bin/g2c build` collects): `overlay/go/runtime.ae` is the package file naming the three files,
+`arbace_local.ae` is hand-written, and `proc.ae` and `runtime2.ae` are the toolchain's
 `proc.go` and `runtime2.go` as `bin/g2c convert --goos linux runtime` converts them, with the
 patch's two lines each marked `; Arbace` (the same forms serve amd64, arm64 and, having no
 build constraints, `GOOS=tamago`). `bin/jrt overlay` prints them and writes the overlay file
@@ -2329,7 +2329,7 @@ exit, random seeds for `SecureRandom`, the embedded resources (§10.3). B1a's im
 over Go's `os` and `time`; B1b replaces it with the monitor's host calls. Translated code never
 reaches the host except through jrt's classes (`FileInputStream`, `System`, `PrintStream` ...).
 
-**As implemented** (amendment T14, accepted 2026-10-08): `jrt.Host` (in `host.clj`) has the
+**As implemented** (amendment T14, accepted 2026-10-08): `jrt.Host` (in `host.ae`) has the
 standard streams, files (`Open` with `os.O_*` flags, `Stat`, `ReadDir`, `Remove`, `Mkdir`,
 `Rename`, `Getwd`, through `jrt.HostFile` and `jrt.HostFileInfo`), the clocks (`Now`,
 `Nanotime`), the environment (`Getenv`, `Environ`), the command line (`Args`), `NumCPU`,
@@ -2343,17 +2343,17 @@ Go's runtime timers, which TamaGo's runtime provides too.
 
 **An optional `HostFS`** (amendment FS3, accepted 2026-10-10; JRT-NOTES.md, "Files"). What
 `java.io.File` asks beyond `Host`'s file calls is a second interface, `jrt.HostFS` (in
-`hostfs.clj`): `Access` (`access(2)`), `Chmod`, `Chtimes` (the modification time, the access
+`hostfs.ae`): `Access` (`access(2)`), `Chmod`, `Chtimes` (the modification time, the access
 time kept), `Realpath` and `Statfs` (space and the longest name). A host implements it when it
 can; `jrt.CurrentHostFS()` is the current host as one, or nil. `OSHost` implements it on Linux
-(`hostfs_linux.clj`, `//go:build linux`, over `syscall`, `os` and `path/filepath`). Without it
-the natives of `UnixFileSystem`'s variant (`filesystem.clj`) answer as the JDK does when the
+(`hostfs_linux.ae`, `//go:build linux`, over `syscall`, `os` and `path/filepath`). Without it
+the natives of `UnixFileSystem`'s variant (`filesystem.ae`) answer as the JDK does when the
 system call fails (no permission or time changes, canonical paths only collapsed, no space).
 `Host` itself is unchanged, so B1b's host and other additions (sockets) are not touched by it.
 
 **An optional `HostLinks`; the host's zone and clock** (amendment TM6, accepted 2026-10-10;
 JRT-NOTES.md, "Time"). `TimeZone`'s natives `getSystemTimeZoneID` and `getSystemGMTOffsetID`
-are jrt's (`timezone.clj`) and find the default zone as jdk26u's `TimeZone_md.c` does on Linux:
+are jrt's (`timezone.ae`) and find the default zone as jdk26u's `TimeZone_md.c` does on Linux:
 `TZ` (without a leading `:` or `posix/`), else the target of the symbolic link `/etc/localtime`
 after `zoneinfo/`, else the file of `/usr/share/zoneinfo` with its contents (`UTC`, `GMT` first,
 then sorted order), else the host's offset now as `GMT+hh:mm`. The symbolic link is read through
@@ -2363,10 +2363,10 @@ is the host's clock with its nanoseconds, so `Instant.now()` has them.
 
 **An optional `HostProc`; the JVM's process texts** (amendments PR2, PR5, accepted 2026-10-10;
 JRT-NOTES.md, "Processes"). The processes are a fifth optional interface, `jrt.HostProc` (in
-`hostproc.clj`): `Start` (a path, the arguments, the environment or nil for the program's, the
+`hostproc.ae`): `Start` (a path, the arguments, the environment or nil for the program's, the
 directory, each standard stream a pipe, the program's own or an open file of the host, error output
 to standard output), `Pid`, `ProcStat`, `ProcInfo`, `Pids`, `Kill`; a started child is a
-`jrt.HostChild` (`Pid`, `Wait`, `Signal`). `OSHost` implements it on Linux (`hostproc_linux.clj`,
+`jrt.HostChild` (`Pid`, `Wait`, `Signal`). `OSHost` implements it on Linux (`hostproc_linux.ae`,
 `//go:build linux`) over `os.StartProcess`, `os.Pipe` and `/proc`, a goroutine reaping each child
 at its end (no zombies; a reaped child's pid is never signalled). Without it no program starts.
 jrt's generic process files name no `syscall` or `os` (errors carry Linux's numbers as `int`s), so
@@ -2378,7 +2378,7 @@ status is the JDK's encoding (0x80 plus the signal) (PR5, with NT5).
 
 **`SecureRandom`'s entropy** (amendment SC6, accepted 2026-10-10; JRT-NOTES.md, "Security").
 `Host.RandomBytes` is unchanged; `OSHost`'s, Go's `crypto/rand` (getrandom(2)), is in the
-Linux-tagged `hostrand_linux.clj` (`//go:build linux`). jrt's own Java
+Linux-tagged `hostrand_linux.ae` (`//go:build linux`). jrt's own Java
 `jdk.internal.jrt.HostRandom` (a static native over it, and an endless `InputStream`) is what
 `NativePRNG`'s and `SeedGenerator`'s variants read where the JDK reads `/dev/random` and
 `/dev/urandom`.
@@ -2386,11 +2386,11 @@ Linux-tagged `hostrand_linux.clj` (`//go:build linux`). jrt's own Java
 **An optional `HostExecutable`** (amendment FX6, accepted 2026-10-10; JRT-NOTES.md, "Resources
 by URL"). The executable's path, which the URLs of embedded resources name (§10.3), comes from
 an optional interface `jrt.HostExecutable`, as `HostFS`; `OSHost` implements it on Linux
-(`resources_linux.clj`, `//go:build linux`: `os.Executable`, links resolved). A host without it
+(`resources_linux.ae`, `//go:build linux`: `os.Executable`, links resolved). A host without it
 (B1b's box, `GOOS=tamago`) names `/arbace`.
 
 **An optional `NetHost`** (JRT-NOTES.md, "Sockets (go-net)"; accepted with NT1-NT5,
-2026-10-10). The network is a third interface, `jrt.NetHost` (in `net.clj`): `Listen`, `Dial`
+2026-10-10). The network is a third interface, `jrt.NetHost` (in `net.ae`): `Listen`, `Dial`
 (with a local address and a timeout), `LookupIP`, `LookupAddr`, `Hostname`, `HasFamily`,
 `SetOption`/`GetOption` (by `java.net.SocketOptions`' numbers) and `Available`. jrt asks the
 current host for it at each use; a host without it has no network (every `HostNet` native fails,
@@ -2401,7 +2401,7 @@ the C library's texts as this machine's (musl) JVM gives them (amendment NT5).
 
 **`JAVA_TOOL_OPTIONS`** (amendment NT2, accepted 2026-10-10). The system properties are made
 from the host (above) and then from the `-Dname=value` options of the environment variable
-`JAVA_TOOL_OPTIONS`, split as HotSpot splits it (`tooloptions.clj`), as the JVM reads it at its
+`JAVA_TOOL_OPTIONS`, split as HotSpot splits it (`tooloptions.ae`), as the JVM reads it at its
 start; no "Picked up" line is printed. Leading `-D` arguments of the executable are the
 launcher's (step 6). `System.getProperties()` is c2g's (§11): a `Properties` holding a copy.
 
@@ -2461,14 +2461,14 @@ hinted interop. A Clojure function passed where a functional interface is expect
 **Closure compilation** (amendments EC1, EC2, EC5, accepted 2026-10-10; SPEED-NOTES.md, "The
 evaluator: closure compilation"). The evaluator compiles each method of an evaluated fn,
 deftype, defrecord or reify, at its first call, into a tree of `Code` nodes (the variant file
-`arbace/lang/go/CompilerCode.clj`): locals as slot indexes, `long` and `double` locals unboxed
+`arbace/lang/go/CompilerCode.ae`): locals as slot indexes, `long` and `double` locals unboxed
 in the frame's `prims`, constants made once, a node of a primitive analyzed type answering
 `runLong`, `runDouble` or `runBool` (the bytecode's `emitUnboxed`), `recur` by a frame flag;
 `evalIn` remains the evaluation of top-level forms and of node kinds the compiler does not know
 (compat mode). The public static methods of `Numbers`, `RT`, `Util` and jrt's `Math` with at
 most three parameters of the kinds long, int, double, boolean or a reference are called
-directly, as Go calls: `arbace/lang/go/CompilerOps.clj` (`CodeOp0` .. `CodeOp3`), generated by
-`test/c2g/eval_ops.clj` from the JVM's classes and checked in, regenerated when those methods
+directly, as Go calls: `arbace/lang/go/CompilerOps.ae` (`CodeOp0` .. `CodeOp3`), generated by
+`test/c2g/eval_ops.ae` from the JVM's classes and checked in, regenerated when those methods
 change. Other resolved methods go through `Evaluator.invokeResolved` (their invoker directly,
 when the declaring class is public), resolved constructors through jrt's
 `Compiler_CodeRun_Construct_Constructor_O1__O`, exceptions unwrapped.
@@ -2506,7 +2506,7 @@ names.
 per closed-over local, named and typed as `ObjExpr.compile` declares them (not public; a primitive
 local's field of its primitive type), whose reflective `get` reads the `EvalFn`'s captured value
 (and `set`, for a reference type, writes it): `Compiler$Dyn.defineFnField`, a native c2g writes
-(`arbace/c2g/dyn.clj`). The evaluator clears locals as compiled code does (EVAL-PLAN §2.1), so
+(`arbace/c2g/dyn.ae`). The evaluator clears locals as compiled code does (EVAL-PLAN §2.1), so
 such a field of a `^:once` fn reads null once the fn has run (Clojure's `clearing` tests).
 
 **Primitive fns are evaluated boxed** (EVAL-PLAN Q1, decided 2026-10-09). An `EvalFn` cannot
@@ -2529,7 +2529,7 @@ class before evaluating its arguments, as the JVM's `new` instruction does (the 
 keeps `Constructor.newInstance`'s `InstantiationException`); a `deftype*` stub whose name has
 `/` or a leading `[` is `NoClassDefFoundError: IllegalName: NAME`, as
 `ClassLoader.preDefineClass` refuses it. `java.lang.InstantiationError` joins the closure
-(`test/g2c/jrt_sources.clj`).
+(`test/g2c/jrt_sources.ae`).
 
 ### 10.3 Classes and resources by name
 
@@ -2538,7 +2538,7 @@ classes the evaluator defined (§5.12), and array classes (`"[Ljava.lang.String;
 `String/1`). There is one loader: `RT`'s variant makes `baseLoader` ignore the thread's context
 loader, `makeClassLoader` return nil, and `classForName(String, boolean, ClassLoader)` call
 `Class.forName` without `DynamicClassLoader` (amendment P4, accepted 2026-10-09). `RT.load` reads a
-namespace's source from jrt's embedded resources (the `.clj` files of the REPL's namespaces,
+namespace's source from jrt's embedded resources (the `.ae` files of the REPL's namespaces,
 embedded with `//go:embed`) or from the file system through the host, and evaluates it; there are no
 `__init` classes. `DynamicClassLoader`, `FnLoaderThunk`, `Compile` are not translated.
 
@@ -2547,20 +2547,24 @@ namespaces' sources under the main package's forms directory
 (`go/arbace/cmd/arbace/res/arbace/...`), marked as data for `bin/g2c` by a file `.g2c-data`
 (BUILD.md, "The program's layout"), lists them as the package's `:embed-files` and declares
 `//go:embed res`; `main` sets the host's `Resources` to `fs.Sub(resources, "res")` (§9.4)
-before `Main.main`. The embedded tree is `arbace/**/*.clj` less the tools (`classes`, but for
+before `Main.main`. The embedded tree is `arbace/**/*.ae` less the tools (`classes`, but for
 the class forms' analysis, CF2 below; `j2c`, `g2c`, `c2g`), the runtime's class forms
 (`arbace/lang`), ASM, and the namespaces the Go build
 leaves out (JAVA-SURFACE.md decision 6; D6's Swing and SAX: `inspector`, `xml`; processes,
 `arbace.java.shell` and `arbace.java.process`, are in since amendment PR1, accepted 2026-10-10)
-(`arbace.c2g.embed/excluded`). `RT.load` (variant) finds `NAME.clj` or `.cljc` among the
-embedded sources, then in the directories of the environment variable `ARBACE_PATH`, the class
-path's counterpart; `ClassLoader.getResourceAsStream` (a table entry c2g writes, §11) searches
+(`arbace.c2g.embed/excluded`). `RT.load` (variant) finds `NAME.ae`, else `NAME.clj`, else
+`NAME.cljc` among the embedded sources, then in the directories of the environment variable
+`ARBACE_PATH`, the class path's counterpart, as the JVM's `RT.load` looks for them on the class
+path (VENDOR-NOTES.md, hand change 19: Arbace's sources are `.ae` since 2026-10-11, `.clj` stays
+for Clojure libraries, such as the renamed suite on `ARBACE_PATH`); the embedded sources' resource
+paths, and so the image's keys (EXEC-NOTES.md) and the file names of stack traces (§10.7), are
+the `.ae` names (`arbace/core.ae`); `RT.doInit` loads `user.ae`, else `user.clj`; `ClassLoader.getResourceAsStream` (a table entry c2g writes, §11) searches
 the same places. RT's initialization loads `arbace.core` when the program has its sources.
 
 **Resources by URL** (amendment FX6, accepted 2026-10-10; JRT-NOTES.md, "Resources by URL").
 jrt's own Java `jdk.internal.jrt.ClassPathResources` finds a resource in `RT.load`'s order, the
 embedded resources, then the directories of `ARBACE_PATH`, and gives it a URL: an embedded one a
-`jar:` URL naming the executable (`jar:file:/path/to/arbace!/arbace/core.clj`, as the JVM names
+`jar:` URL naming the executable (`jar:file:/path/to/arbace!/arbace/core.ae`, as the JVM names
 a resource of `arbace.jar`), whose handler, `ClassPathResources`' own, reads the embedded bytes;
 a file of an `ARBACE_PATH` directory its `file:` URL, as the JVM's class path directories give
 it. `ClassLoader.getResource` and `getResources` of the built-in loaders are table entries c2g
@@ -2610,8 +2614,8 @@ Evaluation is unchanged; only the analysis is skipped, as for the JVM's AOT-comp
 The image is recorded by the program itself, run once with `ARBACE_PREPARE=FILE` requiring every
 embedded namespace (`bin/arbace-go --build`): `Compiler.load` hands each top-level form of an
 embedded source to `Compiler$Image.evalUnit`, which records the unit between its analysis and
-its evaluation, with the events gathered while the analysis runs (`genclass.clj` and
-`core_proxy.clj` report theirs, the `RT` variant's boot `ns` macro its own). Objects are encoded
+its evaluation, with the events gathered while the analysis runs (`genclass.ae` and
+`core_proxy.ae` report theirs, the `RT` variant's boot `ns` macro its own). Objects are encoded
 by Go's reflection over the program's struct types, by name (`Var`, `Keyword`, `Namespace`,
 `Class`, members), by value (strings, boxes, arrays, patterns) or as the canonical empty
 collections and `Compiler`'s constant nodes; the graph keeps its sharing and the objects their
@@ -2621,16 +2625,16 @@ not encoded. A load from source (`ARBACE_PATH`, `load-file`, a program without a
 
 **Namespace variants** (amendment M1, accepted 2026-10-09). The Go build's differences in the
 namespaces live in `arbace/lang/go/ns/`, applied by `--program` when it embeds the sources:
-`P.clj` replaces `arbace/P.clj`, `P.after.clj` is appended to it, and `P.subst.clj`, a vector of
+`P.ae` replaces `arbace/P.ae`, `P.after.ae` is appended to it, and `P.subst.ae`, a vector of
 strings `[old new ...]`, replaces each `old`, which must occur exactly once. They are
-`genclass.clj` (`gen-interface` at run time, `gen-class` throws), `core_proxy.clj` (§10.4),
-`instant.clj` (JAVA-SURFACE.md decision 7), `main.after.clj` and `main.subst.clj` (the REPL's
+`genclass.ae` (`gen-interface` at run time, `gen-class` throws), `core_proxy.ae` (§10.4),
+`instant.ae` (JAVA-SURFACE.md decision 7), `main.after.ae` and `main.subst.ae` (the REPL's
 trimmed start, no `DynamicClassLoader`, the error report printed with `prn`), and
-`java/io.subst.clj` (no reflection warnings; `copy` between two files through their streams,
+`java/io.subst.ae` (no reflection warnings; `copy` between two files through their streams,
 not their channels; the escape of `+` written out as `"%2B"`, not computed with `URLEncoder`),
-`core_bean.subst.clj` (`bean`, §10.4: no modules, every package counts as exported),
-`core/server.subst.clj` (prepl makes no `DynamicClassLoader` for its thread; NT1) and
-`reflect/java.subst.clj` (`arbace.reflect` without ASM: the names ASM's `Type` gives classes,
+`core_bean.subst.ae` (`bean`, §10.4: no modules, every package counts as exported),
+`core/server.subst.ae` (prepl makes no `DynamicClassLoader` for its thread; NT1) and
+`reflect/java.subst.ae` (`arbace.reflect` without ASM: the names ASM's `Type` gives classes,
 computed; amendment FX5, accepted 2026-10-10), besides those of the class forms (CF2, below).
 Since files are in the world (amendment FS6, accepted 2026-10-10), the error report goes to a
 temporary file through `Files/createTempFile` as on the JVM, and `Compiler.loadFile` has no
@@ -2639,12 +2643,12 @@ variant: `load-file` is the JVM's, with `File`'s absolute path and name.
 **The class forms' analysis** (amendment CF2, accepted 2026-10-10; CLASSFORMS-REPL.md). The
 embedded tree holds the class forms compiler's analysis (`arbace/classes/types`, `env`, `parse`,
 `lower`, `analyze`; not `emit`, `compiler`, `shape`, `verify`, `build`, `boot`), with namespace
-variants in `arbace/lang/go/ns/classes/`: `types.subst.clj` (the runtime's package name),
-`env.subst.clj` (a `HashMap` for reflection's cache; the constructors jrt's reflection does not
-list), `analyze.subst.clj` (ASM's `TypeReference` and the world's generic signatures from
-`arbace.classes.go`; no source path lookup), `native.subst.clj` (the classes interpreted:
-`arbace.classes.interp`'s `compile-and-load!`), and the Go build's own namespaces `go.clj` and
-`interp.clj`. `Compiler.classForms`' variant loads them on the first class form without
+variants in `arbace/lang/go/ns/classes/`: `types.subst.ae` (the runtime's package name),
+`env.subst.ae` (a `HashMap` for reflection's cache; the constructors jrt's reflection does not
+list), `analyze.subst.ae` (ASM's `TypeReference` and the world's generic signatures from
+`arbace.classes.go`; no source path lookup), `native.subst.ae` (the classes interpreted:
+`arbace.classes.interp`'s `compile-and-load!`), and the Go build's own namespaces `go.ae` and
+`interp.ae`. `Compiler.classForms`' variant loads them on the first class form without
 checking the macros' specs, as the JVM loads them compiled.
 
 **The world's generic signatures** (amendment CF5, accepted 2026-10-10). `--program` also
@@ -2672,7 +2676,7 @@ class's member table), so inline protocol implementations in `deftype` work as r
 §12's `gen-interface`, which generates a class file.
 
 **`proxy` over `Dyn`** (amendment X2, accepted 2026-10-09; it reverses D6 for `proxy`, B1-PLAN.md;
-`gen-class` stays out). The namespace variant `core_proxy.clj` (§10.3) keeps upstream's
+`gen-class` stays out). The namespace variant `core_proxy.ae` (§10.3) keeps upstream's
 `proxy-name`, `get-proxy-class`, `construct-proxy`, `init-proxy`, `update-proxy`,
 `proxy-mappings`, `proxy`, `proxy-call-with-super` and `proxy-super`, and replaces
 `generate-proxy` with `define-proxy`: a class made by `Compiler$Dyn.defineProxyClass` (§5.12),
@@ -2693,7 +2697,7 @@ and the code forms, B1-PLAN.md; `gen-class` stays out). `defclass` and the code 
 §9.5) are analyzed by the embedded analysis (§10.3) and interpreted (CLASSFORMS-REPL.md):
 `arbace.classes.native`'s boundary is kept, `compile-and-load!` is `arbace.classes.interp`'s,
 which builds from the analyzed nodes trees of the interpreter's nodes (`Compiler$CF`, class forms
-in the `Compiler` variant `arbace/lang/go/ClassForms.clj`, translated), one per method, and
+in the `Compiler` variant `arbace/lang/go/ClassForms.ae`, translated), one per method, and
 makes the classes through the host `Compiler$CFGo` (§5.12, amendment CF4): classes made at run
 time whose objects are `Dyn` (DynSub_C for a superclass of the world, `Compiler$CF$FnObj` for a
 Clojure fn's class), their members in the member tables and `Dyn`'s slots.
@@ -2716,7 +2720,7 @@ then calls `arbace.main`'s entry through the evaluator as `clojure.main` would (
 
 **`--program`** (amendment W6, accepted 2026-10-09). `bin/c2g --program` translates the whole
 program, without a slice: `arbace.lang.Main#main` is a root, and c2g writes the main package
-`arbace/cmd/arbace` (`DIR/prog/go/arbace/cmd/arbace.clj`), whose `main` passes the command line
+`arbace/cmd/arbace` (`DIR/prog/go/arbace/cmd/arbace.ae`), whose `main` passes the command line
 as a `String[]` to `Main.main` inside `jrt.RunMain`:
 
 ```clojure
@@ -2742,7 +2746,7 @@ namespaces).
 
 **The main package's files** (amendment U3, accepted 2026-10-09). Besides `main.go` and the
 embedded sources (`res/`), `--program` writes `image.go` (the image's encoding, hand-written Go
-forms `go/arbace/cmd/arbace/image.clj`, copied), `image_types.go` (generated: every exported,
+forms `go/arbace/cmd/arbace/image.ae`, copied), `image_types.go` (generated: every exported,
 non-generic struct type of `arbace/lang` and `arbace/jrt`, registered by name for decoding) and an
 empty `image.bin`, embedded as a string (`//go:embed image.bin`), which `bin/arbace-go --build`
 replaces with the prepared image before linking the executables again. `main` installs the image
@@ -2765,7 +2769,7 @@ reachability pass indexes virtual calls by their receiver's type and instantiate
 supertypes (amendment TM8, accepted 2026-10-10; `arbace.c2g.reach`).
 
 **The Java API** (amendment SL6, accepted 2026-10-10): `--program` also translates
-`arbace/java/api/Clojure.clj`, so `arbace.java.api.Clojure` (`Clojure/var`, `Clojure/read`; its
+`arbace/java/api/Clojure.ae`, so `arbace.java.api.Clojure` (`Clojure/var`, `Clojure/read`; its
 static initializer requires `arbace.edn` at first use) exists in the Go build as on the JVM. It is
 a class of the program, not an embedded namespace's source.
 
@@ -3092,7 +3096,7 @@ taken). `bin/c2g-perf`'s workloads went from 3.7-49 times the JVM's time to 2.3-
 `ARBACE_CPUPROFILE=FILE` and `ARBACE_MEMPROFILE=FILE` write Go's CPU and heap profiles of any
 program run under `jrt.RunMain`; allocation sampling is off otherwise (its stack walks cost
 about 2% on the evaluator's deep stacks). `bin/arbace-go --build --pgo` runs the host's
-executable on `test/arbace-go-pgo.clj` with a CPU profile and builds every executable again
+executable on `test/arbace-go-pgo.ae` with a CPU profile and builds every executable again
 with `go build -pgo` (`bin/g2c build --pgo FILE` for other programs): gc devirtualizes and
 inlines the hot interface calls, 5-15% on the executable. Opt-in for ordinary builds; the
 freeze's executables are built with it.
@@ -3844,7 +3848,7 @@ folded into the text above, marked "(amendment Xn, accepted 2026-10-08)" where t
   R15 c2g's list of classes with declared members (`java.util.Random`): §5.11, Q13. R16 no
   annotations but `FunctionalInterface`, generic reflection as plain `Class` objects, no
   exception types: §5.10, §12. R17 the default locale `en_US` with root data: §12. R18 three
-  charsets: §12, V9. R19 `standin_reflect.clj` among the stand-ins: §4.3.
+  charsets: §12, V9. R19 `standin_reflect.ae` among the stand-ins: §4.3.
 - **Phase 2a (T):** T11 `RegisterGoType` and `Unsafe`'s offsets: §5.11, §9.2. T12
   `AtomicInteger` and `AtomicLong` embed `Object` until `Number` is translated: §5.3. T13 the
   threads API (`CurrentThread`, `RunMain`, `Go`, `RunnableOf`, `WaitNonDaemon`, the interrupt
@@ -3921,7 +3925,7 @@ Where they meet each other or the text they amend, this is what holds:
   non-trivial initialization run their initializers from jrt's `init()`.
 - C6 replaces §4.4's "empty for B1a" rename table.
 - P1 and E6 differ on where a native of `arbace.lang` lives (P1: jrt's hand-written
-  `natives.clj`; E6: the class's own package). Both hold, split by who writes the function:
+  `natives.ae`; E6: the class's own package). Both hold, split by who writes the function:
   c2g-written natives (`Compiler$Dyn`'s) are in the class's package, hand-written ones in jrt,
   called qualified; c2g calls jrt's function when jrt defines one of that name, else the class's
   package's (§9.1).
@@ -4062,7 +4066,7 @@ Decisions. FS3 the optional `HostFS`: §9.4. FS4 the rename table's entries for 
 and `java.net.Proxy`: §4.4. FS5 shutdown hooks at the end of `RunMain`: §8.4. FS6 `File`, `URL`
 and the `java.nio.file` subset in the closed world, with their variants and the namespace
 variants' changes: §4.1, §10.3. FS7 the code transcribed from jdk26u in `HostPath.java` and
-`filesystem.clj`: LICENSE.md.
+`filesystem.ae`: LICENSE.md.
 
 **Sockets** (JRT-NOTES.md, "Sockets (go-net)"; accepted by the user 2026-10-10): NT1
 `RT.doInit` loads `arbace.core.server` and starts the servers of the `arbace.server.*`
@@ -4103,7 +4107,7 @@ not taken.
 2026-10-10): EC1 each method of an evaluated fn or deftype compiled at its first call into
 `Code` nodes, `long` and `double` locals unboxed in the frame, `recur` by a frame flag:
 §10.1, EVAL-PLAN §2, §6. EC2 the direct static calls of `Numbers`, `RT`, `Util` and `Math`
-generated into `arbace/lang/go/CompilerOps.clj`: §10.1. EC3 calls of fixed arity without a
+generated into `arbace/lang/go/CompilerOps.ae`: §10.1. EC3 calls of fixed arity without a
 seq: EVAL-PLAN §2.2. EC4 frames reused per thread by depth: EVAL-PLAN §2.1. EC5 resolved
 members through their invoker (`Evaluator.invokeResolved`, `Compiler_CodeRun_Construct`) and
 the `Compiler_Code*` frames in jrt's stack-trace mapping: §10.1, §10.7. EC6 the image stores
@@ -4136,7 +4140,7 @@ the closure: JRT-SOURCES.md. JC4 `ThreadLocalRandom` translated over the Thread'
 `ForkJoinPool` an `ExecutorService`, `CompletableFuture`'s delays on threads: §8.4. JC8 the
 additions to jrt's hand-written classes (`Thread.State`, `Thread.Builder`, `Future.State`,
 `LockSupport`'s blockers, `Unsafe`): §11. JC9 no Go deadlock crash at main's end: §8.4. JC10
-`bin/arbace-go`'s gate key covers `test/g2c/jrt_sources.clj`.
+`bin/arbace-go`'s gate key covers `test/g2c/jrt_sources.ae`.
 
 **Time** (JRT-NOTES.md, "Time"; accepted by the user 2026-10-10): TM1 java.time in the world,
 the ISO chronology alone, its variants: §4.1. TM2 `lib/tzdb.dat` as resource data, an image
@@ -4187,7 +4191,7 @@ FX2 skipped tests not compiled, and a stand-in `arbace.inspector` for the suite'
 EVAL-NOTES.md, "Phase 2C" (the runner). FX3 functional interfaces of `let` and `loop` locals:
 §10.2, EVAL-PLAN §2.6. FX4 the JVM's errors of `new` of an abstract class and of a stub's
 illegal name, `InstantiationError` in the closure: §10.2, EVAL-PLAN §2.5. FX5 the namespace
-variant `reflect/java.subst.clj`: §10.3. FX6 resources by URL (`ClassPathResources`, the loaders'
+variant `reflect/java.subst.ae`: §10.3. FX6 resources by URL (`ClassPathResources`, the loaders'
 `getResource` and `getResources`, `URLClassLoader` in the world and out of the library cuts,
 `VM.isSystemDomainLoader`, the optional `HostExecutable`): §4.1, §9.4, §10.3, §11. FX7
 `Files.newDirectoryStream` in jrt's `Files` (entries listed when the stream is opened, a
@@ -4203,7 +4207,7 @@ JRT-SOURCES.md. TL5 the providers over the selected locales, the default selecti
 user's decision of 2026-10-11): §4.1. TL6 `BreakIteratorResourceBundle`'s variant: §4.6. TL7
 jrt's locale properties, the Turkish and Azerbaijani i, `SoftReference`'s subclass
 constructors: §12 (R17), JRT-NOTES.md. TL8 the shape check's known difference in
-`Locale.clj`: JRT-SOURCES.md. TL5 revises TM4.
+`Locale.ae`: JRT-SOURCES.md. TL5 revises TM4.
 
 The 23 questions, each with its recommendation, which the user accepted on 2026-10-08 and the
 text above follows:
@@ -4279,7 +4283,7 @@ text above follows:
     Java's per-site class), or a class per lambda site (javac's naming, much more code)?
     *Recommendation: per interface.*
 19. **Where jrt's forms live, and the runtime patch.** jrt's hand-written Go forms as a forms
-    root `go/` at the repository's top (`go/arbace/jrt/*.clj`, the layout of BUILD.md), merged
+    root `go/` at the repository's top (`go/arbace/jrt/*.ae`, the layout of BUILD.md), merged
     with c2g's generated tree for the build; the patched runtime files given to the build by an
     overlay option added to `bin/g2c build` (an amendment of BUILD.md), the patch held as Go
     forms (the runtime's converted files with the three changes of §9.3). Alternatives:
@@ -4313,23 +4317,23 @@ text above follows:
   T11-T16, the deviations V11-V13 and §12's reduced scope, with their own sources);
   `doc/go/C2G-NOTES.md` (c2g's core and phase 2's parts A to D: the amendments C1-C8, P1-P4,
   E1-E8, K1-K3, W1-W6, and D7's measurements) and `doc/go/EVAL-PLAN.md` (the evaluator's design, its questions Q1-Q7); the variants
-  `arbace/lang/go/Compiler.clj`, `RT.clj`, `Reflector.clj` and jrt's `dyn.clj`, `natives.clj`;
+  `arbace/lang/go/Compiler.ae`, `RT.ae`, `Reflector.ae` and jrt's `dyn.ae`, `natives.ae`;
   jrt's own Java `overlay/jdk/java.base/` and the JDK's variants `overlay/jdk/variants/`,
-  `go/arbace/jrt/files.clj`, `arbace/c2g/out.clj` (`string-regex-methods`, `java-names`,
-  `support-forms`), `arbace/c2g/checks.clj`, `arbace/c2g/model.clj` (`benign-init?`);
+  `go/arbace/jrt/files.ae`, `arbace/c2g/out.ae` (`string-regex-methods`, `java-names`,
+  `support-forms`), `arbace/c2g/checks.ae`, `arbace/c2g/model.ae` (`benign-init?`);
   `doc/go/JRT-NOTES.md`, "Phase 2C" (the closure grown, the 26 stand-ins).
 - The notes whose amendments §16 folds: `doc/go/EVAL-NOTES.md` (the evaluator: M, X, S, Y, Z,
   SL, FX), `doc/go/EXEC-NOTES.md` (the executable: U, RL), `doc/go/SPEED-NOTES.md` (step 7: EC,
   O), `doc/go/CLASSFORMS-REPL.md` (CF), `doc/go/JAVA-BASE.md` (JB), `doc/go/JRT-NOTES.md`'s later
   parts (FS, NT, RD, JC, TM, SZ, PR, SC, TL) and `doc/go/JRT-SOURCES.md` (the closure as grown).
-- The class forms compiler, `arbace/classes/`: `analyze.clj` (the node kinds, `invoke-node`'s
+- The class forms compiler, `arbace/classes/`: `analyze.ae` (the node kinds, `invoke-node`'s
   kinds, `analyze-with-resources`' desugaring into `try` with `:normal-finally`,
-  `analyze-lambda`'s instantiated types and captures), `emit.clj` (the contexts `:stmt`,
-  `:expr`, `:return`, `children`, the `emit-extra` node kinds), `compiler.clj` (the
+  `analyze-lambda`'s instantiated types and captures), `emit.ae` (the contexts `:stmt`,
+  `:expr`, `:return`, `children`, the `emit-extra` node kinds), `compiler.ae` (the
   enter-analyze sequence c2g reuses).
-- Arbace's runtime: `arbace/lang/Reduced.clj`, `Murmur3.clj`, `Util.clj`,
-  `PersistentVector.clj`, `Delay.clj`, `LazySeq.clj`, `RT.clj` (the static initializer that
-  loads `arbace/core`), `Var.clj` (`dvals`), `Compiler.clj` (`Expr`, `QualifiedMethodExpr`'s
+- Arbace's runtime: `arbace/lang/Reduced.ae`, `Murmur3.ae`, `Util.ae`,
+  `PersistentVector.ae`, `Delay.ae`, `LazySeq.ae`, `RT.ae` (the static initializer that
+  loads `arbace/core`), `Var.ae` (`dvals`), `Compiler.ae` (`Expr`, `QualifiedMethodExpr`'s
   lambdas and `MethodKind`); `target/stage2`'s `PersistentVector$2.class` (`javap`: the
   captures `val$start`, `val$end`, `this$0`, the constructor descriptor
   `(Larbace/lang/PersistentVector;II)V`).
@@ -4344,7 +4348,7 @@ text above follows:
   `model` (interface values against thin pointers), `exc` (exceptions, goroutine ids, guards,
   locks), `gls` (the runtime patch through `go build -overlay`, on amd64 and arm64 under
   `qemu-aarch64`), `fma` (fusion per architecture), `alloc` (allocation), `big` (a synthetic
-  package of c2g's shape), `modpath` (a main module named `arbace`), `leaves.clj` (the leaf
+  package of c2g's shape), `modpath` (a main module named `arbace`), `leaves.ae` (the leaf
   classes of stage 2's `arbace.lang`); `.tmp/c2g-proto/` (the
   prototype of §15, built with `bin/g2c build` for both architectures and compared with
   the JVM Arbace, then `bin/arbace`, now `bin/arbace-j`).

@@ -17,7 +17,7 @@ the questions the user should decide (§9).
   of `Compiler`'s 96 classes (its analyzer: `analyze`, macroexpansion, resolution, every `Expr`
   class and its parser, `eval`, `load`), about 17,400 lines of Go; the two left are the back
   end's (`Compiler$2`, a `ClassWriter`; `SourceDebugExtensionAttribute`). The variant
-  (`arbace/lang/go/Compiler.clj`, 356 lines) erases ASM (`(c2g/erase "arbace/asm/")`: every
+  (`arbace/lang/go/Compiler.ae`, 356 lines) erases ASM (`(c2g/erase "arbace/asm/")`: every
   value of an ASM type is nil, its computation skipped, its stores dropped; members whose
   signatures name ASM do not exist in Go, so the `emit` methods disappear), replaces
   `ObjExpr.compile` (no class is generated), `getCompiledClass`, `ObjExpr.eval` (a `fn*` is an
@@ -190,7 +190,7 @@ kinds the compiler does not know.
   C2G-SPEC §5.12, §10.4): a proxy of `Object` is a `Dyn`; a proxy of a class of a fixed list
   (`Writer`, `Reader`, `PushbackReader`, `InputStream`, `OutputStream`, `APersistentMap`, jrt's
   `ThreadLocal`) is a `DynSub_C`, which c2g writes ahead of time; the namespace variant
-  `core_proxy.clj` replaces only `generate-proxy`. A class made at run time that defines a
+  `core_proxy.ae` replaces only `generate-proxy`. A class made at run time that defines a
   method twice throws `ClassFormatError`, as on the JVM. The list is
   `arbace.c2g.model/proxy-supers`; it gained `BufferedWriter` (amendment Z1, accepted
   2026-10-10), and the class forms' superclasses (`arbace.c2g.dyn/class-supers`, CF4;
@@ -232,7 +232,7 @@ kinds the compiler does not know.
 
 ### 2.7 Loading `arbace.core` from source
 
-- `RT`'s initialization loads `arbace/core.clj` and the REPL namespaces through `RT.load`
+- `RT`'s initialization loads `arbace/core.ae` and the REPL namespaces through `RT.load`
   (`Compiler.load` over a reader of the source): the sources are embedded in the executable
   (`//go:embed`, jrt's host `Resource`) and read through `RT.resourceAsStream`'s variant
   (phase 2A/C's `RT` work). `Compiler.load` itself is translated unchanged (its class loader

@@ -3,7 +3,7 @@
  * under HostSocketImpl and the variants of java.net's InetAddress and Inet6AddressImpl
  * (overlay/jdk/variants). A handle is a number naming a listening socket or a connection of the
  * host (jrt's NetHost: Go's net package in B1a); the natives are jrt's Go
- * (go/arbace/jrt/net.clj). A native reports an error as a negative kind, its text in error[0];
+ * (go/arbace/jrt/net.ae). A native reports an error as a negative kind, its text in error[0];
  * exception(kind, text) is the exception the JVM throws for it.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */

@@ -6,7 +6,7 @@ special forms of `arbace.lang.Compiler` at every stage, the seed's stage 0 inclu
 and `arbace/j2c/` (the converter).
 
 This spec defines the **class forms**: how every construct javac can put into a class file is
-written as idiomatic Clojure, in ordinary `.clj` sources, and compiled by Arbace's own compiler
+written as idiomatic Clojure, in ordinary Arbace sources (`.ae` files), and compiled by Arbace's own compiler
 to classes equivalent to javac's. It covers the forms, what they mean, what the compiler
 derives by itself (as javac does), and what the Java → Clojure converter must spell out.
 
@@ -1303,15 +1303,15 @@ classes the recommended layout follows `clojure.core`, which loads `core_print.c
 into one namespace:
 
 ```
-arbace/lang.clj            (ns arbace.lang (:import ...)) and (load "lang/Keyword") ... in order
-arbace/lang/Keyword.clj    (in-ns 'arbace.lang) (import ...) (defclass ^:public Keyword ...)
-arbace/lang/RT.clj         (in-ns 'arbace.lang) ...
+arbace/lang.ae           (ns arbace.lang (:import ...)) and (load "lang/Keyword") ... in order
+arbace/lang/Keyword.ae   (in-ns 'arbace.lang) (import ...) (defclass ^:public Keyword ...)
+arbace/lang/RT.ae        (in-ns 'arbace.lang) ...
 ```
 
 One file per Java source file, named after its top-level class, holding that file's class forms.
-When the source directory also has a `.clj` file of that name, `_class` is appended:
-`clojure/main.java` (class `clojure.main`) becomes `clojure/main_class.clj` (in the converted
-baseline), since
+When the source directory also has a `.clj` or `.ae` file of that name, `_class` is appended:
+`clojure/main.java` (class `clojure.main`) becomes `clojure/main_class.ae` (in the converted
+baseline; `.clj` before the `.ae` rename of 2026-10-11), since
 `clojure/main.clj` is the namespace `clojure.main` (and `(load "clojure/main")` would also pick up
 `clojure/main__init.class`). A package with a single segment gets the single-segment namespace:
 package `clojure` is namespace `clojure`. Same-package classes need no import (§5.2). Java's
@@ -1337,14 +1337,14 @@ from
    forms together and evaluates to a vector of the classes. Arbace's own compiler (every stage
    since) treats a top-level `do` as said: compiling each class form of the `do`, it enters the
    others as declarations (as for sources, 3). It keeps `defclasses` as the explicit form,
-3. **sources**: a class name that resolves to nothing is looked up as `p/C.clj` on the source
+3. **sources**: a class name that resolves to nothing is looked up as `p/C.ae` on the source
    path (javac's `-sourcepath` behaviour); the file's namespace form is evaluated and its
    top-level class forms are entered, declarations only, without compiling their bodies or
    evaluating anything else. The bodies are compiled when the file itself is loaded.
 
 Bytecode refers to classes by name and the JVM resolves names lazily, so a class can be defined
 before the classes it refers to exist, as long as it is not used before. With 3, loading
-`arbace/lang.clj` (or requiring any one class's file) compiles each file in turn, whatever the
+`arbace/lang.ae` (or requiring any one class's file) compiles each file in turn, whatever the
 cycles.
 
 ### 9.3 AOT
@@ -1449,7 +1449,7 @@ forms); its value is `nil`. `import*` imports into the current namespace at run 
   nothing of `class*`), which compiles the bodies (the Java subset only) with `clojure.asm` and
   defines or writes the classes. The stage-0 driver interns the library's macros into the running
   `clojure.core` namespace (at run time; the frozen sources are not touched), so the same
-  `arbace/**/*.clj` sources work at every stage without qualifying the new names.
+  `arbace/**/*.ae` sources work at every stage without qualifying the new names.
 - **Stage 1**: stage 0 compiles the class forms of `arbace/`. Its classes are self-contained
   `arbace.*` classes, `arbace.lang.Compiler` (converted, knowing the special forms of §9.5) among
   them; `arbace.core` holds the names of §9.5, and the class forms compiler is loaded on first use,

@@ -65,7 +65,7 @@ node trees as on the JVM.
    (`compile-top`, `compile-fn`, `compile-deftype`) is kept; in the Go build its
    `compile-and-load!` is `arbace.classes.interp`'s, which builds, from the node trees emit would
    compile, trees of interpreter nodes (`Compiler$CF$...`, class forms in the `Compiler` variant
-   `arbace/lang/go/ClassForms.clj`, translated by c2g like the evaluator), one per method, and
+   `arbace/lang/go/ClassForms.ae`, translated by c2g like the evaluator), one per method, and
    makes the classes.
 3. **Classes are classes made at run time.** A class extending `Object` (or another interpreted
    class) is a `Dyn` class (C2G-SPEC §5.12): its objects are `Dyn` values, their fields `Dyn`'s
@@ -176,20 +176,20 @@ linked to the newest class of a name, as SPEC §10 says for the JVM.
 
 | where | what |
 |---|---|
-| `arbace/lang/go/ClassForms.clj` | the interpreter (`Compiler$CF`: `Rt`, `Host`, `Frame`, `Node` and its kinds, `Klass`, `Meth`, `MethodFn`, `CtorFn`, `FnObj`, the JVM's `TestHost`); the Go host (`Compiler$CFGo`: `GoHost`, the natives); `Compiler.classForms` loading the class forms without spec checks |
-| `arbace/lang/go/ns/classes/interp.clj` | `arbace.classes.interp`: the builder (analyzed nodes to interpreter nodes), the classes' layouts, vtables, publication to the host, `define!` and `compile-and-load!` |
-| `arbace/lang/go/ns/classes/go.clj` | `arbace.classes.go`: ASM's `TypeReference` as the analysis computes it, the world's generic signatures |
-| `arbace/lang/go/ns/classes/*.subst.clj` | the Go build's variants of `types`, `env`, `analyze`, `native` |
-| `arbace/c2g/dyncf.clj` | the natives of `Compiler$CFGo` (`c2g_cf.go`); `arbace/classes/generics.edn` (the world's generic signatures, embedded) |
-| `arbace/c2g/embed.clj` | the analysis namespaces embedded (not emit, compiler, shape, verify, build, boot) |
-| `arbace/c2g/out.clj` | a cut class's constants are readable (§8, CF1) |
-| `arbace/c2g/dyn.clj`, `main.clj` | `DynClass.CF`; `c2g_cf.go` and `generics.edn` written |
-| `test/oracle/forms/defclass.clj` | the oracle's forms for `defclass` at the REPL |
-| `test/classforms/jvm_check.clj` | the interpreter on the JVM against the compiled classes (static calls) |
+| `arbace/lang/go/ClassForms.ae` | the interpreter (`Compiler$CF`: `Rt`, `Host`, `Frame`, `Node` and its kinds, `Klass`, `Meth`, `MethodFn`, `CtorFn`, `FnObj`, the JVM's `TestHost`); the Go host (`Compiler$CFGo`: `GoHost`, the natives); `Compiler.classForms` loading the class forms without spec checks |
+| `arbace/lang/go/ns/classes/interp.ae` | `arbace.classes.interp`: the builder (analyzed nodes to interpreter nodes), the classes' layouts, vtables, publication to the host, `define!` and `compile-and-load!` |
+| `arbace/lang/go/ns/classes/go.ae` | `arbace.classes.go`: ASM's `TypeReference` as the analysis computes it, the world's generic signatures |
+| `arbace/lang/go/ns/classes/*.subst.ae` | the Go build's variants of `types`, `env`, `analyze`, `native` |
+| `arbace/c2g/dyncf.ae` | the natives of `Compiler$CFGo` (`c2g_cf.go`); `arbace/classes/generics.edn` (the world's generic signatures, embedded) |
+| `arbace/c2g/embed.ae` | the analysis namespaces embedded (not emit, compiler, shape, verify, build, boot) |
+| `arbace/c2g/out.ae` | a cut class's constants are readable (§8, CF1) |
+| `arbace/c2g/dyn.ae`, `main.ae` | `DynClass.CF`; `c2g_cf.go` and `generics.edn` written |
+| `test/oracle/forms/defclass.ae` | the oracle's forms for `defclass` at the REPL |
+| `test/classforms/jvm_check.ae` | the interpreter on the JVM against the compiled classes (static calls) |
 
 ## 5. Checks
 
-- `bin/arbace-j test/classforms/jvm_check.clj [FILE...]`: on the JVM, every `defclass` of the file
+- `bin/arbace-j test/classforms/jvm_check.ae [FILE...]`: on the JVM, every `defclass` of the file
   compiled and interpreted (over the test host, without Class objects), every form calling only
   static methods of the classes evaluated both ways and compared.
 - `bin/oracle check '<go executable> -' forms/defclass`: the oracle's `defclass` forms (recorded on
@@ -199,7 +199,7 @@ linked to the newest class of a name, as SPEC §10 says for the JVM.
 
 On amd64 (this machine, 2026-10-09/10), the branch `cf-repl`:
 
-- **The oracle's `defclass` forms** (`test/oracle/forms/defclass.clj`, 213 cases recorded on the
+- **The oracle's `defclass` forms** (`test/oracle/forms/defclass.ae`, 213 cases recorded on the
   JVM: arithmetic and conversions, control flow, strings, arrays, objects, static
   initialization (`ExceptionInInitializerError`, then `NoClassDefFoundError`), inheritance and
   interfaces (default and static methods, `Comparable` through `sort`), the world's interfaces
@@ -214,24 +214,24 @@ On amd64 (this machine, 2026-10-09/10), the branch `cf-repl`:
   `new` gives `InstantiationError`; recorded in `test/oracle/known-go-amd64.edn`. (Since the
   branch `gofix`, 2026-10-10, the evaluator's resolved `new` of an abstract class throws
   `InstantiationError` as compiled code does: EVAL-NOTES.md, "The suite's Java fixtures".)
-- **The class forms tests' corpus** (`test/oracle/forms/defclass_corpus.clj`, generated by
-  `test/classforms/gen_corpus.clj` from `test/classes/*_test.clj`: the 65 vectors of class
+- **The class forms tests' corpus** (`test/oracle/forms/defclass_corpus.ae`, generated by
+  `test/classforms/gen_corpus.ae` from `test/classes/*_test.ae`: the 65 vectors of class
   forms the tests compile, each defined at the REPL by `defclasses`; 55 define, 10 are the
   tests' error cases, failing with the same messages): 131 of 131 match on Go. Every method of
   every class is built when the class is defined, so this checks the builder on all of them.
-- **A class script through defclass** (`test/classforms/class_scripts.clj`): `arbace.lang.Murmur3`
-  defined at the REPL from its class forms (`arbace/lang/Murmur3.clj`, as `cf.lang.Murmur3`) and
-  the oracle's `Murmur3.clj` script run on it: 189 of 189 steps match, on the JVM (compiled) and on
+- **A class script through defclass** (`test/classforms/class_scripts.ae`): `arbace.lang.Murmur3`
+  defined at the REPL from its class forms (`arbace/lang/Murmur3.ae`, as `cf.lang.Murmur3`) and
+  the oracle's `Murmur3.ae` script run on it: 189 of 189 steps match, on the JVM (compiled) and on
   Go (interpreted). The other scripts' classes are recognized by identity in the runtime or the
   driver, or extend classes without a DynSub type (the tool says which).
 - **No regression**: the whole oracle on Go after merging main `b20b577` (`bin/oracle check ...
   --expected test/oracle/known-go-amd64.edn`): 20,909 of 20,944 cases, the 35 recorded mismatches
   (the case above among them), none new, none newly passing; `bin/oracle check jvm` passes
   (20,944 of 20,944); `bin/arbace-go --smoke` passes.
-- **On the JVM**, `test/classforms/jvm_check.clj` runs the interpreter against the compiled classes
+- **On the JVM**, `test/classforms/jvm_check.ae` runs the interpreter against the compiled classes
   (over the test host): 74 forms calling static methods match; the others need Class objects.
 
-**Times** (amd64; `test/classforms/bench.clj`, second run; JVM warm, `bin/arbace-j`):
+**Times** (amd64; `test/classforms/bench.ae`, second run; JVM warm, `bin/arbace-j`):
 
 | | JVM, compiled | Go, interpreted | Go, the same as a Clojure fn (evaluator) |
 |---|---:|---:|---:|
@@ -304,6 +304,6 @@ trimming the executable", SZ1-SZ4):
 - **CF5** `c2g --program` embeds `arbace/classes/generics.edn`: the generic signatures of the
   world's interfaces and extendable classes, and the constructors of abstract ones, which jrt's
   reflection does not have (javac's bridges need them). Folded: C2G-SPEC §10.3.
-- **CF6** ORACLE.md's exclusion of the class forms is lifted: `forms/defclass.clj` and
-  `forms/defclass_corpus.clj` (generated) check them; `test/classforms/` holds the JVM-side check,
+- **CF6** ORACLE.md's exclusion of the class forms is lifted: `forms/defclass.ae` and
+  `forms/defclass_corpus.ae` (generated) check them; `test/classforms/` holds the JVM-side check,
   the class scripts through defclass and the timings. Folded: ORACLE.md (contents, exclusions).

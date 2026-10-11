@@ -5,7 +5,7 @@ Arbace is a Clojure derivative written entirely in Clojure.
 - **Extended to represent its own implementation.** Clojure gained the class forms
   ([spec](doc/classes/SPEC.md)): every construct of a Java class file as idiomatic Clojure
   (`defclass`, `method`, `switch`, `label`, ...). With them, and the Java → class forms converter
-  j2c, Clojure's Java half became Clojure too. Arbace is that vendored Clojure, all `.clj`,
+  j2c, Clojure's Java half became Clojure too. Arbace is that vendored Clojure, all `.ae`,
   bootstrapping itself in stages that rebuild each other byte for byte and pass Clojure's whole
   test suite.
 - **Modernized for Java 26.** `invokedynamic` call sites for reflection, keywords and `str`, the

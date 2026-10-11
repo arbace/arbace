@@ -10,17 +10,17 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 
 | file | namespace | role |
 |---|---|---|
-| `arbace/j2c/javac.clj` | `arbace.j2c.javac` | runs the JDK's javac (`JavacTask.parse` + `analyze`: attribution and flow, no desugaring) |
-| `arbace/j2c/jtypes.clj` | `arbace.j2c.jtypes` | javac types and symbols: erasure, boxing, widening, flags, binary names, renaming |
-| `arbace/j2c/forms.clj` | `arbace.j2c.forms` | output data: forms, class references named later (`CRef`), raw tokens, ordered metadata |
-| `arbace/j2c/convert.clj` | `arbace.j2c.convert` | the conversion of attributed trees: declarations, code, control flow, patterns, switches, lambdas |
-| `arbace/j2c/names.clj` | `arbace.j2c.names` | one namespace per package: which class gets which simple name, imports, file layout |
-| `arbace/j2c/print.clj` | `arbace.j2c.print` | printing with metadata and a Clojure-style layout |
-| `arbace/j2c/main.clj` | `arbace.j2c.main` | command line: `convert`, `jdk` |
-| `arbace/j2c/build.clj` | `arbace.j2c.build` | compiles converted files with the class forms compiler into class files |
-| `arbace/j2c/coverage.clj` | `arbace.j2c.coverage` | coverage summary from run reports |
-| `arbace/j2c/resolve.clj` | `arbace.j2c.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
-| `arbace/j2c/rename.clj` | `arbace.j2c.rename` | the `clojure` → `arbace` renaming rules, for Clojure's test suite (`bin/clojure-tests`); they derived the vendored sources (`doc/VENDOR-NOTES.md`) |
+| `arbace/j2c/javac.ae` | `arbace.j2c.javac` | runs the JDK's javac (`JavacTask.parse` + `analyze`: attribution and flow, no desugaring) |
+| `arbace/j2c/jtypes.ae` | `arbace.j2c.jtypes` | javac types and symbols: erasure, boxing, widening, flags, binary names, renaming |
+| `arbace/j2c/forms.ae` | `arbace.j2c.forms` | output data: forms, class references named later (`CRef`), raw tokens, ordered metadata |
+| `arbace/j2c/convert.ae` | `arbace.j2c.convert` | the conversion of attributed trees: declarations, code, control flow, patterns, switches, lambdas |
+| `arbace/j2c/names.ae` | `arbace.j2c.names` | one namespace per package: which class gets which simple name, imports, file layout |
+| `arbace/j2c/print.ae` | `arbace.j2c.print` | printing with metadata and a Clojure-style layout |
+| `arbace/j2c/main.ae` | `arbace.j2c.main` | command line: `convert`, `jdk` |
+| `arbace/j2c/build.ae` | `arbace.j2c.build` | compiles converted files with the class forms compiler into class files |
+| `arbace/j2c/coverage.ae` | `arbace.j2c.coverage` | coverage summary from run reports |
+| `arbace/j2c/resolve.ae` | `arbace.j2c.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
+| `arbace/j2c/rename.ae` | `arbace.j2c.rename` | the `clojure` → `arbace` renaming rules, for Clojure's test suite (`bin/clojure-tests`); they derived the vendored sources (`doc/VENDOR-NOTES.md`) |
 | `bin/j2c` | | starts Arbace (`target/stage2`, `bin/lib/tools.bash`) with access to javac's internals |
 | `bin/j2c-check` | | the checks (below) |
 | `test/j2c/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4; `Pins.java`: overloads that need pins and that must not get them, constructor calls of every kind, `o.new Inner(...) {...}` |
@@ -70,8 +70,8 @@ bin/j2c-check --jdk [MODULE...]
   it does not compile are looked up on the class path: `J2C_CP` adds to it (`bin/j2c-check`
   passes the frozen tree's javac classes).
 
-Output layout (§9.1): for package `p.q`, `p/q.clj` holds `(ns p.q)` and a `(load "q/File")` per
-Java file, supertypes in the same package first; `p/q/File.clj` holds `(in-ns 'p.q)`, an
+Output layout (§9.1): for package `p.q`, `p/q.ae` holds `(ns p.q)` and a `(load "q/File")` per
+Java file, supertypes in the same package first; `p/q/File.ae` holds `(in-ns 'p.q)`, an
 `(import ...)` of the classes it uses, and the file's class forms. A comment line names the Java
 file; Java's comments are not carried over.
 
