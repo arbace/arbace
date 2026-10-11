@@ -2115,12 +2115,12 @@ world). `main.subst.clj` no longer replaces the error report's `Files/createTemp
 report goes to a temporary file as on the JVM. `Compiler.loadFile`'s Go-build variant is gone:
 `load-file` is the JVM's, with `File`'s absolute path and name.
 
-**Not done.** `RandomAccessFile` (nothing in Arbace or the suite uses it); `java.nio`'s
-channels, buffers and coders (`FileChannel`, `URLEncoder`); `Files`' attribute views, directory
-streams, walks and links; `jar:`, `http:` and `https:` connections; `URLClassLoader`
-(`java.io` suite's two resource tests); `java.net.ServerSocket` and `Socket` (the sockets
-branch). Done since: sockets ("Sockets (go-net)"), `URLClassLoader` ("Resources by URL"),
-`Files.newDirectoryStream` (FX7, below).
+**Not done.** `RandomAccessFile` (nothing in Arbace or the suite uses it); `java.nio`'s channels,
+buffers and coders (`FileChannel`, `URLEncoder`); `Files`' attribute views, directory streams (done
+since, FX7), walks and links; `jar:`, `http:` and `https:` connections; `URLClassLoader` (`java.io`
+suite's two resource tests); `java.net.ServerSocket` and `Socket` (the sockets branch). Done since:
+sockets ("Sockets (go-net)"), `URLClassLoader` ("Resources by URL"), `Files.newDirectoryStream`
+(FX7, below).
 
 ## Decisions
 
@@ -2192,7 +2192,16 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
 - **FS7 (LICENSE.md) Transcribed code**: `HostPath.java` (UnixPath's path operations) and
   `filesystem.clj` (`JDK_Canonicalize`, `collapse`) hold jdk26u code under the GPL version 2 with
   the Classpath Exception, recorded by the rule of B7; the alternative is rewriting those parts
-  from the documented behaviour. *Accepted 2026-10-10 (kept, as LICENSE.md records it).*
+  from the documented behaviour. *Accepted 2026-10-10 (kept, as LICENSE.md records it).* (Since
+  2026-10-11 LICENSE.md also records, by the same rule, `Path.java`'s default methods and
+  `Files.java`'s `readAllLines` and `copy(Path, OutputStream)`, which keep jdk26u's code, and the
+  variants of `File`, the `file:` handler, `ParseUtil`, `URI`, `URL` and `URLConnection`.)
+- **FX7 (EVAL-NOTES.md, "Amendments FX1-FX7"; FS2) `Files.newDirectoryStream`** in jrt's
+  `Files` (`gofix`), its three overloads, with jdk26u's `DirectoryStream`, `NotDirectoryException`
+  and `sun.nio.fs.Globs` (a glob as `UnixFileSystem.getPathMatcher` reads it, through jrt's
+  `sun.nio.fs.GlobPatterns`); the entries are listed and filtered when the stream is opened (a
+  deviation: a filter's `IOException` comes from `newDirectoryStream`). *Accepted 2026-10-10,
+  folded into "What was done" above; C2G-SPEC §16 cites it here.*
 
 # The JDK's resource data (regex `\N{name}` and `CANON_EQ`)
 
@@ -2959,7 +2968,8 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
   `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer`, and the variants above. *Accepted 2026-10-10, folded into JRT-SOURCES.md ("The closure as grown").*
 - **JC4 (C2G-SPEC §8.4, §9.2) `ThreadLocalRandom` translated**: jrt's `Thread` has the JDK's
   three random fields as `F_` fields and registers its Go type for `Unsafe.objectFieldOffset`;
-  jrt's hand-written probes go. *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (its summary there).*
+  jrt's hand-written probes go. *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (the translated
+  `ThreadLocalRandom`) and §9.2 (`Thread`'s `F_` fields and their offsets).*
 - **JC5 (C2G-SPEC §8.4) The executors translated**: jrt's hand-written pools, `FutureTask` and
   `Executors` go; `ExecutorService` is translated over a stand-in (C2G-SPEC §4.3), and c2g gives
   jrt's `ForkJoinPool` its `shutdownNow`, `invokeAll`, `invokeAny` through jrt's Java
@@ -2976,7 +2986,8 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
   `getState` (three of its six states), `Thread.Builder`, `Future.State` and `Future`'s JDK 19
   defaults, `LockSupport`'s blockers and class object, `Unsafe`'s `weakCompareAndSetReference`,
   `getAndBitwiseAndInt`, `putIntOpaque`, `getLongOpaque`, `storeStoreFence`, `park`, `unpark`,
-  and the casts of the new types. *Accepted 2026-10-10, it stays here; C2G-SPEC §16 refers to it.*
+  and the casts of the new types. *Accepted 2026-10-10, folded into C2G-SPEC §11 ("Additions to
+  jrt's hand-written classes for `java.util.concurrent`"); C2G-SPEC §16 refers to it.*
 - **JC9 (C2G-SPEC §8.4, `RunMain`) No Go deadlock crash at main's end**: `RunMain` keeps a
   ticker pending for the program's life, so a program whose threads all wait forever waits, as
   on the JVM; `bin/arbace-go --smoke` checks main's end (a non-daemon thread outliving main,

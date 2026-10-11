@@ -158,7 +158,10 @@ in both layouts; the gofmt layout of every case but `s12_printer` is gofmt's fix
 `lines` cases (and the `line-file` test) have the original's lines. In the lines layout `s14_3_sort`
 is byte-identical to its original; `s02_search`, `s14_1_sample_lines` and `s14_2_utf8` differ only
 in ordinary comments and literal spellings; `s10_positions` only in its imports (two `import`
-declarations printed as one group, so the next declaration gets `//line :6:1`). A forms file of
+declarations printed as one group, so the next declaration gets `//line :6:1`). (Since
+2026-10-11 the originals of `s02_search` and `s14_3_sort` carry Go's copyright notice, as
+`s14_2_utf8`'s did, which the forms hold as `;;` lines (SPEC §10.1) and the printer does not
+print: `s14_3_sort` now differs from its original in that comment only.) A forms file of
 32,000 table elements and 3,000 statements prints in 2.5 s, the JVM's start included.
 
 ## Findings: amendments to SPEC.md (accepted 2026-10-08)

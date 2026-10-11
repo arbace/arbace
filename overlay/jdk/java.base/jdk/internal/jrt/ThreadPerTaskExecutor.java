@@ -9,7 +9,12 @@
  * running threads and returning an empty list, termination once shut down with no thread left,
  * and a future whose cancellation interrupts its thread. invokeAll and invokeAny are
  * AbstractExecutorService's.
- * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * Its states and their transitions, ensureNotShutdown, tryTerminate, tryShutdownAndTerminate,
+ * shutdown and shutdownNow follow the code of jdk26u's, from https://github.com/openjdk/jdk26u
+ * at baf63fb, src/java.base/share/classes/java/util/concurrent/ThreadPerTaskExecutor.java:
+ * Copyright (c) 2019, 2025, Oracle and/or its affiliates, GNU General Public License version 2
+ * with the Classpath Exception (LICENSE.md). The rest is Arbace's own: Copyright (c) the Arbace
+ * authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
 

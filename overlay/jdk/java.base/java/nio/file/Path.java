@@ -4,7 +4,12 @@
  * (sun.nio.fs, the VM's natives), outside the Go build. This Path is the documented interface
  * less what needs a FileSystem (getFileSystem, register with a WatchService): the default file
  * system's paths only, implemented by jdk.internal.jrt.HostPath as sun.nio.fs.UnixPath behaves.
- * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * Its default methods resolve(Path, Path...), resolve(String, String...), resolveSibling(Path)
+ * and iterator keep the code of jdk26u's, from https://github.com/openjdk/jdk26u at baf63fb,
+ * src/java.base/share/classes/java/nio/file/Path.java: Copyright (c) 2007, 2025, Oracle and/or
+ * its affiliates, GNU General Public License version 2 with the Classpath Exception
+ * (LICENSE.md). The rest is Arbace's own: Copyright (c) the Arbace authors; Eclipse Public
+ * License 1.0.
  */
 package java.nio.file;
 

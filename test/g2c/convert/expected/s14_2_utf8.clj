@@ -4,6 +4,9 @@
 ;; untyped runes (t3 | RuneError>>12 mixes an untyped int and an untyped rune), so their
 ;; :val is a character by §8.2's own table, not 239; the comments after acceptRange's
 ;; fields are line comments, not doc comments, so they are ; comments, not :doc.
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
 (go/const
   "Numbers fundamental to the encoding.\n"
   [^{:val \uFFFD} RuneError \uFFFD]   ; the "error" Rune or "Unicode replacement character"

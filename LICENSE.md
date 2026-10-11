@@ -52,12 +52,18 @@ covers what.
   (doc/go/JRT-NOTES.md, phase 2a): Copyright 2009 The Go Authors, under Go's BSD 3-Clause
   License (text below). `overlay/go/runtime/arbace_local.clj` and `overlay/go/runtime.clj` are
   Arbace's own.
-- Excerpts of Go's standard library in g2c's cases and spec: `test/g2c/cases/s14_2_utf8.go`
+- Excerpts of Go's standard library in g2c's cases, tests and spec: `test/g2c/cases/s14_2_utf8.go`
   (from `src/unicode/utf8/utf8.go`), `s14_3_sort.go` (from `src/sort/sort.go` and
   `zsortinterface.go`), `s02_search.go` (`sort.Search`, from `src/sort/search.go`), the Go forms
-  of the same names (`.clj`) that hold them converted, and their code and forms in
-  doc/go/SPEC.md §2 (`sort.Search`), §14.2 and §14.3: from TamaGo's go1.27.1 tree, as above,
-  Copyright 2009 The Go Authors, under Go's BSD 3-Clause License (text below).
+  of the same names (`.clj`) that hold them converted, `test/g2c/convert/search.go`
+  (`sort.Search`) and the expected forms `test/g2c/convert/expected/s02_search.clj`,
+  `s14_2_utf8.clj` and `s14_3_sort.clj`, and their code and forms in doc/go/SPEC.md §2
+  (`sort.Search`), §14.2 and §14.3: from TamaGo's go1.27.1 tree, as above, Copyright 2009
+  (`utf8.go`, `sort.go`), 2010 (`search.go`) and 2022 (`zsortinterface.go`) The Go Authors,
+  under Go's BSD 3-Clause License (text below). Each of those files carries Go's notice
+  ("Copyright 20XX The Go Authors. All rights reserved. Use of this source code is governed by
+  a BSD-style license that can be found in the LICENSE file."), the forms as `;;` lines; SPEC.md's
+  excerpts are covered by this entry.
 - `go/`: jrt's hand-written Go forms (`go/arbace/jrt.clj`, `go/arbace/jrt/`) and the Go
   build's main package (`go/arbace/cmd/arbace/`): Arbace's own, under the Eclipse Public License
   1.0, except the parts of `go/arbace/jrt/` listed below.
@@ -90,7 +96,7 @@ covers what.
   jrt's socket table), and the variants `overlay/jdk/variants/Socket.clj`, `ServerSocket.clj`, `InetAddress.clj`,
   `Inet4AddressImpl.clj`, `Inet6AddressImpl.clj`, `Inet6Address.clj`, `IPAddressUtil.clj` and `Exceptions.clj` keep
   the code of the jdk26u methods they replace (`java/net/Socket.java`, `ServerSocket.java`, `InetAddress.java`,
-  `Inet6AddressImpl.java`, `sun/net/util/IPAddressUtil.java`, `jdk/internal/util/Exceptions.java`) where they keep it: Copyright (c)
+  `Inet6AddressImpl.java`, `Inet6Address.java`, `sun/net/util/IPAddressUtil.java`, `jdk/internal/util/Exceptions.java`) where they keep it: Copyright (c)
   Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below); the rest of those files is Arbace's own.
 - Security (doc/go/JRT-NOTES.md, "Security"): `overlay/jdk/java.base/javax/crypto/JceSecurity.java`
@@ -109,16 +115,19 @@ covers what.
   (`MD5.clj`, `SHA.clj`, `SHA2.clj`, `SHA5.clj`, `SHA3.clj`), `jdk/internal/jrt/HostRandom.java`,
   `sun/security/provider/JrtServices.java` and `com/sun/crypto/provider/JceServices.java` are Arbace's
   own.
-- `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds
-  code transcribed from https://github.com/openjdk/jdk26u at `baf63fb`
+- `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds code
+  transcribed from https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/unix/classes/sun/nio/fs/UnixPath.java`: the path operations, its header names
-  them), and `go/arbace/jrt/filesystem.clj` jrt's Go forms following
-  `src/java.base/unix/native/libjava/canonicalize_md.c` (`JDK_Canonicalize`) and `path_util.c`
-  (`collapse`) and the results of `UnixFileSystem_md.c`: Copyright (c) Oracle and/or its
-  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
-  below); recorded by the rule of B7. The rest of those files is Arbace's own, and the other
-  files of the change (`Path.java`, `Files.java`, the variants) are written from the documented
-  APIs, as the overlay's other files.
+  them), `overlay/jdk/java.base/java/nio/file/Path.java` its default methods `resolve` (the two
+  varargs overloads), `resolveSibling(Path)` and `iterator` (`java/nio/file/Path.java`),
+  `overlay/jdk/java.base/java/nio/file/Files.java` its `readAllLines(Path, Charset)` and
+  `copy(Path, OutputStream)` (`java/nio/file/Files.java`), and `go/arbace/jrt/filesystem.clj` jrt's
+  Go forms following `src/java.base/unix/native/libjava/canonicalize_md.c` (`JDK_Canonicalize`) and
+  `path_util.c` (`collapse`) and the results of `UnixFileSystem_md.c`: Copyright (c) Oracle and/or
+  its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below); recorded by the rule of B7. The rest of those files is Arbace's own, and the other files
+  of the change are written from the documented APIs, as the overlay's other files (but for the
+  variants keeping jdk26u's code, listed below).
 - Processes (doc/go/JRT-NOTES.md, "Processes"; recorded by the rule of B7): the variants
   `overlay/jdk/variants/ProcessImpl.clj`, `Process.clj`, `ProcessBuilder.clj` and
   `ProcessHandleImpl.clj` keep the code of the jdk26u methods they replace
@@ -146,7 +155,11 @@ covers what.
   `Executors.java`, `CompletableFuture.java`, `AbstractExecutorService.java`, `Future.java`):
   Copyright (c) Oracle and/or
   its affiliates, under the GNU General Public License version 2 with the Classpath Exception
-  (text below); recorded as ports to be safe, by the rule of B7. The rest of the concurrency
+  (text below); recorded as ports to be safe, by the rule of B7. `Executors.java`,
+  `CompletableFuture.java`, `AbstractExecutorService.java` and `Future.java` also carry the notice
+  of their original version: "Written by Doug Lea with assistance from members of JCP JSR-166
+  Expert Group and released to the public domain, as explained at
+  http://creativecommons.org/publicdomain/zero/1.0/". The rest of the concurrency
   work's files (the other variants and overlay classes, `varhandle.clj`) is Arbace's own.
 - `overlay/jdk/variants/TreeMap.clj` (doc/go/JAVA-BASE.md, amendment JB2): its two
   `buildFromIterator` methods are jdk26u's `buildFromSorted` (https://github.com/openjdk/jdk26u
@@ -154,6 +167,21 @@ covers what.
   branch, and its other members keep the code of the members they replace: Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below), by the rule of B7; the rest of the file is Arbace's own.
+- Other Go-build variants (C2G-SPEC §4.6; recorded by the rule of B7):
+  `overlay/jdk/variants/AbstractChronology.clj`, `BitSet.clj`, `CRC32.clj`, `Collectors.clj`,
+  `File.clj`, `FileHandler.clj`, `ParseUtil.clj`, `TimeZone.clj`, `TzdbZoneRulesProvider.clj`,
+  `URI.clj`, `URL.clj`, `URLConnection.clj`, `ZoneInfoFile.clj` and `ZoneOffset.clj` keep the code
+  of the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`:
+  `src/java.base/share/classes/java/time/chrono/AbstractChronology.java`, `java/util/BitSet.java`,
+  `java/util/zip/CRC32.java`, `java/util/stream/Collectors.java`, `java/io/File.java`,
+  `src/java.base/unix/classes/sun/net/www/protocol/file/Handler.java`, `sun/net/www/ParseUtil.java`,
+  `java/util/TimeZone.java`, `java/time/zone/TzdbZoneRulesProvider.java`, `java/net/URI.java`,
+  `java/net/URL.java`, `java/net/URLConnection.java`, `sun/util/calendar/ZoneInfoFile.java`,
+  `java/time/ZoneOffset.java`) where they keep it (each file's header names the members), and
+  `overlay/jdk/java.base/jdk/internal/jrt/StandardStreams.java` keeps `System.newPrintStream`
+  (`java/lang/System.java`): Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); the rest of those files is
+  Arbace's own.
 - `go/arbace/jrt/fdlibm.clj` and the `FdLibm` part of `go/arbace/jrt/math.clj` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1

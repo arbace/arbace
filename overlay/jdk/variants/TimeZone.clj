@@ -9,7 +9,9 @@
 ;; name (another Java package) would override it (C2G-SPEC §4.4, W4), and nothing in the Go
 ;; build calls it on a TimeZone (the JDK's calendars of java.util do, which jrt's own
 ;; GregorianCalendar replaces by getRawOffset and getOffset; SimpleTimeZone keeps its own).
-;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; setDefaultZone keeps jdk26u's code (the properties read through System.getProperty) (baf63fb;
+;; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the
+;; rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'java.util)
 
 (c2g/variant TimeZone

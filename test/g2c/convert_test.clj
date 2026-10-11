@@ -143,8 +143,9 @@
         (is (= 16 (:line (meta (last st)))))))
     (let [r (convert "search.go.edn")
           f (first (filter #(= 'go/func (first %)) (first (:files r))))]
-      ;; the final `return i` on Go line 19: a symbol with explicit :line
-      (is (= 19 (:line (meta (last (last f)))))))))
+      ;; the final `return i` on Go line 23 (after Go's copyright notice): a symbol with
+      ;; explicit :line
+      (is (= 23 (:line (meta (last (last f)))))))))
 
 (deftest positions-full
   (testing "mode :full writes positions and reads back"

@@ -1,4 +1,8 @@
 ;; SPEC §14.3, sort (std, tamago/amd64): the excerpts (docs compared as prefixes).
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+;; (insertionSort and siftDown are from zsortinterface.go: Copyright 2022 The Go Authors.)
 (go/func insertionSort "insertionSort sorts data[a:b] using insertion sort. ..." [^Interface data ^int a ^int b]
   (for [i (+ a 1)] (< i b) (inc! i)
     (for [j i] (and (> j a) (.Less data j (- j 1))) (dec! j)

@@ -8,7 +8,13 @@
  * others (as AbstractExecutorService's), else throws ExecutionException; shutdownNow shuts the
  * pool down and returns an empty list (the JDK's pool cancels its queued tasks; jrt's runs
  * every task in a worker of its own at once, so none is queued).
- * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * doInvokeAny follows the code of AbstractExecutorService's, from
+ * https://github.com/openjdk/jdk26u at baf63fb,
+ * src/java.base/share/classes/java/util/concurrent/AbstractExecutorService.java (Oracle's GNU
+ * General Public License version 2 with the Classpath Exception header, and Doug Lea's: "Written
+ * by Doug Lea with assistance from members of JCP JSR-166 Expert Group and released to the
+ * public domain"; LICENSE.md). The rest is Arbace's own: Copyright (c) the Arbace authors;
+ * Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
 

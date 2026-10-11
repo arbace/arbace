@@ -2,7 +2,9 @@
 ;; by c2g only. BitSet is translated from jdk26u; valueOf(byte[]) and toByteArray go through a
 ;; little-endian java.nio.ByteBuffer, outside the closed world: the variant reads and writes the
 ;; same little-endian bytes with shifts (the ByteBuffer and LongBuffer overloads stay outside).
-;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; toByteArray's length count is jdk26u's code (baf63fb; Copyright (c) Oracle and/or its affiliates,
+;; GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace authors;
+;; Eclipse Public License 1.0.
 (in-ns 'java.util)
 
 (c2g/variant BitSet

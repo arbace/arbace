@@ -7,8 +7,10 @@
 ;; (SharedSecrets' JavaNetURLAccess, jrt's lacks it) is gone, and so are the static fields of
 ;; the lookup's ScopedValue and of serialization (ObjectStreamField), outside the world.
 ;; (URLStreamHandler's hashCode and hostsEqual, which resolve the host through InetAddress, are
-;; the JDK's since InetAddress is in the world: JRT-NOTES.md, "Sockets".)
-;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; the JDK's since InetAddress is in the world: JRT-NOTES.md, "Sockets".) DefaultFactory's
+;; createURLStreamHandler keeps jdk26u's code where it keeps it (baf63fb; Copyright (c) Oracle
+;; and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c)
+;; the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'java.net)
 
 (c2g/variant URL

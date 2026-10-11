@@ -3,8 +3,10 @@
 ;; rule data from its bundle's module (getClass().getModule().getResourceAsStream; the Go
 ;; build has no modules); the variant reads the same path through Class.getResourceAsStream,
 ;; absolute, from the resource data bin/jrt-convert makes as the JDK build does
-;; (sun/text/resources/WordBreakIteratorData, ...; amendment RD1).
-;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; (sun/text/resources/WordBreakIteratorData, ...; amendment RD1). handleGetObject keeps jdk26u's
+;; code but for the stream's opening (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2
+;; with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse
+;; Public License 1.0.
 (in-ns 'sun.util.resources)
 
 (c2g/variant BreakIteratorResourceBundle

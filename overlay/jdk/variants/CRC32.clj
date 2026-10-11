@@ -2,7 +2,10 @@
 ;; c2g only. Its natives (update, updateBytes0) are jrt's over Go's hash/crc32; the static
 ;; initializer, which loads the zip library, is cut, and so are the native over a direct
 ;; buffer's address and its caller: a direct buffer (outside the Go build's world) is read
-;; through its get, as the JDK reads a buffer that is neither direct nor backed by an array. Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; through its get, as the JDK reads a buffer that is neither direct nor backed by an array.
+;; update(ByteBuffer) keeps jdk26u's code but for the direct buffers' branch (baf63fb; Copyright (c)
+;; Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright
+;; (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'java.util.zip)
 
 (c2g/variant CRC32

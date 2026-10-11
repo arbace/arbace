@@ -3,8 +3,10 @@
 ;; jar URLs), none of which is in the Go build; the variant registers nothing. decode (getPath and
 ;; the other decoded parts) decodes each run of %-escapes as UTF-8 with a CharsetDecoder, outside
 ;; the closed world: the variant collects the run's bytes and decodes them with String's UTF-8,
-;; which replaces malformed input as the decoder's REPLACE does (JRT-NOTES.md, "Files").
-;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; which replaces malformed input as the decoder's REPLACE does (JRT-NOTES.md, "Files"). decode
+;; keeps jdk26u's code but for the decoding of a run (baf63fb; Copyright (c) Oracle and/or its
+;; affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace
+;; authors; Eclipse Public License 1.0.
 (in-ns 'java.net)
 
 (c2g/variant URI

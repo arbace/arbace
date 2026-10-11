@@ -3,8 +3,9 @@
 ;; URL's path, decodes each run of %-escapes as UTF-8 with a CharsetDecoder (java.nio's coders
 ;; are outside the closed world): the variant collects the run's bytes and decodes them with
 ;; String's UTF-8, rejecting what is not valid UTF-8 as the decoder's REPORT does (valid UTF-8
-;; is exactly what encodes back to the same bytes). Copyright (c) the Arbace authors; Eclipse
-;; Public License 1.0.
+;; is exactly what encodes back to the same bytes). decode keeps jdk26u's code but for the decoding
+;; of a run (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath
+;; Exception: LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'sun.net.www)
 
 (c2g/variant ParseUtil

@@ -1449,30 +1449,34 @@ Java fixtures, resources by URL"); where each is folded is marked below.
   --java-fixtures`: j2c on the renamed `test/java`), which `bin/clojure-tests` requires of
   `CLOJURE_TESTS_GO` and `bin/gate --full`'s `suite-go` uses; `test/arbace-go-results.edn` is
   its reference, with `compilation`, `generated-*` ×3, `java-interop`, `param-tags`, `reflect`
-  and `try-catch` no longer skipped. Supersedes SL4. *Accepted 2026-10-10; to fold into
-  B1-PLAN D6 and C2G-SPEC §10.6 and §16 (pending there).*
+  and `try-catch` no longer skipped. Supersedes SL4. *Accepted 2026-10-10, folded into
+  B1-PLAN D6 and C2G-SPEC §10.6 and §16 ("The suite's Java fixtures").*
 - **FX2 (EVAL-NOTES "Phase 2C", the runner; SL3) Skipped tests are not compiled**, and a
   stand-in `arbace.inspector` on the suite's `ARBACE_PATH` for the Go runs (`test/suite-go`).
   *Accepted 2026-10-10, folded into "Phase 2C", "The runner", above.*
 - **FX3 (EVAL-PLAN §2; C2G-SPEC §10.2) Functional interfaces of let and loop locals.** The
   evaluator adapts or casts the init of an object local tagged with a functional interface, as
-  `LetExpr.doEmit` compiles it. *Accepted 2026-10-10, folded into EVAL-PLAN §2.6; C2G-SPEC
-  §10.2 pending.*
+  `LetExpr.doEmit` compiles it. *Accepted 2026-10-10, folded into EVAL-PLAN §2.6 and C2G-SPEC
+  §10.2 ("Functional interfaces of `let` and `loop` locals"; §16, "The suite's Java fixtures").*
 - **FX4 (EVAL-PLAN §2.5, C2G-SPEC §10.2) The JVM's errors of `new` and of a stub's name.** The
   resolved `new` of an abstract class throws `InstantiationError` before its arguments; a
   `deftype*` stub whose name has `/` or a leading `[` is `NoClassDefFoundError: IllegalName:
   NAME`, as `ClassLoader.preDefineClass` refuses it; `java.lang.InstantiationError` joins the
-  closure. *Accepted 2026-10-10, folded into EVAL-PLAN §2.5; C2G-SPEC §10.2 pending.*
+  closure. *Accepted 2026-10-10, folded into EVAL-PLAN §2.5 and C2G-SPEC §10.2 ("The JVM's errors
+  of `new` and of a stub's name"; §16, "The suite's Java fixtures").*
 - **FX5 (C2G-SPEC §10.3, namespace variants) `arbace.reflect` without ASM**: the variant
   `arbace/lang/go/ns/reflect/java.subst.clj`. *Accepted 2026-10-10, listed in "Namespace
-  variants", above; C2G-SPEC §10.3 pending.*
+  variants", above, and folded into C2G-SPEC §10.3 (§16, "The suite's Java fixtures").*
 - **FX6 (C2G-SPEC §10.3, M5, RD1; §4.1, SL7) Resources by URL**: JRT-NOTES.md "Resources by URL"
   (`ClassPathResources`, the class loaders' `getResource` and `getResources`, `URLClassLoader`
   in the world and out of the library cuts, `VM.isSystemDomainLoader`, the optional host
-  interface `HostExecutable`). *Accepted 2026-10-10; C2G-SPEC §10.3 and §4.1 pending.*
+  interface `HostExecutable`). *Accepted 2026-10-10, folded into C2G-SPEC §4.1 (the world),
+  §9.4 (`HostExecutable`), §10.3 (resources by URL) and §11 (the loaders' table entries); §16,
+  "The suite's Java fixtures".*
 - **FX7 (JRT-NOTES "Files", FS2) `Files.newDirectoryStream`** in jrt's `Files`, with jdk26u's
   `DirectoryStream`, `NotDirectoryException` and `Globs`; the entries listed when the stream is
-  opened. *Accepted 2026-10-10; JRT-NOTES "Files" pending.*
+  opened. *Accepted 2026-10-10, folded into JRT-NOTES.md "Files" ("What was done" and its
+  amendments); C2G-SPEC §16 ("The suite's Java fixtures") cites it there.*
 
 Not done, proposed for after the freeze or for the user to choose: annotations on interfaces
 made at run time and `AdaptFn` for them (2 java-interop tests); `java.util.BitSet` among the

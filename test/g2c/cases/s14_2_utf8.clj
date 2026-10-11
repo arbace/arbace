@@ -1,10 +1,10 @@
 ;; g2c-test: lines   SPEC §14.2: unicode/utf8 (excerpts), forms on Go's lines
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
 (ns go.unicode.utf8 (:require [arbace.go :as go]))
 (go/package utf8 :path "unicode/utf8" :files ["s14_2_utf8.go"] :positions :lines)
 (go/file "s14_2_utf8.go" :doc "Package utf8 implements functions and constants to support text encoded in\nUTF-8. It includes functions to translate between runes and UTF-8 byte sequences.\nSee https://en.wikipedia.org/wiki/UTF-8\n" :imports [])
-
-
-
 
 
 

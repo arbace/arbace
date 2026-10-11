@@ -10,7 +10,10 @@
 ;;   shuts the executor down when the wrapper becomes unreachable (java.lang.ref.Cleaner is not
 ;;   in the Go build): an unreachable single-thread executor's idle worker stays, as a fixed
 ;;   pool's does.
-;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; DefaultThreadFactory's newThread and AutoShutdownDelegatedExecutorService's members keep
+;; jdk26u's code where they keep it (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2
+;; with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse
+;; Public License 1.0.
 (in-ns 'java.util.concurrent)
 
 (c2g/variant Executors

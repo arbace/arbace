@@ -2,7 +2,9 @@
 ;; "Time"): read by c2g only. The JDK reads $JAVA_HOME/lib/tzdb.dat; the Go build embeds the same
 ;; file (bin/jrt-convert makes it as the JDK build does) as the resource lib/tzdb.dat
 ;; (amendment RD1's resource data), which the constructor reads through
-;; Class.getResourceAsStream. Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; Class.getResourceAsStream. The constructor keeps jdk26u's code but for the file's opening
+;; (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception:
+;; LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'java.time.zone)
 
 (c2g/variant TzdbZoneRulesProvider

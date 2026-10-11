@@ -6,7 +6,9 @@
 ;; same two methods without the stream (jdk26u's code with its `it == null` branch, the
 ;; deserializing one, left out) and calls them from those four places, whose code is otherwise
 ;; jdk26u's (a replacing member's parameter tags are written as j2c writes the original's, by
-;; which the variant finds it). Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; which the variant finds it). The kept code is jdk26u's (baf63fb; Copyright (c) Oracle and/or its
+;; affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace
+;; authors; Eclipse Public License 1.0.
 (in-ns 'java.util)
 
 (c2g/variant TreeMap

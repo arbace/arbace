@@ -1,4 +1,7 @@
 ;; SPEC §2, the first example: sort.Search (doc comment shortened in the source).
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
 (go/func Search
   "Search uses binary search to find and return the smallest index i\nin [0, n) at which f(i) is true.\n"
   ^int [^int n ^{:tag (func [int] [bool])} f]

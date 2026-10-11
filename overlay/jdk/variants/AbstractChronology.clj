@@ -2,7 +2,10 @@
 ;; "Time"): read by c2g only. The Go build has the ISO chronology only (the Hijrah, Japanese,
 ;; Minguo and Thai Buddhist chronologies are cut) and no ServiceLoader: the cache registers
 ;; IsoChronology alone, and a chronology not found is the JDK's DateTimeException at once.
-;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; initCache, ofLocale, of and getAvailableChronologies keep jdk26u's code without the other
+;; chronologies and the ServiceLoader lookups (baf63fb; Copyright (c) Oracle and/or its affiliates,
+;; GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace authors;
+;; Eclipse Public License 1.0.
 (in-ns 'java.time.chrono)
 
 (c2g/variant AbstractChronology

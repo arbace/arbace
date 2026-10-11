@@ -3,7 +3,9 @@
 ;; (src/java.base/unix/classes); its openConnection(URL) calls openConnection(URL, Proxy), whose
 ;; Proxy is outside the closed world: the variant does what that call does with no proxy (a
 ;; local file's connection, else the JDK's refusal of non-local file URLs, the FTP fallback being
-;; outside the world). Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; outside the world). openConnection keeps the code of jdk26u's openConnection(URL, Proxy) where it
+;; keeps it (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath
+;; Exception: LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'sun.net.www.protocol.file)
 
 (c2g/variant Handler

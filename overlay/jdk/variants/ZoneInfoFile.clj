@@ -1,7 +1,9 @@
 ;; Go-build variant of sun.util.calendar.ZoneInfoFile (C2G-SPEC §4.6; doc/go/JRT-NOTES.md,
 ;; "Time"): read by c2g only. As TzdbZoneRulesProvider's variant, it reads the time-zone database
-;; from the embedded resource lib/tzdb.dat where the JDK reads $JAVA_HOME/lib/tzdb.dat.
-;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; from the embedded resource lib/tzdb.dat where the JDK reads $JAVA_HOME/lib/tzdb.dat. loadTZDB
+;; keeps jdk26u's code but for the file's opening (baf63fb; Copyright (c) Oracle and/or its
+;; affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace
+;; authors; Eclipse Public License 1.0.
 (in-ns 'sun.util.calendar)
 
 (c2g/variant ZoneInfoFile

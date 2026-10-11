@@ -2,7 +2,9 @@
 ;; read by c2g only. URLConnection is translated from jdk26u; its file name map (the MIME types
 ;; by file extension) is sun.net.www.MimeTable's, read from the JDK's content-types.properties,
 ;; outside the Go build: the variant's map knows no type (guessContentTypeFromName answers
-;; null). Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; null). getFileNameMap keeps jdk26u's code but for the map (baf63fb; Copyright (c) Oracle and/or
+;; its affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the
+;; Arbace authors; Eclipse Public License 1.0.
 (in-ns 'java.net)
 
 (c2g/variant URLConnection

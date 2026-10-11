@@ -4,7 +4,9 @@
 ;; names come from java.util.Random (SecureRandom is not in the world either; createTempFile
 ;; creates the file exclusively, O_EXCL, so the names need not be unpredictable to be safe
 ;; from races). toPath makes the host's Path (jrt's jdk.internal.jrt.HostPath, the Go build's
-;; UnixPath) where the JDK asks FileSystems.getDefault(). Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; UnixPath) where the JDK asks FileSystems.getDefault(). toPath keeps jdk26u's code but for the
+;; path's making (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath
+;; Exception: LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'java.io)
 
 (c2g/variant File$TempDirectory

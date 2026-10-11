@@ -1,8 +1,9 @@
 ;; Go-build variant of java.time.ZoneOffset (C2G-SPEC §4.6; doc/go/JRT-NOTES.md, "Time"): read
 ;; by c2g only. The cache of offsets by quarter hours is a ConcurrentHashMap keyed by the
 ;; quarters (AtomicReferenceArray is not in the closed world); as the JDK's, it keeps one
-;; instance per quarter-hour offset, the first one made. Copyright (c) the Arbace authors;
-;; Eclipse Public License 1.0.
+;; instance per quarter-hour offset, the first one made. ofTotalSeconds keeps jdk26u's code but for
+;; the cache's type (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath
+;; Exception: LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'java.time)
 
 (c2g/variant ZoneOffset

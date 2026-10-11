@@ -9,7 +9,12 @@
  * directory streams (newDirectoryStream: the directory's entries listed when the stream is
  * opened, then filtered; a glob as UnixFileSystem.getPathMatcher reads it, sun.nio.fs.Globs).
  * Not here: channels, attribute views, walks, links, file stores.
- * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * readAllLines(Path, Charset) and copy(Path, OutputStream) keep the code of jdk26u's, from
+ * https://github.com/openjdk/jdk26u at baf63fb,
+ * src/java.base/share/classes/java/nio/file/Files.java: Copyright (c) 2007, 2025, Oracle and/or
+ * its affiliates, GNU General Public License version 2 with the Classpath Exception
+ * (LICENSE.md). The rest is Arbace's own: Copyright (c) the Arbace authors; Eclipse Public
+ * License 1.0.
  */
 package java.nio.file;
 

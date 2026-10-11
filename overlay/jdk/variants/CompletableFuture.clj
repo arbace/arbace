@@ -3,8 +3,10 @@
 ;; delayedExecutor's delays in its pool's DelayScheduler (ForkJoinPool.scheduleDelayedTask),
 ;; which jrt's ForkJoinPool has not; the variant schedules them with jrt's own
 ;; jdk.internal.jrt.Delays (a daemon thread per delay that a cancellation wakes), with the same
-;; cancellation of a timeout once the future completes.
-;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; cancellation of a timeout once the future completes. arrangeTimeout and DelayedExecutor.execute
+;; keep jdk26u's code but for the scheduler (baf63fb; Copyright (c) Oracle and/or its affiliates,
+;; GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace authors;
+;; Eclipse Public License 1.0.
 (in-ns 'java.util.concurrent)
 
 (c2g/variant CompletableFuture
